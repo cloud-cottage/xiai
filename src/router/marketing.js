@@ -25,7 +25,7 @@ export const marketingRoutes = [
   {
     path: '/docs',
     name: 'docs',
-    component: ComingSoonPage,
+    component: () => import('@/pages/marketing/ApiDocsPage.vue'),
     meta: {
       entry: 'marketing', milestone: 'M2', title: 'API 文档', specRef: 'P-M2-01', comingSoon: true,
       highlights: [

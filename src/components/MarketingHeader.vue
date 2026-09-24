@@ -10,6 +10,7 @@
         <router-link v-for="anchor in anchors" :key="anchor.hash" :to="{ path: '/', hash: anchor.hash }">
           {{ anchor.label }}
         </router-link>
+        <router-link v-if="featureFlags.apiDocsOpen !== false" to="/docs">API 文档</router-link>
         <!-- M2 / M3 页面入口：以「即将开放」标记承载，导航结构后续不再变更 -->
         <router-link
           v-for="pending in pendingRoutes"
@@ -47,7 +48,6 @@ const anchors = [
 const pendingRoutes = computed(() => {
   const flags = featureFlags.value
   const list = []
-  if (flags.apiDocsOpen !== false) list.push({ to: '/docs', label: 'API 文档' })
   if (flags.orgProfileOpen !== false) list.push({ to: '/org', label: '机构资料' })
   list.push({ to: '/demo', label: '申请演示' })
   if (flags.helpOpen !== false) list.push({ to: '/help', label: '帮助中心' })
