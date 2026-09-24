@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>印源｜兆级玺印数字引擎</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{ font-family: "Noto Serif SC", "Songti SC", "SimSun", serif; background-color:#f8f6f0; color:#222; line-height:1.7; }
+    a{color:inherit;}
+    .container{max-width:1200px;margin:0 auto;padding:0 20px;}
+    header{padding:24px 0;border-bottom:1px solid #e8e4da;}
+    .header-wrap{display:flex;justify-content:space-between;align-items:center;}
+    .logo{font-size:28px;color:#992222;font-weight:bold;letter-spacing:4px;}
+    nav a{margin-left:24px;color:#333;text-decoration:none;}
+    nav a:hover{color:#992222;}
+    .hero{padding:80px 0;text-align:center;}
+    .hero h1{font-size:42px;margin-bottom:16px;color:#222;}
+    .hero p{font-size:18px;color:#444;max-width:800px;margin:0 auto 32px;}
+    .btn{ display:inline-block;padding:12px 28px;background:#992222;color:#fff; text-decoration:none;border-radius:2px; }
+    .btn.ghost{background:transparent;border:1px solid #992222;color:#992222;margin-left:12px;}
+    .section{padding:60px 0;}
+    .section-title{text-align:center;font-size:26px;margin-bottom:40px;color:#222;}
+    .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;}
+    .card{background:#fff;padding:28px;border-radius:4px;border:1px solid #e8e4da;}
+    .card h3{color:#992222;margin-bottom:12px;font-size:20px;}
+    .card p{margin-bottom:12px;}
+    .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;}
+    .seal-card{ background:#fff;padding:20px;text-align:center;border:1px solid #e8e4da; transition: transform .2s; }
+    .seal-card:hover{transform: translateY(-4px);}
+    .seal-img{ width:120px;height:120px;margin:0 auto 12px; background:#f8f6f0; display:flex;align-items:center;justify-content:center; color:#992222;font-weight:bold;font-size:22px; border:1px solid #e8e4da; }
+    .seal-img.zhushu{background:#992222;color:#f8f6f0;}
+    .meta small{color:#666;}
+    .tech-block{background:#fff;padding:32px;border-radius:4px;border:1px solid #e8e4da;}
+    .tech-block h3{color:#992222;margin-bottom:10px;font-size:19px;}
+    .tech-block ul{padding-left:20px;margin-top:16px;}
+    .tech-block li{margin-bottom:10px;}
+    footer{padding:32px 0;text-align:center;border-top:1px solid #e8e4da;color:#666;font-size:14px;}
+    @media (max-width:768px){
+      .grid-3,.grid-4{grid-template-columns:1fr;}
+      .header-wrap{flex-direction:column;gap:16px;}
+      nav a{margin:0 8px;}
+      .hero h1{font-size:30px;}
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container header-wrap">
+      <div class="logo">印源</div>
+      <nav>
+        <a href="#resources">资源总览</a>
+        <a href="#tech">图像技术</a>
+        <a href="#api">API服务</a>
+        <a href="#seals">玺印样例</a>
+        <a href="#contact">联系咨询</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container">
+        <h1>印源・兆级玺印数字引擎</h1>
+        <p>以结构化玺印数据基座，赋能文博展陈应用面向博物馆、古籍与篆刻研究机构的玺印结构化数字服务平台。收录十万方历代玺印，配套印面、边款多视角高清影像与完整著录元数据，通过标准化REST API对外提供检索与图像调用能力，支撑学术研究、线上展厅、数字化典藏项目。</p>
+        <div>
+          <a class="btn" href="#resources">查看资源规格</a>
+          <a class="btn ghost" href="#tech">获取技术白皮书</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="resources" class="section">
+      <div class="container">
+        <h2 class="section-title">资源总览</h2>
+        <div class="grid-3">
+          <article class="card">
+            <h3>资源体量</h3>
+            <p><strong>玺印体量</strong>：100,000 方历代玺印，远期迈向兆级规模愿景</p>
+            <p><strong>影像素材</strong>：每方玺印配套2–4组影像（印面、边款特写），合计约40万张影像</p>
+          </article>
+          <article class="card">
+            <h3>结构化著录</h3>
+            <p><strong>印名、释文、朝代、材质、玺印类型</strong>支持姓名印、闲章、吉语印、官印、鉴藏印</p>
+            <p>多维度分类检索</p>
+          </article>
+          <article class="card">
+            <h3>数据库底座</h3>
+            <p><strong>PostgreSQL</strong>，支持古文释文、异体字检索</p>
+            <p>内置强数据校验，保障文博著录规范</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="tech" class="section">
+      <div class="container">
+        <h2 class="section-title">高清图像技术方案</h2>
+        <div class="tech-block">
+          <h3>归档母版</h3>
+          <ul>
+            <li>TIFF G4（CCITT Group4），无损压缩，文博标准归档格式；仅用于底层存档，不对外分发。</li>
+            <li>朱文两色玺印采用TIFF调色板格式。</li>
+          </ul>
+        </div>
+        <div class="tech-block" style="margin-top:20px;">
+          <h3>在线预览</h3>
+          <ul>
+            <li>预生成无损WebP优先，PNG索引2色兜底。HTTP内容协商自动适配客户端浏览器，原生支持透明底。</li>
+          </ul>
+        </div>
+        <div class="tech-block" style="margin-top:20px;">
+          <h3>图像规格</h3>
+          <ul>
+            <li>2cm见方，400PPI双色二值图像，印文线条锐利纯净，无多余灰度噪点，满足学术研究与数字展陈标准。</li>
+          </ul>
+        </div>
+        <div class="tech-block" style="margin-top:20px;">
+          <h3>性能优势</h3>
+          <ul>
+            <li>高清预览图像仅数KB，CDN全球分发；批量一次性加载百方玺印，瞬时完成渲染，流量开销极低。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="api" class="section">
+      <div class="container">
+        <h2 class="section-title">API查询服务</h2>
+        <div class="grid-3">
+          <article class="card">
+            <h3>多维检索</h3>
+            <p>关键词、朝代、材质、玺印类型多条件联合筛选；支持释文近似相似度检索。</p>
+          </article>
+          <article class="card">
+            <h3>图像资源输出</h3>
+            <p>返回WebP/PNG高清预览图访问地址，归档TIFF母本隔离保护，保障原始档案安全。</p>
+          </article>
+          <article class="card">
+            <h3>接入与计费</h3>
+            <p>机构月度包量套餐，典型场景：每月200次查阅会话，单次会话浏览100方玺印，调取10张高清原图。基础月度运维服务费，超额调用单独结算。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="seals" class="section">
+      <div class="container">
+        <h2 class="section-title">玺印样例预览</h2>
+        <div class="grid-4">
+          <article class="seal-card">
+            <div class="seal-img">XX之印</div>
+            <h3>白文印</h3>
+            <div class="meta"><small>汉 · 姓名印 | 白文，黑字白底</small></div>
+          </article>
+          <article class="seal-card">
+            <div class="seal-img zhushu">长乐</div>
+            <h3>朱文印</h3>
+            <div class="meta"><small>汉 · 吉语印 | 朱文，透明底</small></div>
+          </article>
+          <article class="seal-card">
+            <div class="seal-img">款识</div>
+            <h3>边款</h3>
+            <div class="meta"><small>明清 · 玺印边款影像</small></div>
+          </article>
+          <article class="seal-card">
+            <div class="seal-img">山水知己</div>
+            <h3>闲章</h3>
+            <div class="meta"><small>清 · 闲章</small></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="contact" class="section">
+      <div class="container">
+        <h2 class="section-title">合作咨询</h2>
+        <p style="text-align:center;max-width:800px;margin:0 auto 32px;">印源面向文博机构提供平台接入服务，项目分为一次性开通部署，以及月度API运维套餐。欢迎博物馆、考古与古籍研究机构对接演示环境，获取接口文档、完整项目测算与报价。</p>
+        <div style="text-align:center;">
+          <a class="btn" href="#contact">发送咨询邮件</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">印源 © 2026 兆级玺印数字引擎｜文博玺印API图像服务平台</div>
+  </footer>
+
+  <script>
+    (function () {
+      try {
+        var links = document.querySelectorAll('a[href^="#"]');
+        Array.prototype.forEach.call(links, function (a) {
+          a.addEventListener('click', function (e) {
+            var id = this.getAttribute('href').slice(1);
+            var target = id ? document.getElementById(id) : null;
+            if (target) {
+              e.preventDefault();
+              target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          });
+        });
+      } catch (err) {
+        /* 脚本失败时保留原生锚点导航降级 */
+      }
+    })();
+  </script>
+</body>
+</html>
