@@ -35,8 +35,8 @@ export const APP_CONFIG = Object.freeze({
   /** 演示态开关与演示账号（P-M1-03 03-3）。凭证仅用于演示填充，登录不校验真实凭证。 */
   demo: Object.freeze({
     showDemoAccount: true,
-    account: 'demo@yinsuo.example',
-    password: 'yinsuo2026',
+    account: 'demo@yinyuan.example',
+    password: 'yinyuan2026',
     label: '演示账号（演示环境：登录不校验真实凭证）',
   }),
 

@@ -21,7 +21,7 @@
             <label for="login-account">账号（邮箱 / 手机号）</label>
             <input
               id="login-account" v-model.trim="form.account" type="text" autocomplete="username"
-              placeholder="demo@yinsuo.example 或 11 位手机号"
+              placeholder="demo@yinyuan.example 或 11 位手机号"
               :aria-invalid="showError('account') || undefined"
               :aria-describedby="showError('account') ? 'login-account-error' : undefined"
               @blur="touch('account')"

@@ -57,7 +57,7 @@
             <div class="field">
               <label for="reg-email">邮箱</label>
               <input
-                id="reg-email" v-model.trim="form.email" type="email" autocomplete="username" placeholder="name@yinsuo.example"
+                id="reg-email" v-model.trim="form.email" type="email" autocomplete="username" placeholder="name@yinyuan.example"
                 :aria-invalid="showError('email') || undefined"
                 :aria-describedby="showError('email') ? 'reg-email-error' : undefined"
                 @blur="touch('email')"

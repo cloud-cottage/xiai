@@ -26,7 +26,7 @@ export const DEMO_USER = Object.freeze({
   orgType: ORG_TYPE.MUSEUM,
   contactName: '张示例',
   phone: '13800000000',
-  email: 'demo@yinsuo.example',
+  email: 'demo@yinyuan.example',
   /** 前端 mock 不存明文口令（§3.2）：占位散列。 */
   passwordHash: '$mock$argon2id$v=19$m=65536,t=3,p=1$ZGVtby1tb2NrLXNhbHQ$ZGVtby1tb2NrLWhhc2g',
   status: USER_STATUS.ACTIVE,
@@ -35,7 +35,7 @@ export const DEMO_USER = Object.freeze({
 })
 
 /** 演示账号登录口令（§11 待决 6 默认邮箱 + 密码；仅演示填充用）。 */
-export const DEMO_PASSWORD = 'yinsuo2026'
+export const DEMO_PASSWORD = 'yinyuan2026'
 
 /**
  * mock 示意账户初始充值余额（**非商品价格**，仅为让流水可复算 Σ流水 = 余额，§5.4）。
