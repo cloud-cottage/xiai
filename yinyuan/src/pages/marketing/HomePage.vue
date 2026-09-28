@@ -9,6 +9,8 @@
           收录十万方历代玺印，配套印面、边款多视角高清影像与完整著录元数据，
           通过标准化 REST API 对外提供检索与图像调用能力，支撑学术研究、线上展厅、数字化典藏项目。
         </p>
+        <!-- 「兆级」首次显著出现处的口径界定（品牌词保留；文案源＝src/config/app-config.js → site.taglineNote） -->
+        <div class="disclaimer" style="margin-top:8px;">{{ taglineNote }}</div>
         <div class="hero-actions">
           <a class="btn" href="#resources" @click.prevent="scrollTo('#resources')">查看资源规格</a>
           <button class="btn ghost" type="button" @click="notify">获取技术白皮书</button>
@@ -24,7 +26,7 @@
         <div class="grid-3">
           <article class="card">
             <h3>资源体量</h3>
-            <p><strong>玺印体量</strong>：100,000 方历代玺印，远期迈向兆级规模愿景。</p>
+            <p><strong>玺印体量</strong>：100,000 方历代玺印，远期迈向兆级（百万级）规模愿景。</p>
             <p><strong>影像素材</strong>：每方玺印配套 2–4 组影像（印面、边款特写），合计约 40 万张影像。</p>
           </article>
           <article class="card">
@@ -199,6 +201,13 @@ import { useAppConfig } from '@/composables/useAppConfig.js'
 import { toastNotConnected } from '@/composables/useToast.js'
 
 const { featureFlags, config } = useAppConfig()
+
+/** 「兆级」口径界定文案（与页脚同源：src/config/app-config.js → site.taglineNote）。 */
+const taglineNote = computed(
+  () =>
+    config.value?.site?.taglineNote ||
+    '兆级＝百万级（10 的 6 次方）：本站「兆级」采用现代工程口径，指百万级；不是古籍大数体系里「万亿」的「兆」。',
+)
 
 /** 01-6 典型场景文案：由定价配置插值，页面不书写任何数字（spec §4.3）。 */
 const pricing = useAsync(getPricingTable, { immediate: true })

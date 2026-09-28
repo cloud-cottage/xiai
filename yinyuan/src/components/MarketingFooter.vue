@@ -2,6 +2,8 @@
   <footer class="site">
     <div class="container">
       <div>{{ site.footerLine || '印源 © 2026 兆级玺印数字引擎｜文博玺印 API 图像服务平台' }}</div>
+      <!-- 「兆级」口径界定（品牌词保留；文案源＝src/config/app-config.js → site.taglineNote） -->
+      <div class="disclaimer" style="margin-top:8px;">{{ taglineNote }}</div>
       <div class="footer-links">
         <!-- 统一走 EntryLink：同入口 → SPA 路由跳转，跨入口（如 /console/login）→ 整页跳转（验收 D1） -->
         <EntryLink v-for="link in links" :key="link.to" :to="link.to">{{ link.label }}</EntryLink>
@@ -21,6 +23,12 @@ import { PRICING } from '@/config/pricing.js'
 
 const { config } = useAppConfig()
 const site = computed(() => config.value?.site || {})
+/** 「兆级」口径界定文案（唯一来源：src/config/app-config.js → site.taglineNote）。 */
+const taglineNote = computed(
+  () =>
+    config.value?.site?.taglineNote ||
+    '兆级＝百万级（10 的 6 次方）：本站「兆级」采用现代工程口径，指百万级；不是古籍大数体系里「万亿」的「兆」。',
+)
 /** 全站声明文案的唯一来源（spec §1.6 全局声明条 / §4.3）。 */
 const disclaimer = PRICING.disclaimer
 

@@ -27,6 +27,9 @@ export const APP_CONFIG = Object.freeze({
   site: Object.freeze({
     name: '印源',
     tagline: '兆级玺印数字引擎',
+    /** 「兆级」口径界定（全站唯一来源）：品牌词保留，含义按现代工程口径标注，避免读者误读为古籍大数之「万亿」。 */
+    taglineNote:
+      '兆级＝百万级（10 的 6 次方）：本站「兆级」采用现代工程口径，指百万级；不是古籍大数体系里「万亿」的「兆」。',
     footerLine: '印源 © 2026 兆级玺印数字引擎｜文博玺印 API 图像服务平台',
     /** 全站时间口径标注（spec §7.5）。 */
     timezoneNote: '时间均为北京时间（CST）',
