@@ -56,6 +56,15 @@ import {
   decodeImageInput
 } from '../utils/image.js'
 import { displayDataUrlOf } from './displayImage.js'
+/* **CloudBase 读取面（v1）**：云端行的展示件**服务端不可用面**下走「整件展示件」——
+   判据（`cloudBaseObjectKeyOf`）/ 临时链接 / 字节取回全部收口在 `data/cloudbase.js`，
+   本层只消费，**不自立第二份对象键解析**。 */
+import {
+  cloudBaseActive,
+  cloudBaseObjectKeyOf,
+  cloudObjectBytesOfRow
+} from '../data/cloudbase.js'
+import { bytesToDataUrl } from '../data/assetmeta.js'
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：行級分流判據的唯一真源在 `imageAuthority.js`
    （行內有 digest 且二進制在服務端權威庫 ⇒ `digest`；否則 ⇒ `local`）。本層只消費，不自立第二把尺子。 */
 import { digestOfRow, readViaOfRow } from './imageAuthority.js'
@@ -517,6 +526,22 @@ export function updateSealFixedAttributes(actor, faceId, patch = {}) {
  */
 export async function loadImageDataUrl(imageId) {
   const meta = listImageRows().find((row) => row.id === imageId) || null
+  /* **CloudBase 讀取面（v1）**：雲端行 ⇒ 取**已遷的展示件**（PNG / WebP，mapping.md §3
+     的 `storage_key`）的**臨時鏈接** ⇒ 整件字節 ⇒ dataURL。**零轉碼、零切塊**：
+     交出去的就是遷移時那一份字節（容器按字節如實判定，不採信自稱值）。 */
+  if (cloudBaseActive() && cloudBaseObjectKeyOf(meta)) {
+    const cloud = await cloudObjectBytesOfRow(meta)
+    if (!cloud.ok) return { ok: false, message: cloud.message, meta }
+    return {
+      ok: true,
+      dataUrl: bytesToDataUrl(cloud.bytes, cloud.mime || String((meta && meta.mime) || '').toLowerCase()),
+      bytes: cloud.bytes,
+      mime: cloud.mime || String((meta && meta.mime) || '').toLowerCase(),
+      transcoded: false,
+      meta,
+      message: ''
+    }
+  }
   const out = await readImageDataUrl(imageId)
   if (!out.ok) {
     return { ok: false, message: out.message || '本機影像庫中暫無該編號的圖象文件' }
@@ -554,6 +579,21 @@ export async function loadImageDataUrl(imageId) {
  */
 export async function loadStoredImage(imageId) {
   const row = listImageRows().find((item) => item.id === imageId) || null
+  /* **CloudBase 讀取面（v1）**：雲端行 ⇒ 交出**已遷的展示件整件字節**。
+     面别如实登记（不冒充）：這**不是** TIFF 存儲件，也**不是**權威庫的「原字節面」；
+     `mime` 一律**按字節如實**判定（不採信行上自稱值）。 */
+  if (cloudBaseActive() && cloudBaseObjectKeyOf(row)) {
+    const cloud = await cloudObjectBytesOfRow(row)
+    if (!cloud.ok) return { ok: false, message: cloud.message, row }
+    return {
+      ok: true,
+      bytes: cloud.bytes,
+      mime: cloud.mime || String((row && row.mime) || '').toLowerCase(),
+      sha256: (row && row.sha256) || '',
+      row,
+      message: ''
+    }
+  }
   const out = await readImageDataUrl(imageId)
   if (!out.ok) {
     return { ok: false, message: out.message || '本機影像庫中暫無該編號的圖象文件', row }
@@ -581,6 +621,13 @@ export async function loadStoredImage(imageId) {
 export function imageSourceOf(imageId) {
   const row = listImageRows().find((item) => item.id === imageId) || null
   if (!row) return { row: null, via: '', digest: '' }
+  /* **CloudBase 讀取面（v1）**：雲端行（對象在 CloudBase 對象存儲）⇒ 一律 **`local`**。
+     理由（機械可判）：`digest` 分流的前置是「二進制在**本機 5191 權威庫**」（三面 ＝
+     原字節 / 縮略 / 塊全部由該服務端按 digest 引用輸出）；雲端形態下**沒有**該服務端
+     （Vercel 上不存在 `/api/image/*`），按 digest 引用只會得到一次 404 ⇒ 展示面另走
+     「整件展示件」（`loadImageDataUrl` / `loadStoredImage` 的雲端分支），**可見、不假成功**。
+     本判據只影響**雲端接管時**的雲端行；本機行（dev 5163 + 5191）逐字不變。 */
+  if (cloudBaseActive() && cloudBaseObjectKeyOf(row)) return { row, via: 'local', digest: '' }
   const via = readViaOfRow(row)
   return { row, via, digest: via === 'digest' ? digestOfRow(row) : '' }
 }

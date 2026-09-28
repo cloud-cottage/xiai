@@ -37,6 +37,10 @@ import {
   blobstoreInfo
 } from './blobstore.js'
 import { normalizeImagePayload, bytesToDataUrl, dataUrlToBytes, imageSize, sha256Hex, toUint8Array } from './assetmeta.js'
+/* **CloudBase 讀取面（v1）**：雲端快照的**唯一讀入口**（同步、零網絡）。
+   本文件在 `readCollection` 裏**只讀它** —— 是否接管、接管到哪一步（pending / ready / failed）
+   全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。 */
+import { cloudBaseReadOf, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS } from './cloudbase.js'
 /* **K-P5b（2026-09-23｜寫入面切遠端）**：新增產物的容器 ＝ **單頁 8bit Deflate TIFF**（`STORAGE_MIME`，
    字面定義點仍恰 1 處 ＝ `utils/tiff.js::TIFF_MIME`，本處**只 import 轉口**、不另立同值字面量）。 */
 import { STORAGE_MIME } from '../utils/image.js'
@@ -234,7 +238,126 @@ function ensureSeed() {
   migrateTraditionalData()
 }
 
+/* ============================================================================
+   **本地同 `_id` 覆盖层（v2 必修 3：云模式下「写后读可见」）**
+   ----------------------------------------------------------------------------
+   背景（质检实据）：云模式下写入仍落 localStorage，而读走云端快照 ⇒ 写后读**不可见**
+   （管理员的编辑静默丢失）。口径（Zang 裁定，逐条执行）：
+     · **只管三个集合**（`CLOUD_COLLECTION_KEYS` ＝ `seals` / `faces` / `images`）；
+       其余 10 个集合的读 / 写路径**一律不变**（仍走既有本地实现）；
+     · 读 = **云端快照 ∪ 本地同 `_id` 覆盖（本地优先）**：同 `_id` 的行**逐键合并、本地键优先**
+       （本地行未携带的云端键保留 ⇒ 不会因为一条本地编辑而静默丢字段）；
+     · 本地有、云端没有的行**也要能读到**（本地行；按本地形态原样交出，**不**再走云端归一器）；
+     · **不得把本地种子数据混入云端集合**：与种子行**逐字（JSON 全等）相同**的本地行视为
+       本机示范种子 ⇒ **不并入**；管理员改过 / 本地新建的行与种子行不等 ⇒ 照常可见。
+   本层**只读**：不写 localStorage、不改云端行、不动其它集合。
+   ============================================================================ */
+
+/** 参与覆盖层的集合键（真源＝`cloudbase.js` 的 `CLOUD_COLLECTION_KEYS`，不另立一份字面量）。 */
+const OVERLAY_COLLECTION_KEYS = CLOUD_COLLECTION_KEYS
+
+const firstPresent = (...values) => values.find((value) => value !== undefined && value !== null)
+
+/**
+ * 行身份键（覆盖层的**唯一配对依据**）：`_id` 优先 ⇒ `id` ⇒ `stamp_id`。
+ * 云端行一律带 `_id`（`normalizeSealRow` / `normalizeFaceRow` / `normalizeImageRow` 都落该键）；
+ * 云模式下写回 localStorage 的行也是**云端行**（带 `_id`）⇒ 同 `_id` 配对成立。
+ * 本地新建（本机生成 `XA…` / `fc-…`）的行没有 `_id` ⇒ 用 `id` 配对，恰好「云端无 ⇒ 本地行」。
+ */
+function overlayIdentityOf(row) {
+  if (!row || typeof row !== 'object') return ''
+  const raw = firstPresent(row._id, row.id, row.stamp_id)
+  return raw === null || raw === undefined ? '' : String(raw)
+}
+
+/** 种子行的逐字指纹（＝**落盘形态**：影像行按 `withSliceMeta` 补 `slice_meta` 后再比）。 */
+const SEED_FINGERPRINT_CACHE = new Map()
+function seedFingerprints(key) {
+  if (SEED_FINGERPRINT_CACHE.has(key)) return SEED_FINGERPRINT_CACHE.get(key)
+  const rows =
+    key === STORAGE_KEYS.seals
+      ? SEED_SEALS
+      : key === STORAGE_KEYS.faces
+        ? SEED_FACES
+        : key === STORAGE_KEYS.images
+          ? /* 影像行两种历史形态都算种子：**落盘形态**（`ensureSeed` 补 `slice_meta`）与**种子原形**
+               （`slice_meta` 是确定性派生键，缺它的历史行同属本机示范数据）。 */
+            [...withSliceMeta(SEED_IMAGES), ...SEED_IMAGES]
+          : []
+  const fingerprints = new Set((Array.isArray(rows) ? rows : []).map((row) => JSON.stringify(row)))
+  SEED_FINGERPRINT_CACHE.set(key, fingerprints)
+  return fingerprints
+}
+
+/** 该本地行是否与种子行**逐字相同**（⇒ 本机示范种子，不得并入云端集合）。 */
+function isVerbatimSeedRow(key, row) {
+  return seedFingerprints(key).has(JSON.stringify(row))
+}
+
+/**
+ * 云端行 ∪ 本地同 `_id` 覆盖（本地优先）。非覆盖层集合 ⇒ **原样返回云端行**。
+ *
+ * 读法（**确定性、与调用次序无关**）：先按云端行序输出（同 `_id` 的行逐键合并、本地优先），
+ * 再把「本地有、云端没有」的行**按本地行序追加**在尾部。
+ *
+ * @param {string} key 集合键
+ * @param {Array<object>} cloudRows 云端快照行
+ * @returns {Array<object>} 合并后的行（**新数组**；云端行对象只在被覆盖时新建）
+ */
+function withLocalOverlay(key, cloudRows) {
+  const cloud = Array.isArray(cloudRows) ? cloudRows : []
+  if (!OVERLAY_COLLECTION_KEYS.includes(key)) return cloud
+  /* **不调 `ensureSeed()`**：云模式下一行种子都不许写进 localStorage；这里只读**已有**的本地行。 */
+  const local = readKey(key)
+  if (!Array.isArray(local) || local.length === 0) return cloud
+  const overlays = new Map()
+  local.forEach((row) => {
+    const id = overlayIdentityOf(row)
+    if (!id) return
+    if (isVerbatimSeedRow(key, row)) return // 本机示范种子 ⇒ 不并入（见本节头注）
+    overlays.set(id, row)
+  })
+  if (overlays.size === 0) return cloud
+  const out = []
+  const matched = new Set()
+  cloud.forEach((row) => {
+    const id = overlayIdentityOf(row)
+    if (id && overlays.has(id)) {
+      matched.add(id)
+      /* **本地优先**：同 `_id` ⇒ 逐键合并（本地行有的键取本地值；云端独有的键保留）。 */
+      out.push({ ...row, ...overlays.get(id) })
+      return
+    }
+    out.push(row)
+  })
+  /* 本地有、云端没有的行 ⇒ **照读**（本地行原样交出；本地行序稳定）。 */
+  overlays.forEach((row, id) => {
+    if (!matched.has(id)) out.push(row)
+  })
+  return out
+}
+
+/* ============================================================================
+   **集合读入口（CloudBase 读取面 v2 的唯一接线点）**
+   ----------------------------------------------------------------------------
+   读序（**机械可判，三支互斥**）：
+     ① 云端 `ready` ⇒ **云端快照 ∪ 本地同 `_id` 覆盖**（`seals` / `faces` / `images` 三个键；
+        见上方「本地覆盖层」）；
+     ② 云端已配置但快照未到（`pending`）⇒ **返回空集** ——
+        此刻**绝不回落本地种子**：回落会让 24 枚本机示范印章先上屏、云端 79 枚再替换
+        （先假后真，且会往 localStorage 里灌一份本机种子）。
+        **v2 必修 1**：`pending` 带**超时护栏**（总预算，默认 8 秒）⇒ 超时即转 `failed` ⇒ 走 ③，
+        页面**不会**长期停在空态；
+     ③ 其余（未配置 `off` / 失败 `failed` / 非本层接管的键）⇒ **既有本地实现一字未改**
+        （`ensureSeed()` ⇒ `readKey(key)`）。
+   ============================================================================ */
 function readCollection(key, fallback) {
+  /* **启动兜底**：`main.js` 不在本单接线面内 ⇒ 首次读取顺带把水合拉起来（幂等；未配置时零成本）。
+     这样即使启动引导链被改动，云端接管也不会静默失效。 */
+  ensureCloudBaseHydration()
+  const cloud = cloudBaseReadOf(key)
+  if (cloud.state === 'ready' && Array.isArray(cloud.rows)) return withLocalOverlay(key, cloud.rows)
+  if (cloud.state === 'pending') return []
   ensureSeed()
   const value = readKey(key)
   return Array.isArray(value) ? value : fallback
