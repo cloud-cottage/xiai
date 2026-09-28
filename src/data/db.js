@@ -1308,8 +1308,23 @@ export function saveFaceRows(rows) {
   return writeCollection(STORAGE_KEYS.faces, rows)
 }
 
+/*
+ * **影像行（讀取面）** —— 真源容器 `slice_meta` 的**讀路徑補缺**。
+ *
+ * 為什麼要有：切分元數據（張數 / 刀向 / 切位）的真源恰一處 ＝ 行上的 `slice_meta`
+ * （`SLICE_META_FIELD`，容器形狀由本檔的 `sliceMetaOf()` 由 `id` ＋ `kind` **確定性派生**）。
+ * 落盤面（`ensureSeed()` / `insertImageRow()`）都會補這個鍵，但**雲端快照行不是本機落盤行**
+ * （遷移進 `xiai_images` 的文檔只有 `kind` / `width` / `height` / `sha256` / `storage_key` 等
+ * 機械欄位，沒有 `slice_meta`）⇒ 讀出來的行缺真源容器，展示層（`SliceImage.vue` 經
+ * `sliceMetaOf()`）只能結構化拒絕 ⇒ **線上實據（2026-09-28）：詳情頁「印面影像」塊穩定顯示
+ * 「影像暫時無法顯示」，而同桶同源的廣場卡片（走 `<img>` ＋ dataURL，不經切分元數據）能出圖**
+ * —— 也就是說這不是桶 / 權限 / 時序問題，而是**讀出來的行缺真源**。
+ *
+ * 口徑：與落盤補缺**同一份派生函數**（`withSliceMeta`，**已有該鍵的行不覆蓋**）⇒ 種子值、
+ * 落盤值、雲端行三者不會漂移；本函數**只讀**，不改寫 localStorage / 不動任何行。
+ */
 export function listImageRows() {
-  return readCollection(STORAGE_KEYS.images, [])
+  return withSliceMeta(readCollection(STORAGE_KEYS.images, []))
 }
 
 export function saveImageRows(rows) {

@@ -36,6 +36,9 @@ const gallery = computed(() => (seal.value ? photoService.listPhotosByStamp(seal
 /* 页面**只能**经服务层取回二进制（`seals.loadImageDataUrl`），不得自行读写浏览器存储。 */
 const imageUrls = reactive({})
 const imageErrors = reactive({})
+/* **未落定（`pending`）的逐影像讀數（本單 M1）**：它不是錯誤 —— 是「還沒讀到」。留一個顯式的
+   非終態讀數，讓面板顯示載入態、且**不妨礙**落定後的重試（錯誤緩存才是永久阻斷的成因）。 */
+const imagePending = reactive({})
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：逐影像的來源讀數 —— `digest` ⇒ 二進制在服務端權威庫
    （展示走**塊面**：`POST /api/image/slices?sha256=`，**本機不需要 dataURL**）；
    `local` ⇒ 存量 / 本機二進制行（既有路徑一字未改；非 TIFF 走瀏覽器原生解碼、**零 api**）。 */
@@ -62,12 +65,31 @@ async function loadFaceImages() {
     if (imageUrls[id] || imageVias[id] === 'digest' || imageErrors[id]) continue
     const out = await seals.imageDisplaySourceOf(id)
     if (!out.ok) {
+      /* **未落定 ⇒ 保持載入態、**不寫**錯誤緩存（本單 M1）**：寫進去就會被迴圈開頭的
+         `continue` 永久擋住 ⇒ 永遠不再試（線上實據的穩定不出圖）。落定後由下面的 watch
+         依賴面（數據源狀態）觸發重試。 */
+      if (out.pending) {
+        imagePending[id] = out.message
+        continue
+      }
+      delete imagePending[id]
       imageErrors[id] = out.message
       continue
     }
+    delete imagePending[id]
     imageVias[id] = out.via
     if (out.via === 'local') imageUrls[id] = out.dataUrl
   }
+}
+
+/**
+ * 逐影像的**非終態**提示（載入態面板文案）：未落定 ⇒ 讀取中；其餘 ⇒ 既有字面值（一字未改）。
+ * @param {string} imageId 影像編號
+ * @returns {string} 上屏文案
+ */
+function imagePendingHintOf(imageId) {
+  const id = imageId ? String(imageId) : ''
+  return (id && imagePending[id]) || '正在讀取本機影像庫…'
 }
 
 watch(
@@ -76,8 +98,12 @@ watch(
      而依賴面若只有 `route.params.id` + `dataVersion`，水合落定後**這個 watch 永不重跑**
      ⇒ 印面圖永遠停在「正在讀取本機影像庫…」（線上實據：詳情頁其餘欄位已渲染、只有圖不出）。
      與實物照片的 watch **同形**（那裡本來就帶 `gallery…map(id).join(',')`）。
-     `loadFaceImages()` 對已取到的編號會 `continue` ⇒ 重跑是安全的（不重複取字節）。 */
-  () => [route.params.id, dataVersion.value, faceImageIds.value.join(',')],
+     `loadFaceImages()` 對已取到的編號會 `continue` ⇒ 重跑是安全的（不重複取字節）。
+   **本單 M1（就緒門檻的重試面）**：依賴面再加**數據源狀態**（`pending` / `ready` / `failed` / `off`）——
+     未落定時取字節只會拿回「還沒讀到」的非終態讀數（見 `services/seals.js` 的就緒門檻），
+     必須在**狀態一變**就重試一次；否則同一批編號會停在載入態永不重試（這正是線上那條缺陷的
+     另一半：錯誤被緩存 ⇒ 不重試）。這裡**不猜、不等**：讀的就是數據源狀態本身（同步只讀）。 */
+  () => [route.params.id, dataVersion.value, faceImageIds.value.join(','), seals.dataSourceState().state],
   loadFaceImages,
   { immediate: true }
 )
@@ -93,7 +119,22 @@ const dataSource = computed(() => seals.dataSourceState())
 const sealLoading = computed(() => !seal.value && dataSource.value.pending)
 const sealUnavailable = computed(() => !seal.value && dataSource.value.failed)
 
+/**
+ * 清掉逐影像的**一次性讀數**（終態錯誤 ＋ 未落定標記）。
+ * **重試必須真的有牙齒（本單 M1／M4）**：`loadFaceImages()` 迴圈開頭對 `imageErrors[id]` 一律
+ * `continue` ⇒ 不清就是「錯誤永久緩存」——重試輪跑完也取不回圖。
+ */
+function clearImageReadouts() {
+  Object.keys(imageErrors).forEach((id) => {
+    delete imageErrors[id]
+  })
+  Object.keys(imagePending).forEach((id) => {
+    delete imagePending[id]
+  })
+}
+
 function retryDataSource() {
+  clearImageReadouts()
   void seals.retryDataSource()
 }
 
@@ -975,6 +1016,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- **O-1**：雲讀失敗已回落本機示範資料（此刻 `seal` 來自示範集）⇒ 顯式提示 ＋ 重試入口。 -->
+    <p v-if="dataSource.failed" class="notice detail__notice" data-source-fallback="seal-detail">
+      雲端資料暫時未能讀取，目前顯示的是本機示範資料；可按「重新讀取」再試一次。
+      <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
+    </p>
     <p v-if="driveSaveFeedback" class="notice detail__notice" data-drive-feedback="save-seal">
       {{ driveSaveFeedback }}
     </p>
@@ -1112,7 +1158,7 @@ onBeforeUnmount(() => {
             <p v-else-if="imageErrorOf(face.face_image_id)" class="detail__hint">
               {{ imageErrorOf(face.face_image_id) }}（本機影像庫中暫無該編號的圖象文件。）
             </p>
-            <p v-else class="detail__hint">正在讀取本機影像庫…</p>
+            <p v-else class="detail__hint">{{ imagePendingHintOf(face.face_image_id) }}</p>
             <p v-if="face.faceImage">
               {{ face.faceImage.width }} × {{ face.faceImage.height }} · {{ formatBytes(face.faceImage.bytes) }} · {{ face.faceImage.color_mode }}
             </p>

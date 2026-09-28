@@ -44,6 +44,14 @@ const list = computed(() => {
    說成「沒有」⇒ 讀數據層的數據源讀數，`pending` 時渲染**載入態**。 */
 const dataSource = computed(() => seals.dataSourceState())
 const hydrating = computed(() => !list.value.length && dataSource.value.pending)
+/* **O-1（本單）**：雲端讀取失敗 ⇒ 數據層已回落**本機示範資料**（`readCollection` 的非 ready 分支）。
+   此刻廣場照樣列出 8 行示範資料 —— **不得靜默**：顯式告知目前看的是示範資料，並給重試入口。
+   判據只讀數據層狀態（`failed`），不猜、不自造第二套狀態機。 */
+const demoFallback = computed(() => dataSource.value.failed)
+
+function retryDataSource() {
+  void seals.retryDataSource()
+}
 /* ============================================================================
    筛选条三维度值集（R-21 / R-30 / R-31 / R-34）
    ----------------------------------------------------------------------------
@@ -259,6 +267,12 @@ function onSealSaved() {}
     />
 
     <p v-if="keyword" class="square__keyword">當前檢索「{{ keyword }}」，共 {{ list.length }} 枚</p>
+
+    <!-- **O-1**：雲讀失敗已回落本機示範資料 ⇒ 顯式提示 ＋ 重試入口（不靜默；字形同全站）。 -->
+    <div v-if="demoFallback" class="notice square__notice" data-source-fallback="square">
+      <span>雲端藏品資料暫時未能讀取，目前列出的是本機示範資料；可按「重新讀取」再試一次。</span>
+      <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
+    </div>
 
     <!-- 縮略圖走**縮略面**（規範 §3.27.6：256 長邊**單件**、不經切分內核；卡片內不再按塊渲染）；
          存量 / 非 TIFF 存儲件仍由瀏覽器原生解碼顯示（存量面不得回歸）。 -->

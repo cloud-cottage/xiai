@@ -559,6 +559,37 @@ export function updateSealFixedAttributes(actor, faceId, patch = {}) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   **影像行就緒門檻（2026-09-28｜本單 M1）**：行「查不到」有兩種截然不同的成因
+   ---------------------------------------------------------------------------
+   `listImageRows()` 在雲端讀取面**未落定**（狀態 `pending`）時一律回空集
+   （`db.js::readCollection` 的 `pending` 分支）⇒ 此刻 `find(...)` 得 `null` 並**不代表**
+   「本機影像庫沒有這張圖」。兩者必須分開：
+     · `pending`（**未定**）⇒ 調用方一律拿**非終態**讀數，**不得**寫進錯誤緩存、**不得**恆不重試；
+     · 其餘（`ready` / `failed` / `off` ＝ 已落定）⇒ 既有終態文案與行為**一字不改**。
+   為什麼非判不可（線上實據的機械口徑）：詳情頁「印面影像」塊在 `face_image_id` 一變非空
+   （＝印章集合剛水合那一刻）就取字節；若此刻影像集合尚未落定 ⇒ 行查不到 ⇒
+   `cloudBaseObjectKeyOf(null)` 為空 ⇒ **雲端分支被跳過** ⇒ 落本機路徑取不到字節 ⇒ 回終態失敗；
+   而詳情頁把該失敗記進 `imageErrors` 且迴圈開頭 `continue` ⇒ **永久緩存、永不重試** ⇒ 穩定不出圖。
+   同桶同源的廣場卡片走進視口懶加載（水合早已完成）⇒ 有圖。
+   判據本身**同步、零 I/O**（讀數據層狀態讀數），不靠等待、不靠輪詢、不靠猜。
+   --------------------------------------------------------------------------- */
+function imageRowsUnsettled() {
+  const status = cloudBaseStatus() || {}
+  return status.state === 'pending'
+}
+
+/** **未落定**的結構化讀數（`ok:false` ＋ `pending:true`；**不是**終態失敗 ⇒ 調用方不得緩存為錯誤）。 */
+function imageRowsPendingReadout(extra = {}) {
+  return {
+    ok: false,
+    pending: true,
+    reason: 'IMAGE_ROWS_PENDING',
+    message: '影像資料仍在讀取中（雲端資料尚未落定），就緒後會自動重試',
+    ...extra
+  }
+}
+
 /**
  * **附加能力（非冻结项，UI 单可直接用）**：按影像编号取回二进制并转 dataURL（**仅运行时渲染**）。
  * 二进制只在 IndexedDB，页面要用 `<img>` 显示时必须走这里（不得直接读 IndexedDB，§3.2 收口注）。
@@ -578,6 +609,8 @@ export function updateSealFixedAttributes(actor, faceId, patch = {}) {
  */
 export async function loadImageDataUrl(imageId) {
   const meta = listImageRows().find((row) => row.id === imageId) || null
+  /* **就緒門檻（M1）**：行查不到 ＋ 讀取面未落定 ⇒ **非終態**（「還沒讀到」不是「沒有這張圖」）。 */
+  if (!meta && imageRowsUnsettled()) return imageRowsPendingReadout({ meta: null })
   /* **CloudBase 讀取面（v1）**：雲端行 ⇒ 取**已遷的展示件**（PNG / WebP，mapping.md §3
      的 `storage_key`）的**臨時鏈接** ⇒ 整件字節 ⇒ dataURL。**零轉碼、零切塊**：
      交出去的就是遷移時那一份字節（容器按字節如實判定，不採信自稱值）。 */
@@ -631,6 +664,8 @@ export async function loadImageDataUrl(imageId) {
  */
 export async function loadStoredImage(imageId) {
   const row = listImageRows().find((item) => item.id === imageId) || null
+  /* **就緒門檻（M1）**：同上 —— 未落定 ⇒ 非終態讀數（不冒充「本機沒有」）。 */
+  if (!row && imageRowsUnsettled()) return imageRowsPendingReadout({ row: null })
   /* **CloudBase 讀取面（v1）**：雲端行 ⇒ 交出**已遷的展示件整件字節**。
      面别如实登记（不冒充）：這**不是** TIFF 存儲件，也**不是**權威庫的「原字節面」；
      `mime` 一律**按字節如實**判定（不採信行上自稱值）。 */
@@ -672,7 +707,8 @@ export async function loadStoredImage(imageId) {
  */
 export function imageSourceOf(imageId) {
   const row = listImageRows().find((item) => item.id === imageId) || null
-  if (!row) return { row: null, via: '', digest: '' }
+  /* **就緒門檻（M1）**：未落定 ⇒ `pending:true`（分流讀數的第三態：既非 digest、也非 local）。 */
+  if (!row) return { row: null, via: '', digest: '', pending: imageRowsUnsettled() }
   /* **CloudBase 讀取面（v1）**：雲端行（對象在 CloudBase 對象存儲）⇒ 一律 **`local`**。
      理由（機械可判）：`digest` 分流的前置是「二進制在**本機 5191 權威庫**」（三面 ＝
      原字節 / 縮略 / 塊全部由該服務端按 digest 引用輸出）；雲端形態下**沒有**該服務端
@@ -697,6 +733,8 @@ export function imageDigestOf(imageId) {
  */
 export async function imageDisplaySourceOf(imageId) {
   const source = imageSourceOf(imageId)
+  /* **就緒門檻（M1）**：未落定 ⇒ **非終態**（詳情頁據此保持載入態、不寫錯誤緩存；落定後自動重試）。 */
+  if (source.pending) return imageRowsPendingReadout({ via: '', digest: '', dataUrl: '' })
   if (source.via === 'digest') {
     return { ok: true, via: 'digest', digest: source.digest, dataUrl: '', message: '' }
   }

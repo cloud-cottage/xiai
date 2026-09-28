@@ -255,7 +255,16 @@ const statusRef = shallowRef({
   emptyVerified: [],
   emptySuspect: [],
   /* **v3 T1（阶段预算 / 冷启动重试）读数**：`attempt` ＝ 本轮是第几轮（1 首轮 / 2 自动重试轮）；
-     `timeoutStage` ＝ 最近一次超时的**阶段名**（空串 ⇒ 没有超时过）。 */
+     `timeoutStage` ＝ **最近一次阶段超时的阶段名**（`sdk-load` / `anonymous-login` / `<集合>@<游标>`）。
+     生命周期（**与实现的真实取值序列逐字对齐**；读数见 `qa/probes/probe-c-timeoutstage.mjs` 的
+     ①②③④ 四处采样，本字段**不采信旧口径**）：
+       ① 阶段超时**即写入** —— `scheduleHydrationRetry()`（重试窗口内）与 `fail('TIMEOUT')`（终态）都带它；
+       ② **重试窗口内仍看得到**「是哪个阶段触发了本次重试」（如 `sdk-load`）；
+       ③ **新一轮起跑即被本轮清空** —— `hydrate()` 的 `pending` 状态写入自带 `timeoutStage: ''`
+          ⇒ 重试轮进行中该字段为 `''`（此时归因由 `reason: 'HYDRATING_RETRY'` ＋ `attempt: 2` 承载）；
+       ④ 被下一次超时**覆盖**；成功落定（`ready`）或 `resetCloudBaseSource()` 亦清空；
+          终态 `failed / TIMEOUT` 上**保留**触发该次失败的那个阶段（排障要看的就是它）。
+     空串 ⇒ 当下不在「重试窗口 / 超时终态」位置，或自上次清空以来没有发生过阶段超时。 */
   attempt: 0,
   timeoutStage: '',
   fetchedAt: ''
@@ -1039,7 +1048,10 @@ function scheduleHydrationRetry(budget, err) {
   generation += 1 /* 作廢本輪 */
   setStatus('pending', {
     reason: 'HYDRATING_RETRY',
-    message: `雲端資料載入較慢（階段「${err.stage}」超出 ${budget} ms 預算），即將自動重試…`,
+    /* **D-1**：必须印**该阶段实际耗尽的等待上限**（`CloudTimeoutError.budgetMs`
+       ＝ `min(阶段预算, 本輪剩余)`，如 `sdk-load` 的 12000），**不得**印本轮的**总预算**
+       （20000）—— 后者会让人误以为「等了 20 秒」，与真实归因不符。 */
+    message: `雲端資料載入較慢（階段「${err.stage}」超出 ${err.budgetMs} ms 預算），即將自動重試…`,
     timeoutMs: budget,
     timeoutStage: err.stage,
     retryBudgetMs: CLOUD_HYDRATE_RETRY_BUDGET_MS,
