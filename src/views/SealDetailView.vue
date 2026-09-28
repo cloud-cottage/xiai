@@ -70,7 +70,32 @@ async function loadFaceImages() {
   }
 }
 
-watch(() => [route.params.id, dataVersion.value], loadFaceImages, { immediate: true })
+watch(
+  /* **T3（依賴面缺一項）**：依賴面必須含**逐影像編號**（`faceImageIds`）——
+     硬導航 / 雲端水合下，首屏求值時 `seal` 還是 `null` ⇒ 編號集合為空、迴圈跑零次；
+     而依賴面若只有 `route.params.id` + `dataVersion`，水合落定後**這個 watch 永不重跑**
+     ⇒ 印面圖永遠停在「正在讀取本機影像庫…」（線上實據：詳情頁其餘欄位已渲染、只有圖不出）。
+     與實物照片的 watch **同形**（那裡本來就帶 `gallery…map(id).join(',')`）。
+     `loadFaceImages()` 對已取到的編號會 `continue` ⇒ 重跑是安全的（不重複取字節）。 */
+  () => [route.params.id, dataVersion.value, faceImageIds.value.join(',')],
+  loadFaceImages,
+  { immediate: true }
+)
+
+/* ---------------------- 數據源狀態（硬導航首屏不得顯示終態） ---------------------- */
+/* **線上實據（2026-09-28）**：直接打開 / 刷新 `/seal/1` 時，雲端快照尚未落定 ⇒
+   `seals.getSealById()` 返回 `null`。此刻若渲染「未找到這枚印章」，等於把「還沒讀到」
+   說成「不存在」（實據：等 14 秒仍是「未找到」，而同一構建在本地／快照到位後能出內容）。
+   ⇒ 一律讀**數據層的數據源讀數**：`pending` ⇒ 載入態；`failed` ⇒ 可重試的失敗態；
+   落定（`ready` / `off`）後才允許「未找到」這類終態文案。讀數是響應式的
+   （數據層 `shallowRef`）⇒ 水合落定時本頁自動重算，無需手動刷新。 */
+const dataSource = computed(() => seals.dataSourceState())
+const sealLoading = computed(() => !seal.value && dataSource.value.pending)
+const sealUnavailable = computed(() => !seal.value && dataSource.value.failed)
+
+function retryDataSource() {
+  void seals.retryDataSource()
+}
 
 /* ---------------------- 实物照片：二进制只在 IndexedDB ---------------------- */
 /* 画廊**不再依赖行内的 dataURL**（AC-33：整张 dataURL 不得进 localStorage），
@@ -1542,6 +1567,24 @@ onBeforeUnmount(() => {
     />
   </section>
 
+  <!-- **資料尚未到位（硬導航首屏）⇒ 載入態**：水合未完成時**不得**顯示「未找到這枚印章」
+       這類終態（它是在斷言一件還沒讀到的事）。水合落定後本元件自動重算。 -->
+  <PlaceholderPanel
+    v-else-if="sealLoading"
+    glyph="候"
+    title="正在讀取藏品資料"
+    desc="雲端藏品資料載入中，就緒後會自動顯示這枚印章。"
+  />
+  <!-- **雲端讀取失敗（已回落本機示範資料）⇒ 可重試的失敗態**：同樣不宣稱「這枚印章不存在」
+       —— 此刻資料源是本地示範集，判不出雲端的真實歸屬。重試走數據層既有那一輪水合。 -->
+  <PlaceholderPanel
+    v-else-if="sealUnavailable"
+    glyph="阻"
+    title="藏品資料暫時無法讀取"
+    desc="雲端資料暫時未能讀取（目前顯示的是本機示範資料），無法確認這枚印章是否存在。"
+  >
+    <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
+  </PlaceholderPanel>
   <PlaceholderPanel
     v-else
     glyph="空"

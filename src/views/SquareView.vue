@@ -39,6 +39,11 @@ const list = computed(() => {
   /* 参数名**逐字** `content` / `style`（取代旧 `sealType`）；筛选**按印面聚合**由服务层实现。 */
   return seals.listSeals({ dynasty: dynasty.value, content: content.value, style: style.value, keyword: keyword.value })
 })
+/* **硬導航首屏（同一類終態缺陷，見 SealDetailView 的同名處理）**：直接打開 / 刷新廣場時，
+   雲端快照尚未落定 ⇒ `list` 必為空。此刻渲染「沒有符合條件的印章」等於把「還沒讀到」
+   說成「沒有」⇒ 讀數據層的數據源讀數，`pending` 時渲染**載入態**。 */
+const dataSource = computed(() => seals.dataSourceState())
+const hydrating = computed(() => !list.value.length && dataSource.value.pending)
 /* ============================================================================
    筛选条三维度值集（R-21 / R-30 / R-31 / R-34）
    ----------------------------------------------------------------------------
@@ -266,6 +271,15 @@ function onSealSaved() {}
         @save="askSaveSeal"
       />
     </div>
+
+    <!-- **資料尚未到位 ⇒ 載入態**（水合未完成時不得顯示「沒有符合條件的印章」這類終態；
+         水合落定後本元件自動重算並渲染真實結果）。 -->
+    <PlaceholderPanel
+      v-else-if="hydrating"
+      glyph="候"
+      title="正在讀取藏品資料"
+      desc="雲端藏品資料載入中，就緒後會自動顯示；載入過慢時會自動重試一次。"
+    />
 
     <PlaceholderPanel
       v-else

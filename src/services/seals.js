@@ -62,7 +62,9 @@ import { displayDataUrlOf } from './displayImage.js'
 import {
   cloudBaseActive,
   cloudBaseObjectKeyOf,
-  cloudObjectBytesOfRow
+  cloudBaseStatus,
+  cloudObjectBytesOfRow,
+  retryCloudBaseHydration
 } from '../data/cloudbase.js'
 import { bytesToDataUrl } from '../data/assetmeta.js'
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：行級分流判據的唯一真源在 `imageAuthority.js`
@@ -313,6 +315,56 @@ export function fixedAttributesOf(target) {
 }
 
 /* ------------------------------ 权限判定 ------------------------------ */
+
+/* ============================================================================
+   **資料源讀數（唯讀、響應式）** —— 硬導航首屏用的「水合是否已落定」
+   ----------------------------------------------------------------------------
+   為什麼要有：水合是**一次性 fire-and-forget**（啟動引導拉起；快照到位後由數據層的響應式
+   讀數驅動頁面重算）。硬導航（直接打開 / 刷新 `/seal/<id>`）時**首屏必然先於快照渲染** ⇒
+   `getSealById()` 返回 `null`。此時若視圖直接渲染「未找到這枚印章」這類**終態**文案，
+   就是在斷言一件**還沒讀到**的事（線上實據 2026-09-28：等 14 秒仍顯示「未找到這枚印章」，
+   而同一份構建在本地能出內容）。
+   ⇒ 視圖一律據本讀數：`pending` ⇒ 渲染**載入態**；落定（`ready` / `failed` / `off`）後才渲染
+   終態。分層：狀態與判據都在數據層（`data/cloudbase.js` 的 `cloudBaseStatus()`），
+   本層只**投影**成視圖可用的形狀，**不自立第二處判據**（R-25）；讀數經 `shallowRef`
+   天然可追蹤 ⇒ 在視圖的 `computed` 裡讀它，水合落定時視圖自動重算（組件零手動刷新）。
+   ============================================================================ */
+
+/**
+ * 當前數據源狀態（**唯讀、響應式、零 I/O**）。
+ * @returns {{state:'off'|'pending'|'ready'|'failed', pending:boolean, ready:boolean,
+ *   failed:boolean, off:boolean, retrying:boolean, reason:string, message:string,
+ *   timeoutStage:string, attempt:number, counts:object}}
+ *   - `pending`（含 `retrying`）⇒ 雲端讀取面**接管中但快照未到**：視圖**必須**渲染載入態，
+ *     不得把「暫無資料」渲染成終態（未找到 / 沒有符合條件的印章）；
+ *   - `ready` / `off` ⇒ 數據已可按既有語義判終態（找到 / 未找到 / 空集）；
+ *   - `failed` ⇒ 已回落本地實現：**「找不到」不再是雲端的事實**，視圖應給可重試的失敗態。
+ */
+export function dataSourceState() {
+  const status = cloudBaseStatus() || {}
+  const state = typeof status.state === 'string' && status.state ? status.state : 'off'
+  return {
+    state,
+    pending: state === 'pending',
+    ready: state === 'ready',
+    failed: state === 'failed',
+    off: state === 'off',
+    retrying: state === 'pending' && status.reason === 'HYDRATING_RETRY',
+    reason: typeof status.reason === 'string' ? status.reason : '',
+    message: typeof status.message === 'string' ? status.message : '',
+    timeoutStage: typeof status.timeoutStage === 'string' ? status.timeoutStage : '',
+    attempt: Number(status.attempt) || 0,
+    counts: status.counts || { seals: 0, faces: 0, images: 0 }
+  }
+}
+
+/**
+ * **重新讀取雲端資料**（失敗態 / 載入過久時由界面觸發；數據層自理預算與回落規則）。
+ * @returns {Promise<object>} 新一輪水合的結論（狀態讀數）
+ */
+export function retryDataSource() {
+  return retryCloudBaseHydration()
+}
 
 export function canBrowse() {
   return true

@@ -24,6 +24,10 @@
 
 import { shallowRef } from 'vue'
 import { loadCloudBaseSdk } from './cloudbaseSdk.js'
+/* **可疑空集判定（§3c）**要读**本地同集合**的现有行数：**只读**、零写入。
+   `storage.js` 是全工程唯一碰 localStorage 的模块 ⇒ 本文件**只消费**它，
+   **不自立**第二处存储访问实现（R-25）。 */
+import { readKey, STORAGE_KEYS } from './storage.js'
 /* 容器判定**不自立第二份实现**（R-25）：按字节魔数的那把尺子仍恰 1 处 ＝ `utils/image.js`。 */
 import { sniffBytesMime } from '../utils/image.js'
 
@@ -56,11 +60,60 @@ export const CLOUD_MAX_PAGES = 100
 export const CLOUD_ORDER_FIELD = '_id'
 export const CLOUD_ORDER_DIRECTION = 'asc'
 
-/* **v2 必修 1（超時護欄）**：水合的**總預算**（預設 8 秒；可由構建期變數 `VITE_XIAI_CB_TIMEOUT_MS` 配）。
-   覆蓋「SDK 裝載 / `init` / 匿名登錄 / 每一頁查詢」全部階段：**任一階段超預算 ⇒ 判失敗**
-   （`reason: 'TIMEOUT'`）—— 與 `SDK_UNAVAILABLE` / `ANONYMOUS_LOGIN_FAILED` **同一條失敗狀態機**
-   ⇒ 數據層自動回落本地實現。**不得讓頁面無限 pending**（質檢實據：400 ms 後仍 pending ⇒ 長期空態）。 */
-export const CLOUD_HYDRATE_TIMEOUT_MS = 8000
+/* **v2 必修 1（超時護欄）／v3 T1 調預算**：水合的**總預算**（預設 20 秒；可由構建期變數
+   `VITE_XIAI_CB_TIMEOUT_MS` 配）。覆蓋「SDK 裝載 / `init` / 匿名登錄 / 每一頁查詢」全部階段：
+   **任一階段超預算 ⇒ 判失敗**（`reason: 'TIMEOUT'`）—— 與 `SDK_UNAVAILABLE` /
+   `ANONYMOUS_LOGIN_FAILED` **同一條失敗狀態機** ⇒ 數據層自動回落本地實現。
+   **不得讓頁面無限 pending**（質檢實據：400 ms 後仍 pending ⇒ 長期空態）。
+
+   **為什麼由 8 秒調到 20 秒（線上 E2E 實據 2026-09-28）**：冷緩存首次加載的**最壞路徑**
+   ＝「獨立 SDK 塊（實測 758,535 B ＝ 750.5 KiB，另存 `assets/index.esm-*.js`，與主 bundle 分離）
+   ＋ `init` ＋ 匿名登錄 ＋ 三集合分頁（每頁 79 行、服務端上限 20 ⇒ 4 頁/集合，共 12 次查詢）」。
+   750 KiB 在 3 Mbit/s（≈375 KiB/s）的移動網上**光下載就 ~2 s**、在 1 Mbit/s（≈125 KiB/s）上
+   **~6 s**、在 500 kbit/s（≈62 KiB/s）上 **~12 s**；再疊 TLS/HTTP2 建連（0.2–2 s）、
+   `init`（<50 ms）、匿名登錄（0.3–2 s）、12 次分頁查詢（每次 0.1–0.8 s ⇒ 1.2–9.6 s）
+   ⇒ **典型 3–10 s、冷緩存弱網 15–25 s**。8 秒預算會把「本來能成功」的加載判成 TIMEOUT
+   ⇒ 靜默回落 8 行本機示範資料（線上實據：廣場穩定顯示「共 8 枚」而雲端實有 79 枚）。
+   20 秒 = 上述最壞路徑的**上四分位再加餘量**，同時仍是**有界**的（不會無限 pending）。
+   取值參照不是猜的：`VITE_XIAI_CB_TIMEOUT_MS` 由構建期注入，`cloudBaseTimeoutMs()` 只認
+   正數有限值（見該函數），配置缺失 / 非法一律回落到本常量。 */
+export const CLOUD_HYDRATE_TIMEOUT_MS = 20000
+
+/**
+ * **按階段預算（v3 T1）** —— 讓「SDK 塊下載 / 匿名登錄 / 單頁查詢」**各自不被誤判為整體超時**。
+ *
+ * 形態：`每階段的實際等待上限 ＝ min(該階段預算, 本輪總預算剩餘)`。
+ *   · 為什麼要分階段：8 秒總預算的失敗**幾乎總發生在 SDK 塊下載**（最大、最慢、冷緩存），
+ *     而後面的登錄與查詢根本沒機會跑；只報一句「整體超時」也分不出是**慢**還是**壞**。
+ *     分階段後：`CloudTimeoutError.stage`（`sdk-load` / `anonymous-login` / `<集合>@<游標>`）
+ *     與狀態上的 `timeoutStage` 直接把**是哪一段**寫清楚。
+ *   · 為什麼仍受總預算約束：每階段的上限還要 **min 上「本輪剩餘」** ⇒ 總牆鐘仍被總預算釘住
+ *     （不會因為「每階段各自 12 秒」把一次加載拖成 3 分鐘）。
+ *   · 取值：`sdk-load` 12000（750 KiB ⇒ 62 KiB/s 的鏈路仍能在本階段內下完）、
+ *     `anonymous-login` 8000（匿名登錄是單次往返，8 秒足夠；超過即視為鑑權面異常）、
+ *     `query` 8000（**單頁**查詢；4 頁 × 8000 不會發生 —— 總預算會先到）。
+ */
+export const CLOUD_STAGE_BUDGET_MS = Object.freeze({
+  'sdk-load': 12000,
+  'anonymous-login': 8000,
+  query: 8000
+})
+
+/**
+ * **冷啟動自動重試（v3 T1）**：`sdk-load` 階段超時 ⇒ **自動再來一輪**（預算見下），
+ * 且**這一輪不寫 `failed`**（狀態維持 `pending / HYDRATING_RETRY` ⇒ 視圖維持載入態，
+ * **不回落本地種子**）。為什麼只認 `sdk-load`、只重試一次：
+ *   · SDK 塊是**可緩存的靜態資源** ⇒ 第一次超時時那次下載**仍在後台繼續**（`withBudget`
+ *     只放棄等待、不取消請求），第二輪多半命中瀏覽器 HTTP 緩存 ⇒ **第二輪是更便宜的一輪**；
+ *   · 登錄 / 查詢超時代表**服務端或鑑權面異常**，重試只是把等待翻倍（**不重試**：
+ *     立即走既有 `failed / TIMEOUT` ⇒ 回落本地，這正是「不把立即失敗拖成長等待」的守則）；
+ *   · 只一次：最壞牆鐘 ＝ 首輪 `sdk-load` 上限 12 s ＋ 等待 0.8 s ＋ 重試輪 12 s ≈ **25 s**，
+ *     之後仍是既有的 `failed / TIMEOUT` 回落（有界，不會無限重試 / 無限 pending）。
+ */
+export const CLOUD_HYDRATE_RETRY_BUDGET_MS = 12000
+export const CLOUD_HYDRATE_RETRY_DELAY_MS = 800
+/** 只有這幾個階段的超時會觸發自動重試（見上）。 */
+export const CLOUD_RETRYABLE_TIMEOUT_STAGES = Object.freeze(['sdk-load'])
 
 /* **Zang 實測裁定（fileID 形態）**：
    ✅ 成功形態 ＝ `cloud://<envId>.<bucket>/<對象鍵>`（真瀏覽器實測：SUCCESS + 簽名鏈接 + `<img>` 真載入）；
@@ -169,7 +222,7 @@ export function cloudBaseFileIdDenial() {
 
 /**
  * 水合总预算（毫秒）。口径：`VITE_XIAI_CB_TIMEOUT_MS` 缺失 / 非正数 / 非数字 ⇒
- * 回落默认 `CLOUD_HYDRATE_TIMEOUT_MS`（8 秒）；**不设「0 ＝ 無限」的暗门**
+ * 回落默认 `CLOUD_HYDRATE_TIMEOUT_MS`（20 秒；为什么是 20 s 见该常量的头注）；**不设「0 ＝ 無限」的暗门**
  * （那样的配置错误会让页面又变回「无限 pending」）。
  */
 export function cloudBaseTimeoutMs() {
@@ -197,6 +250,14 @@ const statusRef = shallowRef({
   message: '未配置 CloudBase 数据源，使用本地实现',
   envId: '',
   counts: { seals: 0, faces: 0, images: 0 },
+  /* **空集诊断（§3c）**：`emptyVerified` ＝ 诚实空态（云端 0 行 + 本地也空 ⇒ 不回落）；
+     `emptySuspect` ＝ 可疑空集（云端 0 行 + 本地有数据 ⇒ 已走失败状态机回落本地）。 */
+  emptyVerified: [],
+  emptySuspect: [],
+  /* **v3 T1（阶段预算 / 冷启动重试）读数**：`attempt` ＝ 本轮是第几轮（1 首轮 / 2 自动重试轮）；
+     `timeoutStage` ＝ 最近一次超时的**阶段名**（空串 ⇒ 没有超时过）。 */
+  attempt: 0,
+  timeoutStage: '',
   fetchedAt: ''
 })
 
@@ -247,11 +308,13 @@ export function cloudBaseSnapshot() {
 }
 
 /* ---------------------------------------------------------------------------
-   3b. **超时护栏（v2 必修 1）**：预算内必须落定；超时即判失败 ⇒ 归入既有失败状态机
+   3b. **超时护栏（v2 必修 1 ／ v3 T1 分阶段）**：预算内必须落定；超时即判失败 ⇒ 归入既有失败状态机
    ---------------------------------------------------------------------------
    形态纪律：`withBudget()` 包住**每一个**可能不落定的 await（SDK 装载 / 匿名登录 / 单页查询），
-   每阶段的等待上限 ＝ **总预算的剩余部分** ⇒ 总墙钟不会超过预算（量级上）＋ 少量计时器开销。
-   超时**不向外抛**：`ensureCloudBaseHydration()` 的 catch 把它转成 `failed / TIMEOUT`，
+   每阶段的等待上限 ＝ **min(该阶段预算, 总预算剩余)** ⇒ ① 单阶段不会被误判成整体超时
+   （见 `CLOUD_STAGE_BUDGET_MS`），② 总墙钟仍被总预算钉住（量级上）＋ 少量计时器开销。
+   超时**不向外抛**：`startHydrationRound()` 的 catch 把它转成 `failed / TIMEOUT`
+   （`sdk-load` 阶段先自动重试一轮，见 `CLOUD_HYDRATE_RETRY_*`），
    与 `SDK_UNAVAILABLE` / `ANONYMOUS_LOGIN_FAILED` 走**同一条**回落路径（数据层 ⇒ 本地实现）。
    --------------------------------------------------------------------------- */
 
@@ -266,13 +329,31 @@ export class CloudTimeoutError extends Error {
 }
 
 /**
- * 在**总预算**内等待某阶段：等待上限 ＝ 预算剩余。
+ * **阶段预算解析（纯函数，可单测）**：`min(该阶段预算, 本轮总预算剩余)`。
+ *
+ * 阶段名口径：`sdk-load` / `anonymous-login` / 其余一律按**单页查询**（`<集合>@<游标>`，如
+ * `xiai_seals@0`）⇒ 取 `query` 预算。
+ * @param {string} stage 阶段名
+ * @param {number} remainingMs 本轮的剩余预算（毫秒）
+ * @returns {number} 该阶段实际等待上限（毫秒；≤ 0 ⇒ 调用方**立刻**判超时、不发起该阶段）
+ */
+export function cloudStageBudgetMs(stage, remainingMs) {
+  const left = Number(remainingMs)
+  if (!Number.isFinite(left) || left <= 0) return 0
+  const name = String(stage || '')
+  const key = name === 'sdk-load' || name === 'anonymous-login' ? name : 'query'
+  const cap = CLOUD_STAGE_BUDGET_MS[key]
+  return Math.min(Number.isFinite(cap) && cap > 0 ? cap : left, left)
+}
+
+/**
+ * 在**阶段预算 ∧ 总预算剩余**内等待某阶段（等待上限见 `cloudStageBudgetMs()`）。
  * 剩余不足（≤ 0）⇒ **立刻**判超时、**不发起**该阶段（避免"超时后还继续发请求"）。
  * `deadline === 0` ⇒ 视为未设预算（不设限；只在测试里出现）。
  */
 function withBudget(promise, deadline, stage) {
   if (!deadline) return Promise.resolve(promise)
-  const ms = deadline - Date.now()
+  const ms = cloudStageBudgetMs(stage, deadline - Date.now())
   if (ms <= 0) return Promise.reject(new CloudTimeoutError(stage, 0))
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new CloudTimeoutError(stage, ms)), ms)
@@ -287,6 +368,61 @@ function withBudget(promise, deadline, stage) {
       }
     )
   })
+}
+
+/* ---------------------------------------------------------------------------
+   3c. **可疑空集（CLOUD_EMPTY_SUSPECT）**：云端 0 行 ⇒ 必须**分辨**「真空」还是「被挡」
+   ---------------------------------------------------------------------------
+   为什么非有不可（真环境实测 + TCB 行为）：CloudBase 数据库**安全规则对未授权读不报错，
+   而是静默返回 0 行**；而本层原先只在 `QUERY_FAILED`（真抛错）时回落 ⇒ 万一根权限被改 /
+   环境配错，线上会稳定显示**空广场且无错误信号**（静默失败面，比报错更难查）。
+   判据（机械可判，只看两个读数 —— 云端行数 / 本地同集合行数）：
+     · 云端某集合读到 **0 行** 且**本地同集合有数据** ⇒ 判为**可疑** ⇒ reason
+       `CLOUD_EMPTY_SUSPECT` ⇒ **走既有失败状态机回落本地实现**（与 `QUERY_FAILED` **同一路径**：
+       `fail()` ⇒ `failed` ⇒ `db.js::readCollection` 的非 ready 分支），并把诊断字段
+       （集合名 / 云端行数 / 本地行数）**上报到状态**（`status.emptySuspect`）；
+     · 云端 **0 行** 且**本地同集合也为空** ⇒ **诚实空态**：`ready`、该集合 0 行、
+       **不回落**（本地无数据可信、回落只会把**本机种子数据**当云端数据交出 ⇒ 禁止）；
+       只在状态里留痕（`status.emptyVerified`）。
+   纪律：本判定**只读不写** —— 读本地走 `readKey()`，**不调** `ensureSeed()`、**不灌**种子、
+   **不写** localStorage；不改变 v2 既有语义（超时护栏 / fileID 形态 / 分页稳定次序 /
+   本地同 `_id` 覆盖层**一字未动**）；只影响 `seals` / `faces` / `images` 三个集合。
+   --------------------------------------------------------------------------- */
+
+/** 可疑空集的**结构化 reason**（与 `QUERY_FAILED` 共用同一条失败状态机）。 */
+export const CLOUD_EMPTY_SUSPECT = 'CLOUD_EMPTY_SUSPECT'
+
+/**
+ * 本地同集合的**现有行数**（**只读**：不灌种子、不写存储、不碰其它集合）。
+ * @param {string} collectionKey 本地集合键（`seals` / `faces` / `images`）
+ * @returns {number} 行数（非本层接管的键 / 非数组 / 缺键 ⇒ 0）
+ */
+export function cloudBaseLocalRowCount(collectionKey) {
+  if (!CLOUD_COLLECTION_KEYS.includes(collectionKey)) return 0
+  const storageKey = STORAGE_KEYS[collectionKey]
+  if (!storageKey) return 0
+  const rows = readKey(storageKey)
+  return Array.isArray(rows) ? rows.length : 0
+}
+
+/**
+ * 云端读数的**空集裁定**（诊断字段：集合名 / 云端行数 / 本地行数）。
+ * @param {string} collectionKey 本地集合键
+ * @param {Array<object>} cloudRows 本次云端读回的行
+ * @returns {{key:string, collection:string, cloud:number, local:number, suspect:boolean}}
+ *   `suspect === true` ⇒ 云端 0 行而本地有数据（可疑 ⇒ 回落）；`cloud === 0 && !suspect`
+ *   ⇒ 诚实空态（不回落）。
+ */
+export function cloudEmptyVerdict(collectionKey, cloudRows) {
+  const cloud = Array.isArray(cloudRows) ? cloudRows.length : 0
+  const local = cloudBaseLocalRowCount(collectionKey)
+  return {
+    key: collectionKey,
+    collection: CLOUD_COLLECTIONS[collectionKey] || '',
+    cloud,
+    local,
+    suspect: cloud === 0 && local > 0
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -699,6 +835,12 @@ let hydration = null
  */
 let generation = 0
 
+/* **v3 T1：待重試窗口**（`sdk-load` 超時後的那 0.8 s）。任何新一輪開始時都會把它作廢，
+   並把它的 promise **接到新一輪的結論上** ⇒ 不留永不落定的懸空 promise（否則 `await` 它的
+   調用方會永久掛住）。 */
+let retryTimer = null
+let retryResolve = null
+
 /** 写入失败态（**代次守卫**：非本轮 ⇒ 一字不写，避免僵尸阶段覆盖既有结论）。 */
 function fail(gen, reason, message, extra = {}) {
   if (gen !== generation) return statusRef.value
@@ -708,11 +850,14 @@ function fail(gen, reason, message, extra = {}) {
 }
 
 /**
- * 水合（一次性把 237 行拉进内存快照）。总预算由 `budget` 决定，`deadline` 是到点时刻。
- * 阶段：SDK 装载 → `sdk.init` → 匿名登录 → 逐集合分页查询 —— **每个 await 都被预算包住**。
- * 超时以 `CloudTimeoutError` **上抛**，由 `ensureCloudBaseHydration()` 统一转成 `failed / TIMEOUT`。
+ * 水合（一次性把 237 行拉进内存快照）。本**轮**预算由 `budget` 决定，`deadline` 是到点时刻。
+ * 阶段：SDK 装载 → `sdk.init` → 匿名登录 → 逐集合分页查询 —— **每个 await 都被预算包住**
+ * （单阶段上限 ＝ `min(阶段预算, 本轮剩余)`，见 `cloudStageBudgetMs()`）。
+ * 超时以 `CloudTimeoutError` **上抛**，由 `startHydrationRound()` 统一转成
+ * `failed / TIMEOUT` 或（`sdk-load` 阶段的）自动重试。
+ * @param {number} attempt 轮次（1 首轮 / 2 自动重试轮）；随状态上报，便于线上排障
  */
-async function hydrate(gen, deadline, budget) {
+async function hydrate(gen, deadline, budget, attempt = 1) {
   const config = cloudBaseConfig()
   if (!cloudBaseConfigured()) {
     if (gen === generation) setStatus('off', { reason: 'NOT_CONFIGURED', message: '未配置 CloudBase 数据源，使用本地实现', envId: '' })
@@ -720,10 +865,12 @@ async function hydrate(gen, deadline, budget) {
   }
   if (gen !== generation) return statusRef.value
   setStatus('pending', {
-    reason: 'HYDRATING',
-    message: '正在讀取雲端資料…',
+    reason: attempt > 1 ? 'HYDRATING_RETRY' : 'HYDRATING',
+    message: attempt > 1 ? `正在重試讀取雲端資料（第 ${attempt} 輪）…` : '正在讀取雲端資料…',
     envId: config.envId,
     timeoutMs: budget,
+    attempt,
+    timeoutStage: '',
     counts: { seals: 0, faces: 0, images: 0 },
     fetchedAt: ''
   })
@@ -760,6 +907,9 @@ async function hydrate(gen, deadline, budget) {
   }
   const raw = {}
   const paging = {}
+  /* **空集诊断容器（§3c）**：逐集合判定 → 诚实空态 / 可疑空集分别登记。 */
+  const emptyVerified = []
+  const emptySuspects = []
   try {
     for (const [key, collectionName] of Object.entries(CLOUD_COLLECTIONS)) {
       const detailed = await fetchAllRowsDetailed(db, collectionName, { deadline })
@@ -771,10 +921,31 @@ async function hydrate(gen, deadline, budget) {
         ordered: detailed.ordered,
         uniqueIds: detailed.uniqueIds
       }
+      /* **可疑空集判定（§3c）**：云端**静默返回 0 行**不再被当成「真空」——
+         本地同集合有数据 ⇒ 可疑（下面走失败状态机回落本地）；本地也空 ⇒ 诚实空态（不回落，
+         也**绝不**把本机种子当云端数据）。 */
+      const verdict = cloudEmptyVerdict(key, detailed.rows)
+      if (verdict.cloud === 0) {
+        if (verdict.suspect) emptySuspects.push(verdict)
+        else emptyVerified.push(verdict)
+      }
     }
   } catch (err) {
     if (err instanceof CloudTimeoutError) throw err
     return fail(gen, 'QUERY_FAILED', `雲端資料讀取失敗（${(err && err.message) || '未知原因'}），已回落到本機示範資料`)
+  }
+  /* **可疑空集 ⇒ 回落（§3c）**：与 `QUERY_FAILED` **同一条失败状态机**（`fail()` ⇒ `failed` ⇒
+     `db.js::readCollection` 走既有「非 ready」分支 ⇒ 本地实现）；诊断字段（集合名 / 云端行数 /
+     本地行数）随状态上报 ⇒ 线上排障一眼分得清「真空」与「被权限/配置挡了」。 */
+  if (emptySuspects.length > 0) {
+    return fail(
+      gen,
+      CLOUD_EMPTY_SUSPECT,
+      `雲端資料可疑為空（${emptySuspects
+        .map((item) => `${item.collection} 雲端 ${item.cloud} 列 / 本機 ${item.local} 列`)
+        .join('、')}），已回落到本機示範資料`,
+      { emptySuspect: emptySuspects, emptyVerified }
+    )
   }
   if (gen !== generation) return statusRef.value
   const snapshot = {
@@ -800,19 +971,101 @@ async function hydrate(gen, deadline, budget) {
     envId: config.envId,
     counts,
     paging,
+    attempt,
+    timeoutStage: '',
+    /* **诚实空态如实登记（§3c）**：云端 0 行且本地同集合也为空 ⇒ **不回落**，但状态留痕；
+       可疑空集（已回落）此时恒为空集（有可疑即已 `failed`）。 */
+    emptyVerified,
+    emptySuspect: [],
     fetchedAt: snapshot.fetchedAt
   })
   return statusRef.value
 }
 
 /**
+ * **起一輪水合**（唯一入口：首輪 / `sdk-load` 超時後的自動重試輪 / 顯式重試都走這裡）。
+ *
+ * 任何新一輪都會**作廢待重試窗口**，並把它的 promise 接到本輪結論上（不留懸空 promise）。
+ * 超時的分派（v3 T1）：`sdk-load` 階段且是首輪 ⇒ `scheduleHydrationRetry()`
+ * （狀態維持 `pending / HYDRATING_RETRY` ⇒ 視圖維持載入態、**不回落本地**）；
+ * 其餘一律走既有 `failed / TIMEOUT` 回落路徑（**不拖長**：鑑權 / 查詢面立即失敗就立即回落）。
+ * @param {number} budget 本輪總預算（毫秒；0 ⇒ 不設限，僅測試）
+ * @param {number} attempt 輪次（1 首輪 / 2 自動重試輪）
+ */
+function startHydrationRound(budget, attempt) {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer)
+    retryTimer = null
+  }
+  const supersededResolve = retryResolve
+  retryResolve = null
+  generation += 1
+  const gen = generation
+  const deadline = budget > 0 ? Date.now() + budget : 0
+  /* **同步起跑**（`hydrate()` 是 async 函数 ⇒ 体内首个 await 之前**同步**执行）：
+     `pending` 状态必须在**本次调用返回前**就位 —— 否则紧随其后的同步读取会读到 `off`
+     ⇒ 走回本地种子（「先假后真」）。 */
+  const round = hydrate(gen, deadline, budget, attempt).catch((err) => {
+    if (err instanceof CloudTimeoutError) {
+      /* **已作廢的輪次**（例如用户已 `retry`）⇒ 本輪的逾時**一字不寫**（不得覆寫新輪的結論）。 */
+      if (gen !== generation) return statusRef.value
+      if (attempt === 1 && CLOUD_RETRYABLE_TIMEOUT_STAGES.includes(err.stage)) {
+        return scheduleHydrationRetry(budget, err)
+      }
+      /* 先**作廢本輪**（僵尸阶段的后续写入一律被代次守卫挡掉），再写失败态。 */
+      generation += 1
+      return fail(
+        generation,
+        'TIMEOUT',
+        `雲端資料讀取超時（本輪預算 ${budget} ms，階段「${err.stage}」未落定），已回落到本機示範資料`,
+        { timeoutMs: budget, timeoutStage: err.stage, attempt }
+      )
+    }
+    if (gen !== generation) return statusRef.value
+    return fail(gen, 'QUERY_FAILED', `雲端資料讀取失敗（${(err && err.message) || '未知原因'}），已回落到本機示範資料`)
+  })
+  if (supersededResolve) supersededResolve(round)
+  return round
+}
+
+/**
+ * **`sdk-load` 超時後的自動重試**（见 `CLOUD_HYDRATE_RETRY_*` 头注的理由）。
+ * 本函數**不寫 `failed`**：作廢本輪（`generation += 1`，僵屍階段一律被擋）後把狀態留在
+ * `pending / HYDRATING_RETRY` ⇒ `db.js::readCollection` 的 `pending` 分支照舊返回空集、
+ * **不回落本地種子**（避免把 8 行示範資料當成 79 行藏品展示）；延遲後起重試輪。
+ * @returns {Promise<object>} 重試輪的結論（或新一輪的結論，若窗口內被顯式重試取代）
+ */
+function scheduleHydrationRetry(budget, err) {
+  generation += 1 /* 作廢本輪 */
+  setStatus('pending', {
+    reason: 'HYDRATING_RETRY',
+    message: `雲端資料載入較慢（階段「${err.stage}」超出 ${budget} ms 預算），即將自動重試…`,
+    timeoutMs: budget,
+    timeoutStage: err.stage,
+    retryBudgetMs: CLOUD_HYDRATE_RETRY_BUDGET_MS,
+    attempt: 2,
+    counts: { seals: 0, faces: 0, images: 0 },
+    fetchedAt: ''
+  })
+  return new Promise((resolve) => {
+    retryResolve = resolve
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      hydration = startHydrationRound(CLOUD_HYDRATE_RETRY_BUDGET_MS, 2)
+    }, CLOUD_HYDRATE_RETRY_DELAY_MS)
+  })
+}
+
+/**
  * 启动/按需触发水合（**幂等**：并发调用共用同一份 promise）。
  * 未配置 ⇒ 立刻回 `off`（一次网络都不发）；失败 ⇒ `failed` ⇒ 数据层自动回落本地实现。
  *
- * **v2 必修 1（超时护栏）**：本轮的总预算在**开始时**算出（`deadline = now + 预算`），
- * 所有阶段共享它；超预算 ⇒ 结构化 `failed / TIMEOUT` ⇒ **同一条回落路径**。
- * ⇒ 页面**不会**停留在 `pending`（质检实据的「长期空态」由此消除）。
- * 重试能力保留：`retryCloudBaseHydration()`（清掉一轮的状态，重新按同一预算水合）。
+ * **v2 必修 1（超时护栏）／v3 T1（分阶段预算 + 冷启动重试）**：本轮的总预算在**开始时**算出
+ * （`deadline = now + 预算`），所有阶段共享它、单阶段另受自己的预算约束（见
+ * `cloudStageBudgetMs()`）；超预算 ⇒ 结构化 `failed / TIMEOUT`（或 `sdk-load` 阶段先自动重试
+ * 一輪）⇒ **同一条回落路径**。⇒ 页面**不会**停留在 `pending`（质检实据的「长期空态」由此消除），
+ * 也不会因为一次冷緩存慢加载就把 79 行藏品静默换成 8 行示范数据。
+ * 重试能力保留：`retryCloudBaseHydration()`、以及 `sdk-load` 阶段的一次自动重试。
  */
 export function ensureCloudBaseHydration() {
   if (!cloudBaseConfigured()) {
@@ -822,30 +1075,11 @@ export function ensureCloudBaseHydration() {
     }
     return Promise.resolve(statusRef.value)
   }
-  if (!hydration) {
-    generation += 1
-    const gen = generation
-    const budget = cloudBaseTimeoutMs()
-    const deadline = budget > 0 ? Date.now() + budget : 0
-    /* **同步起跑**（`hydrate()` 是 async 函数 ⇒ 体内首个 await 之前**同步**执行）：
-       `pending` 状态必须在**本次调用返回前**就位 —— 否则紧随其后的同步读取会读到 `off`
-       ⇒ 走回本地种子（「先假后真」）。 */
-    hydration = hydrate(gen, deadline, budget).catch((err) => {
-      if (err instanceof CloudTimeoutError) {
-        /* **已作廢的輪次**（例如用户已 `retry`）⇒ 本輪的逾時**一字不寫**（不得覆寫新輪的結論）。 */
-        if (gen !== generation) return statusRef.value
-        /* 先**作廢本輪**（僵尸阶段的后续写入一律被代次守卫挡掉），再写失败态。 */
-        generation += 1
-        return fail(generation, 'TIMEOUT', `雲端資料讀取超時（總預算 ${budget} ms，階段「${err.stage}」未落定），已回落到本機示範資料`, { timeoutMs: budget })
-      }
-      if (gen !== generation) return statusRef.value
-      return fail(gen, 'QUERY_FAILED', `雲端資料讀取失敗（${(err && err.message) || '未知原因'}），已回落到本機示範資料`)
-    })
-  }
+  if (!hydration) hydration = startHydrationRound(cloudBaseTimeoutMs(), 1)
   return hydration
 }
 
-/** 重試（已 `failed` 时用；清掉一次性状态后重新水合 ⇒ 走同一套预算与回落规则）。 */
+/** 重試（已 `failed` / 載入過久時用；清掉一次性状态后重新水合 ⇒ 走同一套预算与回落规则）。 */
 export function retryCloudBaseHydration() {
   hydration = null
   generation += 1
@@ -860,6 +1094,12 @@ export function resetCloudBaseSource() {
   generation += 1
   hydration = null
   appRef = null
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer)
+    retryTimer = null
+  }
+  const pendingResolve = retryResolve
+  retryResolve = null
   tempUrlCache.clear()
   objectCache.clear()
   snapshotRef.value = null
@@ -868,6 +1108,12 @@ export function resetCloudBaseSource() {
     message: '未配置 CloudBase 数据源，使用本地实现',
     envId: '',
     counts: { seals: 0, faces: 0, images: 0 },
+    attempt: 0,
+    timeoutStage: '',
+    emptyVerified: [],
+    emptySuspect: [],
     fetchedAt: ''
   })
+  /* 待重試窗口被作廢 ⇒ 它的 promise 接到「已重置」的結論上（不懸空）。 */
+  if (pendingResolve) pendingResolve(statusRef.value)
 }
