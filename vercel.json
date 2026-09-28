@@ -1,18 +1,76 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "buildCommand": "npm run build",
+  "installCommand": "npm install && npm --prefix yinyuan install",
+  "buildCommand": "npm run build -- --outDir dist/xiai && npm --prefix yinyuan run build -- --outDir ../dist/yinyuan --emptyOutDir",
   "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/console", "destination": "/console.html" },
-    { "source": "/console/:path*", "destination": "/console.html" },
-    { "source": "/pricing", "destination": "/index.html" },
-    { "source": "/docs", "destination": "/index.html" },
-    { "source": "/docs/quickstart", "destination": "/index.html" },
-    { "source": "/org", "destination": "/index.html" },
-    { "source": "/demo", "destination": "/index.html" },
-    { "source": "/help", "destination": "/index.html" },
-    { "source": "/", "destination": "/index.html" },
-    { "source": "/((?!assets/).*)", "destination": "/index.html" }
+    {
+      "source": "/assets/:path*",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/assets/:path*"
+    },
+    {
+      "source": "/console",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/console.html"
+    },
+    {
+      "source": "/console/:path*",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/console.html"
+    },
+    {
+      "source": "/pricing",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/docs",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/docs/quickstart",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/org",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/demo",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/help",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/((?!assets/|yinyuan/|xiai/).*)",
+      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
+      "destination": "/yinyuan/index.html"
+    },
+    {
+      "source": "/assets/:path*",
+      "destination": "/xiai/assets/:path*"
+    },
+    {
+      "source": "/",
+      "destination": "/xiai/index.html"
+    },
+    {
+      "source": "/((?!assets/|yinyuan/|xiai/).*)",
+      "destination": "/xiai/index.html"
+    }
   ]
 }

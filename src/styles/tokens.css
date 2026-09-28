@@ -1,184 +1,278 @@
-/**
- * ============================================================================
- * 设计 tokens —— V1「典藏宋韵」
- *
- * 唯一来源：`shu/mockups/v1.html`（md5 46ddac3e82ff7f3459b8a95d0302403b，已定稿归档）。
- * 两个入口（marketing / console）共用本文件；其他任何地方不得重定义颜色字面量。
- *
- * 对比度：v1 已修正过的色值必须沿用，不得回退 ——
- *   --faint 由 #8a8578（对 --paper 仅 3.40:1，不达 AA）修正为 #6f6b61。
- *   --mask  由 #777（4.48:1，擦线）修正为 #737373。
- * ============================================================================
- */
+/* ============================================================================
+   玺爱 · 设计令牌（唯一色值来源）
+   ----------------------------------------------------------------------------
+   规矩：组件内不得出现裸色值，一律引用本文件的语义令牌 / 槽位令牌。
+   槽位令牌按用途专名，不得跨用途复用（例如 header 的令牌不得用于卡片）。
+
+   三套视觉基线通过 <html data-theme="..."> 切换，默认 a：
+     - a 宣纸朱印 ＝ 已选定视觉基线 v1（mockups/xiai/v1.html）：米白宣纸底 + 朱红印 + 墨黑字
+     - b 墨底金线  ：近黑底 + 金线与暗红点缀
+     - c 拓片灰金  ：拓片灰底 + 金 + 暗红
+
+   对比度：承担信息传递的图形元素，对相邻背景非文本对比 ≥ 3:1。
+   ============================================================================ */
 
 :root {
-  /* ---------- 颜色（取自 v1 :root） ---------- */
-  --paper: #f8f6f0;      /* 宣纸底 */
-  --card: #fff;
-  --ink: #222;           /* 正文 */
-  --muted: #666;         /* 次级文字 */
-  --faint: #6f6b61;      /* 三级文字（v1 已修正，不得回退为 #8a8578） */
-  --line: #e8e4da;       /* 1px 细线 */
-  --brand: #992222;      /* 酒红主色 */
-  --brand-d: #7c1b1b;    /* 主色按下态 */
+  /* ---- 中性基底令牌（由各主题覆写） ---- */
+  --c-bg: #efe8d8;
+  --c-surface: #fdfaf3;
+  --c-surface-sunken: #ece4d3;
+  --c-text: #191512;
+  --c-text-muted: #574d40;
+  /* 分隔线：0.18 时压在纸面 / 卡面上仅 1.45:1（看不见）；默认主题（v1）0.52 实测 3.620:1。 */
+  --c-line: rgba(25, 21, 18, 0.52);
+  /* 承担信息传递的控件轮廓 / 卡片描边：对相邻底色非文本对比须 ≥ 3:1。
+     默认主题（v1）0.78：chip 轮廓 7.798:1 / 卡片描边 8.783:1（WCAG 相对亮度，含 alpha 合成）。 */
+  --c-line-strong: rgba(25, 21, 18, 0.78);
 
-  /* ---------- 兼容别名（v1 中直接写死的字面量，此处集中命名） ---------- */
-  --ink-2: #444;         /* hero 正文 / li 正文 */
-  --ink-3: #333;         /* 导航链接 / chip 文字 */
-  --ink-4: #555;         /* 表格 th / banner / tip 文字 */
-  --mask: #737373;       /* 密钥掩码（v1 已修正，不得回退为 #777） */
-  --placeholder: #b3aea3; /* 输入框占位符 */
-  --brand-soft: #f2ece6; /* ghost 按钮 hover 背景 */
-  --brand-tint: #f4f1ea; /* 侧栏导航 hover / active 背景 */
-  --brand-wash: #fbf5f5; /* 警示条 / 状态条背景 */
-  --brand-line: #f0e2e2; /* 柱状图填充 */
-  --panel-alt: #fbf9f4;  /* 交替面板底 */
-  --row-hover: #fcfaf6;  /* 表格行 hover */
-  --meter-track: #efebe3;/* 进度条底 */
-  --overlay: rgba(34, 34, 34, .46); /* 弹层遮罩（无渐变、无 glass） */
-  --state-ok: #3f6b3f;   /* 成功态文字 */
-  --seal-bai-ink: #141414; /* 白文印文字 */
-  --seal-bai-line: #1c1c1c; /* 白文印边框 */
-  --seal-zhu-inner: rgba(153, 34, 34, .35); /* 朱文印内框 */
-  --seal-zhu-texture: rgba(0, 0, 0, .045);  /* 朱文印棋盘底纹 */
+  /* ---- 品牌令牌 ---- */
+  --c-brand: #a3271a;        /* 朱红 / 暗红主色 */
+  --c-brand-strong: #7c1a10;
+  --c-brand-soft: rgba(163, 39, 26, 0.10);
+  --c-gold: #7d5f16;         /* 金 */
+  --c-gold-strong: #5f470f;
+  --c-gold-soft: rgba(125, 95, 22, 0.14);
 
-  /* ---------- 图表色板（spec §1.8-9 / §1.8-10 专用色板 token） ----------
-   * 纪律：图表（环形切片 / 柱体 / 横条 / 进度条填充）**只允许**引用本组 token，
-   * 不得借用品牌 / 线条 / 边框等「槽位专用 token」顶替（例：--brand-line 用途＝柱状图填充槽位，
-   * 不得用作图表切片色）。
-   *
-   * 取值：**全部取自已定稿的 V1 色值**（不新增色相、不越出宣纸 / 酒红体系），
-   * 作为独立色板登记以避免跨用途复用：
-   *   --chart-1 酒红（＝--brand）· --chart-2 松绿（＝--state-ok）· --chart-3 中墨灰（＝--ink-4）
-   *   --chart-4 墨（＝--ink）     · --chart-5 暖灰（＝--faint）
-   *
-   * 硬性判据（§1.8-9 / AC-87）：每片对**轨道 `--meter-track`** 的 WCAG 非文本对比度 ≥ 3:1
-   * （实测 6.777 / 5.216 / 6.270 / 13.382 / 4.470，最差 4.470 ≥ 3），
-   * 且**任意两片之间可区分**：相邻组合按本序取用，全部为「色相不同且亮度比 ≥ 1.28」或
-   * 「亮度比 ≥ 1.84」；唯一一对同为中性灰的 --chart-3 / --chart-5（亮度比 1.63）在本序中**不相邻**。
-   * 兜底手段（§1.8-9 允许的「直接标注」）：图例逐片直标（名称 / 次数 / 占比）＋ 每片 <title> 悬浮读数。
-   */
-  --chart-1: #992222;
-  --chart-2: #3f6b3f;
-  --chart-3: #555555;
-  --chart-4: #222222;
-  --chart-5: #6f6b61;
+  /* ---- 状态令牌 ---- */
+  --c-ok: #2f6b3a;
+  --c-warn: #8a6a1f;
+  --c-danger: #a3271a;
+  --c-overlay: rgba(25, 21, 18, 0.78);
 
-  /* ---------- 字体栈 ---------- */
-  --font-serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
-  --font-mono: "SF Mono", Menlo, Consolas, monospace;
+  /* ---- 槽位令牌：Header ---- */
+  --slot-header-bg: var(--c-surface);
+  --slot-header-text: var(--c-text);
+  --slot-header-line: var(--c-line-strong);
+  --slot-header-search-bg: var(--c-surface-sunken);
+  --slot-header-search-line: var(--c-line-strong);
+  --slot-header-gold-text: var(--c-gold-strong);
+  --slot-header-badge-bg: var(--c-brand);
+  --slot-header-badge-text: #fdfaf3;
 
-  /* ---------- 字号 ---------- */
-  --fs-10: 10px;
-  --fs-11: 11px;
-  --fs-11-5: 11.5px;
-  --fs-12: 12px;
-  --fs-12-5: 12.5px;
-  --fs-13: 13px;
-  --fs-13-5: 13.5px;
-  --fs-14: 14px;
-  --fs-15: 15px;
-  --fs-16: 16px;
-  --fs-17: 17px;
-  --fs-18: 18px;
-  --fs-19: 19px;
-  --fs-22: 22px;
-  --fs-24: 24px;
-  --fs-25: 25px;
-  --fs-26: 26px;
-  --fs-28: 28px;
-  --fs-30: 30px;
-  --fs-32: 32px;
-  --fs-42: 42px;
+  /* ---- 槽位令牌：Sidebar ---- */
+  --slot-sidebar-bg: var(--c-surface-sunken);
+  --slot-sidebar-text: var(--c-text-muted);
+  --slot-sidebar-line: var(--c-line);
+  --slot-sidebar-item-active-bg: var(--c-brand-soft);
+  --slot-sidebar-item-active-text: var(--c-brand-strong);
+  --slot-sidebar-item-active-mark: var(--c-brand);
 
-  /* ---------- 字号语义别名 ---------- */
-  --fs-body: var(--fs-15);
-  --fs-note: var(--fs-13);
-  --fs-kpi: var(--fs-22);
-  --fs-h1: var(--fs-42);
-  --fs-section: var(--fs-25);
-  --fs-brand: var(--fs-28);
+  /* ---- 槽位令牌：印章卡片 ---- */
+  --slot-card-bg: var(--c-surface);
+  --slot-card-line: var(--c-line-strong);
+  --slot-card-title-text: var(--c-text);
+  --slot-card-meta-text: var(--c-text-muted);
+  --slot-card-seal-bg: #f7f2e6;
+  --slot-card-seal-stroke: var(--c-brand);
+  --slot-card-seal-text: var(--c-brand-strong);
+  --slot-card-thumb-line: var(--c-line-strong);
 
-  /* ---------- 字距（v1 的 letter-spacing 档位） ---------- */
-  --ls-0: 0;
-  --ls-1: .3px;
-  --ls-2: .5px;
-  --ls-3: 1px;
-  --ls-4: 2px;
-  --ls-5: 3px;
-  --ls-6: 4px;
-  --ls-7: 5px;
-  --ls-8: 6px;
+  /* ---- 槽位令牌：筛选条 / 标签 ---- */
+  --slot-filter-bg: var(--c-surface);
+  --slot-filter-line: var(--c-line);
+  --slot-chip-bg: var(--c-surface-sunken);
+  --slot-chip-text: var(--c-text-muted);
+  --slot-chip-line: var(--c-line-strong);
+  --slot-chip-active-bg: var(--c-brand);
+  --slot-chip-active-text: #fdfaf3;
 
-  /* ---------- 行高 ---------- */
-  --lh-body: 1.7;
-  --lh-tight: 1.1;
-  --lh-ui: 1.5;
+  /* ---- 槽位令牌：内容分区 ---- */
+  --slot-panel-bg: var(--c-surface);
+  --slot-panel-line: var(--c-line);
+  --slot-panel-head-text: var(--c-text);
+  --slot-panel-body-text: var(--c-text-muted);
 
-  /* ---------- 间距（v1 实际使用的档位） ---------- */
-  --sp-1: 4px;
-  --sp-2: 6px;
-  --sp-3: 8px;
-  --sp-4: 10px;
-  --sp-5: 12px;
-  --sp-6: 14px;
-  --sp-7: 16px;
-  --sp-8: 18px;
-  --sp-9: 20px;
-  --sp-10: 22px;
-  --sp-11: 24px;
-  --sp-12: 26px;
-  --sp-13: 28px;
-  --sp-14: 30px;
-  --sp-15: 34px;
-  --sp-16: 38px;
-  --sp-17: 44px;
-  --sp-18: 52px;
-  --sp-19: 64px;
-  --sp-20: 76px;
+  /* ---- 槽位令牌：主按钮 / 次按钮 ---- */
+  --slot-btn-primary-bg: var(--c-brand);
+  --slot-btn-primary-text: #fdfaf3;
+  --slot-btn-primary-line: var(--c-brand-strong);
+  --slot-btn-ghost-bg: transparent;
+  --slot-btn-ghost-text: var(--c-brand-strong);
+  --slot-btn-ghost-line: var(--c-brand);
 
-  /* ---------- 圆角（v1 仅两档，无阴影） ---------- */
-  --radius: 4px;        /* 卡片 / 容器 / 面板 */
-  --radius-sm: 2px;     /* 按钮 / 输入框 / 标签 / 表头 */
+  /* ---- 槽位令牌：标签 / 徽章 / 页签 ----
+     与「主按钮」是两类不同用途的槽位，各持自己的 token（槽位令牌不得跨用途复用）。 */
+  --slot-tag-text: #fdfaf3;
+  --slot-badge-text: #fdfaf3;
+  --slot-tab-active-text: #fdfaf3;
 
-  /* ---------- 描边 ---------- */
-  --border-w: 1px;
-  --border-accent-w: 3px;   /* 左侧强调条（banner / statusbar / warn-line） */
-  --border: var(--border-w) solid var(--line);
-  --border-brand: var(--border-w) solid var(--brand);
-  --border-strong: 2px solid var(--seal-bai-line);
-  --border-accent: var(--border-accent-w) solid var(--brand);
-  --border-dashed: 1px dashed var(--line);
-  --border-dashed-brand: 1px dashed var(--brand);
-  --border-focus: 2px solid var(--brand);
+  /* ---- 槽位令牌：金（积分） ---- */
+  --slot-gold-bg: var(--c-gold-soft);
+  --slot-gold-text: var(--c-gold-strong);
+  --slot-gold-line: var(--c-gold);
 
-  /* ---------- 容器宽度 ---------- */
-  --container: 1200px;       /* 营销容器 */
-  --container-narrow: 1000px;/* 登录/注册 */
-  --container-wide: 1320px;  /* 控制台外壳 */
-  --side-width: 236px;       /* 控制台侧栏 */
+  /* ---- 取景 / 遮罩（AC-26 收口：组件内不再出现字面色值）----
+     取景框外的高强度遮罩用 `box-shadow` 巨扩散实现；与主题无关，只此一处定义。 */
+  --c-mask-strong: rgba(0, 0, 0, 0.42);
 
-  /* ---------- 层级 ---------- */
-  --z-sticky: 80;
-  --z-toast: 120;
-  --z-modal: 200;
+  /* ---- 画布（canvas）绘制色 ----
+     为什么单独成族：canvas 的 `ctx.fillStyle` 是**绘制指令**、不能直接写 `var()`，
+     ⇒ 由 JS 运行时读本族令牌（`utils/image.js` 的 `canvasToken()`）再喂给 `ctx`。
+     取值与「收口前的字面值」逐字相同 ⇒ 外观零变化；只定义在 `:root`（画布画在照片上，
+     与主题无关，不随 data-theme 覆写）。**本族是唯一来源**：JS 侧 `canvasToken()` 无保底
+     参数，读不到就返回空串并告警一次（不再有同值字面回落 —— 那会重新构成组件内字面色值）。 */
+  --canvas-ink: #000;
+  --canvas-shade: rgba(0, 0, 0, 0.06);
+  --canvas-mask: rgba(0, 0, 0, 0.45);
+  --canvas-frame-line: rgba(255, 255, 255, 0.9);
+  --canvas-grid: rgba(255, 255, 255, 0.35);
+  --canvas-handle-fill: rgba(255, 255, 255, 0.95);
 
-  /* ---------- 动效（v1 统一 .12s，仅颜色/背景过渡，无位移渐变） ---------- */
-  --t-fast: .12s;
-  --t-fade: .18s;
+  /* ---- 焦点环 ---- */
+  --focus-ring: 0 0 0 2px var(--c-surface), 0 0 0 4px var(--c-brand);
 
-  /* ---------- 弹层规格 ---------- */
-  --modal-w: 580px;
-  --modal-w-sm: 470px;
-  --qr-size: 172px;
-  --seal-size: 124px;
-  --seal-size-tiny: 56px;
-  --bars-h: 132px;
+  /* ---- 圆角 ---- */
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-round: 999px;
+
+  /* ---- 间距 ---- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* ---- 字号 ---- */
+  --t-xs: 12px;
+  --t-sm: 13px;
+  --t-md: 14px;
+  --t-lg: 17px;
+  --t-xl: 21px;
+  --t-2xl: 26px;
+  --t-3xl: 34px;
+
+  /* ---- 版式 ---- */
+  --font-serif: "Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", serif;
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-seal: "STKaiti", "Kaiti SC", "KaiTi", "Songti SC", serif;
+
+  /* ---- 版心 ---- */
+  --layout-header-h: 60px;
+  --layout-sidebar-w: 216px;
+  --layout-max: 1180px;
+
+  --shadow-1: 0 1px 2px rgba(25, 21, 18, 0.12);
+  --shadow-2: 0 6px 20px rgba(15, 13, 11, 0.14);
 }
 
-/**
- * 断点（CSS 媒体查询无法读变量，此处为文档与 JS 侧的单一登记）：
- *   --bp-lg: 1180px  （≤1180 收窄重排：4 列→2 列）
- *   --bp-md: 980px   （≤980 单列堆叠）
- * 设计目标桌面优先 ≥1200px；<768px 不专门适配。
- */
+/* ============================ A 朱印宣纸感 ============================ */
+html[data-theme="a"] {
+  --c-bg: #efe8d8;
+  --c-surface: #fdfaf3;
+  --c-surface-sunken: #ece4d3;
+  --c-text: #191512;
+  --c-text-muted: #574d40;
+  --c-line: rgba(25, 21, 18, 0.52);
+  /* 默认主题 a ＝ v1 基线：线色 0.46 → 0.78，chip/tab 轮廓 3.809 → 7.798:1、卡片描边 3.974 → 8.783:1 */
+  --c-line-strong: rgba(25, 21, 18, 0.78);
+  --c-brand: #a3271a;
+  --c-brand-strong: #7c1a10;
+  --c-gold: #7d5f16;
+  --c-gold-strong: #5f470f;
+  --slot-card-seal-bg: #f7f2e6;
+  --shadow-1: 0 1px 2px rgba(25, 21, 18, 0.12);
+}
+
+/* ============================ B 墨底金线 ============================ */
+html[data-theme="b"] {
+  --c-bg: #14120f;
+  --c-surface: #1e1b17;
+  --c-surface-sunken: #100e0c;
+  --c-text: #ece5d6;
+  --c-text-muted: #a99d88;
+  --c-line: rgba(201, 162, 74, 0.22);
+  --c-line-strong: rgba(201, 162, 74, 0.55);
+  --c-brand: #a8352a;
+  --c-brand-strong: #c4553f;
+  --c-brand-soft: rgba(168, 53, 42, 0.2);
+  --c-gold: #c9a24a;
+  --c-gold-strong: #dcb968;
+  --c-gold-soft: rgba(201, 162, 74, 0.16);
+  --c-overlay: rgba(0, 0, 0, 0.7);
+  --slot-header-bg: #1a1714;
+  --slot-header-search-bg: #100e0c;
+  --slot-header-badge-text: #14120f;
+  --slot-sidebar-bg: #100e0c;
+  --slot-sidebar-item-active-bg: rgba(201, 162, 74, 0.14);
+  --slot-sidebar-item-active-text: #dcb968;
+  --slot-sidebar-item-active-mark: #c9a24a;
+  --slot-card-bg: #1e1b17;
+  --slot-card-seal-bg: #0d0b0a;
+  --slot-card-seal-stroke: #c9a24a;
+  --slot-card-seal-text: #dcb968;
+  --slot-card-thumb-line: rgba(201, 162, 74, 0.45);
+  --slot-filter-bg: #1a1714;
+  --slot-chip-bg: #100e0c;
+  --slot-chip-text: #bfb29a;
+  /* 原为 rgba(201,162,74,0.40)：对本主题 chip 底 #100e0c 仅 2.215:1（< 3:1）。
+     删除该覆写后回落到 --slot-chip-line: var(--c-line-strong)，与同主题 tab / 卡片描边同权重。 */
+  --slot-chip-active-bg: #a8352a;
+  --slot-chip-active-text: #f6efe0;
+  --slot-panel-bg: #1e1b17;
+  --slot-btn-primary-bg: #a8352a;
+  --slot-btn-primary-text: #f6efe0;
+  --slot-btn-primary-line: #c4553f;
+  --slot-btn-ghost-text: #dcb968;
+  --slot-btn-ghost-line: #c9a24a;
+  --slot-tag-text: #f6efe0;
+  --slot-badge-text: #f6efe0;
+  --slot-tab-active-text: #f6efe0;
+  --slot-gold-bg: rgba(201, 162, 74, 0.16);
+  --slot-gold-text: #dcb968;
+  --focus-ring: 0 0 0 2px #14120f, 0 0 0 4px #dcb968;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* ============================ C 拓片灰金 ============================ */
+html[data-theme="c"] {
+  --c-bg: #383834;
+  --c-surface: #45443e;
+  --c-surface-sunken: #2c2c29;
+  --c-text: #f0ead9;
+  --c-text-muted: #c0b8a2;
+  --c-line: rgba(232, 224, 204, 0.2);
+  --c-line-strong: rgba(232, 224, 204, 0.5);
+  --c-brand: #9c3226;
+  --c-brand-strong: #c15a45;
+  --c-brand-soft: rgba(156, 50, 38, 0.22);
+  --c-gold: #c9a24a;
+  --c-gold-strong: #e0be6c;
+  --c-gold-soft: rgba(201, 162, 74, 0.18);
+  --c-overlay: rgba(0, 0, 0, 0.65);
+  --slot-header-bg: #45443e;
+  --slot-header-search-bg: #2c2c29;
+  --slot-header-badge-text: #f0ead9;
+  --slot-sidebar-bg: #2c2c29;
+  --slot-sidebar-item-active-bg: rgba(201, 162, 74, 0.16);
+  --slot-sidebar-item-active-text: #e0be6c;
+  --slot-sidebar-item-active-mark: #c9a24a;
+  --slot-card-bg: #45443e;
+  --slot-card-seal-bg: #2c2c29;
+  --slot-card-seal-stroke: #c9a24a;
+  --slot-card-seal-text: #e0be6c;
+  --slot-card-thumb-line: rgba(232, 224, 204, 0.4);
+  --slot-filter-bg: #45443e;
+  --slot-chip-bg: #2c2c29;
+  --slot-chip-text: #d6cdb6;
+  --slot-chip-line: rgba(232, 224, 204, 0.45);
+  --slot-chip-active-bg: #9c3226;
+  --slot-chip-active-text: #f6f0e2;
+  --slot-panel-bg: #45443e;
+  --slot-btn-primary-bg: #9c3226;
+  --slot-btn-primary-text: #f6f0e2;
+  --slot-btn-primary-line: #c15a45;
+  --slot-btn-ghost-text: #e0be6c;
+  --slot-btn-ghost-line: #c9a24a;
+  --slot-tag-text: #f6f0e2;
+  --slot-badge-text: #f6f0e2;
+  --slot-tab-active-text: #f6f0e2;
+  --slot-gold-bg: rgba(201, 162, 74, 0.18);
+  --slot-gold-text: #e0be6c;
+  --focus-ring: 0 0 0 2px #383834, 0 0 0 4px #e0be6c;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+}

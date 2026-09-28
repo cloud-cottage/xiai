@@ -1,0 +1,27 @@
+{
+  "name": "yinsuo-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "印索・兆级玺印数字引擎 Web 平台（营销入口 + 控制台入口，纯前端 mock）",
+  "engines": {
+    "node": ">=18.19.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:marketing": "vite --open /",
+    "dev:console": "vite --open /console/login",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check:pricing": "node scripts/check-price-literals.mjs",
+    "smoke": "node scripts/build-smoke.mjs"
+  },
+  "dependencies": {
+    "vue": "3.5.43",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "5.2.4",
+    "vite": "6.4.3"
+  }
+}

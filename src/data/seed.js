@@ -1,0 +1,640 @@
+/**
+ * 玺爱 · 种子数据（纯前端 mock，零外部请求）
+ *
+ * 数据模型归属：**以玺爱为主**（canonical），斐萃旧结构只作入库映射来源。
+ * canonical 层级：印章 `seal` 1 对 N 印面 `face`；边款是 `kind = EDGE` 的特殊印面，
+ * 三类属性（固定 / 可标记 / 影像）**按印面归属**（见 SEED_FACES）。
+ *
+ * 兼容说明：印面行同时给出规范字段名 `id` / `sealId` / `kind`，并保留既落盘
+ * services 与视图在用的 `stamp_id` 别名（＝`sealId`），**不要删除该别名**。
+ * 印章行上的可标记字段仅为兼容既落盘视图保留；canonical 载体是印面。
+ *
+ * 「默认 1 印面 = 1 印章」只是新建种子时的默认值，不是模型限制：
+ * 种子里已含多印面样本（XAI-0001：2 个印面 + 1 个边款）。
+ */
+
+/**
+ * 玺爱新增字段：斐萃 seals 表中无对应列，属平台自建口径。
+ *
+ * **R-59（2026-09-21｜字段退役）**：【印文简体字】已**整体删除** —— 本清单不再列出它、
+ * 种子行与新建行都不写该键，既有行（印章行 + 印面行）上的该键由数据层
+ * `db.js` 的 `migrateTraditionalData()` **一次性幂等清除**（Kevin 明确授权改写历史行，
+ * 本字段是唯一例外；其余字段的「旧值不改写」口径不变）。
+ */
+export const XIAI_ONLY_FIELDS = {
+  author: '作者（斐萃無對應列，璽愛新增）'
+}
+
+/**
+ * 玺爱平台**唯一管理员**手机号 —— 管理员判定的**唯一真源**（数据层常量）。
+ *
+ * 口径：管理员手机号只以本常量为准（README 与实现均引此处，不得另立第二个来源）。
+ * 引导时数据层会按它**就地纠正**浏览器里已存在的 `users`（老库兼容，无需清库、
+ * 无需升命名空间版本）：
+ *   - 手机号 == `ADMIN_PHONE` ⇒ `role` 强制为 `admin`（该账号不存在则创建并写回）；
+ *   - 手机号 ≠ `ADMIN_PHONE` 而 `role` 仍为 `admin` ⇒ 降为 `user`。
+ * 纠正实现在 `src/data/db.js` 的 `reconcileAdminRoles()`，由 `ensureSeed()` 在**每次
+ * 引导**时调用（与种子版本号无关）。
+ */
+export const ADMIN_PHONE = '16601061656'
+
+/** 管理员账号昵称：仅用于**新建**该账号时；老库已有同名账号保留其原昵称。 */
+export const ADMIN_NICKNAME = '庫守'
+
+
+
+
+
+
+/** **8 级灰（R-83）**：灰度化后中位切分的量化级数＝调色板项数（**本工程唯一真源**）。 */
+
+/**
+ * **切向序列（R-87 冻结、逐字）**：刀1 `vertical`、刀2 `horizontal`（⊥刀1）、
+ * **刀3 `vertical`（回刀1 方向）**；印面 4 块取**前 2 刀**、实拍 8 块取**3 刀**。
+ *
+ * 纪律：**不得**增删改序、**不得**在别处再写一份同序列；跨刀方向**必须交替**
+ * （刀 3 与刀 2 不同向是 Kevin 明确口径）。
+ */
+export const SLICE_DIRECTIONS = ['vertical', 'horizontal', 'vertical']
+
+/**
+ * **切片张数真源（R-87）**：按**切片类别**取刀数 ——
+ *   - `FACE`：**印面**，切 2 刀 ⇒ **4 块＝2×2**；
+ *   - `PHOTO`：**实拍**（用户实物照），切 3 刀 ⇒ **8 块＝4×2**。
+ *
+ * 类别取值口径：`FACE` ＝ 印面族影像（影像行的 `kind` 即 `FACE` / `EDGE`，两者都按印面 4 块）；
+ * `PHOTO` ＝ 实物照片族（R-86）。**未登记的类别按印面 4 块**（保守：不虚增张数），
+ * 由 `db.js` 的 `sliceMetaOf(imageId, kind)` 统一解析 —— **不得**在别处写死张数或切位。
+ */
+export const SLICE_CUT_COUNTS = {
+  FACE: 2,
+  PHOTO: 3
+}
+
+/** 切片元数据键名（**R-87 / R-88 冻结**：影像行上的持久化键 `slice_meta`）。 */
+export const SLICE_META_FIELD = 'slice_meta'
+
+/**
+ * **印面级固定属性白名单（真源）**：`['face_image_id', 'edge_image_ids']`。
+ *
+ * 一道门（字段面）：不在此列的键 ⇒ `INVALID_FIELD` ＋ 零写入（判定在任何写入之前）；
+ * 二道门（值域面）各自另判（见 `db.js`）。
+ * **本单（R-135 配色面整体退场）之后**：该列**只有两项** —— 已退场的那个键不在此列，
+ * 显式传它 ⇒ `INVALID_FIELD`（不再有任何值域门 / 默认值 / 落盘动作）。
+ */
+export const FIXED_ATTR_FIELDS = ['face_image_id', 'edge_image_ids']
+
+/** 印面类型：FACE＝印面，EDGE＝边款（边款是一种特殊印面）。 */
+export const FACE_KIND = {
+  FACE: 'FACE',
+  EDGE: 'EDGE'
+}
+
+/**
+ * 种子用户。
+ *
+ * 管理员账号手机号取自 `ADMIN_PHONE`（唯一真源），账号 id 与登录服务自动建号的
+ * 命名口径一致（`u-<手机号>`）。**原管理员号 `13800000001` 已不再是管理员**：
+ * 它既不在本种子里，也不再是 `admin`；老库中若残留该账号，由
+ * `reconcileAdminRoles()` 就地降为普通用户（不删行、不清库）。
+ */
+export const SEED_USERS = [
+  {
+    id: `u-${ADMIN_PHONE}`,
+    phone: ADMIN_PHONE,
+    nickname: ADMIN_NICKNAME,
+    role: 'admin',
+    points: 50,
+    created_at: '2026-01-01T00:00:00.000Z'
+  },
+  {
+    id: 'u-demo',
+    phone: '13800000002',
+    nickname: '印友',
+    role: 'user',
+    points: 50,
+    created_at: '2026-01-01T00:00:00.000Z'
+  }
+]
+
+export const SEED_SEALS = [
+  {
+    sealGroupId: 'g-0001',
+    stamp_id: 'XAI-0001',
+    seal_name: '長壽',
+    transcription: '取「長樂無極、壽比南山」之意，漢人吉語印常用語。',
+    dynasty: '漢',
+    seal_type: '吉語印',
+    seal_style: '白文',
+    material: '青銅',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '無名'
+  },
+  {
+    sealGroupId: 'g-0002',
+    stamp_id: 'XAI-0002',
+    seal_name: '騎都尉印',
+    transcription: '漢代武職官印，騎都尉掌羽林騎兵，秩比二千石。',
+    dynasty: '漢',
+    seal_type: '官印',
+    seal_style: '白文',
+    material: '青銅',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '無名'
+  },
+  {
+    sealGroupId: 'g-0003',
+    stamp_id: 'XAI-0003',
+    seal_name: '昌',
+    transcription: '單字圓印，戰國私印常見形制，多作佩印之用。',
+    dynasty: '戰國',
+    seal_type: '私印',
+    seal_style: '朱文',
+    material: '玉',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '無名'
+  },
+  {
+    sealGroupId: 'g-0004',
+    stamp_id: 'XAI-0004',
+    seal_name: '文彭之印',
+    transcription: '明代文人篆刻開山之作，印風秀潤，開吳門一派。',
+    dynasty: '明',
+    seal_type: '私印',
+    seal_style: '朱文',
+    material: '青田石',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '文彭'
+  },
+  {
+    sealGroupId: 'g-0005',
+    stamp_id: 'XAI-0005',
+    seal_name: '丁敬身印',
+    transcription: '浙派宗師丁敬自用印，切刀澀進，古拗峭折。',
+    dynasty: '清',
+    seal_type: '私印',
+    seal_style: '白文',
+    material: '壽山石',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '丁敬'
+  },
+  {
+    sealGroupId: 'g-0006',
+    stamp_id: 'XAI-0006',
+    seal_name: '家在錢塘',
+    transcription: '閒章，寓鄉思。浙派閒章多取里居、志向入印。',
+    dynasty: '清',
+    seal_type: '閒章',
+    seal_style: '白文',
+    material: '壽山石',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '陳豫鍾'
+  },
+  {
+    sealGroupId: 'g-0007',
+    stamp_id: 'XAI-0007',
+    seal_name: '乾隆御覽之寶',
+    transcription: '清宮鑒藏璽，多鈐於內府書畫引首，規制宏整。',
+    dynasty: '清',
+    seal_type: '鑒藏印',
+    seal_style: '朱文',
+    material: '田黃',
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: '清內府'
+  },
+  {
+    sealGroupId: 'g-0008',
+    stamp_id: 'XAI-0008',
+    seal_name: '安持',
+    transcription: '陳巨來號安持，元朱文精絕，時稱近代第一。',
+    dynasty: '近現代',
+    seal_type: '私印',
+    seal_style: '朱文',
+    material: '昌化凍石',
+    asset_kind: 'SEAL',
+    review_status: 'PENDING',
+    author: '陳巨來'
+  }
+]
+
+/**
+ * 印面影像（对齐 images 表）。每枚印章至少一张 FACE；
+ * 部分印章另附 EDGE（边款）。
+ * 因本工程零外部请求，不存真实图象，仅存可复算的元数据与摘要占位。
+ *
+ * **R-87 / R-88（2026-09-21｜切割元数据）**：影像行另有**切片元数据**键 `slice_meta`
+ * （＝`{directions, ratios, cols, rows, cuts}`）。它**不在本数组里写死字面量** ——
+ * 落盘时由数据层用**同一确定性派生函数**（`db.js` 的 `sliceMetaOf`）补上，
+ * 以免「种子字面量」与「派生真源」两处漂移（同一 image id 必得同一元数据，
+ * 故既有行**无需迁移**，派生即可复现）。
+ */
+export const SEED_IMAGES = [
+  { id: 'img-0001f', stamp_id: 'XAI-0001', kind: 'FACE', sha256: '3d1f0b2a6c7e4915b8a2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718', bytes: 184320, width: 1600, height: 1600, color_mode: 'RGB' },
+  { id: 'img-0001g', stamp_id: 'XAI-0001', kind: 'FACE', sha256: '5c6d7e8f90a1b2c3d4e5f60718293a4b3d1f0b2a6c7e4915b8a2c3d4e5f60718e', bytes: 141312, width: 1200, height: 1200, color_mode: 'RGB' },
+  { id: 'img-0001e', stamp_id: 'XAI-0001', kind: 'EDGE', sha256: 'a1b2c3d4e5f60718293a4b5c6d7e8f903d1f0b2a6c7e4915b8a2c3d4e5f60718', bytes: 210112, width: 2400, height: 800, color_mode: 'RGB' },
+
+  { id: 'img-0002f', stamp_id: 'XAI-0002', kind: 'FACE', sha256: 'b2c3d4e5f60718293a4b5c6d7e8f90a13d1f0b2a6c7e4915b8a2c3d4e5f607182', bytes: 176540, width: 1600, height: 1600, color_mode: 'RGB' },
+
+  { id: 'img-0003f', stamp_id: 'XAI-0003', kind: 'FACE', sha256: 'c3d4e5f60718293a4b5c6d7e8f90a1b23d1f0b2a6c7e4915b8a2c3d4e5f6071829', bytes: 158900, width: 1400, height: 1400, color_mode: 'RGB' },
+
+  { id: 'img-0004f', stamp_id: 'XAI-0004', kind: 'FACE', sha256: 'd4e5f60718293a4b5c6d7e8f90a1b2c33d1f0b2a6c7e4915b8a2c3d4e5f6071829a', bytes: 199872, width: 1800, height: 1800, color_mode: 'RGB' },
+  { id: 'img-0004e', stamp_id: 'XAI-0004', kind: 'EDGE', sha256: 'e5f60718293a4b5c6d7e8f90a1b2c3d43d1f0b2a6c7e4915b8a2c3d4e5f6071829ab', bytes: 245760, width: 2600, height: 900, color_mode: 'RGB' },
+
+  { id: 'img-0005f', stamp_id: 'XAI-0005', kind: 'FACE', sha256: 'f60718293a4b5c6d7e8f90a1b2c3d4e53d1f0b2a6c7e4915b8a2c3d4e5f6071829abc', bytes: 172032, width: 1600, height: 1600, color_mode: 'RGB' },
+  { id: 'img-0005e', stamp_id: 'XAI-0005', kind: 'EDGE', sha256: '0718293a4b5c6d7e8f90a1b2c3d4e5f63d1f0b2a6c7e4915b8a2c3d4e5f6071829abcd', bytes: 233984, width: 2600, height: 900, color_mode: 'RGB' },
+
+  { id: 'img-0006f', stamp_id: 'XAI-0006', kind: 'FACE', sha256: '18293a4b5c6d7e8f90a1b2c3d4e5f6073d1f0b2a6c7e4915b8a2c3d4e5f60718a', bytes: 165376, width: 1600, height: 1600, color_mode: 'RGB' },
+
+  { id: 'img-0007f', stamp_id: 'XAI-0007', kind: 'FACE', sha256: '293a4b5c6d7e8f90a1b2c3d4e5f607183d1f0b2a6c7e4915b8a2c3d4e5f60718b', bytes: 289792, width: 2000, height: 2000, color_mode: 'RGB' },
+  { id: 'img-0007e', stamp_id: 'XAI-0007', kind: 'EDGE', sha256: '3a4b5c6d7e8f90a1b2c3d4e5f60718293d1f0b2a6c7e4915b8a2c3d4e5f60718c', bytes: 301056, width: 2800, height: 960, color_mode: 'RGB' },
+
+  { id: 'img-0008f', stamp_id: 'XAI-0008', kind: 'FACE', sha256: '4b5c6d7e8f90a1b2c3d4e5f60718293a3d1f0b2a6c7e4915b8a2c3d4e5f60718d', bytes: 168960, width: 1600, height: 1600, color_mode: 'GRAY' }
+]
+
+/**
+ * **朝代真源（R-20｜唯一真源，冻结）**：逐字 **14 类**，**顺序即本数组顺序**，不得增删改序。
+ *
+ * 口径（裁定全文见 `docs/xiai-plan.md` §12.7）：
+ *   - 录入面（新增印章 / 勘误）**选项只能来自本常量**，不得再 ∪ 库内派生值
+ *     （旧形态 `unionOptions(DYNASTY_OPTIONS, seals.listDynastyOptions())` 已废除）；
+ *   - **数据层独立校验**（第二道门，见 `db.js` 的 `dynastyValueDenial`）：凡**写入** `dynasty`
+ *     的行都必须 `∈ 本数组`，否则结构化拒绝 `{ok:false, reason:'INVALID_VALUE'}` + 零写入；
+ *   - **R-21 旧值不改写（读路径口径）**：既有行的旧值（`漢` / `戰國` / `明` / `清` /
+ *     `近現代` 等）**在读路径上一律原样读出**，**不做值域校验**；
+ *     广场筛选＝本 14 类（规范顺序）＋库内旧值（去重、追加于后）。
+ *   - **R-58 / R-60（2026-09-21｜繁体化）**：本 14 类的字面自本轮起为**繁体**
+ *     （＝OpenCC `s2t` 的逐字输出，可复算）；库内既有行的枚举字段由数据层
+ *     `db.js` 的 `migrateTraditionalData()` 按**显式值映射表**归一（映射不到的旧值
+ *     如 `戰國` / `明` / `清` / `近現代` **保留原样并登记**，不归一、不猜）。
+ */
+export const DYNASTY_OPTIONS = [
+  '先秦',
+  '秦',
+  '漢',
+  '魏晉',
+  '隋唐',
+  '宋元',
+  '明中期',
+  '晚明',
+  '清初',
+  '清中期',
+  '晚清',
+  '民國',
+  '新中國',
+  '當代'
+]
+
+/** 朝代值是否在冻结的 14 类之内（**纯谓词**，不抛错；供数据层值域门复用同一真源）。 */
+export function isKnownDynasty(value) {
+  if (value === null || value === undefined) return false
+  return DYNASTY_OPTIONS.includes(String(value))
+}
+
+/* ============================================================================
+   印面内容（R-30）与印面风格（R-31）—— **常量真源**（唯一，就地存放）
+
+/**
+ * **印面内容（9 值｜冻结）**：显示名＝【印面内容】，键名沿用 `seal_type`。
+ *
+ * **顺序即显示顺序**，不得增删改序。录入面（新增印章 / 勘误）选项**只能来自本数组**
+ * （不得再 ∪ 库内派生值）；既有行的旧值（`吉語印` / `鑒藏印` / `閒章` 等）**读路径一律照读**
+ * （不做值域校验）。
+ *
+ * **R-58 / R-60（2026-09-21｜繁体化）**：本 9 类的字面自本轮起为**繁体**（`s2t` 输出）。
+ * 库内既有的**异体旧值**由数据层按显式映射表归一（实测：`鑒藏印` ⇒ `鑑藏印`；`s2t`
+ * 逐字转换**不会**得到该结果，故必须显式列入映射表）；映射不到的旧值保原样 + 登记。
+ */
+export const FACE_CONTENT_OPTIONS = [
+  '官印',
+  '私印',
+  '姓名印',
+  '齋館印',
+  '鑑藏印',
+  '吉語印',
+  '肖形印',
+  '花押印',
+  '閒章'
+]
+
+/** **印面内容**值是否在冻结的 9 类之内（**纯谓词**，不抛错；供值域门复用同一真源）。 */
+export function isKnownFaceContent(value) {
+  if (value === null || value === undefined) return false
+  return FACE_CONTENT_OPTIONS.includes(String(value))
+}
+
+/**
+ * **印面风格（23 值｜冻结）**：显示名＝【印面风格】，键名＝**新键 `face_style`**（印面级）。
+ *
+ * **顺序即显示顺序**（按时代 / 流派脉络排列），不得增删改序。旧行一律无该字段 ⇒
+ * 读值＝**空串**（**无回落**：不从 `seal_style` / 印章行取任何值 —— 那会等于编造）。
+ */
+export const FACE_STYLE_OPTIONS = [
+  '三晉古璽',
+  '楚古璽',
+  '燕古璽',
+  '齊古璽',
+  '秦印',
+  '漢白文鑄印',
+  '漢玉印',
+  '將軍急就章',
+  '漢朱文',
+  '朱白相間印',
+  '魏晉印',
+  '隋唐九疊篆印',
+  '元朱文',
+  '浙派',
+  '鄧派',
+  '歙派',
+  '吳讓之印風',
+  '趙之謙印風',
+  '黃牧甫印風',
+  '吳昌碩印風',
+  '趙叔孺印風',
+  '陳巨來印風',
+  '來楚生印風'
+]
+
+/** **印面风格**值是否在冻结的 23 类之内（**纯谓词**，不抛错；供值域门复用同一真源）。 */
+export function isKnownFaceStyle(value) {
+  if (value === null || value === undefined) return false
+  return FACE_STYLE_OPTIONS.includes(String(value))
+}
+
+/**
+ * **旧分类枚举（5 值）—— 只作历史留档，保留导出；当前全仓无任何消费方**。
+ *
+ * ⚠️ **消费方现状（2026-09-20 实测）**：**无 UI / 服务消费方** —— `UploadSealDialog.vue` 等
+ * 组件**已不再 import 它、也不再取值**（`grep -rn "SEAL_TYPE_OPTIONS" src/` 的命中只剩本条
+ * 注释与 `UploadSealDialog.vue` 里**描述「旧形态已删除」的一行注释**，无任何 `import` / 取值；
+ * 证据 ＝ `qa-recheck/kong-r5clean-20260920/grep-sealtypeoptions.txt`）。
+ * 本常量只为「不删既有导出」而留（R-30：旧常量保留导出）。
+ *
+ * ⚠️ **自 R-30 起它不再是录入真源**：录入面（新增印章 / 勘误）的选项真源是
+ * `FACE_CONTENT_OPTIONS`（9 值）。新代码**不得**由它派生出选项面
+ * （`SEAL_TYPE_OPTIONS` 与 9 值不是同一套口径：它是繁体旧形态，会被值域门按 `INVALID_VALUE` 拒绝）。
+ * 库内既有值（含繁体）受 R-32「旧值不改写」保护，仍可读、可筛。
+ *
+ * **R-58 / R-60（2026-09-21）**：本常量**保留 `鑒藏印` 异体字面未改**（它无任何消费方、
+ * 也不属上屏面；改它等于动一个「只为不删既有导出而留」的历史留档）。若其值被写进库，
+ * 会经 `db.js` 的显式值映射表归一为 R-58 的 `鑑藏印`。
+ */
+export const SEAL_TYPE_OPTIONS = ['官印', '私印', '吉語印', '閒章', '鑒藏印']
+
+/* ============================================================================
+   印章级固定属性（R-22 / R-23 / **R-32**）
+
+/** 印章级固定属性字段名（**冻结契约**：`SEAL_SHAPE_FIELD = 'shape'`）。 */
+export const SEAL_SHAPE_FIELD = 'shape'
+
+/** 印章级固定属性字段名（**R-32 冻结**：`SEAL_MATERIAL_FIELD = 'material'`）。 */
+export const SEAL_MATERIAL_FIELD = 'material'
+
+/** 印章级固定属性白名单（**R-32 冻结契约**：`['shape','material']`）。 */
+export const SEAL_FIXED_ATTR_FIELDS = [SEAL_SHAPE_FIELD, SEAL_MATERIAL_FIELD]
+
+/* ============================================================================
+   印面 `face`（canonical 一等实体）
+   ============================================================================ */
+
+function faceSeed({
+  id,
+  sealId,
+  kind,
+  faceImageId = null,
+  material,
+  edgeImageIds = [],
+  markable = {},
+  source = null
+}) {
+  return {
+    id,
+    sealId, // 规范字段：所属印章（印章 1 对 N 印面）
+    stamp_id: sealId, // 兼容别名：等同于 sealId，供既落盘 services / 视图按原命名读取
+    kind, // FACE＝印面 / EDGE＝边款（边款是一种特殊印面）
+    face_image_id: faceImageId, // 固定属性：印面图片
+    material, // 固定属性：材质（**历史上**属印面级；R-32 后真源移至印章行，本处旧值保留）
+    edge_image_ids: edgeImageIds, // 固定属性：边款图片 ID（kind = EDGE 的影像 id）
+    // 可标记属性（勘误对象）
+    seal_name: markable.seal_name || '',
+    dynasty: markable.dynasty || '',
+    seal_type: markable.seal_type || '', // 印面内容（R-30：印面级真源，键名沿用 seal_type）
+    face_style: markable.face_style || '', // 印面风格（R-31：新键；种子一律空串，无回落）
+    author: markable.author || '',
+    transcription: markable.transcription || '',
+    source, // 来源追踪（可空）
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z'
+  }
+}
+
+export const SEED_FACES = [
+  /* ---- XAI-0001 長壽：多印面样本（2 个印面 + 1 个边款） ---- */
+  faceSeed({
+    id: 'fc-0001-f1',
+    sealId: 'XAI-0001',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0001f',
+    material: '青銅',
+    markable: {
+      seal_name: '長壽',
+      dynasty: '漢',
+      seal_type: '吉語印',
+      author: '無名',
+      transcription: '取「長樂無極、壽比南山」之意，漢人吉語印常用語。'
+    },
+    source: { book: '《漢印文字徵》', page: '卷三 十二頁' }
+  }),
+  faceSeed({
+    id: 'fc-0001-f2',
+    sealId: 'XAI-0001',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0001g',
+    material: '青銅',
+    markable: {
+      seal_name: '長壽合文',
+      dynasty: '漢',
+      seal_type: '吉語印',
+      author: '無名',
+      transcription: '同印之另一面，二字作合文，筆畫互借，為漢代吉語印習見佈局。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0001-e1',
+    sealId: 'XAI-0001',
+    kind: FACE_KIND.EDGE,
+    faceImageId: null,
+    material: '青銅',
+    edgeImageIds: ['img-0001e'],
+    markable: {
+      seal_name: '長壽',
+      dynasty: '漢',
+      seal_type: '吉語印',
+      author: '無名',
+      transcription: '邊款一行，記此印為漢吉語印之同範者，可與卷三者互證。'
+    },
+    source: { book: '《漢印文字徵》', page: '卷三 十二頁' }
+  }),
+
+  /* ---- 其余印章：默认 1 印面 = 1 印章（仅为种子默认值，非模型限制） ---- */
+  faceSeed({
+    id: 'fc-0002-f1',
+    sealId: 'XAI-0002',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0002f',
+    material: '青銅',
+    markable: {
+      seal_name: '騎都尉印',
+      dynasty: '漢',
+      seal_type: '官印',
+      author: '無名',
+      transcription: '漢代武職官印，騎都尉掌羽林騎兵，秩比二千石。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0003-f1',
+    sealId: 'XAI-0003',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0003f',
+    material: '玉',
+    markable: {
+      seal_name: '昌',
+      dynasty: '戰國',
+      seal_type: '私印',
+      author: '無名',
+      transcription: '單字圓印，戰國私印常見形制，多作佩印之用。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0004-f1',
+    sealId: 'XAI-0004',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0004f',
+    material: '青田石',
+    markable: {
+      seal_name: '文彭之印',
+      dynasty: '明',
+      seal_type: '私印',
+      author: '文彭',
+      transcription: '明代文人篆刻開山之作，印風秀潤，開吳門一派。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0004-e1',
+    sealId: 'XAI-0004',
+    kind: FACE_KIND.EDGE,
+    faceImageId: null,
+    material: '青田石',
+    edgeImageIds: ['img-0004e'],
+    markable: {
+      seal_name: '文彭之印',
+      dynasty: '明',
+      seal_type: '私印',
+      author: '文彭',
+      transcription: '邊款記「壬寅秋日三橋自制」，刀法溫潤，為吳門派自用印之證。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0005-f1',
+    sealId: 'XAI-0005',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0005f',
+    material: '壽山石',
+    markable: {
+      seal_name: '丁敬身印',
+      dynasty: '清',
+      seal_type: '私印',
+      author: '丁敬',
+      transcription: '浙派宗師丁敬自用印，切刀澀進，古拗峭折。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0005-e1',
+    sealId: 'XAI-0005',
+    kind: FACE_KIND.EDGE,
+    faceImageId: null,
+    material: '壽山石',
+    edgeImageIds: ['img-0005e'],
+    markable: {
+      seal_name: '丁敬身印',
+      dynasty: '清',
+      seal_type: '私印',
+      author: '丁敬',
+      transcription: '邊款記「龍泓山人自製」，款字用刀如筆，可觀浙派趨向。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0006-f1',
+    sealId: 'XAI-0006',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0006f',
+    material: '壽山石',
+    markable: {
+      seal_name: '家在錢塘',
+      dynasty: '清',
+      seal_type: '閒章',
+      author: '陳豫鍾',
+      transcription: '閒章，寓鄉思。浙派閒章多取里居、志向入印。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0007-f1',
+    sealId: 'XAI-0007',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0007f',
+    material: '田黃',
+    markable: {
+      seal_name: '乾隆御覽之寶',
+      dynasty: '清',
+      seal_type: '鑒藏印',
+      author: '清內府',
+      transcription: '清宮鑒藏璽，多鈐於內府書畫引首，規制宏整。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0007-e1',
+    sealId: 'XAI-0007',
+    kind: FACE_KIND.EDGE,
+    faceImageId: null,
+    material: '田黃',
+    edgeImageIds: ['img-0007e'],
+    markable: {
+      seal_name: '乾隆御覽之寶',
+      dynasty: '清',
+      seal_type: '鑒藏印',
+      author: '清內府',
+      transcription: '邊款記內府編次，可與《石渠寶笈》著錄相參。'
+    },
+    source: null
+  }),
+  faceSeed({
+    id: 'fc-0008-f1',
+    sealId: 'XAI-0008',
+    kind: FACE_KIND.FACE,
+    faceImageId: 'img-0008f',
+    material: '昌化凍石',
+    markable: {
+      seal_name: '安持',
+      dynasty: '近現代',
+      seal_type: '私印',
+      author: '陳巨來',
+      transcription: '陳巨來號安持，元朱文精絕，時稱近代第一。'
+    },
+    source: null
+  })
+]

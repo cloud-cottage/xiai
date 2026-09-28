@@ -1,0 +1,184 @@
+/**
+ * ============================================================================
+ * 设计 tokens —— V1「典藏宋韵」
+ *
+ * 唯一来源：`shu/mockups/v1.html`（md5 46ddac3e82ff7f3459b8a95d0302403b，已定稿归档）。
+ * 两个入口（marketing / console）共用本文件；其他任何地方不得重定义颜色字面量。
+ *
+ * 对比度：v1 已修正过的色值必须沿用，不得回退 ——
+ *   --faint 由 #8a8578（对 --paper 仅 3.40:1，不达 AA）修正为 #6f6b61。
+ *   --mask  由 #777（4.48:1，擦线）修正为 #737373。
+ * ============================================================================
+ */
+
+:root {
+  /* ---------- 颜色（取自 v1 :root） ---------- */
+  --paper: #f8f6f0;      /* 宣纸底 */
+  --card: #fff;
+  --ink: #222;           /* 正文 */
+  --muted: #666;         /* 次级文字 */
+  --faint: #6f6b61;      /* 三级文字（v1 已修正，不得回退为 #8a8578） */
+  --line: #e8e4da;       /* 1px 细线 */
+  --brand: #992222;      /* 酒红主色 */
+  --brand-d: #7c1b1b;    /* 主色按下态 */
+
+  /* ---------- 兼容别名（v1 中直接写死的字面量，此处集中命名） ---------- */
+  --ink-2: #444;         /* hero 正文 / li 正文 */
+  --ink-3: #333;         /* 导航链接 / chip 文字 */
+  --ink-4: #555;         /* 表格 th / banner / tip 文字 */
+  --mask: #737373;       /* 密钥掩码（v1 已修正，不得回退为 #777） */
+  --placeholder: #b3aea3; /* 输入框占位符 */
+  --brand-soft: #f2ece6; /* ghost 按钮 hover 背景 */
+  --brand-tint: #f4f1ea; /* 侧栏导航 hover / active 背景 */
+  --brand-wash: #fbf5f5; /* 警示条 / 状态条背景 */
+  --brand-line: #f0e2e2; /* 柱状图填充 */
+  --panel-alt: #fbf9f4;  /* 交替面板底 */
+  --row-hover: #fcfaf6;  /* 表格行 hover */
+  --meter-track: #efebe3;/* 进度条底 */
+  --overlay: rgba(34, 34, 34, .46); /* 弹层遮罩（无渐变、无 glass） */
+  --state-ok: #3f6b3f;   /* 成功态文字 */
+  --seal-bai-ink: #141414; /* 白文印文字 */
+  --seal-bai-line: #1c1c1c; /* 白文印边框 */
+  --seal-zhu-inner: rgba(153, 34, 34, .35); /* 朱文印内框 */
+  --seal-zhu-texture: rgba(0, 0, 0, .045);  /* 朱文印棋盘底纹 */
+
+  /* ---------- 图表色板（spec §1.8-9 / §1.8-10 专用色板 token） ----------
+   * 纪律：图表（环形切片 / 柱体 / 横条 / 进度条填充）**只允许**引用本组 token，
+   * 不得借用品牌 / 线条 / 边框等「槽位专用 token」顶替（例：--brand-line 用途＝柱状图填充槽位，
+   * 不得用作图表切片色）。
+   *
+   * 取值：**全部取自已定稿的 V1 色值**（不新增色相、不越出宣纸 / 酒红体系），
+   * 作为独立色板登记以避免跨用途复用：
+   *   --chart-1 酒红（＝--brand）· --chart-2 松绿（＝--state-ok）· --chart-3 中墨灰（＝--ink-4）
+   *   --chart-4 墨（＝--ink）     · --chart-5 暖灰（＝--faint）
+   *
+   * 硬性判据（§1.8-9 / AC-87）：每片对**轨道 `--meter-track`** 的 WCAG 非文本对比度 ≥ 3:1
+   * （实测 6.777 / 5.216 / 6.270 / 13.382 / 4.470，最差 4.470 ≥ 3），
+   * 且**任意两片之间可区分**：相邻组合按本序取用，全部为「色相不同且亮度比 ≥ 1.28」或
+   * 「亮度比 ≥ 1.84」；唯一一对同为中性灰的 --chart-3 / --chart-5（亮度比 1.63）在本序中**不相邻**。
+   * 兜底手段（§1.8-9 允许的「直接标注」）：图例逐片直标（名称 / 次数 / 占比）＋ 每片 <title> 悬浮读数。
+   */
+  --chart-1: #992222;
+  --chart-2: #3f6b3f;
+  --chart-3: #555555;
+  --chart-4: #222222;
+  --chart-5: #6f6b61;
+
+  /* ---------- 字体栈 ---------- */
+  --font-serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --font-mono: "SF Mono", Menlo, Consolas, monospace;
+
+  /* ---------- 字号 ---------- */
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-11-5: 11.5px;
+  --fs-12: 12px;
+  --fs-12-5: 12.5px;
+  --fs-13: 13px;
+  --fs-13-5: 13.5px;
+  --fs-14: 14px;
+  --fs-15: 15px;
+  --fs-16: 16px;
+  --fs-17: 17px;
+  --fs-18: 18px;
+  --fs-19: 19px;
+  --fs-22: 22px;
+  --fs-24: 24px;
+  --fs-25: 25px;
+  --fs-26: 26px;
+  --fs-28: 28px;
+  --fs-30: 30px;
+  --fs-32: 32px;
+  --fs-42: 42px;
+
+  /* ---------- 字号语义别名 ---------- */
+  --fs-body: var(--fs-15);
+  --fs-note: var(--fs-13);
+  --fs-kpi: var(--fs-22);
+  --fs-h1: var(--fs-42);
+  --fs-section: var(--fs-25);
+  --fs-brand: var(--fs-28);
+
+  /* ---------- 字距（v1 的 letter-spacing 档位） ---------- */
+  --ls-0: 0;
+  --ls-1: .3px;
+  --ls-2: .5px;
+  --ls-3: 1px;
+  --ls-4: 2px;
+  --ls-5: 3px;
+  --ls-6: 4px;
+  --ls-7: 5px;
+  --ls-8: 6px;
+
+  /* ---------- 行高 ---------- */
+  --lh-body: 1.7;
+  --lh-tight: 1.1;
+  --lh-ui: 1.5;
+
+  /* ---------- 间距（v1 实际使用的档位） ---------- */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 10px;
+  --sp-5: 12px;
+  --sp-6: 14px;
+  --sp-7: 16px;
+  --sp-8: 18px;
+  --sp-9: 20px;
+  --sp-10: 22px;
+  --sp-11: 24px;
+  --sp-12: 26px;
+  --sp-13: 28px;
+  --sp-14: 30px;
+  --sp-15: 34px;
+  --sp-16: 38px;
+  --sp-17: 44px;
+  --sp-18: 52px;
+  --sp-19: 64px;
+  --sp-20: 76px;
+
+  /* ---------- 圆角（v1 仅两档，无阴影） ---------- */
+  --radius: 4px;        /* 卡片 / 容器 / 面板 */
+  --radius-sm: 2px;     /* 按钮 / 输入框 / 标签 / 表头 */
+
+  /* ---------- 描边 ---------- */
+  --border-w: 1px;
+  --border-accent-w: 3px;   /* 左侧强调条（banner / statusbar / warn-line） */
+  --border: var(--border-w) solid var(--line);
+  --border-brand: var(--border-w) solid var(--brand);
+  --border-strong: 2px solid var(--seal-bai-line);
+  --border-accent: var(--border-accent-w) solid var(--brand);
+  --border-dashed: 1px dashed var(--line);
+  --border-dashed-brand: 1px dashed var(--brand);
+  --border-focus: 2px solid var(--brand);
+
+  /* ---------- 容器宽度 ---------- */
+  --container: 1200px;       /* 营销容器 */
+  --container-narrow: 1000px;/* 登录/注册 */
+  --container-wide: 1320px;  /* 控制台外壳 */
+  --side-width: 236px;       /* 控制台侧栏 */
+
+  /* ---------- 层级 ---------- */
+  --z-sticky: 80;
+  --z-toast: 120;
+  --z-modal: 200;
+
+  /* ---------- 动效（v1 统一 .12s，仅颜色/背景过渡，无位移渐变） ---------- */
+  --t-fast: .12s;
+  --t-fade: .18s;
+
+  /* ---------- 弹层规格 ---------- */
+  --modal-w: 580px;
+  --modal-w-sm: 470px;
+  --qr-size: 172px;
+  --seal-size: 124px;
+  --seal-size-tiny: 56px;
+  --bars-h: 132px;
+}
+
+/**
+ * 断点（CSS 媒体查询无法读变量，此处为文档与 JS 侧的单一登记）：
+ *   --bp-lg: 1180px  （≤1180 收窄重排：4 列→2 列）
+ *   --bp-md: 980px   （≤980 单列堆叠）
+ * 设计目标桌面优先 ≥1200px；<768px 不专门适配。
+ */
