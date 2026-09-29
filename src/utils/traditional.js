@@ -5,7 +5,9 @@
  *   ① `toTraditionalText(text)` —— **同步**：只用 s2t **逐字表**（上下文相关字**原样保留**）。
  *   ② `toSimplifiedText(text)` —— **同步**：t2s **逐字层**。
  *   ③ `toTraditionalFull(text)` —— **异步**：先 s2t **词组表**、后 s2t 逐字表
- *      （词组表用 `import()` **按需加载** ⇒ 两张词组表都不进主包）。
+ *      （词组表是**可取回的数据资源**：`fetch` 按需取、**流式读取算真实下载进度** ⇒ 两张表都
+ *      不进主包；另导出 `loadPhraseTable(kind, onProgress)`，界面在转换前先 await 它即可显示
+ *      真实百分比。四个契约的**名字与语义未变**）。
  *   ④ `toSimplifiedFull(text)` —— **异步**：先 t2s 词组表、后 t2s 逐字表（同 ③ 按需加载）。
  *      t2s 输出面另有**禁用档门**（逐字键与词组值一律只出基本区字形，详见 ② 的档位说明与
  *      `gateForbiddenChars()`）—— 这一门**只作用于 t2s 方向**，③ 不受影响。
@@ -16,8 +18,9 @@
  *
  * ## 数据来源（OpenCC；dev 期用临时 venv 生成，运行期**零依赖**）
  *   · 逐字表 `S2T_GLYPH_SOURCE` / `S2T_GLYPH_TARGET`（各 3,878 字）—— 本文件内，随主包；
- *   · 词组表 `./traditional-phrases-s2t.js`（`STPhrases` 49,051 条）/
- *     `./traditional-phrases-t2s.js`（`TSPhrases` 277 条）—— **独立模块**，由 ③④ 懒加载。
+ *   · 词组表 `./traditional-phrases-s2t.txt`（`STPhrases` 49,051 条）/
+ *     `./traditional-phrases-t2s.txt`（`TSPhrases` 277 条）—— **可取回的数据资源**
+ *     （`fetch` 按需取、流式计进度），由 ③④ 懒加载；生成器 `scripts/build-phrase-data.mjs`。
  * 算法口径＝OpenCC **`s2t` / `t2s`**（**禁 `s2tw` / `s2twp`**：台湾用词与字形不在本单范围）。
  * 产品与 npm **都不依赖** Python / opencc：它们只在生成期出现，仓库里只有静态表。
  *
@@ -323,8 +326,24 @@ export function toSimplifiedText(text) {
 }
 
 /* ============================================================================
- * ③ 词组表索引（**按需加载**：只有 ③④ 全量转换才会 `import()` 到，主包不含两张表）
+ * ③ 词组表（**可取回的数据资源**：`fetch` ＋ 流式读取算**真实进度**；主包不含两张表）
+ *
+ * 为什么不是 `import()`：**动态 import 没有下载进度 API**（取不到已收字节）⇒ 进度只能是假动画。
+ * 改成数据资源后用 `fetch` ＋ `response.body.getReader()`：`Content-Length` 与已收字节都是真读数
+ * ⇒ 真百分比；响应**没有** `Content-Length`（分块传输 / 未知长度）时才降级为**不确定进度**
+ * （`ratio: null`，界面给不确定态），语义与成功路径完全相同。
+ *
+ * 资源形态（生成器 `scripts/build-phrase-data.mjs`，格式见 `traditional-phrases-s2t.txt` 头部）：
+ *   `#AUTO` 块只存**键**（值＝逐字表结果，运行期重算）＋ `#REST` 块按键排序后做**公共前缀压缩**
+ *   ＋ 头部 `digest`（FNV-1a 32 位）。运行期把两块还原成完整 `键\t值` 行集合后**复算 digest 对拍**
+ *   ⇒ 要么**逐字还原**，要么显式失败（绝不静默用半张表转换）。
  * ========================================================================== */
+
+/** 词组表数据资源 URL（Vite 资产：dev 直读源文件、构建期发到 `/assets/`；随既有 host-split 规则可读）。 */
+const PHRASE_TABLE_URL = {
+  s2t: new URL('./traditional-phrases-s2t.txt', import.meta.url).href,
+  t2s: new URL('./traditional-phrases-t2s.txt', import.meta.url).href
+}
 
 /** s2t 词组表索引（懒建；`null` ＝ 表尚未加载）。 */
 let S2T_PHRASE_INDEX = null
@@ -332,6 +351,193 @@ let S2T_PHRASE_INDEX = null
 let T2S_PHRASE_INDEX = null
 /** 词组表**加载状态**（自测 / 质检：证明「按需加载」真的发生了）。 */
 const PHRASE_LOADED = { s2t: false, t2s: false }
+/** **在飞请求**（去重：连点按钮 / 多个字段同时转换只发**一次**请求）。 */
+const PHRASE_INFLIGHT = { s2t: null, t2s: null }
+/** 每种表的**尝试次数**（> 1 ⇒ 重试：URL 带破缓存参数，见 `phraseTableUrl()`）。 */
+const PHRASE_ATTEMPTS = { s2t: 0, t2s: 0 }
+/** 每种表的元信息（条数 / 两块条数 / digest；自测与质检用）。 */
+const PHRASE_META = { s2t: null, t2s: null }
+
+/** 失败面标记：`code` 以 `PHRASE_TABLE_` 开头 ⇒ 调用方（组件）据此给「字库取不到」的可读态与【重試】。 */
+function phraseError(code, detail) {
+  const err = new Error(code + (detail ? '：' + detail : ''))
+  err.code = code
+  return err
+}
+
+/**
+ * 词组表数据资源的**内容摘要**（FNV-1a 32 位，逐码元）。
+ * 与生成器 `scripts/build-phrase-data.mjs` 的同名实现**逐字相同** ⇒ 生成物与运行期两侧独立复算对拍。
+ */
+export function phraseTableDigest(text) {
+  let h = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/** 逐字重算口径（`#AUTO` 块的值）：与 `convertWithPhrases()` 里 `charMap.get(ch) || ch` 同一口径。 */
+function glyphReconvert(key, charMap) {
+  let out = ''
+  for (const ch of key) out += charMap.get(ch) || ch
+  return out
+}
+
+/**
+ * 数据资源 ⇒ 完整 `键\t值` 表文本（`buildPhraseIndex()` 的入参口径，与旧 JS 模块**逐字相同**）。
+ * @param {string} text 数据资源内容
+ * @param {'s2t'|'t2s'} kind
+ * @returns {string} 完整表（行序：`#AUTO` 块在前、`#REST` 块在后）
+ */
+function decodePhraseTable(text, kind) {
+  const nl = text.indexOf('\n')
+  const header = nl === -1 ? '' : text.slice(0, nl)
+  const HEAD = '#PHRASE-TABLE v1 '
+  if (header.indexOf(HEAD) !== 0) throw phraseError('PHRASE_TABLE_FORMAT', 'header')
+  const meta = {}
+  for (const kv of header.slice(HEAD.length).split(' ')) {
+    const eq = kv.indexOf('=')
+    if (eq > 0) meta[kv.slice(0, eq)] = kv.slice(eq + 1)
+  }
+  const entriesN = Number(meta.entries)
+  const autoN = Number(meta.auto)
+  const restN = Number(meta.rest)
+  if (!Number.isInteger(entriesN) || !Number.isInteger(autoN) || !Number.isInteger(restN) || autoN + restN !== entriesN) {
+    throw phraseError('PHRASE_TABLE_FORMAT', 'counts')
+  }
+  const sepA = text.indexOf('\n#AUTO\n')
+  const sepR = text.indexOf('\n#REST\n')
+  if (sepA === -1 || sepR < sepA) throw phraseError('PHRASE_TABLE_FORMAT', 'blocks')
+  const autoKeys = text.slice(sepA + 7, sepR).split('\n').filter((l) => l.length > 0)
+  const restLines = text.slice(sepR + 7).split('\n').filter((l) => l.length > 0)
+  if (autoKeys.length !== autoN || restLines.length !== restN) throw phraseError('PHRASE_TABLE_FORMAT', 'block-size')
+
+  const out = []
+  if (autoN > 0) {
+    if (kind !== 's2t') throw phraseError('PHRASE_TABLE_UNSUPPORTED', 'auto-block:' + kind)
+    const charMap = s2tGlyphMap()
+    for (const key of autoKeys) out.push(key + '\t' + glyphReconvert(key, charMap))
+  }
+  let prev = ''
+  for (const line of restLines) {
+    const tab = line.indexOf('\t')
+    if (tab <= 0) throw phraseError('PHRASE_TABLE_FORMAT', 'rest-line')
+    const n = line.charCodeAt(0) - 97
+    if (n < 0 || n > 25) throw phraseError('PHRASE_TABLE_FORMAT', 'prefix')
+    const key = prev.slice(0, n) + line.slice(1, tab)
+    out.push(key + '\t' + line.slice(tab + 1))
+    prev = key
+  }
+  const table = out.join('\n')
+  const digest = phraseTableDigest(out.map((l) => l + '\n').join(''))
+  if (meta.digest !== digest) throw phraseError('PHRASE_TABLE_INTEGRITY', `${meta.digest}≠${digest}`)
+  PHRASE_META[kind] = { entries: entriesN, autoEntries: autoN, restEntries: restN, digest }
+  return table
+}
+
+/**
+ * 取数据资源并**流式**汇报进度（真百分比；无 `Content-Length` ⇒ `ratio: null` 的不确定态）。
+ * @param {string} url 资源地址
+ * @param {(p: {phase: string, loaded: number, total: number|null, ratio: number|null}) => void} [onProgress]
+ * @returns {Promise<string>} 资源文本（**失败抛 `PHRASE_TABLE_*`**，绝不返回半截内容）
+ */
+async function fetchPhraseTableText(url, onProgress) {
+  let res
+  try {
+    res = await fetch(url)
+  } catch (err) {
+    throw phraseError('PHRASE_TABLE_NETWORK', String((err && err.message) || err))
+  }
+  if (!res.ok) throw phraseError('PHRASE_TABLE_HTTP', String(res.status))
+  const lenHeader = res.headers.get('content-length')
+  const total = lenHeader && /^[0-9]+$/.test(lenHeader) && Number(lenHeader) > 0 ? Number(lenHeader) : null
+  const report = (loaded) => {
+    if (onProgress) onProgress({ phase: 'download', loaded, total, ratio: total === null ? null : Math.min(loaded / total, 1) })
+  }
+  report(0)
+  const reader = res.body && typeof res.body.getReader === 'function' ? res.body.getReader() : null
+  if (!reader) {
+    // 没有流式 body（老环境）⇒ 一次取完，进度为**不确定态**（`ratio: null`）：不假装有百分比。
+    const text = await res.text()
+    if (onProgress) onProgress({ phase: 'download', loaded: text.length, total, ratio: null })
+    return text
+  }
+  const chunks = []
+  let loaded = 0
+  try {
+    for (;;) {
+      const step = await reader.read()
+      if (step.done) break
+      if (step.value) {
+        chunks.push(step.value)
+        loaded += step.value.byteLength
+        report(loaded)
+      }
+    }
+  } catch (err) {
+    throw phraseError('PHRASE_TABLE_NETWORK', String((err && err.message) || err))
+  }
+  const buf = new Uint8Array(loaded)
+  let at = 0
+  for (const chunk of chunks) {
+    buf.set(chunk, at)
+    at += chunk.byteLength
+  }
+  return new TextDecoder('utf-8').decode(buf)
+}
+
+/** 资源地址（**重试**时带破缓存参数：同一 URL 的失败可能被浏览器记住 ⇒ 换读，见交付报告实测）。 */
+function phraseTableUrl(kind) {
+  const url = PHRASE_TABLE_URL[kind]
+  const attempt = PHRASE_ATTEMPTS[kind]
+  if (attempt <= 1) return url
+  return url + (url.indexOf('?') === -1 ? '?' : '&') + 'r=' + attempt
+}
+
+/** 词组表元信息（自测 / 质检：条数、两块条数、digest、是否已加载）。 */
+export function phraseTableInfo(kind) {
+  const k = kind === 't2s' ? 't2s' : 's2t'
+  return { kind: k, loaded: PHRASE_LOADED[k], attempts: PHRASE_ATTEMPTS[k], url: PHRASE_TABLE_URL[k], ...(PHRASE_META[k] || {}) }
+}
+
+/**
+ * **取词组表**（③④ 共用的唯一入口；界面在转换前先 `await` 它即可拿到**真实下载进度**）。
+ *
+ * 幂等：已加载 ⇒ 立刻回一个 `phase:'ready'` 事件。并发去重：同一种表在飞时复用同一请求。
+ * 失败 ⇒ **抛**（`err.code` 以 `PHRASE_TABLE_` 开头）并**清掉在飞请求** ⇒ 再调一次即**重新发请求**
+ * （尝试次数 +1 ⇒ 重试 URL 带破缓存参数）。
+ * @param {'s2t'|'t2s'} kind
+ * @param {(p: {phase: string, loaded: number, total: number|null, ratio: number|null}) => void} [onProgress]
+ */
+export async function loadPhraseTable(kind, onProgress) {
+  const k = kind === 't2s' ? 't2s' : 's2t'
+  const ready = () => {
+    if (onProgress) onProgress({ phase: 'ready', loaded: 0, total: null, ratio: 1 })
+  }
+  if (PHRASE_LOADED[k]) {
+    ready()
+    return phraseTableInfo(k)
+  }
+  if (!PHRASE_INFLIGHT[k]) {
+    PHRASE_ATTEMPTS[k] += 1
+    PHRASE_INFLIGHT[k] = (async () => {
+      const text = await fetchPhraseTableText(phraseTableUrl(k), onProgress)
+      const index = buildPhraseIndex(decodePhraseTable(text, k))
+      if (k === 's2t') S2T_PHRASE_INDEX = index
+      else T2S_PHRASE_INDEX = index
+      PHRASE_LOADED[k] = true
+      return phraseTableInfo(k)
+    })().catch((err) => {
+      PHRASE_INFLIGHT[k] = null
+      throw err
+    })
+  }
+  const info = await PHRASE_INFLIGHT[k]
+  ready()
+  return info
+}
 
 /**
  * 建索引：`首字 → { lengths: 键长降序去重, entries: 键→值 }`。
@@ -439,48 +645,46 @@ export function phraseTableLoaded() {
 }
 
 /**
- * **繁化（全量）**：先 s2t 词组表、后 s2t 逐字表。**异步** —— 词组表 `import()` 按需加载。
+ * **繁化（全量）**：先 s2t 词组表、后 s2t 逐字表。**异步** —— 词组表按需 `fetch`（`loadPhraseTable()`）。
  * 词组表命中 ⇒ 连上下文相关字一起定形（`干净` ⇒ `乾淨`）；未命中 ⇒ 逐字表口径
  * （上下文相关字原样保留）。幂等：已是繁体 ⇒ 原样返回。
  * @param {string} text 任意文本（空串 / 非字符串 ⇒ 空串）
- * @returns {Promise<string>} 繁化后的文本（**不抛错**：词组表拉不到 ⇒ 回落同步逐字层）
+ * @returns {Promise<string>} 繁化后的文本（**不抛错**：词组表取不到 ⇒ 回落同步逐字层）
  */
 export async function toTraditionalFull(text) {
   if (typeof text !== 'string' || text === '') return ''
   let index = S2T_PHRASE_INDEX
   if (!index) {
     try {
-      const mod = await import('./traditional-phrases-s2t.js')
-      index = buildPhraseIndex(mod.S2T_PHRASE_TABLE)
-      S2T_PHRASE_INDEX = index
-      PHRASE_LOADED.s2t = true
+      await loadPhraseTable('s2t')
+      index = S2T_PHRASE_INDEX
     } catch {
       return toTraditionalText(text)
     }
   }
+  if (!index) return toTraditionalText(text)
   return convertWithPhrases(text, index, s2tGlyphMap())
 }
 
 /**
- * **简化（全量）**：先 t2s 词组表、后 t2s 逐字表。**异步**（词组表按需加载）。
+ * **简化（全量）**：先 t2s 词组表、后 t2s 逐字表。**异步**（词组表按需 `fetch`）。
  * 词组值经**禁用档门**（`gateForbiddenChars()`）：值里落扩展 B+ / PUA 的字**保留原形**
  * （`二噁英` 保持 `二噁英`），与逐字层「档 0 才建键」同一安全口径 —— 禁用档字形不上屏。
  * 幂等：已是简体 ⇒ 原样返回。
  * @param {string} text 任意文本（空串 / 非字符串 ⇒ 空串）
- * @returns {Promise<string>} 简化后的文本（**不抛错**：词组表拉不到 ⇒ 回落同步逐字层）
+ * @returns {Promise<string>} 简化后的文本（**不抛错**：词组表取不到 ⇒ 回落同步逐字层）
  */
 export async function toSimplifiedFull(text) {
   if (typeof text !== 'string' || text === '') return ''
   let index = T2S_PHRASE_INDEX
   if (!index) {
     try {
-      const mod = await import('./traditional-phrases-t2s.js')
-      index = buildPhraseIndex(mod.T2S_PHRASE_TABLE)
-      T2S_PHRASE_INDEX = index
-      PHRASE_LOADED.t2s = true
+      await loadPhraseTable('t2s')
+      index = T2S_PHRASE_INDEX
     } catch {
       return toSimplifiedText(text)
     }
   }
+  if (!index) return toSimplifiedText(text)
   return convertWithPhrases(text, index, t2sGlyphMap(), gateForbiddenChars)
 }
