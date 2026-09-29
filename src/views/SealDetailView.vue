@@ -9,7 +9,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
-import { seals, corrections, photos as photoService, points, imageFaces } from '../services/index.js'
+import { seals, corrections, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS } from '../data/seed.js'
 import { isLoggedIn } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
@@ -166,6 +166,8 @@ const canUpload = computed(() => seals.canUploadPhoto())
 const canDownload = computed(() => seals.canDownloadHd())
 /* 管理员专属按钮的渲染条件（服务层判定；普通用户 / 游客 ⇒ false ⇒ 不渲染）。 */
 const canEditFixed = computed(() => seals.canEditFixedAttributes())
+/* 「一键导出印章数据」的渲染条件（同样是服务层判定；非管理员 ⇒ false ⇒ 按钮根本不渲染）。 */
+const canExportSeal = computed(() => sealExport.canExportSealData())
 
 /* ============================================================================
    影像展示（R-85 / R-87 / R-88）：**印面图 4 块 / 实拍图 8 块**，张数与切位一律读元数据
@@ -507,6 +509,35 @@ function openSaveToDrive() {
 
 /** 保存反馈由选择器内给出（成功 / 幂等 / 失败三类逐字）；此处只保留选择器打开态。 */
 function onDriveSealSaved() {}
+
+/* ============================================================================
+   一键导出印章数据（管理员专属）
+   ----------------------------------------------------------------------------
+   按钮落点＝详情页操作区（与「存入雲盤」「下載高清原圖」同列）；非管理员 ⇒ **不渲染**。
+   点击 ⇒ 服务层 `sealExport.exportSealData()`：**恰好一个工作表**的 `.xlsx`
+   （层级分组：印章级固定属性 → 印面级固定属性 → 可勘误属性的系统选中值 → 影像内嵌 PNG）。
+   失败即取消（服务层保证零半成品文件）；本页只把结果如实上屏（可读文案 ＋ 结构化读数）。
+   ============================================================================ */
+const exportFeedback = ref('')
+const exportReport = ref(null)
+const exporting = ref(false)
+
+async function runSealExport() {
+  if (exporting.value) return
+  exportFeedback.value = ''
+  exportReport.value = null
+  exporting.value = true
+  try {
+    const result = await sealExport.exportSealData(route.params.id)
+    exportReport.value = result
+    exportFeedback.value = result.message
+  } catch (err) {
+    exportReport.value = { ok: false, reason: 'UNEXPECTED', message: (err && err.message) || '未知原因' }
+    exportFeedback.value = `導出失敗（${(err && err.message) || '未知原因'}）；本次未產出任何文件。`
+  } finally {
+    exporting.value = false
+  }
+}
 
 function confirmDownload() {
   const sealRow = seal.value
@@ -1013,6 +1044,17 @@ onBeforeUnmount(() => {
           存入雲盤
         </button>
         <button class="btn btn--primary" type="button" @click="openDownload">下載高清原圖</button>
+        <!-- 「一鍵導出印章數據」（管理员专属）：非管理员 / 游客 ⇒ **不渲染**（DOM 零命中；
+             不得用 CSS 隐藏 / `disabled` 冒充）。钩子字面值 `export-seal-data`。 -->
+        <button
+          v-if="canExportSeal"
+          class="btn btn--ghost"
+          type="button"
+          data-admin-action="export-seal-data"
+          @click="runSealExport"
+        >
+          一鍵導出印章數據
+        </button>
       </div>
     </div>
 
@@ -1026,6 +1068,15 @@ onBeforeUnmount(() => {
     </p>
 
     <p v-if="downloadFeedback" class="notice detail__notice" :data-download-report="downloadReport ? JSON.stringify(downloadReport) : null">{{ downloadFeedback }}</p>
+
+    <!-- 一键导出印章数据的可读反馈 ＋ 结构化读数（成功 / 失败都走这里；失败即取消、零产出）。 -->
+    <p
+      v-if="exportFeedback"
+      class="notice detail__notice"
+      :data-export-report="exportReport ? JSON.stringify(exportReport) : null"
+    >
+      {{ exportFeedback }}
+    </p>
 
     <p v-if="fixedFeedback" class="notice detail__notice" data-admin-feedback="fixed-attributes">
       {{ fixedFeedback }}
