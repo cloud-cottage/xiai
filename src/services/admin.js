@@ -26,6 +26,13 @@ import { writeInviteRewardSetting } from '../data/drive.js'
 import { currentUser } from '../data/session.js'
 import { FIXED_ATTR_FIELDS } from '../data/seed.js'
 import { listFacesOf } from './seals.js'
+/* **写面 Phase 1（写操作一律经云函数校验）**：本文件通过 `adminGate` 把「这次写是否合法」交给
+   云函数判定（服务端验签 ＋ 手机号白名单 ＋ 值域门）；**本地 `role` 不再是授权依据**（见 §四 / R-WF1）。
+   dev / 离线形态（无云写入面）下 `adminGate` 放行到本文件自己的本地角色门，且该形态**明确标注为
+   非正式写入路径**（`src/data/writeFaceMode.js`）。 */
+import { adminGate } from './adminToken.js'
+
+export { ensureAdminWriteSession, adminTokenSnapshot, clearAdminToken } from './adminToken.js'
 
 export { FIXED_ATTR_FIELDS }
 /* `PermissionError` 类**保留转口**（规范明文：保留导出、不删；既有导入方与自检仍可 import）——
@@ -110,15 +117,32 @@ export function updateFixedAttributes(stampId, patch) {
 
 /**
  * 写邀请奖励数值（管理员专属）。
- * @param {{id?:string, role?:string}|null} actor 写者（缺省时取当前登录用户）
+ *
+ * **写面 Phase 1 切片（2026-09-30）**：本入口由**同步**改为 **`async`**，判定顺序改为：
+ *   ① **服务端门（唯一授权判据）**：`adminGate('setInviteReward', { value })`
+ *      ⇒ 云函数 `xiai-admin-token` 验收令牌（HMAC 验签 → 有效期待 → 手机号白名单 → 值域 / 字段门）；
+ *      **不过门 ⇒ 原样透传服务端结构化拒绝 ＋ 零写入**（传输层失败 ⇒ `STORAGE_UNAVAILABLE`，**不伪装 `FORBIDDEN`**）；
+ *   ② **dev / 离线形态的本地角色门**（**仅该形态生效**；生产写路径不得只依赖它）；
+ *   ③ **值域门**：值不是非负整数 ⇒ `INVALID_VALUE`（本地兜底；云端形态服务端已先判过一次）；
+ *   ④ 过门后才真正落盘站点配置键（`xiai:v1:invite-reward`）。
+ *
+ * 历史不改写：本入口**只写配置键这一个键** —— 既有 `invite` 行与既有积分流水一字不动
+ * （改值只影响之后的结算）。**成功态返回值形状与改前逐字一致**（`{ok:true, key, value}`）。
+ *
+ * @param {{id?:string, role?:string, phone?:string}|null} actor 写者（缺省时取当前登录用户；**不作授权判据**）
  * @param {number} value 目标值（非负整数）
- * @returns {{ok:true, key:string, value:number}|{ok:false, reason:'FORBIDDEN'|'INVALID_VALUE'|string, message:string}}
+ * @returns {Promise<{ok:true, key:string, value:number}|{ok:false, reason:'FORBIDDEN'|'INVALID_VALUE'|string, message:string}>}
  */
-export function setInviteReward(actor, value) {
+export async function setInviteReward(actor, value) {
   const user = actor && actor.id ? actor : currentUser()
-  if (!user || user.role !== 'admin') {
+  /* ① 服务端门（**云端形态下这是唯一授权判据**；dev / 离线形态返回放行标记）。 */
+  const gate = await adminGate('setInviteReward', { value })
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* ② dev / 离线形态：沿用改前的本地角色门（**不得**当作正式写入路径）。 */
+  if (gate.mode === 'local-dev' && (!user || user.role !== 'admin')) {
     return forbidden('僅管理員可以修改邀請獎勵數值；本次零寫入。')
   }
+  /* ③ 值域门（本地兜底，判定在**任何写入之前**）。 */
   if (!Number.isInteger(value) || value < 0) {
     return {
       ok: false,
@@ -126,5 +150,6 @@ export function setInviteReward(actor, value) {
       message: `邀請獎勵必須是「非負整數」（非整數 / 負數 / 非數字一律拒收，實測 ${JSON.stringify(value)}）；本次零寫入。`
     }
   }
+  /* ④ 过门后才落盘（Phase 1 落盘点仍是本地配置键；迁移到云端权威存储属 Phase 2）。 */
   return writeInviteRewardSetting(value)
 }

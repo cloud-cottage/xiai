@@ -15,6 +15,13 @@
  *     本页只做入口渲染侧（两条独立要求，缺一即判负）。
  *
  * 上屏文案一律繁体（`s2t(x) === x`），且**零「切分」措辞**。
+ *
+ * **写面 Phase 1 追加（2026-09-30｜页面改动，逐处登记）**：
+ *   - 提交钮的落盘路径改为「**先取寫入令牌 → 雲端驗簽 → 才落盘**」：`submitEdit` 改为 `async`，
+ *     先 `admin.ensureAdminWriteSession(校驗碼)` 再 `await admin.setInviteReward(...)`；
+ *   - 弹窗内**新增一个输入位**（「寫入校驗碼」，云写入面下必需；已有未过期令牌时留空）；
+ *   - **`data-admin-action` 取值集合与实例数一字未动**（仍恰 8 值；本页仍恰 `edit-invite-reward` 1 处）；
+ *     入口钮的 `v-if="isAdmin"` 渲染判定**一字未改**（它只是展示性隐藏，不是授权）。
  */
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
@@ -77,11 +84,15 @@ const editOpen = ref(false)
 const editValue = ref('')
 const editFeedback = ref('')
 const editSaved = ref(false)
+/* 寫入校驗碼（写面 Phase 1：云端写入面下用于换取 15 分钟写入令牌；dev / 離線形態留空即可）。 */
+const writeCode = ref('')
+const editBusy = ref(false)
 
 function openEdit() {
   editOpen.value = true
   editFeedback.value = ''
   editSaved.value = false
+  writeCode.value = ''
   /* 预填当前生效值（配置键 ⇒ 默认值回落），仍不硬编码。 */
   editValue.value = String(points.readInviteReward().value)
 }
@@ -90,9 +101,11 @@ function closeEdit() {
   editOpen.value = false
   editFeedback.value = ''
   editSaved.value = false
+  writeCode.value = ''
 }
 
-function submitEdit() {
+async function submitEdit() {
+  if (editBusy.value) return
   editFeedback.value = ''
   editSaved.value = false
   const raw = String(editValue.value || '').trim()
@@ -102,15 +115,29 @@ function submitEdit() {
     editFeedback.value = '請填寫非負整數。'
     return
   }
-  const result = admin.setInviteReward(null, parsed)
-  if (!result.ok) {
-    editFeedback.value = result.message || '保存失敗，請稍後再試。'
-    return
+  editBusy.value = true
+  try {
+    /* ① 保證有一枚可攜帶的寫入令牌（雲端寫入面下必需）——**它本身不是授權**，
+       只是把請求交給服務端；服務端驗簽才是唯一判據。 */
+    const session = await admin.ensureAdminWriteSession(writeCode.value)
+    if (!session.ok) {
+      editFeedback.value = session.message || '寫入校驗失敗，請稍後再試。'
+      return
+    }
+    /* ② 經雲端校驗後才落盘（過不了門 ⇒ 結構化拒絕 ＋ 零寫入）。 */
+    const result = await admin.setInviteReward(null, parsed)
+    if (!result.ok) {
+      editFeedback.value = result.message || '保存失敗，請稍後再試。'
+      return
+    }
+    editSaved.value = true
+    editFeedback.value = '已保存，新註冊將按新數值發放。'
+    writeCode.value = ''
+    /* 规则第 4 条的插值随之更新（页面文案随值变化，无硬编码）。 */
+    dataVersion.value += 1
+  } finally {
+    editBusy.value = false
   }
-  editSaved.value = true
-  editFeedback.value = '已保存，新註冊將按新數值發放。'
-  /* 规则第 4 条的插值随之更新（页面文案随值变化，无硬编码）。 */
-  dataVersion.value += 1
 }
 </script>
 
@@ -228,6 +255,20 @@ function submitEdit() {
           <label for="invite-reward-value">邀請註冊獎勵（金）</label>
           <input id="invite-reward-value" v-model="editValue" type="number" min="0" step="1" inputmode="numeric" />
           <span class="field__hint">須為非負整數；邀請人與被邀請人各得該數值。</span>
+        </div>
+
+        <!-- 寫入校驗碼（写面 Phase 1 新增输入位）：云端写入面下必需，用于换取 15 分钟写入令牌；
+             已有未过期令牌时可留空。**它不是授权凭据** —— 服务端验签才是唯一判据。 -->
+        <div class="field">
+          <label for="invite-reward-write-code">寫入校驗碼</label>
+          <input
+            id="invite-reward-write-code"
+            v-model="writeCode"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+          />
+          <span class="field__hint">雲端寫入面下必要（管理員手機號 ＋ 校驗碼換取 15 分鐘寫入令牌）；已有未過期令牌時可留空。</span>
         </div>
 
         <p v-if="editFeedback" class="edit-box__feedback" data-admin-feedback="edit-invite-reward">
