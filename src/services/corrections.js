@@ -33,6 +33,11 @@ import {
 } from '../data/seed.js'
 import { awardCorrectionReward } from './points.js'
 import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND } from './seals.js'
+/* **写面 Phase A（用户写面切片）**：勘误提交经云函数 `xiai-user-token` 的 `action:'verify'`
+   服务端验签后才落盘（落盘在**云端**，`xiai_corrections` 的 ACL 是 `PRIVATE` ⇒ 只能由云函数
+   以管理端凭据写）；**创建者身份由服务端记录**（`uid = u-<手机号>` 从令牌声明派生），
+   载荷里的身份类键一律被服务端拒（`INVALID_FIELD` ＋ 零写入）。 */
+import { userGate } from './userToken.js'
 
 /** 勘误三态（规范冻结字面值）。 */
 export const CORRECTION_STATUS = {
@@ -182,10 +187,21 @@ function rowsOfFace(face) {
  *   - 未登录 / 字段不可勘误 / 未指定印面 / 值为空 ⇒ 只有 `message`（无 `reason`，历史形态保留）；
  *   - **值域门（R-20 / R-30 / R-31）**：字段落在 `FIELD_VALUE_DOMAINS`
  *     （`dynasty` 14 类 / `seal_type` 9 类 / `face_style` 23 类）且值 ∉ 真源
- *     ⇒ `{ok:false, reason:'INVALID_VALUE', message}` + **零写入**（**写之前**判定，
- *     不依赖 `saveCorrectionRows` 的返回值 —— 那是整集合覆盖写且调用方不读返回值）。
+ *     ⇒ `{ok:false, reason:'INVALID_VALUE', message}` + **零写入**（**写之前**判定）。
+ *
+ * **写面 Phase A 切片（2026-09-30）**：本入口由**同步**改为 **`async`**，判定顺序改为：
+ *   ① 本地前置门（登录态 / 字段面 / 印面 / 空值 / 值域 —— 一律**在写之前**，拒绝即零写入）；
+ *   ② **服务端门（云端形态下的唯一身份判据）**：`userGate('submitCorrection', payload)`
+ *      ⇒ 云函数 `xiai-user-token` 验收用户令牌（HMAC 验签 → 有效期待 → `role==='user'`
+ *      → `op` 值域 / 字段门）**并在云端落盘**（`xiai_corrections`，ACL `PRIVATE` ⇒ 只能由云函数写）；
+ *      **创建者 uid / 手机号由服务端从令牌声明派生**（载荷里的身份类键被服务端拒 ⇒ `INVALID_FIELD`）；
+ *      不过门 ⇒ **原样透传服务端结构化拒绝 ＋ 零写入**（传输层失败 ⇒ `STORAGE_UNAVAILABLE`，
+ *      **绝不伪装 `FORBIDDEN`**）；
+ *   ③ 过门后：**dev / 离线形态** ⇒ 本地落盘（**非正式写入路径**，身份仍是本地 `user.id`）；
+ *      **云端形态** ⇒ 本地只写**服务端回传的那一行**（镜像；不是前端自建行）；回传缺行 ⇒
+ *      `STORAGE_UNAVAILABLE`（**不冒充成功、不冒充越权**），返回 `authority` 供调用方区分。
  */
-export function submitCorrection({ faceId = '', sealId = '', stampId = '', field, value, basis = '' } = {}) {
+export async function submitCorrection({ faceId = '', sealId = '', stampId = '', field, value, basis = '' } = {}) {
   const user = currentUser()
   if (!user) return { ok: false, message: '請先登錄後再提交勘誤' }
   const meta = markableMeta(field)
@@ -204,28 +220,63 @@ export function submitCorrection({ faceId = '', sealId = '', stampId = '', field
   const denied = domainValueDenial(field, meta.label, text)
   if (denied) return denied
 
-  const row = {
-    id: makeId(),
-    faceId: face.id, // 规范字段：勘误挂在印面上
-    sealId: face.sealId, // 规范字段：所属印章
-    stamp_id: face.sealId, // 兼容别名：＝sealId，勿删
-    userId: user.id, // 规范字段：提交人
-    user_id: user.id, // 兼容别名：＝userId
+  const payload = {
+    faceId: face.id,
+    sealId: face.sealId,
+    stampId: face.sealId,
     field,
-    field_label: meta.label,
     value: text,
-    basis: String(basis || '').trim(),
-    status: CORRECTION_STATUS.PENDING,
-    created_at: nowIso(),
-    reviewed_at: null,
-    reviewer_id: null,
-    rewarded_at: null
+    basis: String(basis || '').trim()
+  }
+  const faceLabel = faceLabelOf(face.id, face.sealId)
+
+  /* ② **服务端门**（云端形态下唯一身份判据 ＋ 权威落盘）。 */
+  const gate = await userGate('submitCorrection', payload)
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+
+  if (gate.mode === 'local-dev') {
+    /* ③-a dev / 離線形態：本地落盘（**非正式寫入路徑**）。 */
+    const row = {
+      id: makeId(),
+      faceId: face.id, // 规范字段：勘误挂在印面上
+      sealId: face.sealId, // 规范字段：所属印章
+      stamp_id: face.sealId, // 兼容别名：＝sealId，勿删
+      userId: user.id, // 规范字段：提交人（本地形态 ⇒ 本地身份）
+      user_id: user.id, // 兼容别名：＝userId
+      field,
+      field_label: meta.label,
+      value: text,
+      basis: payload.basis,
+      status: CORRECTION_STATUS.PENDING,
+      created_at: nowIso(),
+      reviewed_at: null,
+      reviewer_id: null,
+      rewarded_at: null
+    }
+    saveCorrectionRows([...listCorrectionRows(), row])
+    return {
+      ok: true,
+      row,
+      authority: 'LOCAL_DEV',
+      message: `已提交「${faceLabel}·${meta.label}」勘誤，待審覈（dev / 離線形態，非正式寫入路徑）`
+    }
+  }
+
+  /* ③-b 雲端形態：**服務端已落盤** ⇒ 本地只寫服務端回傳的那一行（鏡像；身份／時間／狀態皆為服務端值）。 */
+  const row = gate.row
+  if (!row || typeof row !== 'object') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。'
+    }
   }
   saveCorrectionRows([...listCorrectionRows(), row])
-  const faceLabel = faceLabelOf(face.id, face.sealId)
   return {
     ok: true,
     row,
+    authority: 'SERVER',
+    docId: gate.docId,
     message: `已提交「${faceLabel}·${meta.label}」勘誤，待審覈`
   }
 }

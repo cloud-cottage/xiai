@@ -21,8 +21,9 @@ function sendCode() {
   feedback.value = result.message
 }
 
-function submit() {
-  const result = auth.login(phone.value, code.value)
+async function submit() {
+  /* 写面 Phase A：`auth.login` 改为 `async`（**先服务端验证并拿到用户令牌，再写 session**）⇒ 本处 `await`。 */
+  const result = await auth.login(phone.value, code.value)
   if (!result.ok) {
     feedback.value = result.message
     return

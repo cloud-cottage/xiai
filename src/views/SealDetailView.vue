@@ -604,7 +604,7 @@ function correctionFieldIsFreeText(key) {
   return key !== 'dynasty' && key !== FACE_CONTENT_KEY && key !== FACE_STYLE_KEY
 }
 
-function submitCorrection() {
+async function submitCorrection() {
   if (!seal.value || !formFaceId.value) return
   const filled = corrections.MARKABLE_FIELDS.filter(
     (item) => correctionFieldVisible(item) && String(form[item.key] || '').trim() !== ''
@@ -615,8 +615,10 @@ function submitCorrection() {
   }
   let accepted = 0
   let firstError = ''
-  filled.forEach((item) => {
-    const result = corrections.submitCorrection({
+  /* 写面 Phase A：`submitCorrection` 改为 `async`（经云函数验签后落盘）⇒ 本处由 `forEach`
+     改为**串行 `await`**（逐条过门、逐条独立成败，与改前语义一致：一条失败不影响其余）。 */
+  for (const item of filled) {
+    const result = await corrections.submitCorrection({
       faceId: formFaceId.value,
       sealId: seal.value.stamp_id,
       field: item.key,
@@ -625,7 +627,7 @@ function submitCorrection() {
     })
     if (result.ok) accepted += 1
     else if (!firstError) firstError = result.message
-  })
+  }
   if (accepted === 0) {
     formFeedback.value = firstError || '提交失敗，請稍後重試'
     return

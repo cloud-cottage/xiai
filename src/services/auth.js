@@ -9,6 +9,10 @@ import { listUserRows, saveUserRows } from '../data/db.js'
 import { setUser, restoreSession } from '../data/session.js'
 import { ADMIN_PHONE, ADMIN_NICKNAME } from '../data/seed.js'
 import { grantInitialGold, settleInviteReward } from './points.js'
+/* **写面 Phase A（用户写面）**：登录改为「**先服务端验证并拿到用户令牌，再写 session**」——
+   云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。
+   dev / 离线形态（无云写入面）仍走改前的本地形态，并明确标注为非正式路径。 */
+import { ensureUserLoginToken } from './userToken.js'
 
 export const DEV_SMS_CODE = '1234'
 export const GOLD_INITIAL = 50
@@ -34,16 +38,29 @@ export function requestCode(phone) {
  * 老账号登录**不触发**结算（不以「邀请人登录」等其它条件触发）。
  *
  * @param {string} phone 手机号
- * @param {string} code 验证码（开发态固定 1234）
+ * @param {string} code 验证码（**云端形态下由服务端判**；dev / 离线形态仍固定 1234）
  * @param {{inviterId?:string}} [options]
- * @returns {{ok:boolean, user?:object, message?:string, invite?:object}}
+ * @returns {Promise<{ok:boolean, user?:object, message?:string, invite?:object, reason?:string}>}
+ *
+ * **写面 Phase A（2026-09-30）**：本入口由**同步**改为 **`async`**，判定顺序改为：
+ *   ① **服务端验证登录（云端形态下的唯一身份判据）**：`ensureUserLoginToken(phone, code)`
+ *      ⇒ 云函数 `xiai-user-token` 的 `action:'issue'`（手机号形态 → 验证码 → 签发短 TTL 用户令牌）；
+ *      不过门 ⇒ **原样透传结构化拒绝（恰 3 键）＋ 零半成品**（**不建本地账号行、不写 session、不发初始金**）；
+ *   ② **dev / 离线形态**（无云写入面）：沿用改前的本地验证码门，**明确标注为非正式路径**；
+ *   ③ 过门后才落本地：账号行 / 初始金 / session（**本地库是镜像面**：身份真源在服务端）。
  */
-export function login(phone, code, options = {}) {
+export async function login(phone, code, options = {}) {
   const normalized = String(phone || '').trim()
   if (!isPhoneLike(normalized)) {
     return { ok: false, message: '請輸入 11 位手機號' }
   }
-  if (String(code || '').trim() !== DEV_SMS_CODE) {
+  /* ① 服务端验证登录（**云端形态下这是唯一身份判据**；dev / 離線形態返回放行标记 ＋ `mode`）。 */
+  const verified = await ensureUserLoginToken(normalized, code)
+  if (!verified.ok) {
+    return { ok: false, reason: verified.reason, message: verified.message }
+  }
+  /* ② dev / 離線形態：沿用改前的本地验证码门（**不得**当作正式登录路径）。 */
+  if (verified.mode === 'local-dev' && String(code || '').trim() !== DEV_SMS_CODE) {
     return { ok: false, message: '驗證碼不正確' }
   }
 

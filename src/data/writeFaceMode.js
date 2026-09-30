@@ -262,3 +262,41 @@ export function localWriteDenial() {
 export function assertLocalWriteAllowed() {
   return localWriteDenial()
 }
+
+/* ============================================================================
+   **写面 Phase A：用户写面切片（独立登记）**（2026-09-30）
+   ----------------------------------------------------------------------------
+   为什么**独立**登记、不动上面那 24 条：那 24 条是 **Phase 1 的清单**（判据基线 ＝
+   `C1` 总条数 24 / `C2` 8＋6＋10 / `C3` 1 migrated ＋ 23 unmigrated）——**改它就等于改判据**。
+   Phase A 新增的这条**不在**那 24 条里（它是**普通用户写路径**，Phase 1 清单尚未覆盖），
+   故另立一段登记：既让「哪个入口已过云端校验」可枚举，又保证 24 条基线逐字不动。
+   ============================================================================ */
+
+/** 用户写面切片登记（**恰 1 条**；Phase A 只开一条路径 ⇒ 不要贪大）。 */
+export const USER_WRITE_SLICE = Object.freeze({
+  id: 'UW-A1',
+  file: 'src/services/corrections.js',
+  symbol: 'submitCorrection',
+  dataLayer: 'cloudfunctions/xiai-user-token/lib/ops.js::OPS.submitCorrection ⇒ 集合 xiai_corrections',
+  channel: 'xiai-user-token（action:verify）',
+  authority: 'SERVER',
+  status: 'phaseA-cloud-verified',
+  annotation:
+    '已過雲端驗簽（Phase A 切片）：提交前必須由 `xiai-user-token` 回 `ok:true`，' +
+    '**權威行由服務端寫入**（創建者 uid／手機號由服務端從令牌聲明派生）；本機只寫服務端回傳的那一行（鏡像）'
+})
+
+/** 用户写面切片读数（自检 / 报告用）。 */
+export function userWriteSliceReadout() {
+  return {
+    total: 1,
+    entries: [
+      {
+        id: USER_WRITE_SLICE.id,
+        at: `${USER_WRITE_SLICE.file}::${USER_WRITE_SLICE.symbol}`,
+        status: USER_WRITE_SLICE.status,
+        authority: USER_WRITE_SLICE.authority
+      }
+    ]
+  }
+}
