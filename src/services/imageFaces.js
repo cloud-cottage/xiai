@@ -389,6 +389,7 @@ export async function downloadOriginalFor(stampId) {
       sha256: out.sha256,
       sha256Stored: source.digest,
       verdict: 'match',
+      original: true,
       viaApi: true,
       watermark: out.watermark === true,
       passthrough: out.passthrough === true,
@@ -404,7 +405,10 @@ export async function downloadOriginalFor(stampId) {
     imageId,
     kind: clientKindOf(stored.row || {}, ''),
     bytes: stored.bytes,
-    mime: stored.mime
+    mime: stored.mime,
+    /* **R-F3-4（雙層一致）**：面别**由數據層判定、服務層只轉達** —— 雲端展示件
+       （`loadStoredImage` 的 `displayOnly`）⇒ 下載面如實標「非原圖」。 */
+    displayOnly: stored.displayOnly === true
   })
   const report = {
     imageId,
@@ -414,6 +418,8 @@ export async function downloadOriginalFor(stampId) {
     sha256: out.sha256 || '',
     sha256Stored: out.sha256Stored || '',
     verdict: out.verdict || '',
+    original: out.original !== false,
+    source: stored.displayOnly === true ? 'cloud_display' : 'stored',
     viaApi: out.viaApi === true,
     via: out.viaApi === true ? 'api' : 'local',
     passthrough: out.passthrough === true,
@@ -426,6 +432,28 @@ export async function downloadOriginalFor(stampId) {
       ok: false,
       report,
       message: '原檔下載失敗，請稍後再試（本次會話已爲該印章計費，重試不再扣費）。'
+    }
+  }
+  if (out.verdict === 'display_only') {
+    /* **R-F3-1（無真原圖 ⇒ 可交展示檔，但必須如實標「非原圖」｜2026-09-30）**：
+       `ok: true`（件確實交出去了，不假裝失敗）＋ `original: false` ＋ `verdict: 'display_only'`；
+       **不得**再落到下面那條「摘要核對一致」的成功文案（那是拿「自己與自己比」冒充原檔）。
+       上屏文案＝本函數的 `message`（廣場 / 詳情頁直接顯示它，見 `runOriginalDownload` / `confirmDownload`）。 */
+    return {
+      ok: true,
+      filename: out.filename,
+      bytes: out.bytes,
+      mime: out.mime,
+      bytesLength: out.bytesLength,
+      sha256: out.sha256,
+      sha256Stored: '',
+      verdict: 'display_only',
+      original: false,
+      viaApi: false,
+      watermark: false,
+      passthrough: true,
+      report,
+      message: `已下載展示檔 ${out.filename}（${out.bytesLength} 字節）：雲端暫無此印面的原檔，本次交付的是展示檔、非原圖（未與原檔作摘要核對）。`
     }
   }
   if (out.verdict !== 'match') {
@@ -445,6 +473,7 @@ export async function downloadOriginalFor(stampId) {
     sha256: out.sha256,
     sha256Stored: out.sha256Stored,
     verdict: out.verdict,
+    original: true,
     viaApi: out.viaApi === true,
     watermark: out.watermark === true,
     passthrough: out.passthrough === true,
@@ -473,6 +502,29 @@ export async function originalDownloadOf(input = {}) {
   }
   const storedSha = sha256Hex(stored)
   const verdict = (downSha) => (downSha === storedSha ? 'match' : 'mismatch')
+  if (input.displayOnly === true) {
+    /* **R-F3-1（不得靜默把展示檔冒充原檔｜2026-09-30）**：來源是**雲端展示件**（雲端面無原檔對象）
+       ⇒ 這裡的「摘要一致」只會是**自己與自己比**（`storedSha` 就是剛讀到的那份字節的摘要），
+       **不是**與原檔對賬 ⇒ **不得**報 `verdict: 'match'`。如實交出展示件字節：
+       `verdict: 'display_only'`（**新增值**）、`original: false`、`sha256Stored: ''`（無原檔可對），
+       且檔名**不得**冠 `original`（否則與結果自相矛盾）。本機面（`displayOnly` 缺位）逐字不變。 */
+    const suffix = EXT_OF_MIME[mime] || '.bin'
+    return {
+      ok: true,
+      viaApi: false,
+      filename: `xiai-display-${storedSha.slice(0, 12)}${suffix}`,
+      bytes: stored,
+      mime,
+      bytesLength: stored.length,
+      sha256: storedSha,
+      sha256Stored: '',
+      verdict: 'display_only',
+      original: false,
+      watermark: false,
+      passthrough: true,
+      message: ''
+    }
+  }
   if (!passThroughMimeOf(mime)) {
     /* 存量 / 非源面容器：**不經 api**，本機字節原樣交出 + 摘要對賬。 */
     const suffix = EXT_OF_MIME[mime] || '.bin'
@@ -486,6 +538,7 @@ export async function originalDownloadOf(input = {}) {
       sha256: storedSha,
       sha256Stored: storedSha,
       verdict: verdict(storedSha),
+      original: true,
       watermark: false,
       passthrough: true,
       message: ''
@@ -503,6 +556,7 @@ export async function originalDownloadOf(input = {}) {
     sha256: out.sha256,
     sha256Stored: storedSha,
     verdict: verdict(out.sha256),
+    original: true,
     watermark: out.watermark,
     passthrough: out.passthrough,
     message: ''

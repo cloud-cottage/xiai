@@ -678,6 +678,14 @@ export async function loadStoredImage(imageId) {
       mime: cloud.mime || String((row && row.mime) || '').toLowerCase(),
       sha256: (row && row.sha256) || '',
       row,
+      /* **R-F3（雲端接管態｜語義如實，2026-09-30）**：此處交出的是**雲端展示件整件字節**
+         （PNG / WebP）—— **不是**存儲件的原檔字節。為什麼結構上必無原檔：雲端對象鍵只認
+         `xiai/images/<sha 前兩位>/<sha>.<png|webp>`（`IMAGE_OBJECT_KEY_PATTERN`），
+         **不含 TIFF**。⇒ 面别**如實登記**（`displayOnly` / `source`），下載面據此標「非原圖」，
+         **不得**再拿「字節與自己比對」得出的摘要一致冒充原檔（見 `originalDownloadOf`）。
+         本判據只影響**雲端接管時的雲端行**；本機行（dev 5163 + 5191）逐字不變。 */
+      displayOnly: true,
+      source: 'cloud_display',
       message: ''
     }
   }
@@ -694,6 +702,9 @@ export async function loadStoredImage(imageId) {
     mime,
     sha256: (row && row.sha256) || '',
     row,
+    /* **R-F3 對照面（本機面）**：本機面拿到的就是**本機存儲的原檔字節**（面别不變、逐字不變）。 */
+    displayOnly: false,
+    source: 'stored',
     message: ''
   }
 }
