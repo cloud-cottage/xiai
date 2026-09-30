@@ -26,6 +26,48 @@ import { cloudBaseConfig, cloudBaseConfigured, ensureAnonymousLogin, CLOUD_HYDRA
  *  写面是**单次往返**，用同一量级的下界，避免「写操作卡住不返回」。 */
 export const CLOUD_FUNCTION_TIMEOUT_MS = 15000
 
+/**
+ * 诊断通道标签（**只用于 console.warn 读数**；不是判据、也不进返回结构）。
+ * 纪律：失败形状恒为**恰 3 键** `{ok:false, reason, message}`（冻结表不变、**不新增 reason 字面值**）；
+ * 平台 / SDK 的**原始原因**（如 `[PERMISSION_DENIED]`）只经本通道上抛供排障，绝不改写判定。
+ */
+export const CLOUD_FUNCTION_DIAGNOSTIC_TAG = '[xiai:cloud-fn]'
+
+/** 诊断摘要里可能出现的敏感片段一律打码（令牌 / 手机号 / 64 位 hex 密钥）。 */
+function redactDiagnostic(text) {
+  return String(text)
+    .replace(/[A-Za-z0-9_-]{40,}/g, '<REDACTED-LONGSTRING>')
+    .replace(/\b\d{11}\b/g, '<REDACTED-11DIGITS>')
+    .replace(/\b[a-f0-9]{64}\b/g, '<REDACTED-SECRET>')
+}
+
+/** 从任意抛出物里取「平台原始原因」（**只取判别字段，不取任何载荷**）。 */
+function summarizeDiagnostic(detail) {
+  try {
+    if (detail === undefined || detail === null) return ''
+    if (typeof detail === 'string') return redactDiagnostic(detail).slice(0, 300)
+    const fields = ['code', 'msg', 'message', 'name', 'requestId']
+    const picked = {}
+    for (const key of fields) {
+      if (detail[key] !== undefined && detail[key] !== null) picked[key] = redactDiagnostic(detail[key]).slice(0, 300)
+    }
+    if (Object.keys(picked).length > 0) return picked
+    return redactDiagnostic(String(detail)).slice(0, 300)
+  } catch {
+    return '<unavailable>'
+  }
+}
+
+/** 上抛诊断（**只到 `console.warn`**；返回结构一个字段都不加）。 */
+function diagnose(kind, detail) {
+  try {
+    if (typeof console === 'undefined' || typeof console.warn !== 'function') return
+    console.warn(CLOUD_FUNCTION_DIAGNOSTIC_TAG, kind, summarizeDiagnostic(detail))
+  } catch {
+    /* 诊断失败不得影响判定结果 */
+  }
+}
+
 /** 传输层失败的**唯一** reason（工程既有冻结字面值；**不是** `FORBIDDEN`）。 */
 export const CLOUD_FUNCTION_UNAVAILABLE = 'STORAGE_UNAVAILABLE'
 
@@ -40,7 +82,9 @@ const TRANSPORT_MESSAGES = Object.freeze({
   BAD_REPLY: '雲端校驗回傳形狀不可辨識，本次未寫入。'
 })
 
-function transportDenial(kind) {
+function transportDenial(kind, detail) {
+  /* **形状恒为恰 3 键**（`ok` / `reason` / `message`）；平台原始原因只进诊断通道（见 `diagnose()`）。 */
+  diagnose(kind, detail)
   return { ok: false, reason: CLOUD_FUNCTION_UNAVAILABLE, message: TRANSPORT_MESSAGES[kind] || TRANSPORT_MESSAGES.CALL_FAILED }
 }
 
@@ -79,7 +123,8 @@ async function resolveApp() {
   let sdk = null
   try {
     sdk = await loadCloudBaseSdk()
-  } catch {
+  } catch (error) {
+    diagnose('SDK_LOAD_FAILED', error)
     sdk = null
   }
   if (!sdk || typeof sdk.init !== 'function') return { ok: false, kind: 'SDK_UNAVAILABLE' }
@@ -94,8 +139,8 @@ async function resolveApp() {
     try {
       const user = await ensureAnonymousLogin(auth)
       if (!user) return { ok: false, kind: 'LOGIN_FAILED' }
-    } catch {
-      return { ok: false, kind: 'LOGIN_FAILED' }
+    } catch (error) {
+      return { ok: false, kind: 'LOGIN_FAILED', detail: error }
     }
   }
   if (typeof app.callFunction !== 'function') return { ok: false, kind: 'SDK_UNAVAILABLE' }
@@ -186,17 +231,23 @@ export async function callCloudFunction(name, data, options = {}) {
   }
   const resolved = await withTimeout(appOrNull(), timeoutMs)
   if (resolved && resolved.__timeout) return transportDenial('TIMEOUT')
-  if (!resolved || resolved.ok !== true) return transportDenial((resolved && resolved.kind) || 'SDK_UNAVAILABLE')
+  if (!resolved || resolved.ok !== true)
+    return transportDenial((resolved && resolved.kind) || 'SDK_UNAVAILABLE', resolved && resolved.detail)
   let raw = null
   try {
     raw = await withTimeout(Promise.resolve(resolved.app.callFunction({ name, data })), timeoutMs)
-  } catch {
-    raw = { __error: true }
+  } catch (error) {
+    /* **平台 / SDK 的原始原因在此被捕获**（如网关级 `[PERMISSION_DENIED]`）⇒ 只经诊断通道上抛。 */
+    raw = { __error: error }
   }
   if (raw && raw.__timeout) return transportDenial('TIMEOUT')
-  if (raw && raw.__error) return transportDenial('CALL_FAILED')
+  if (raw && raw.__error) return transportDenial('CALL_FAILED', raw.__error)
   const unpacked = unpackFunctionReply(raw)
-  if (!unpacked.ok) return transportDenial('BAD_REPLY')
+  if (!unpacked.ok)
+    return transportDenial('BAD_REPLY', {
+      shape: raw === null ? 'null' : typeof raw,
+      keys: raw && typeof raw === 'object' ? Object.keys(raw) : []
+    })
   return unpacked
 }
 
