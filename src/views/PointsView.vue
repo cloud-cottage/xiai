@@ -206,7 +206,7 @@ function submitEdit() {
       title="暫無積分流水"
       desc="下載高清原圖或提交勘誤被採納後，這裏會記錄每一筆金的變動。"
     >
-      <router-link class="btn btn--ghost" :to="{ name: 'square' }">去藏品廣場看看</router-link>
+      <router-link class="btn btn--ghost" :to="{ name: 'square' }">去璽印匯類看看</router-link>
     </PlaceholderPanel>
 
     <!-- 編輯邀請獎勵弹窗（仅管理员入口可开；提交钮用 `data-action`，**不带** `data-admin-action`）。 -->

@@ -409,7 +409,7 @@ async function onUpload() {
               {{ item.seal_name || '佚名' }}（{{ item.stamp_id }}）
             </option>
           </select>
-          <p v-if="!sealOptions.length" class="field__hint">暫無印章可選，請先在藏品廣場上傳印章。</p>
+          <p v-if="!sealOptions.length" class="field__hint">暫無印章可選，請先在璽印匯類上傳印章。</p>
         </div>
 
         <div class="field">
@@ -534,7 +534,7 @@ async function onUpload() {
       title="還沒有上傳實物照片"
       desc="在上方選擇印章與圖片上傳，或進入任一印章詳情頁的實物照片區上傳。"
     >
-      <router-link class="btn btn--ghost" :to="{ name: 'square' }">去藏品廣場看看</router-link>
+      <router-link class="btn btn--ghost" :to="{ name: 'square' }">去璽印匯類看看</router-link>
     </PlaceholderPanel>
   </section>
 </template>

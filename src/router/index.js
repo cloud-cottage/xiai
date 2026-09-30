@@ -8,18 +8,18 @@ import { isLoggedIn } from '../data/session.js'
  * 不设 `requiresAuth`）为 v1.21 新增两条。
  *
  * 管理员**没有**独立路由 / 独立页面：其编辑能力一律是**普通页面内的「管理员专属按钮」**
- * （藏品广场「上传印章」、印章详情页「编辑固定属性」、我的勘误记录「采纳 / 驳回」），
+ * （璽印匯類「上传印章」、印章详情页「编辑固定属性」、我的勘误记录「采纳 / 驳回」），
  * 且对游客与普通用户**不渲染**（条件渲染，不是 CSS 隐藏 / disabled）。
  *
  * 末条 `/:pathMatch(.*)*` 是**兜底重定向**（不是一个可直达页面，不渲染任何内容）：
- * 未知路径——含已退役的 `/admin`——一律重定向到藏品广场。
+ * 未知路径——含已退役的 `/admin`——一律重定向到璽印匯類。
  */
 const routes = [
   {
     path: '/',
     name: 'square',
     component: () => import('../views/SquareView.vue'),
-    meta: { title: '藏品廣場' }
+    meta: { title: '璽印匯類' }
   },
   {
     path: '/seal/:id',

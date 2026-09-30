@@ -219,7 +219,7 @@ function decide(row, decision) {
       title="暫無勘誤記錄"
       desc="在印章詳情頁對可標記屬性提交勘誤後，會在此處顯示審覈進度。"
     >
-      <router-link class="btn btn--ghost" :to="{ name: 'square' }">去藏品廣場看看</router-link>
+      <router-link class="btn btn--ghost" :to="{ name: 'square' }">去璽印匯類看看</router-link>
     </PlaceholderPanel>
   </section>
 </template>

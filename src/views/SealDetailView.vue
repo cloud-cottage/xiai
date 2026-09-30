@@ -1688,7 +1688,7 @@ onBeforeUnmount(() => {
     title="未找到這枚印章"
     desc="它可能已被移出藏品，或編號有誤。"
   >
-    <router-link class="btn btn--ghost" :to="{ name: 'square' }">返回藏品廣場</router-link>
+    <router-link class="btn btn--ghost" :to="{ name: 'square' }">返回璽印匯類</router-link>
   </PlaceholderPanel>
 </template>
 

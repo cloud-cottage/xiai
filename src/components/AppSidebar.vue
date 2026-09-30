@@ -4,7 +4,7 @@ import { computed } from 'vue'
 import { isLoggedIn } from '../data/session.js'
 
 /**
- * 侧边菜单 —— **5 项**（藏品广场 / 我的勘误记录 / 我的实物照片 / 积分中心 / **我的雲盤**）。
+ * 侧边菜单 —— **5 项**（璽印匯類 / 我的勘误记录 / 我的实物照片 / 积分中心 / **我的雲盤**）。
  * 第 5 项【我的雲盤】为 v1.21 新增（规范 §3.21.2 / §8.3 收口注（v1.21 追加））：label 逐字
  * 「我的雲盤」、glyph 逐字单字「盤」（既有约定是单字，不画 SVG）、`to` 指向 `/my/drive`。
  * **前 4 项的 label 与顺序逐字未改**。
@@ -20,7 +20,7 @@ import { isLoggedIn } from '../data/session.js'
 const logged = isLoggedIn
 
 const items = computed(() => [
-  { key: 'square', to: { name: 'square' }, glyph: '廣', label: '藏品廣場' },
+  { key: 'square', to: { name: 'square' }, glyph: '廣', label: '璽印匯類' },
   { key: 'my-corrections', to: { name: 'my-corrections' }, glyph: '勘', label: '我的勘誤記錄' },
   { key: 'my-photos', to: { name: 'my-photos' }, glyph: '影', label: '我的實物照片' },
   { key: 'points', to: { name: 'points' }, glyph: '金', label: '積分中心' },

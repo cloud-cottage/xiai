@@ -55,7 +55,7 @@ function signOut() {
         <p class="login__signed-role">{{ user.role === 'admin' ? '管理員賬號' : '普通用戶賬號' }}</p>
         <div class="login__signed-foot">
           <button class="btn btn--ghost" type="button" @click="signOut">退出登錄</button>
-          <router-link class="btn btn--primary" :to="{ name: 'square' }">返回藏品廣場</router-link>
+          <router-link class="btn btn--primary" :to="{ name: 'square' }">返回璽印匯類</router-link>
         </div>
       </div>
 

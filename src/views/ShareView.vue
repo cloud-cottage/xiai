@@ -136,7 +136,7 @@ function goSquare() {
       <div class="share-state" data-share-state="expired">
         <h1 class="share-state__title">連結已過期</h1>
         <p class="share-state__body">這個分享連結已失效。</p>
-        <button class="btn btn--primary" type="button" @click="goSquare">返回藏品廣場</button>
+        <button class="btn btn--primary" type="button" @click="goSquare">返回璽印匯類</button>
       </div>
     </template>
 
@@ -145,7 +145,7 @@ function goSquare() {
       <div class="share-state" data-share-state="invalid">
         <h1 class="share-state__title">連結不存在</h1>
         <p class="share-state__body">請向分享者索取新的連結。</p>
-        <button class="btn btn--ghost" type="button" @click="goSquare">返回藏品廣場</button>
+        <button class="btn btn--ghost" type="button" @click="goSquare">返回璽印匯類</button>
       </div>
     </template>
   </section>

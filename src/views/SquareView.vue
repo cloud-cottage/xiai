@@ -219,7 +219,7 @@ function onSealSaved() {}
   <section>
     <div class="page-head square__head">
       <div>
-        <h1>藏品廣場</h1>
+        <h1>璽印匯類</h1>
         <p>歷代印章與印面彙集於此，可按朝代、印面內容與印面風格篩選，亦可查看印面詳情。</p>
       </div>
       <button
