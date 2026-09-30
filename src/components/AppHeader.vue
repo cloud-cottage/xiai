@@ -56,7 +56,9 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 <template>
   <header class="app-header">
     <router-link class="app-header__brand" :to="{ name: 'square' }">
-      <span class="app-header__logo-mark">印</span>
+      <span class="app-header__logo-mark">
+        <img class="app-header__logo-img" src="/assets/xiai-logo.svg" alt="璽愛" />
+      </span>
       <span class="app-header__logo-text">璽愛</span>
     </router-link>
 
@@ -112,6 +114,22 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </template>
 
 <style scoped>
+/* 字标位放整张横版 logo（640×400）：取消全局那条 30×30 方形徽章盒约束，改为按高度定尺、宽度自适应。
+   仅覆盖尺寸/描边，不碰任何色值或主题变量。 */
+.app-header__logo-mark {
+  display: block;
+  width: auto;
+  height: 30px;
+  border: 0;
+  border-radius: 0;
+}
+
+.app-header__logo-img {
+  display: block;
+  height: 100%;
+  width: auto;
+}
+
 .app-header__icon-btn {
   color: var(--slot-header-text);
 }
