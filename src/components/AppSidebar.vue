@@ -20,7 +20,7 @@ import { isLoggedIn } from '../data/session.js'
 const logged = isLoggedIn
 
 const items = computed(() => [
-  { key: 'square', to: { name: 'square' }, glyph: '廣', label: '璽印匯類' },
+  { key: 'square', to: { name: 'square' }, glyph: '匯', label: '璽印匯類' },
   { key: 'my-corrections', to: { name: 'my-corrections' }, glyph: '勘', label: '我的勘誤記錄' },
   { key: 'my-photos', to: { name: 'my-photos' }, glyph: '影', label: '我的實物照片' },
   { key: 'points', to: { name: 'points' }, glyph: '金', label: '積分中心' },

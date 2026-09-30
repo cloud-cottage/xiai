@@ -1550,7 +1550,7 @@ onBeforeUnmount(() => {
       title="下載高清原圖"
       :message="`本次下載將扣除 ${downloadCost} 金；同一枚印章在本次會話內只扣費一次。`"
       :detail="quoteDetail"
-      hint="下載件爲該印面在本機存儲的原檔字節（不加水印、不轉碼），下載後即與存檔件做摘要核對。"
+      hint="本機存有原檔時直出原檔；雲端暫無原檔時交付展示檔並註明。"
       confirm-text="確認下載"
       @confirm="confirmDownload"
       @cancel="downloadOpen = false"
