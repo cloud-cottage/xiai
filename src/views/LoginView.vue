@@ -15,6 +15,9 @@ const feedback = ref('')
 
 const user = computed(() => currentUser())
 
+/* 验证码提示由服务层按**當前形態**给出（云端形態下固定碼在服务端 ⇒ 本機不得自稱 1234）。 */
+const codeHint = auth.loginCodeHint()
+
 function sendCode() {
   const result = auth.requestCode(phone.value)
   codeSent.value = result.ok
@@ -72,14 +75,14 @@ function signOut() {
             <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="4" placeholder="請輸入驗證碼" />
             <button class="btn btn--ghost" type="button" @click="sendCode">獲取驗證碼</button>
           </div>
-          <span class="field__hint">當前爲演示環境，驗證碼固定爲 1234。</span>
+          <span class="field__hint">{{ codeHint }}</span>
         </div>
 
         <button class="btn btn--primary login__submit" type="submit">登錄</button>
       </form>
 
       <p v-if="feedback" class="login__feedback">{{ feedback }}</p>
-      <p v-if="codeSent" class="login__sent">驗證碼已就緒，可填入 1234 完成登錄。</p>
+      <p v-if="codeSent" class="login__sent">驗證碼已就緒，請填入後完成登錄。</p>
     </section>
   </div>
 </template>

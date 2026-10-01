@@ -410,6 +410,11 @@ const badLogin = await authSvc.login(PHONE, `${SMSCode}x`)
 check('B6', '验证码错 ⇒ 登录失败', false, badLogin.ok)
 check('B6b', '登录失败 ⇒ 零半成品（未建本地账号行）', usersBefore, (await import(path.join(ROOT, 'src/data/db.js'))).listUserRows().length)
 check('B6c', '登录失败 ⇒ 未写 session', null, session.currentUser())
+/* B6f / B6g（Phase A 语义修复的回归断言）：**服务端结构化拒绝必须原样透传** ——
+   修复前 `request()` 把「业务拒绝（`ok:false` ＋ `reason` ＋ `message`）」误判为「回传形状不可辨識」，
+   上屏变成 `STORAGE_UNAVAILABLE` ＋「雲端校驗回傳形狀不可辨識…」（**真因被吞、文案变假**）。 */
+check('B6f', '登录失败 ⇒ reason 原样透传（不得折叠成 STORAGE_UNAVAILABLE）', badCode.reason, badLogin.reason)
+check('B6g', '登录失败 ⇒ message 逐字 ＝ 服务端拒因（不是「形狀不可辨識」）', badCode.message, badLogin.message)
 const goodLogin = await authSvc.login(PHONE, SMSCode)
 check('B6d', '正确验证码 ⇒ 登录成功（服务端验证）', true, goodLogin.ok === true)
 check('B6e', '登录后本机镜像是登录用户', PHONE, (session.currentUser() || {}).phone)

@@ -13,6 +13,9 @@ import { grantInitialGold, settleInviteReward } from './points.js'
    云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。
    dev / 离线形态（无云写入面）仍走改前的本地形态，并明确标注为非正式路径。 */
 import { ensureUserLoginToken } from './userToken.js'
+/* **形态如实的验证码提示**（Phase A 语义修复）：固定码只在本機 dev / 離線形態为真；
+   云端形態下验证码由服务端校验（环境变量固定演示码，W-43）⇒ 客户端**不得**自称 1234。 */
+import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 
 export const DEV_SMS_CODE = '1234'
 export const GOLD_INITIAL = 50
@@ -26,7 +29,20 @@ export function requestCode(phone) {
   if (!isPhoneLike(phone)) {
     return { ok: false, message: '請輸入 11 位手機號' }
   }
-  return { ok: true, message: '驗證碼已發送（開發環境固定爲 1234）' }
+  return { ok: true, message: loginCodeHint() }
+}
+
+/**
+ * 验证码提示（**形态如实，不得静默 / 不得假称**）：本機 dev / 離線形態固定碼为 1234（既有约定）；
+ * 云端形態（有云写入面）下验证码**由服务端校验**（函数环境变量固定演示码，`W-43`）⇒ 提示不得
+ * 谎称 1234（否则用户按上屏提示输入必被服务端拒）。**明文**：本函数**不**回传、**不**内嵌任何
+ * 验证码取值（云端形态只指向「向管理员索取」）。
+ * @returns {string} 上屏提示（繁體）
+ */
+export function loginCodeHint() {
+  return writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV
+    ? '當前爲演示環境，驗證碼固定爲 1234。'
+    : '當前爲演示環境：驗證碼由服務端固定校驗，請向管理員索取演示碼。'
 }
 
 /**

@@ -152,6 +152,15 @@ export function createTokenChannel(profile) {
     /* 传输层失败 ⇒ 原样（`STORAGE_UNAVAILABLE`）；业务拒绝 ⇒ 原样透传。 */
     if (!reply.ok) return reply
     const result = reply.result
+    /* **服务端结构化拒绝原样透传**（`reason` / `message` 一个都不改写）—— 与 `gate()` 的同一分支
+       **逐条同形**：服务端的「业务拒绝」（如签发时手机号 / 验证码不符 ⇒ `FORBIDDEN`）**不是**
+       「回传形状不可辨識」⇒ 不得折叠成 `STORAGE_UNAVAILABLE` ＋ `shapeDenial()` 文案（否则真因被
+       吞掉、上屏文案变假，且与 `gate()` 对同类回传的处置自相矛盾）。`shapeDenial()` 自此**只**覆盖
+       「既非放行、也非结构化拒绝」的真不可辨认形状。 */
+    if (result && result.ok === false && typeof result.reason === 'string' && typeof result.message === 'string') {
+      state.lastReason = result.reason
+      return { ok: false, reason: result.reason, message: result.message }
+    }
     if (!result || result.ok !== true || typeof result.token !== 'string' || result.token === '') return shapeDenial()
     state.token = result.token
     state.expiresAt = Number(result.expiresAt) || 0
