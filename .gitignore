@@ -10,7 +10,7 @@ qa-recheck/
 .env
 .env.*
 !.env.example
-# 亽爱（xiai）生产构建期公开开关：只含 VITE_ 前缀的**公开**构建期变量（无任何密钥），显式放行入库
-!.env.production
+# （2026-10-01）撤跟踪并删除 .env.production：公开仓不入库任何环境文件（原「显式放行入库」白名单撤销，上方 `.env.*` 忽略规则恢复生效）
+/.env.production
 *.log
 .vercel
