@@ -15,13 +15,17 @@ const feedback = ref('')
 
 const user = computed(() => currentUser())
 
-/* 验证码提示由服务层按**當前形態**给出（云端形態下固定碼在服务端 ⇒ 本機不得自稱 1234）。 */
+/* 验证码提示由服务层给出（演示環境共用演示碼；按鈕點下即自動填入 ⇒ 提示只说这一步，不自稱取值）。 */
 const codeHint = auth.loginCodeHint()
 
 function sendCode() {
   const result = auth.requestCode(phone.value)
   codeSent.value = result.ok
   feedback.value = result.message
+  /* 同 jiazu 登录页做法：取碼成功后把演示碼**自動填入**驗證碼欄（免手輸，直接可登錄）。 */
+  if (result.ok && result.code) {
+    code.value = result.code
+  }
 }
 
 async function submit() {
@@ -72,7 +76,7 @@ function signOut() {
         <div class="field">
           <label for="login-code">驗證碼</label>
           <div class="login__code-row">
-            <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="4" placeholder="請輸入驗證碼" />
+            <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="6" placeholder="請輸入驗證碼" />
             <button class="btn btn--ghost" type="button" @click="sendCode">獲取驗證碼</button>
           </div>
           <span class="field__hint">{{ codeHint }}</span>
@@ -82,7 +86,7 @@ function signOut() {
       </form>
 
       <p v-if="feedback" class="login__feedback">{{ feedback }}</p>
-      <p v-if="codeSent" class="login__sent">驗證碼已就緒，請填入後完成登錄。</p>
+      <p v-if="codeSent" class="login__sent">驗證碼已自動填入，請直接點「登錄」。</p>
     </section>
   </div>
 </template>

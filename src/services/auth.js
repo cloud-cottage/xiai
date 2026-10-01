@@ -1,8 +1,11 @@
 /**
  * 玺爱 · 登录服务（手机号 + 验证码）
  *
- * 开发登录约定沿用本工作台既有口径：验证码固定 1234。
- * 零后端：登录只在本机 localStorage 内完成，不发起任何外部请求。
+ * 演示（固定）验证码的**唯一取值真源** = 部署云函数 `xiai-user-token` 的环境变量
+ * `XIAI_USER_SMS_CODE`（W-43 已接受风险：固定值，暂缓）。客户端按「同型做法」
+ * （jiazu 登录页：点「获取验证码」后把服务端演示码 `dev_code` 直接写进验证码栏）
+ * 在点击「獲取驗證碼」后**自动填入**该演示码。
+ * 零后端（dev / 離線形態）：登录只在本机 localStorage 内完成，不发起任何外部请求。
  */
 
 import { listUserRows, saveUserRows } from '../data/db.js'
@@ -13,38 +16,42 @@ import { grantInitialGold, settleInviteReward } from './points.js'
    云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。
    dev / 离线形态（无云写入面）仍走改前的本地形态，并明确标注为非正式路径。 */
 import { ensureUserLoginToken } from './userToken.js'
-/* **形态如实的验证码提示**（Phase A 语义修复）：固定码只在本機 dev / 離線形態为真；
-   云端形態下验证码由服务端校验（环境变量固定演示码，W-43）⇒ 客户端**不得**自称 1234。 */
-import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 
-export const DEV_SMS_CODE = '1234'
+/* **演示碼常量**：值 = 部署雲函數 `xiai-user-token` 環境變量 `XIAI_USER_SMS_CODE` 的**現值**
+   （唯一真源見檔案頭；本處只是它的**鏡像**）。
+   ⚠️ **它實際上是公開的** ✗ —— 隨前端包（`dist/assets/*.js`）一併下發，任何訪客都讀得到 ⇒
+   它**不是**機密，也不得當機密用：把它公開發布，效果 ＝ **任何人可登錄任意手機號（含管理員手機號）**。
+   值指紋（sha256 前 12 位；僅用於與環境變量核對「是否漂移」，不可逆）＝ '4ef5c38bac71'。
+   改環境變量後**必須同步改此處**，否則登錄會被服務端以 `FORBIDDEN`（手機號或驗證碼不正確）拒絕。 */
+export const DEMO_SMS_CODE = '729341'
+/** 兼容既有引用點（本地碼門沿用舊名）。 */
+export const DEV_SMS_CODE = DEMO_SMS_CODE
 export const GOLD_INITIAL = 50
 
 export function isPhoneLike(phone) {
   return /^1[3-9]\d{9}$/.test(String(phone || '').trim())
 }
 
-/** 开发态取码：不发送任何真实短信，直接约定为 1234。 */
+/**
+ * 演示态取码：不发送任何真实短信，把共用演示码交给调用方（登录页据此**自动填入**验证码栏）。
+ * @returns {{ok:boolean, message:string, code?:string}} `code` 仅在取码成功时出现
+ */
 export function requestCode(phone) {
   if (!isPhoneLike(phone)) {
     return { ok: false, message: '請輸入 11 位手機號' }
   }
-  return { ok: true, message: loginCodeHint() }
+  return { ok: true, message: loginCodeHint(), code: DEMO_SMS_CODE }
 }
 
 /**
- * 验证码提示（**形态如实，不得静默 / 不得假称**）：本機 dev / 離線形態固定碼为 1234（既有约定）；
- * 云端形態（有云写入面）下验证码**由服务端校验**（函数环境变量固定演示码，`W-43`）⇒ 提示不得
- * 谎称 1234（否则用户按上屏提示输入必被服务端拒）。**明文**：本函数**不**回传、**不**内嵌任何
- * 验证码取值（云端形态只指向「向管理员索取」）。
+ * 验证码提示（**形态如实，不得静默 / 不得假称**）：演示環境下验证码为**共用演示码**，且
+ * 点「獲取驗證碼」后**自動填入**驗證碼欄（同 jiazu 登录页做法）⇒ 提示如实说明这一步。
+ * **明文**：本函数**不**回传、**不**内嵌验证码取值（值只经 `DEMO_SMS_CODE` / `requestCode().code` 出去）。
  * @returns {string} 上屏提示（繁體）
  */
 export function loginCodeHint() {
-  return writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV
-    ? '當前爲演示環境，驗證碼固定爲 1234。'
-    : '當前爲演示環境：驗證碼由服務端固定校驗，請向管理員索取演示碼。'
+  return '當前爲演示環境：點「獲取驗證碼」即自動填入演示碼。'
 }
-
 /**
  * 登录（＝註冊成功路径的**唯一入口**：老账号登录 / 新账号建号 + 初始赠送）。
  *
@@ -54,7 +61,7 @@ export function loginCodeHint() {
  * 老账号登录**不触发**结算（不以「邀请人登录」等其它条件触发）。
  *
  * @param {string} phone 手机号
- * @param {string} code 验证码（**云端形态下由服务端判**；dev / 离线形态仍固定 1234）
+ * @param {string} code 验证码（**云端形态下由服务端判**；dev / 離線形態仍走本機演示碼門）
  * @param {{inviterId?:string}} [options]
  * @returns {Promise<{ok:boolean, user?:object, message?:string, invite?:object, reason?:string}>}
  *
