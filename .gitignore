@@ -1,8 +1,12 @@
-# 根 .gitignore（一个 Vercel 项目：根＝玺爱前端，yinyuan/＝印源前端）
+# 根 .gitignore（一个 Vercel 项目：根＝玺爱前端）
+# 注：印源（yinyuan/）已拆为独立仓，feicui/ 亦为独立仓，两者均嵌在本目录下；
+#     不再是本仓的一部分 ⇒ 见下方忽略规则。
 node_modules/
 dist/
-yinyuan/node_modules/
-yinyuan/dist/
+# yinyuan/ 与 feicui/ 现为**独立仓**的活副本（各自带 .git）：不忽略会让 `git add -A` 产生 gitlink 条目。
+yinyuan/
+feicui/
+# 原 `yinyuan/node_modules/`、`yinyuan/dist/` 两条已被上方 `yinyuan/` 覆盖，就地合并（2026-10-02）。
 qa-recheck/
 .DS_Store
 *.local
@@ -14,3 +18,13 @@ qa-recheck/
 /.env.production
 *.log
 .vercel
+# data/ 内含真库 yinpu.db（唯一真源）与 originals/、backups/，public 仓绝不能收录。
+data/
+# 运行时产物与 Python 虚拟环境 / 缓存（server/ 是入库的内容 API，但其 .venv 不入库）。
+.runtime/
+server/.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
