@@ -1,0 +1,2221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>印索｜兆级玺印数字引擎 · V2 双轨制</title>
+<style>
+  /* ============ V2 双轨制 ============
+     营销轨：宣纸 #f8f6f0 + 酒红 #992222 + 宋体 + 细线，与官网一致。
+     控制台轨：浅灰白底 + 深墨侧栏 + 无衬线 + 高数据密度，酒红仅作强调色。 */
+  *{box-sizing:border-box;margin:0;padding:0;}
+  :root{
+    --paper:#f8f6f0; --ink:#222; --muted:#666; --faint:#6f6b61; /* P2-4：原 #8a8578，AA 不达 */ --line:#e8e4da;
+    --brand:#992222; --brand-d:#7c1b1b;
+    /* 后台轨 */
+    --bg:#f4f5f6; --surface:#fff; --side:#1d2226; --side-2:#262c31; --line-2:#e3e6e9;
+    --t1:#1c2227; --t2:#5b656e; --t3:#666c72; /* P2-4：原 #8b949c，白底最低 2.86:1 */ --ok:#2f7a4f; --warn:#9e5f10; /* P2-4：原 #b06a12，4.04:1 */ --danger:#a3282c;
+    --serif:"Noto Serif SC","Songti SC","SimSun",serif;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Segoe UI","Microsoft YaHei",Arial,sans-serif;
+  }
+  body{background:var(--paper);color:var(--ink);font-family:var(--serif);line-height:1.7;padding-top:58px;}
+  a{color:inherit;text-decoration:none;}
+  .container{max-width:1200px;margin:0 auto;padding:0 24px;}
+  /* ---------- 切换条 ---------- */
+  .switcher{position:fixed;top:0;left:0;right:0;height:58px;z-index:80;background:var(--paper);
+    border-bottom:1px solid var(--line);}
+  .switcher-in{max-width:1200px;margin:0 auto;padding:0 24px;height:100%;display:flex;align-items:center;gap:18px;}
+  .switcher-mark{font-size:13px;color:var(--faint);letter-spacing:1px;white-space:nowrap;}
+  .switcher-mark b{color:var(--brand);font-weight:normal;}
+  .segs{display:flex;margin-left:auto;border:1px solid var(--line);border-radius:4px;overflow:hidden;background:#fff;}
+  .seg{font-family:inherit;font-size:14px;color:#333;background:#fff;border:0;border-right:1px solid var(--line);
+    padding:7px 17px;cursor:pointer;transition:background .12s,color .12s;}
+  .seg:last-child{border-right:0;}
+  .seg:hover{background:#fbf9f4;color:var(--brand);}
+  .seg.is-active{background:var(--brand);color:#fff;}
+  .seg small{font-size:11px;opacity:.7;margin-right:4px;}
+  .screen{display:none;}
+  .screen.is-active{display:block;}
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1d2226;color:#fff;
+    font-family:var(--sans);font-size:13px;padding:9px 18px;border-radius:4px;opacity:0;pointer-events:none;
+    transition:opacity .18s;z-index:120;max-width:92vw;text-align:center;}
+  .toast.show{opacity:1;}
+  /* ---------- 营销轨元件 ---------- */
+  .btn{display:inline-block;padding:11px 26px;background:var(--brand);color:#fff;border:1px solid var(--brand);
+    border-radius:2px;font-family:inherit;font-size:15px;letter-spacing:1px;cursor:pointer;}
+  .btn:hover{background:var(--brand-d);border-color:var(--brand-d);}
+  .btn.ghost{background:transparent;color:var(--brand);}
+  .btn.ghost:hover{background:#f2ece6;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:4px;padding:28px;}
+  .card h3{color:var(--brand);font-size:19px;margin-bottom:12px;letter-spacing:1px;}
+  .section{padding:64px 0;border-top:1px solid var(--line);}
+  .section-title{text-align:center;font-size:25px;letter-spacing:3px;margin-bottom:8px;}
+  .section-sub{text-align:center;color:var(--muted);font-size:14px;margin-bottom:38px;}
+  .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;}
+  .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;}
+  .eyebrow{color:var(--brand);font-size:13px;letter-spacing:4px;margin-bottom:10px;}
+  .note{font-size:13px;color:var(--faint);}
+  header.site{border-bottom:1px solid var(--line);}
+  .header-wrap{display:flex;justify-content:space-between;align-items:center;padding:22px 0;}
+  .logo{font-size:28px;color:var(--brand);font-weight:bold;letter-spacing:5px;}
+  nav.site-nav a{margin-left:24px;color:#333;font-size:15px;}
+  nav.site-nav a:hover{color:var(--brand);}
+  nav.site-nav a.acct{color:var(--brand);border-bottom:1px solid var(--brand);padding-bottom:2px;}
+  .hero{padding:74px 0 62px;text-align:center;}
+  .hero h1{font-size:42px;letter-spacing:2px;margin-bottom:18px;}
+  .hero p{font-size:17px;color:#444;max-width:820px;margin:0 auto 30px;}
+  .hero-actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:4px;background:#fff;margin-top:52px;}
+  .stat{padding:22px 20px;border-right:1px solid var(--line);}
+  .stat:last-child{border-right:0;}
+  .stat b{display:block;font-size:24px;color:var(--brand);letter-spacing:1px;}
+  .stat span{font-size:13px;color:var(--muted);}
+  .tech-block{background:#fff;border:1px solid var(--line);border-radius:4px;padding:24px 28px;margin-bottom:16px;}
+  .tech-block h3{color:var(--brand);font-size:18px;margin-bottom:8px;letter-spacing:1px;}
+  .tech-block ul{padding-left:20px;}
+  .tech-block li{margin-bottom:6px;}
+  .pipeline{display:grid;grid-template-columns:1fr 30px 1fr 30px 1fr;align-items:center;background:#fff;
+    border:1px solid var(--line);border-radius:4px;padding:22px;margin-bottom:16px;}
+  .pipe-box{border:1px solid var(--line);border-radius:2px;padding:14px;text-align:center;background:var(--paper);}
+  .pipe-box b{display:block;color:var(--brand);font-size:15px;letter-spacing:1px;}
+  .pipe-box span{font-size:12px;color:var(--muted);display:block;margin-top:4px;}
+  .pipe-arrow{text-align:center;color:var(--faint);}
+  .seal-card{background:#fff;border:1px solid var(--line);border-radius:4px;padding:20px;text-align:center;}
+  .seal-card h4{font-size:15px;color:var(--brand);margin:12px 0 4px;letter-spacing:1px;}
+  /* 玺印占位（纯 CSS） */
+  .seal{position:relative;width:124px;height:124px;margin:0 auto;}
+  .seal-face{width:100%;height:100%;display:flex;flex-direction:row-reverse;align-items:center;justify-content:center;gap:2px;}
+  .seal-col{display:flex;flex-direction:column;align-items:center;}
+  .seal-col span{font-size:27px;line-height:1.1;font-weight:bold;}
+  .seal-bai .seal-face{background:#fff;border:2px solid #1c1c1c;}
+  .seal-bai .seal-face::before{content:"";position:absolute;inset:6px;border:1px solid #1c1c1c;}
+  .seal-bai .seal-col span{color:#141414;}
+  .seal-zhu .seal-face{border:1px solid var(--brand);
+    background-image:linear-gradient(45deg,rgba(0,0,0,.045) 25%,transparent 25%,transparent 75%,rgba(0,0,0,.045) 75%),
+      linear-gradient(45deg,rgba(0,0,0,.045) 25%,transparent 25%,transparent 75%,rgba(0,0,0,.045) 75%);
+    background-size:12px 12px;background-position:0 0,6px 6px;}
+  .seal-zhu .seal-face::before{content:"";position:absolute;inset:6px;border:1px solid rgba(153,34,34,.35);}
+  .seal-zhu .seal-col span{color:var(--brand);}
+  .ph-badge{position:absolute;top:4px;left:4px;font-family:var(--sans);font-size:10px;letter-spacing:.4px;color:#555;
+    background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:2px;padding:0 4px;line-height:15px;z-index:2;}
+  /* ---------- 屏② 登录/注册（营销轨） ---------- */
+  .auth-wrap{display:grid;grid-template-columns:0.95fr 1.05fr;max-width:1020px;margin:54px auto 72px;
+    border:1px solid var(--line);border-radius:4px;background:#fff;overflow:hidden;}
+  .auth-aside{background:var(--paper);border-right:1px solid var(--line);padding:42px 36px;}
+  .auth-aside h2{font-size:24px;letter-spacing:2px;margin-bottom:8px;}
+  .auth-aside ul{list-style:none;margin-top:20px;}
+  .auth-aside li{padding:10px 0;border-bottom:1px dashed var(--line);font-size:14px;color:#444;}
+  .auth-aside li b{color:var(--brand);font-weight:normal;}
+  .auth-main{padding:42px 36px;}
+  .subtabs{display:flex;border-bottom:1px solid var(--line);margin-bottom:24px;}
+  .subtab{flex:0 0 auto;font-family:inherit;font-size:16px;background:none;border:0;border-bottom:2px solid transparent;
+    padding:8px 22px 10px 0;margin-right:8px;cursor:pointer;color:#717171;letter-spacing:1px;} /* P2-4：原 #777，4.48:1 擦线 */
+  .subtab.is-active{color:var(--brand);border-bottom-color:var(--brand);}
+  .field{margin-bottom:15px;}
+  .field label{display:block;font-size:13px;color:var(--muted);margin-bottom:5px;}
+  .field input,.field select{width:100%;font-family:inherit;font-size:15px;color:var(--ink);background:#fff;
+    border:1px solid var(--line);border-radius:2px;padding:10px 12px;}
+  .field input:focus,.field select:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var(--brand);}
+  .field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .hint{font-size:12px;color:var(--faint);margin-top:6px;}
+  .checkline{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--muted);margin:16px 0 20px;}
+  .checkline input{margin-top:4px;}
+  .pane{display:none;}
+  .pane.is-active{display:block;}
+  /* ---------- 控制台轨外壳 ---------- */
+  .admin{font-family:var(--sans);background:var(--bg);color:var(--t1);border-top:0;}
+  .admin .shell{display:grid;grid-template-columns:224px 1fr;min-height:720px;max-width:1400px;margin:0 auto;}
+  .admin .side{background:var(--side);color:#cfd6db;padding:20px 0 26px;}
+  .admin .brandline{padding:0 20px 16px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:14px;}
+  .admin .brandline b{display:block;color:#fff;font-size:16px;letter-spacing:2px;}
+  .admin .brandline span{font-size:11.5px;color:#8d979e;letter-spacing:.3px;}
+  .admin .snav{display:flex;flex-direction:column;}
+  .admin .snav a{padding:9px 20px;font-size:13.5px;color:#c2cace;border-left:3px solid transparent;}
+  .admin .snav a:hover{background:var(--side-2);color:#fff;}
+  .admin .snav a.is-active{background:var(--side-2);color:#fff;border-left-color:var(--brand);}
+  .admin .snav .grp{font-size:11px;color:#78838a;letter-spacing:1px;padding:16px 20px 6px;}
+  .admin .sfoot{margin:22px 20px 0;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);font-size:11px;color:#7f8a91;line-height:1.6;}
+  .admin .main{padding:0 0 34px;min-width:0;}
+  .admin .topbar{background:var(--surface);border-bottom:1px solid var(--line-2);padding:14px 26px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;}
+  .admin .crumb{font-size:13px;color:var(--t2);}
+  .admin .crumb b{color:var(--t1);font-weight:600;}
+  .admin .search{margin-left:auto;width:230px;border:1px solid var(--line-2);border-radius:4px;background:var(--bg);
+    padding:6px 10px;font-size:13px;color:var(--t2);font-family:inherit;}
+  .admin .who{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--t2);}
+  .admin .avatar{width:26px;height:26px;border-radius:50%;background:var(--brand);color:#fff;font-size:11.5px;
+    display:flex;align-items:center;justify-content:center;letter-spacing:.5px;}
+  .admin .body{padding:22px 26px 0;}
+  .admin .pills{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  .pill{font-size:11.5px;border-radius:999px;padding:2px 10px;border:1px solid var(--line-2);color:var(--t2);background:#fff;letter-spacing:.2px;}
+  .pill.ok{color:var(--ok);border-color:#cfe3d6;background:#f3faf5;}
+  .pill.warn{color:var(--warn);border-color:#ecdcbf;background:#fdf8ef;}
+  .pill.bad{color:var(--danger);border-color:#eccfcf;background:#fdf4f4;}
+  .pill.accent{color:var(--brand);border-color:#e3cfcf;background:#fbf5f5;}
+  .dash{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
+  .kpi{background:var(--surface);border:1px solid var(--line-2);border-radius:6px;padding:14px 16px;}
+  .kpi label{font-size:12px;color:var(--t3);display:block;margin-bottom:4px;letter-spacing:.3px;}
+  .kpi .v{font-size:23px;font-weight:600;letter-spacing:-.2px;font-variant-numeric:tabular-nums;}
+  .kpi .v em{font-style:normal;font-size:12.5px;color:var(--t3);font-weight:400;margin-left:4px;}
+  .kpi .sub{font-size:11.5px;color:var(--t2);display:flex;justify-content:space-between;align-items:center;margin-top:6px;}
+  .spark{display:block;margin-top:8px;}
+  .meter{height:5px;border-radius:3px;background:#eceff1;overflow:hidden;margin-top:8px;}
+  .meter i{display:block;height:100%;background:var(--brand);}
+  .panel{background:var(--surface);border:1px solid var(--line-2);border-radius:6px;margin-bottom:18px;}
+  .panel-head{padding:13px 18px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .panel-head h3{font-size:14.5px;font-weight:600;letter-spacing:.2px;}
+  .panel-head .right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+  .panel-body{padding:16px 18px;}
+  .two{display:grid;grid-template-columns:1.35fr 1fr;gap:18px;margin-bottom:18px;}
+  table.dt{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;}
+  table.dt th{text-align:left;font-weight:600;color:var(--t3);font-size:11.5px;letter-spacing:.3px;
+    padding:9px 12px;border-bottom:1px solid var(--line-2);background:#fafbfb;white-space:nowrap;}
+  table.dt td{padding:9px 12px;border-bottom:1px solid var(--line-2);color:var(--t1);white-space:nowrap;}
+  table.dt tr:hover td{background:#fafbfb;}
+  table.dt tfoot td{background:#fafbfb;color:var(--t2);font-weight:600;}
+  .scroll{overflow-x:auto;}
+  .mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12px;letter-spacing:.2px;color:#37424a;}
+  .a-btn{font-family:inherit;font-size:12px;background:#fff;border:1px solid var(--line-2);border-radius:4px;
+    padding:4px 10px;cursor:pointer;color:var(--t2);}
+  .a-btn:hover{border-color:var(--brand);color:var(--brand);}
+  .a-btn.pri{background:var(--brand);border-color:var(--brand);color:#fff;}
+  .a-btn.pri:hover{background:var(--brand-d);}
+  .a-btn.sm{padding:3px 8px;font-size:11.5px;}
+  .charts{display:grid;grid-template-columns:1.6fr 1fr;gap:18px;margin-bottom:18px;}
+  .barchart{display:flex;align-items:flex-end;gap:10px;height:148px;padding:0 2px;}
+  .barchart .bc{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;}
+  .barchart .bv{font-size:10.5px;color:var(--t3);margin-bottom:3px;}
+  .barchart .bar{width:100%;max-width:26px;background:#e9dcdc;border:1px solid var(--brand);border-bottom:0;border-radius:1px 1px 0 0;}
+  .barchart .bl{font-size:10.5px;color:var(--t3);margin-top:5px;}
+  .legend{list-style:none;font-size:12px;color:var(--t2);}
+  .legend li{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line-2);}
+  .legend li:last-child{border-bottom:0;}
+  .legend .dot{width:8px;height:8px;border-radius:2px;background:var(--brand);}
+  .legend .dot.g2{background:#c98b8b;}
+  .legend .dot.g3{background:#9aa7ae;}
+  .legend .pct{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--t1);}
+  .donut-wrap{display:flex;align-items:center;gap:16px;}
+  /* ---------- 屏④ 计费（控制台轨） ---------- */
+  .banner{background:#fff;border:1px solid var(--line-2);border-left:3px solid var(--brand);border-radius:4px;
+    padding:11px 14px;font-size:12.5px;color:var(--t2);margin-bottom:18px;}
+  .plans2{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  .plan2{background:var(--surface);border:1px solid var(--line-2);border-radius:6px;padding:18px 20px;}
+  .plan2.hi{border-color:#e3cfcf;background:#fffdfd;}
+  .plan2 h4{font-size:14.5px;font-weight:600;margin-bottom:2px;}
+  .plan2 .price{font-size:25px;font-weight:600;margin:8px 0 2px;font-variant-numeric:tabular-nums;}
+  .plan2 .price small{font-size:12px;color:var(--t3);font-weight:400;}
+  .plan2 ul{list-style:none;margin-top:12px;border-top:1px solid var(--line-2);padding-top:10px;}
+  .plan2 li{font-size:12.5px;color:var(--t2);padding:4px 0;}
+  .plan2 li b{color:var(--brand);font-weight:600;}
+  .tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:4px 0 10px;}
+  .tile{font-family:inherit;font-size:13.5px;background:#fff;border:1px solid var(--line-2);border-radius:4px;
+    padding:12px 6px;cursor:pointer;color:var(--t1);text-align:center;font-variant-numeric:tabular-nums;}
+  .tile:hover{border-color:var(--brand);color:var(--brand);}
+  .tile.is-active{border-color:var(--brand);color:var(--brand);background:#fbf5f5;font-weight:600;}
+  .tile small{display:block;font-size:11px;color:var(--t3);font-weight:400;}
+  .balance{background:var(--side);color:#fff;border-radius:6px;padding:16px 18px;}
+  .balance span{font-size:12px;color:#9ba6ad;}
+  .balance b{display:block;font-size:28px;font-weight:600;letter-spacing:-.3px;font-variant-numeric:tabular-nums;}
+  .payrows{list-style:none;font-size:12.5px;color:var(--t2);}
+  .payrows li{padding:8px 0;border-bottom:1px solid var(--line-2);display:flex;gap:8px;}
+  .payrows li:last-child{border-bottom:0;}
+  .payrows b{color:var(--t1);font-weight:600;flex:0 0 76px;}
+  .steps{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;}
+  .step{flex:1;min-width:160px;border:1px solid var(--line-2);border-radius:4px;padding:10px 12px;background:#fafbfb;}
+  .step b{display:block;font-size:12.5px;color:var(--t1);}
+  .step span{font-size:11.5px;color:var(--t3);}
+  footer.site{border-top:1px solid var(--line);padding:30px 0;text-align:center;color:var(--muted);font-size:13.5px;}
+  /* ---------- 断点 ---------- */
+  @media (max-width:1200px){
+    .grid-4{grid-template-columns:repeat(2,1fr);}
+    .stats{grid-template-columns:repeat(2,1fr);}
+    .stat:nth-child(2){border-right:0;}
+    .stat:nth-child(1),.stat:nth-child(2){border-bottom:1px solid var(--line);}
+    .dash{grid-template-columns:repeat(2,1fr);}
+    .two,.charts{grid-template-columns:1fr;}
+  }
+  @media (max-width:980px){
+    .grid-3{grid-template-columns:1fr;}
+    .auth-wrap{grid-template-columns:1fr;}
+    .auth-aside{border-right:0;border-bottom:1px solid var(--line);}
+    .admin .shell{grid-template-columns:1fr;}
+    .admin .snav{flex-direction:row;flex-wrap:wrap;}
+    .admin .snav a{border-left:0;border-bottom:2px solid transparent;padding:8px 14px;}
+    .admin .snav a.is-active{border-left:0;border-bottom-color:var(--brand);}
+    .admin .snav .grp{display:none;}
+    .plans2{grid-template-columns:1fr;}
+    .pipeline{grid-template-columns:1fr;gap:10px;}
+    .pipe-arrow{transform:rotate(90deg);}
+    .switcher-mark{display:none;}
+    .seg{padding:7px 11px;font-size:13px;}
+    .switcher-in{gap:8px;padding:0 12px;}
+    .segs{margin-left:0;flex:1;}
+    .search{display:none;}
+    .hero h1{font-size:32px;}
+  }
+
+  /* ---------- 演示补丁新增：弹层 / 演示二维码 / 状态条 / 维度切换（后台轨，无渐变、无 glass） ---------- */
+  .modal{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(29,34,38,.5);display:none;z-index:200;
+    font-family:var(--sans);}
+  .modal.show{display:flex;align-items:center;justify-content:center;padding:24px;}
+  .modal-box{background:var(--surface);border:1px solid var(--line-2);border-radius:6px;width:100%;
+    max-width:600px;max-height:88vh;overflow:auto;padding:24px 26px;}
+  .modal-box.sm{max-width:470px;}
+  .modal-box h4{color:var(--t1);font-size:15px;font-weight:600;letter-spacing:.2px;margin-bottom:10px;}
+  .modal-acts{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;}
+  .modal-acts button{font-family:inherit;font-size:12.5px;background:#fff;border:1px solid var(--line-2);
+    border-radius:4px;padding:7px 14px;cursor:pointer;color:var(--t2);}
+  .modal-acts button:hover{border-color:var(--brand);color:var(--brand);}
+  .modal-acts.demo-acts button{border-color:#e3cfcf;background:#fbf5f5;color:var(--brand);}
+  .modal-acts button[disabled]{opacity:.5;cursor:not-allowed;}
+  .warn-line{border-left:3px solid var(--brand);background:#fbf5f5;color:#7c1b1b;
+    font-size:12.5px;padding:8px 12px;margin-bottom:14px;}
+  .plain{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:14px;letter-spacing:.3px;
+    background:var(--bg);border:1px dashed var(--brand);border-radius:4px;padding:14px;
+    word-break:break-all;margin-bottom:10px;color:var(--t1);}
+  .qr{width:172px;height:172px;display:grid;grid-template-columns:repeat(21,1fr);
+    grid-template-rows:repeat(21,1fr);background:#fff;border:1px solid var(--line-2);padding:8px;margin:12px auto 6px;}
+  .qr i{display:block;}
+  .qr i.on{background:#1d2226;}
+  .center{text-align:center;}
+  .pay-amt{font-size:26px;font-weight:600;color:var(--brand);text-align:center;margin:6px 0 2px;
+    font-variant-numeric:tabular-nums;}
+  .tip{font-size:12px;color:var(--t2);background:var(--bg);border:1px solid var(--line-2);
+    border-radius:4px;padding:8px 10px;margin:10px 0 0;}
+  .switchline{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--t2);margin-top:12px;
+    border:1px dashed var(--line-2);border-radius:4px;padding:8px 10px;background:#fafbfb;}
+  .scopebox{border:1px solid var(--line-2);border-radius:4px;padding:10px 12px;margin:12px 0 0;}
+  .scopebox legend{font-size:12px;color:var(--t3);padding:0 6px;}
+  .scopebox label{display:block;font-size:12.5px;color:var(--t2);padding:4px 0;}
+  .statusbar{border:1px solid var(--line-2);border-left:3px solid var(--brand);background:#fbf5f5;
+    border-radius:4px;padding:9px 12px;font-size:12px;color:var(--t2);line-height:1.85;margin-bottom:16px;}
+  .statusbar b{color:var(--brand);font-weight:600;}
+  .statusbar a{color:var(--brand);border-bottom:1px solid var(--brand);}
+  .dims{display:flex;border:1px solid var(--line-2);border-radius:4px;overflow:hidden;width:100%;
+    max-width:420px;margin:0 0 12px;background:#fff;}
+  .dims button{flex:1;font-family:inherit;font-size:12.5px;padding:7px 10px;background:#fff;border:0;
+    border-right:1px solid var(--line-2);cursor:pointer;color:var(--t2);}
+  .dims button:last-child{border-right:0;}
+  .dims button.is-active{background:var(--brand);color:#fff;}
+  .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;}
+  .filters select{font-family:inherit;font-size:12.5px;padding:6px 10px;background:#fff;
+    border:1px solid var(--line-2);border-radius:4px;color:var(--t2);}
+  .steps .step{background:#fafbfb;}
+  .field-label{display:block;font-size:13px;color:var(--muted);margin-bottom:5px;}
+  .cap-box{border:1px solid var(--line);border-radius:2px;padding:10px 12px;
+    font-family:Menlo,monospace;letter-spacing:6px;color:var(--brand);background:var(--paper);}
+  .cap-box span{float:right;font-family:inherit;font-size:11px;color:#6f6b61;letter-spacing:0;}
+  .scopes{font-size:11.5px;color:var(--t3);}
+  .radios{display:flex;gap:16px;flex-wrap:wrap;margin:8px 0 4px;font-size:12.5px;color:var(--t2);}
+  .radios label{display:flex;align-items:center;gap:6px;}
+  .amt-input{width:150px;font-family:inherit;font-size:12.5px;padding:6px 10px;background:#fff;
+    border:1px solid var(--line-2);border-radius:4px;color:var(--t1);}
+  .rowacts button[disabled],.rowacts button[aria-disabled="true"]{opacity:.55;cursor:not-allowed;}
+  .barchart .bcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;}
+  .barchart .bval{font-size:10.5px;color:var(--t3);margin-bottom:3px;}
+  .barchart .blabel{font-size:10.5px;color:var(--t3);margin-top:5px;}
+  .hide{display:none;}
+  @media (max-width:980px){ .modal-box{padding:20px;} .dims{max-width:100%;} }
+</style>
+</head>
+<body>
+
+<div class="switcher">
+  <div class="switcher-in">
+    <div class="switcher-mark">V2 双轨制 · <b>营销轨宋韵 / 后台轨中性</b>（界面示意）</div>
+    <div class="segs" role="tablist" aria-label="页面切换">
+      <button class="seg is-active" role="tab" aria-selected="true" tabindex="0" data-goto="screen-home"><small>①</small>首页</button>
+      <button class="seg" role="tab" aria-selected="false" tabindex="-1" data-goto="screen-auth"><small>②</small>注册 / 登录</button>
+      <button class="seg" role="tab" aria-selected="false" tabindex="-1" data-goto="screen-console"><small>③</small>控制台概览</button>
+      <button class="seg" role="tab" aria-selected="false" tabindex="-1" data-goto="screen-billing"><small>④</small>计费规则</button>
+    </div>
+  </div>
+</div>
+
+<main>
+<!-- ================= ① 首页（营销轨，宋韵） ================= -->
+<section class="screen is-active" id="screen-home" role="tabpanel" aria-label="首页">
+  <header class="site">
+    <div class="container header-wrap">
+      <div class="logo">印索</div>
+      <nav class="site-nav">
+        <a href="#v2-resources">资源总览</a>
+        <a href="#v2-tech">图像技术</a>
+        <a href="#v2-api">API服务</a>
+        <a href="#v2-seals">玺印样例</a>
+        <a href="#v2-contact">联系咨询</a>
+        <a href="#" class="acct" data-goto="screen-auth">机构登录</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="hero">
+      <div class="eyebrow">印索 · 兆级玺印数字引擎</div>
+      <h1>兆级玺印数字引擎</h1>
+      <p>以结构化玺印数据基座，赋能文博展陈应用。面向博物馆、古籍与篆刻研究机构的玺印结构化数字服务平台：收录十万方历代玺印，配套印面、边款多视角高清影像与完整著录元数据，通过标准化 REST API 对外提供检索与图像调用能力，支撑学术研究、线上展厅、数字化典藏项目。</p>
+      <div class="hero-actions">
+        <a class="btn" href="#v2-resources">查看资源规格</a>
+        <a class="btn ghost" href="#v2-api">获取接口文档</a>
+        <a class="btn ghost" href="#" data-goto="screen-console">进入控制台</a>
+      </div>
+      <div class="stats">
+        <div class="stat"><b>100,000 方</b><span>历代玺印收录规模，远期迈向兆级愿景</span></div>
+        <div class="stat"><b>≈ 400,000 张</b><span>印面与边款影像，每方 2–4 组</span></div>
+        <div class="stat"><b>REST API</b><span>多维检索 + 图像资源输出</span></div>
+        <div class="stat"><b>2 cm · 400PPI</b><span>双色二值，线条锐利纯净</span></div>
+      </div>
+    </div>
+  </div>
+
+  <section class="section" id="v2-resources">
+    <div class="container">
+      <h2 class="section-title">资源总览</h2>
+      <p class="section-sub">体量、著录与数据库底座</p>
+      <div class="grid-3">
+        <article class="card">
+          <h3>资源体量</h3>
+          <p><strong>玺印体量</strong>：100,000 方历代玺印，远期迈向兆级规模愿景。</p>
+          <p><strong>影像素材</strong>：每方玺印配套 2–4 组影像（印面、边款特写），合计约 40 万张影像。</p>
+        </article>
+        <article class="card">
+          <h3>结构化著录</h3>
+          <p><strong>印名、释文、朝代、材质、玺印类型</strong>；类型支持姓名印、闲章、吉语印、官印、鉴藏印。</p>
+          <p>多维度分类检索，适配学术著录规范。</p>
+        </article>
+        <article class="card">
+          <h3>数据库底座</h3>
+          <p><strong>PostgreSQL</strong>，支持古文释文、异体字检索。</p>
+          <p>内置强数据校验，保障文博著录规范。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="v2-tech">
+    <div class="container">
+      <h2 class="section-title">高清图像技术方案</h2>
+      <p class="section-sub">归档母版与在线预览分离，母版不外发</p>
+      <div class="pipeline">
+        <div class="pipe-box"><b>TIFF G4 母版</b><span>CCITT Group4 无损归档 · 仅存储不外发</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box"><b>在线预览</b><span>无损 WebP 优先 · PNG 2 色兜底 · 内容协商</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box"><b>CDN 分发</b><span>单图数 KB 级 · 原生透明底</span></div>
+      </div>
+      <div class="tech-block">
+        <h3>归档母版</h3>
+        <ul>
+          <li>TIFF G4（CCITT Group4），无损压缩，文博标准归档格式；仅用于底层存档，不对外分发。</li>
+          <li>朱文两色玺印采用 TIFF 调色板格式。</li>
+        </ul>
+      </div>
+      <div class="tech-block">
+        <h3>在线预览</h3>
+        <ul>
+          <li>预生成无损 WebP 优先，PNG 索引 2 色兜底；HTTP 内容协商自动适配客户端浏览器，原生支持透明底。</li>
+        </ul>
+      </div>
+      <div class="tech-block">
+        <h3>图像规格与性能</h3>
+        <ul>
+          <li>2 cm 见方，400PPI 双色二值图像，印文线条锐利纯净，无多余灰度噪点，满足学术研究与数字展陈标准。</li>
+          <li>高清预览图像仅数 KB，CDN 全球分发；批量一次性加载百方玺印，瞬时完成渲染，流量开销极低。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="v2-api">
+    <div class="container">
+      <h2 class="section-title">API 查询服务</h2>
+      <p class="section-sub">标准化 REST 接口，机构包量套餐</p>
+      <div class="grid-3">
+        <article class="card">
+          <h3>多维检索</h3>
+          <p>关键词、朝代、材质、玺印类型多条件联合筛选；支持释文近似相似度检索。</p>
+          <p class="note">GET /v1/seals?dynasty=&amp;material=&amp;type=</p>
+        </article>
+        <article class="card">
+          <h3>图像资源输出</h3>
+          <p>返回 WebP / PNG 高清预览图访问地址，归档 TIFF 母本隔离保护，保障原始档案安全。</p>
+          <p class="note">GET /v1/seals/{id}/images</p>
+        </article>
+        <article class="card">
+          <h3>接入与计费</h3>
+          <p>机构包量套餐：<b>年度平台授权与运维服务费（年费）+ 月度包量 API 调用 + 超量按次 + 高清原图按张</b>。典型场景：每月 200 次查阅会话，单次会话浏览 100 方玺印，调取 10 张高清原图；先用月包量，后扣充值余额，包量不跨月结转。</p>
+          <p><a class="btn ghost" style="padding:6px 14px;font-size:13px;" href="#" data-goto="screen-billing">查看计费规则</a></p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="v2-seals">
+    <div class="container">
+      <h2 class="section-title">玺印样例预览</h2>
+      <p class="section-sub">图占位为纯 CSS 示意，非真实藏品影像</p>
+      <div class="grid-4">
+        <article class="seal-card">
+          <figure class="seal seal-bai">
+            <span class="ph-badge">图占位</span>
+            <div class="seal-face">
+              <div class="seal-col"><span>X</span><span>X</span></div>
+              <div class="seal-col"><span>之</span><span>印</span></div>
+            </div>
+          </figure>
+          <h4>白文印</h4>
+          <div class="meta"><small>汉 · 姓名印｜白文，黑字白底</small></div>
+        </article>
+        <article class="seal-card">
+          <figure class="seal seal-zhu">
+            <span class="ph-badge">图占位</span>
+            <div class="seal-face"><div class="seal-col"><span>长</span><span>乐</span></div></div>
+          </figure>
+          <h4>朱文印</h4>
+          <div class="meta"><small>汉 · 吉语印｜朱文，红字透明底</small></div>
+        </article>
+        <article class="seal-card">
+          <figure class="seal seal-bai">
+            <span class="ph-badge">图占位</span>
+            <div class="seal-face"><div class="seal-col"><span>款</span><span>识</span></div></div>
+          </figure>
+          <h4>边款</h4>
+          <div class="meta"><small>明清 · 玺印边款影像</small></div>
+        </article>
+        <article class="seal-card">
+          <figure class="seal seal-zhu">
+            <span class="ph-badge">图占位</span>
+            <div class="seal-face">
+              <div class="seal-col"><span>山</span><span>水</span></div>
+              <div class="seal-col"><span>知</span><span>己</span></div>
+            </div>
+          </figure>
+          <h4>闲章</h4>
+          <div class="meta"><small>清 · 闲章｜朱文，红字透明底</small></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="v2-contact">
+    <div class="container">
+      <h2 class="section-title">合作咨询</h2>
+      <p style="text-align:center;max-width:820px;margin:0 auto 30px;color:#444;">
+        印索面向文博机构提供平台接入服务：一次性开通部署（按项目测算）、年度平台授权与运维服务费、月度包量 API 调用、高清原图按张计费。欢迎博物馆、考古与古籍研究机构对接演示环境，获取接口文档、完整项目测算与报价。
+      </p>
+      <div style="text-align:center;">
+        <a class="btn" href="#" data-demo="演示环境：咨询邮件通道未接入">发送咨询邮件</a>
+        <a class="btn ghost" href="#" data-goto="screen-billing">查看计费规则</a>
+      </div>
+    </div>
+  </section>
+
+  <footer class="site">印索 © 2026 兆级玺印数字引擎｜文博玺印 API 图像服务平台</footer>
+</section>
+
+<!-- ================= ② 注册 / 登录（营销轨） ================= -->
+<section class="screen" id="screen-auth" role="tabpanel" aria-label="注册登录">
+  <div class="container">
+    <div class="auth-wrap">
+      <div class="auth-aside">
+        <div class="eyebrow">机构账号</div>
+        <h2>接入印索数据基座</h2>
+        <p class="note">面向博物馆、古籍与篆刻研究机构开放：注册即自动开通（注册开关后台可配置），控制台内可自助生成 API 密钥。</p>
+        <ul>
+          <li>10 万方历代玺印结构化著录检索</li>
+          <li>约 40 万张印面 / 边款影像（每方 2–4 组）</li>
+          <li><b>REST API 密钥</b>与沙箱环境</li>
+          <li>包量套餐典型场景：<b>200 次查阅会话</b>、单次会话浏览 100 方、调取 10 张高清原图</li>
+          <li>归档 TIFF G4 母版隔离保护，不对外分发</li>
+        </ul>
+      </div>
+      <div class="auth-main">
+        <div class="subtabs">
+          <button class="subtab is-active" data-pane="pane-login">登录</button>
+          <button class="subtab" data-pane="pane-reg">注册机构账号</button>
+        </div>
+
+        <div class="pane is-active" id="pane-login">
+          <div class="field">
+            <label for="v2-mail">机构邮箱</label>
+            <input id="v2-mail" type="email" placeholder="curator@museum.org.cn" autocomplete="username">
+          </div>
+          <div class="field">
+            <label for="v2-pwd">登录密码</label>
+            <input id="v2-pwd" type="password" placeholder="请输入密码" autocomplete="current-password">
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="v2-code">图形验证码</label>
+              <input id="v2-code" type="text" placeholder="4 位字符">
+            </div>
+            <div class="field">
+              <span class="field-label" id="v2-cap-label">验证码图片（图形占位）</span>
+              <div class="cap-box" role="img" aria-labelledby="v2-cap-label">7 K 2 9<span>图形占位</span></div>
+            </div>
+          </div>
+          <div class="checkline">
+            <input id="v2-keep" type="checkbox">
+            <label for="v2-keep">保持登录状态（机构内网设备请勿勾选）</label>
+          </div>
+          <button class="btn" style="width:100%;" data-demo="演示环境：未接入后端，登录表单未提交">登录控制台</button>
+          <button class="btn ghost" style="width:100%;margin-top:8px;" data-demo="演示环境：已填入演示凭证 curator@yinsuo.example（演示态不校验真实凭证）">使用演示账号</button>
+          <p class="hint" style="text-align:center;">忘记密码请联系机构管理员或 service@yinsuo.example</p>
+          <p class="hint" style="text-align:center;">还没有账号？开通即用；也可 <a href="#" data-demo="演示环境：申请演示通道（M3 页）未接入；该通路为人工审核 1–2 个工作日">申请演示环境（人工审核）</a></p>
+        </div>
+
+        <div class="pane" id="pane-reg">
+          <div class="statusbar" role="status">注册开关：<b>已开启（注册开放中）</b>　—— 注册开关由后台配置（featureFlags.registerOpen），前端预留开关态展示。<br>主路径：<b>注册即自动开通</b>，控制台内可自助生成 API 密钥。另一条通路：<a href="#" data-demo="演示环境：申请演示 / 联系咨询页（M3）未接入；人工审核 1–2 个工作日，审核通过后由平台签发演示密钥">申请演示环境 / 人工审核</a>。</div>
+          <form id="reg-form" novalidate>
+            <div class="field-row">
+              <div class="field">
+                <label for="reg-org">机构名称</label>
+                <input id="reg-org" type="text" placeholder="例：某某博物馆">
+              </div>
+              <div class="field">
+                <label for="v2-dept">部门 / 课题组</label>
+                <input id="v2-dept" type="text" placeholder="藏品数字部">
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="v2-name">联系人</label>
+                <input id="v2-name" type="text" placeholder="姓名">
+              </div>
+              <div class="field">
+                <label for="v2-phone">联系电话</label>
+                <input id="v2-phone" type="tel" placeholder="手机号">
+              </div>
+            </div>
+            <div class="field">
+              <label for="reg-mail">机构邮箱</label>
+              <input id="reg-mail" type="email" placeholder="用于接收接口文档与密钥通知">
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="v2-use">主要用途</label>
+                <select id="v2-use">
+                  <option>学术研究检索</option>
+                  <option>线上展厅 / 数字展陈</option>
+                  <option>数字化典藏项目</option>
+                  <option>出版与图录编纂</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="reg-scale">预计月度规模（月包量档位）</label>
+                <select id="reg-scale"></select>
+              </div>
+            </div>
+            <div class="checkline">
+              <input id="v2-agree" type="checkbox">
+              <label for="v2-agree">我已阅读并同意《数据使用协议》与《玺印影像版权说明》</label>
+            </div>
+            <p class="warn-line" id="reg-err" style="display:none;"></p>
+            <button class="btn" type="submit" style="width:100%;">立即开通</button>
+            <p class="hint" style="text-align:center;">注册即自动开通（演示态，不落库）：提交后直接进入控制台概览，并可在密钥管理区自助生成 API 密钥。</p>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ③ 控制台概览（后台轨） ================= -->
+<section class="screen admin" id="screen-console" role="tabpanel" aria-label="控制台概览">
+  <div class="shell">
+    <aside class="side">
+      <div class="brandline">
+        <b>印索控制台</b>
+        <span>示例博物馆 · 藏品数字部</span>
+      </div>
+      <nav class="snav">
+        <a href="#" class="is-active" data-side>概览</a>
+        <a href="#v2-keys" data-side>密钥管理</a>
+        <a href="#v2-usage" data-side>用量明细</a>
+        <a href="#" data-goto="screen-billing">计费与账单</a>
+        <div class="grp">开发支持</div>
+        <a href="#" data-demo="演示环境：接口文档站点未接入">接口文档</a>
+        <a href="#" data-demo="演示环境：工单系统未接入">提交工单</a>
+      </nav>
+      <div class="sfoot">归档母版 TIFF G4 仅归档存储，不对外分发。</div>
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <span class="crumb">控制台 / <b>概览</b></span>
+        <span class="pill accent">标准版 · 年费 + 月包量（演示）</span>
+        <span class="pill">计费周期 2026-09-01 — 09-30（CST）</span>
+        <input class="search" type="text" placeholder="检索玺印 / 接口调用记录" aria-label="检索">
+        <span class="who"><span class="avatar">博</span>机构成员</span>
+      </div>
+
+      <div class="body">
+        <div class="dash">
+          <div class="kpi">
+            <label>本月计费调用</label>
+            <div class="v" id="kpi-calls">—</div>
+            <div class="meter"><i id="kpi-calls-bar" style="width:0%"></i></div>
+            <div class="sub"><span id="kpi-calls-note">—</span></div>
+          </div>
+          <div class="kpi">
+            <label>本月高清原图调取</label>
+            <div class="v" id="kpi-images">—</div>
+            <div class="sub"><span id="kpi-images-note">—</span></div>
+          </div>
+          <div class="kpi">
+            <label>本月图片流量</label>
+            <div class="v" id="kpi-traffic">—</div>
+            <div class="sub"><span id="kpi-traffic-note">—</span></div>
+          </div>
+          <div class="kpi">
+            <label>账户余额（充值余额）</label>
+            <div class="v" id="kpi-balance">—</div>
+            <div class="sub"><span>先用月包量，后扣充值余额</span></div>
+          </div>
+        </div>
+
+        <div class="charts">
+          <div class="panel">
+            <div class="panel-head">
+              <h3>近 7 日每日调用次数</h3>
+              <div class="right"><span class="pill">含预览图 / 原图请求</span></div>
+            </div>
+            <div class="panel-body">
+              <div class="barchart" id="usage-bars" aria-hidden="true"></div>            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>接口调用分布</h3><div class="right"><span class="pill">近 7 日</span></div></div>
+            <div class="panel-body">
+              <div class="donut-wrap">
+                <svg width="104" height="104" viewBox="0 0 42 42" aria-hidden="true">
+                  <circle cx="21" cy="21" r="15.9" fill="none" stroke="#eceff1" stroke-width="6"></circle>
+                  <circle cx="21" cy="21" r="15.9" fill="none" stroke="#992222" stroke-width="6"
+                          stroke-dasharray="62 38" stroke-dashoffset="25"></circle>
+                  <circle cx="21" cy="21" r="15.9" fill="none" stroke="#c98b8b" stroke-width="6"
+                          stroke-dasharray="24 76" stroke-dashoffset="-37"></circle>
+                </svg>
+                <ul class="legend">
+                  <li><span class="dot"></span>多维检索 /v1/seals<span class="pct">62%</span></li>
+                  <li><span class="dot g2"></span>图像输出 /images<span class="pct">24%</span></li>
+                  <li><span class="dot g3"></span>著录详情 /{id}<span class="pct">14%</span></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="v2-keys">
+          <div class="panel-head">
+            <h3>密钥管理</h3>
+            <span class="pill" id="key-summary">—</span>
+            <div class="right">
+              <button class="a-btn sm" data-demo="演示环境：IP 白名单设置未接入">IP 白名单</button>
+              <button class="a-btn pri sm" id="key-new" data-open-newkey>+ 新建密钥</button>
+            </div>
+          </div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th>名称</th><th>kid（密钥 ID）</th><th>密钥（前缀 + 掩码）</th><th>环境</th><th>scopes</th><th>状态</th><th>创建时间</th><th>最近调用</th><th>轮换时间</th><th>操作</th></tr>
+              </thead>
+              <tbody id="key-rows"></tbody>
+            </table>
+          </div>
+          <div class="panel-body" style="border-top:1px solid var(--line-2);color:var(--t3);font-size:12px;">
+            密钥为界面示意值，不产生真实凭据。明文仅展示一次（新建 / 重置弹层），关闭后列表与任何入口都不可再取回；kid 非机密（key_ + 12 位 Base32），可用于列表 / 日志 / 用量归属。调用须使用 HTTPS；归档 TIFF G4 母版不对外分发，接口仅返回 WebP / PNG 预览地址。
+          </div>
+        </div>
+
+        <div class="panel" id="v2-usage">
+          <div class="panel-head">
+            <h3>用量明细</h3>
+            <span class="pill">计费周期 2026-09-01 — 09-30</span>
+            <div class="right">
+              <button class="a-btn sm" data-export-usage>导出对账凭据（CSV）</button>
+            </div>
+          </div>
+          <div class="panel-body" style="padding-bottom:0;">
+            <div class="dims" role="group" aria-label="用量维度">
+              <button class="is-active" aria-pressed="true" data-dim="day">按日</button>
+              <button aria-pressed="false" data-dim="endpoint">按接口</button>
+              <button aria-pressed="false" data-dim="kid">按密钥</button>
+            </div>
+            <div class="filters">
+              <select id="usage-range" aria-label="时间范围">
+                <option value="7d">近 7 日</option>
+                <option value="30d">近 30 日</option>
+                <option value="cycle">本计费周期</option>
+              </select>
+              <select id="usage-key" aria-label="密钥">
+                <option value="">全部密钥</option>
+                <option value="key_7F3K2M9QP0AB">key_7F3K2M9QP0AB 线上展厅（生产）</option>
+                <option value="key_4B8N1X5TR7CD">key_4B8N1X5TR7CD 学术检索（生产）</option>
+                <option value="key_2Q6H8J4LW3EF">key_2Q6H8J4LW3EF 展陈调试（沙箱）</option>
+              </select>
+              <select id="usage-endpoint" aria-label="接口">
+                <option value="">全部接口</option>
+                <option value="/v1/seals">/v1/seals 多维检索</option>
+                <option value="/v1/seals/{id}">/v1/seals/{id} 著录详情</option>
+                <option value="/v1/seals/{id}/images">/v1/seals/{id}/images 预览图</option>
+                <option value="/v1/assets/{id}/original">/v1/assets/{id}/original 高清原图</option>
+              </select>
+              <span style="font-size:12px;color:var(--t3);" id="usage-summary">—</span>
+            </div>
+          </div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th id="usage-dim-head">日期（CST 自然日）</th><th>调用次数</th><th>计费调用</th><th>原图张数</th><th>图片流量</th><th>失败数</th><th>占比</th></tr>
+              </thead>
+              <tbody id="usage-tbody"></tbody>
+              <tfoot id="usage-foot"></tfoot>
+            </table>
+          </div>
+          <div class="panel-body" style="border-top:1px solid var(--line-2);color:var(--t3);font-size:12px;">
+            口径：计费调用按 HTTP 请求计（批量返回 100 方仍计 1 次）；4xx / 5xx / 429 与仅取预览图均不计费调用（计入失败数与图片流量）；高清原图按张计费、默认不叠加调用次数；图片流量按图片响应体字节累计，TIFF G4 母版不外发、永不产生流量；导出行集合严格等于当前筛选结果。
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ④ 计费规则（后台轨，含充值与账单） ================= -->
+<section class="screen admin" id="screen-billing" role="tabpanel" aria-label="计费规则">
+  <div class="shell">
+    <aside class="side">
+      <div class="brandline">
+        <b>印索控制台</b>
+        <span>示例博物馆 · 藏品数字部</span>
+      </div>
+      <nav class="snav">
+        <a href="#" data-goto="screen-console">概览</a>
+        <a href="#" data-goto="screen-console">密钥管理</a>
+        <a href="#" data-goto="screen-console">用量明细</a>
+        <a href="#" class="is-active">计费与账单</a>
+        <div class="grp">开发支持</div>
+        <a href="#" data-demo="演示环境：接口文档站点未接入">接口文档</a>
+        <a href="#" data-demo="演示环境：工单系统未接入">提交工单</a>
+      </nav>
+      <div class="sfoot">先用月包量，后扣充值余额；包量不跨月结转。</div>
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <span class="crumb">控制台 / <b>计费与账单</b></span>
+        <span class="pill accent" id="account-plan">—</span>
+        <span class="pill">计费周期 2026-09-01 — 09-30（CST）</span>
+        <span class="who"><span class="avatar">博</span>机构成员</span>
+      </div>
+
+      <div class="body">
+        <div class="banner">本页价格与金额为<strong>演示价（已冻结口径）</strong>，非正式报价，可一句话整体替换；未接入真实支付。</div>
+
+        <div class="plans2" id="plan-cards" style="margin-bottom:18px;"></div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>计费项表</h3>
+            <span class="pill">三档可选 · 年费与月包量为两个并列收费项</span>
+            <div class="right"><span class="pill">一次性开通部署：<span data-onboard-note>按项目测算</span></span></div>
+          </div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th>计费项</th><th>计量单位</th><th>标准版</th><th>专业版</th><th>机构版</th><th>说明</th></tr>
+              </thead>
+              <tbody id="price-rows"></tbody>
+            </table>
+          </div>
+          <div class="panel-body" style="border-top:1px solid var(--line-2);">
+            <div class="steps" id="deduct-steps"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>典型场景算例</h3>
+            <div class="right"><span class="pill">每月 200 次查阅会话 × 每次 100 方 + 10 张高清原图</span></div>
+          </div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th>档位</th><th>包量内折算（按请求计）</th><th>高清原图</th><th>年费摊月</th><th>月度合计（不含一次性开通部署）</th></tr>
+              </thead>
+              <tbody id="scenario-rows"></tbody>
+            </table>
+          </div>
+          <div class="panel-body" style="border-top:1px solid var(--line-2);color:var(--t3);font-size:12px;">
+            算例随配置联动重算：修改文件内唯一的 PRICING 配置对象一处，套餐卡 / 计费项表 / 本算例 / 账户信息同时变化。
+          </div>
+        </div>
+
+        <div class="two">
+          <div class="panel" style="margin:0;">
+            <div class="panel-head"><h3>账户与充值</h3>
+              <div class="right"><span class="pill" id="quota-remain">—</span></div>
+            </div>
+            <div class="panel-body">
+              <div class="balance" style="margin-bottom:14px;">
+                <span>账户充值余额（先用月包量，后扣充值余额）</span>
+                <b id="balance-amount">—</b>
+                <span style="font-size:11.5px;" id="ledger-check">—</span>
+              </div>
+              <div class="tiles">
+                <button class="tile" data-amount="1000">¥ 1,000<small>补充余额</small></button>
+                <button class="tile is-active" data-amount="5000">¥ 5,000<small>常用额度</small></button>
+                <button class="tile" data-amount="10000">¥ 10,000<small>项目预付</small></button>
+                <button class="tile" data-amount="custom">自定义<small>1–100,000 元</small></button>
+              </div>
+              <p style="font-size:12.5px;color:var(--t2);margin:6px 0 10px;">本次充值金额：<strong style="color:var(--brand);" id="amount-label">—</strong>
+                　自定义金额（1–100,000 整数元）<input id="custom-amount" class="amt-input" type="number" min="1" max="100000" step="1" value="20000" style="display:none;"></p>
+              <div class="radios">
+                <label><input type="radio" name="pay-channel" data-pay-channel value="微信支付" checked> 微信支付</label>
+                <label><input type="radio" name="pay-channel" data-pay-channel value="支付宝"> 支付宝</label>
+              </div>
+              <div style="margin-top:12px;">
+                <button class="a-btn pri" id="go-pay" data-open-pay>去支付</button>
+                <button class="a-btn" style="margin-left:8px;" data-demo="演示环境：开票流程未接入（本轮仅占位）">申请开具发票</button>
+              </div>
+              <p style="font-size:12px;color:var(--t3);margin-top:10px;">假支付闭环：去支付 → 待支付（纯 CSS 演示二维码 + 倒计时）→ 支付成功 / 失败 / 超时 → 入账（余额与流水同时变动）；重试不复用旧订单号。</p>
+            </div>
+          </div>
+          <div class="panel" style="margin:0;">
+            <div class="panel-head"><h3>支付与结算说明</h3></div>
+            <div class="panel-body">
+              <ul class="payrows">
+                <li><b>在线预付</b>微信 / 支付宝，入账后额度自动扣减</li>
+                <li><b>扣减顺序</b>先用月包量，包量耗尽后扣充值余额</li>
+                <li><b>高清原图</b>按张扣余额（各档同价，不含在包量内）</li>
+                <li><b>包量重置</b>每月 1 日 00:00（CST）重置，不跨月结转</li>
+                <li><b>对公转账 / 年度预付</b>演示环境：线下通道未接入</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>充值订单</h3><div class="right"><span class="pill">订单终态不可逆；重试生成新订单号</span></div></div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th>订单号</th><th>创建时间（CST）</th><th>金额</th><th>支付方式</th><th>状态</th><th>关联流水</th><th>操作</th></tr>
+              </thead>
+              <tbody id="order-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>充值记录（账单流水）</h3><div class="right"><span class="pill">余额的权威来源是流水：Σ流水 = 余额</span></div></div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th>时间（CST）</th><th>类型</th><th>状态</th><th>方向</th><th>金额 / 次数</th><th>关联单号</th><th>余额快照</th><th>备注</th></tr>
+              </thead>
+              <tbody id="recharge-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>账单（账期对账）</h3><div class="right"><span class="pill">超量与原图按扣减顺序实时结算</span></div></div>
+          <div class="scroll">
+            <table class="dt">
+              <thead>
+                <tr><th>账期</th><th>月包量（额度 / 已用）</th><th>超量调用</th><th>高清原图</th><th>本期扣减合计</th><th>结算方式</th><th>状态</th></tr>
+              </thead>
+              <tbody id="bill-rows"></tbody>
+            </table>
+          </div>
+          <div class="panel-body" style="border-top:1px solid var(--line-2);color:var(--t3);font-size:12px;">
+            一次性开通部署费按项目测算（演示价不展示金额）；年费与包量为两个并列收费项，互不折算。超额用量达到包量的 80% 时，系统将向机构联系人发送邮件提醒。
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+
+<!-- ================= 弹层：一次性明文 / 二次确认 / 新建密钥 / 假支付闭环（§5 §6） ================= -->
+<div class="modal" id="plain-modal" role="dialog" aria-modal="true" aria-labelledby="plain-headline" aria-hidden="true">
+  <div class="modal-box">
+    <h4 id="plain-headline">API 密钥明文（仅显示一次）</h4>
+    <p class="warn-line">请立即复制保存：明文仅显示一次，关闭后不可再查看。</p>
+    <div class="plain" id="plain-value"></div>
+    <p style="font-size:12px;color:var(--t3);">kid：<span class="mono" id="plain-kid"></span>　（kid 非机密，可留存用于列表 / 日志 / 用量归属）</p>
+    <div class="modal-acts">
+      <button data-modal-copy>复制明文</button>
+      <button data-modal-close>我已保存，关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-hidden="true">
+  <div class="modal-box sm">
+    <h4 id="confirm-title">二次确认</h4>
+    <p style="font-size:12.5px;color:var(--t2);" id="confirm-text"></p>
+    <div class="modal-acts">
+      <button id="confirm-ok" data-confirm-ok>确认</button>
+      <button data-confirm-cancel>取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="newkey-modal" role="dialog" aria-modal="true" aria-labelledby="newkey-title" aria-hidden="true">
+  <div class="modal-box">
+    <h4 id="newkey-title">新建密钥</h4>
+    <div class="field"><label for="newkey-label">备注名</label><input id="newkey-label" type="text" placeholder="例：线上展厅（生产）"></div>
+    <div class="field"><label for="newkey-env">环境</label>
+      <select id="newkey-env"><option value="live">生产 live</option><option value="test">沙箱 test</option></select></div>
+    <fieldset class="scopebox"><legend>scopes（权限范围）</legend>
+      <label><input type="checkbox" data-newkey-scope value="seal:search" checked> seal:search 检索 / 详情（计费调用）</label>
+      <label><input type="checkbox" data-newkey-scope value="image:preview" checked> image:preview 预览图（仅计图片流量）</label>
+      <label><input type="checkbox" data-newkey-scope value="image:original"> image:original 高清原图（按张计价）</label>
+      <label><input type="checkbox" data-newkey-scope value="usage:read"> usage:read 读取用量（不计费）</label>
+    </fieldset>
+    <p style="font-size:12px;color:var(--t3);">密钥数量上限 5 个；创建成功后明文仅展示一次。</p>
+    <div class="modal-acts">
+      <button data-newkey-submit>创建并展示明文（仅一次）</button>
+      <button data-newkey-cancel>取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="pay-modal" role="dialog" aria-modal="true" aria-labelledby="pay-title" aria-hidden="true">
+  <div class="modal-box">
+    <h4 id="pay-title">扫码支付（假支付闭环演示）</h4>
+    <p style="font-size:12px;color:var(--t3);">订单号 <span class="mono" id="pay-order-id"></span>　状态 <span id="pay-state"></span>　支付方式 <span id="pay-channel-text"></span></p>
+    <p class="pay-amt" id="pay-amt">¥ 0.00</p>
+    <div id="pay-qr-wrap">
+      <div class="qr" id="pay-qr"></div>
+      <p style="font-size:12px;color:var(--t3);text-align:center;">演示二维码，不可扫（纯 CSS 绘制占位，未接入支付渠道）</p>
+    </div>
+    <p class="hide" id="pay-expired" style="text-align:center;font-size:12px;color:var(--t3);">支付码已关闭</p>
+    <p style="text-align:center;font-size:12.5px;color:var(--t2);">剩余支付时间 <strong id="pay-countdown">15:00</strong>（默认 15 分钟）</p>
+    <p class="tip" id="pay-tip"></p>
+    <label class="switchline" id="pay-accel-line"><input type="checkbox" id="pay-accel"> <span>演示开关：加速到 30 秒（仅为演示超时分支）</span></label>
+    <div class="modal-acts demo-acts">
+      <button data-demo-pay="success">模拟支付成功（演示按钮）</button>
+      <button data-demo-pay="fail">模拟支付失败（演示按钮）</button>
+    </div>
+    <div class="modal-acts">
+      <button data-demo-pay="cancel">关闭（取消订单）</button>
+      <button data-pay-hide>收起弹层（保留待支付订单）</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="v2-toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =====================================================================
+     印索 · 控制台演示内核（v1 / v2 / v3 三版共用；每版只替换 THEME 与 toastId）
+     覆盖：演示价单一配置源（§4.3 R8）／假支付闭环状态机（§5 R6）／
+          密钥生命周期与一次性明文（§6 R2）／用量三维聚合与导出（§7 R7）／
+          键盘可达与 roving tabindex（§1.6）。
+     纯前端 mock：0 外部请求；明文密钥关闭弹窗后即从内存丢弃，不再可取回。
+     ===================================================================== */
+
+  /* ---------- 1. 演示价：单一配置源（R8「改此一处，全站联动」） ---------- */
+  var PRICING = {
+    mark: '演示价，可一句话整体替换',
+    onboardNote: '按项目测算（演示价不展示金额）',
+    originalImageUnitCents: 200,
+    scenario: { sessions: 200, sealsPerSession: 100, originals: 10 },
+    plans: [
+      { code: 'standard', name: '标准版', annualFeeCents: 360000, quotaCalls: 2000, overageUnitCents: 80 },
+      { code: 'pro', name: '专业版', annualFeeCents: 1200000, quotaCalls: 10000, overageUnitCents: 50 },
+      { code: 'org', name: '机构版', annualFeeCents: 3600000, quotaCalls: 50000, overageUnitCents: 30 }
+    ]
+  };
+
+  var THEME = {
+    planCls: 'plan2',
+    rowBtn: function (attrs, label) { return '<button class="a-btn sm" ' + attrs + '>' + label + '</button>'; },
+    status: function (kind, text) {
+      var cls = kind === 'ok' ? 'ok' : kind === 'bad' ? 'bad' : 'warn';
+      return '<span class="pill ' + cls + '">' + text + '</span>';
+    }
+  };
+
+
+  var $ = function (id) { return document.getElementById(id); };
+  var toastEl = $('v2-toast');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function money(cents) {
+    return '¥ ' + (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function callsFmt(n) { return n.toLocaleString('zh-CN') + ' 次'; }
+  function numFmt(n) { return n.toLocaleString('zh-CN'); }
+  function bytesFmt(b) {
+    if (b >= 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    return (b / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  /* P2-6：入账 / 重置时间取本机当前时间（CST，格式与既有流水一致），不再写死常量 */
+  function nowCst() {
+    var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  function planOfCode(code) {
+    for (var i = 0; i < PRICING.plans.length; i++) { if (PRICING.plans[i].code === code) return PRICING.plans[i]; }
+    return PRICING.plans[0];
+  }
+  function bytesParts(b) {
+    if (b >= 1024 * 1024 * 1024) return [(b / (1024 * 1024 * 1024)).toFixed(1), 'GB'];
+    return [(b / (1024 * 1024)).toFixed(1), 'MB'];
+  }
+
+  var toastTimer = null;
+  function toast(msg) {
+    if (!toastEl || !msg) return;
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    if (toastTimer) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () { toastEl.classList.remove('show'); }, 3200);
+  }
+
+  function copyText(text, okMsg) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () {
+          toast(okMsg || '已复制到剪贴板（演示值）');
+        })['catch'](function () {
+          toast('当前环境不允许读取剪贴板，演示值：' + text);
+        });
+        return;
+      }
+    } catch (e) { /* 降级到提示 */ }
+    toast(okMsg || ('演示值：' + text));
+  }
+
+  /* ---------- 2. 屏切换 / 子标签 / 侧栏（保留原行为 + roving tabindex） ---------- */
+  var screens = Array.prototype.slice.call(document.querySelectorAll('.screen'));
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.segs .seg'));
+
+  function syncTabFocus() {
+    tabs.forEach(function (t) {
+      t.setAttribute('tabindex', t.classList.contains('is-active') ? '0' : '-1');
+    });
+  }
+
+  function activate(id) {
+    var found = false;
+    screens.forEach(function (s) {
+      var on = s.id === id;
+      s.classList.toggle('is-active', on);
+      if (on) found = true;
+    });
+    if (!found) return false;
+    tabs.forEach(function (t) {
+      var on = t.getAttribute('data-goto') === id;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    syncTabFocus();
+    if (window.scrollTo) window.scrollTo(0, 0);
+    return true;
+  }
+
+  function setSubtabs(btn) {
+    var wrap = btn.parentNode;
+    if (!wrap) return;
+    Array.prototype.forEach.call(wrap.children, function (b) { b.classList.remove('is-active'); });
+    btn.classList.add('is-active');
+    Array.prototype.forEach.call(document.querySelectorAll('.pane'), function (p) { p.classList.remove('is-active'); });
+    var target = document.getElementById(btn.getAttribute('data-pane'));
+    if (target) target.classList.add('is-active');
+  }
+
+  function setGroupActive(btn, childSel) {
+    var group = btn.parentNode;
+    if (!group) return;
+    Array.prototype.forEach.call(group.querySelectorAll(childSel), function (b) { b.classList.remove('is-active'); });
+    btn.classList.add('is-active');
+  }
+
+  /* 注册表单：预计月度规模（月包量档位）从单一配置源渲染，避免页面硬编码包量数字（§4.3） */
+  function renderScaleOptions() {
+    var sel = $('reg-scale');
+    if (!sel) return;
+    var h = '';
+    PRICING.plans.forEach(function (p) {
+      h += '<option value="' + p.code + '">' + esc(p.name) + ' · 月包量 ' + callsFmt(p.quotaCalls) + '</option>';
+    });
+    h += '<option value="sandbox">仅需演示环境沙箱（申请演示 / 人工审核）</option>';
+    sel.innerHTML = h;
+  }
+
+  /* ---------- 3. 弹层基础 ---------- */
+  function openModal(el) { if (!el) return; el.classList.add('show'); el.setAttribute('aria-hidden', 'false'); }
+  function closeModal(el) { if (!el) return; el.classList.remove('show'); el.setAttribute('aria-hidden', 'true'); }
+
+  var confirmCb = null;
+  function askConfirm(title, text, okLabel, cb) {
+    if (!$('confirm-modal')) { cb(); return; }
+    $('confirm-title').textContent = title;
+    $('confirm-text').textContent = text;
+    $('confirm-ok').textContent = okLabel || '确认';
+    confirmCb = cb;
+    openModal($('confirm-modal'));
+  }
+  function resolveConfirm(ok) {
+    closeModal($('confirm-modal'));
+    var cb = confirmCb;
+    confirmCb = null;
+    if (ok && cb) cb();
+  }
+
+  /* =====================================================================
+     4. 计费规则：三档套餐卡 + 计费项表 + 扣减顺序 + 典型场景算例（全部由 PRICING 渲染）
+     ===================================================================== */
+  function renderPricing() {
+    var cards = $('plan-cards');
+    if (cards) {
+      var h = '';
+      PRICING.plans.forEach(function (p, i) {
+        h += '<article class="' + THEME.planCls + (i === 1 ? ' hi' : '') + '">' +
+          '<h4>' + esc(p.name) + '</h4>' +
+          '<div class="price">' + money(p.annualFeeCents) + '<small>／年（年度平台授权与运维服务费）</small></div>' +
+          '<p class="note">月包量 ' + callsFmt(p.quotaCalls) + '；超量 ' + money(p.overageUnitCents) + ' / 次</p>' +
+          '<ul>' +
+          '<li>月包量 <b>' + callsFmt(p.quotaCalls) + '</b>（API 计费调用，按 HTTP 请求计）</li>' +
+          '<li>超量单价 <b>' + money(p.overageUnitCents) + ' / 次</b>（包量耗尽后扣充值余额）</li>' +
+          '<li>高清原图 <b>' + money(PRICING.originalImageUnitCents) + ' / 张</b>（各档同价，不含在包量内）</li>' +
+          '</ul></article>';
+      });
+      cards.innerHTML = h;
+    }
+
+    var rows = $('price-rows');
+    if (rows) {
+      var r = '';
+      r += '<tr><td>年度平台授权与运维服务费（年费）</td><td>元 / 年</td>' +
+        PRICING.plans.map(function (p) { return '<td>' + money(p.annualFeeCents) + '</td>'; }).join('') +
+        '<td>年费不转化为包量；包量不抵扣年费（两个并列收费项）</td></tr>';
+      r += '<tr><td>月度包量 API 调用</td><td>次 / 月</td>' +
+        PRICING.plans.map(function (p) { return '<td>' + callsFmt(p.quotaCalls) + '</td>'; }).join('') +
+        '<td>计费调用按 HTTP 请求计（批量返回 100 方仍计 1 次）；包量内不另计费</td></tr>';
+      r += '<tr><td>超量调用</td><td>元 / 次</td>' +
+        PRICING.plans.map(function (p) { return '<td>' + money(p.overageUnitCents) + '</td>'; }).join('') +
+        '<td>包量耗尽后超出部分从充值余额扣减；余额不足阻断下轮调用</td></tr>';
+      r += '<tr><td>高清原图调取</td><td>元 / 张</td>' +
+        PRICING.plans.map(function () { return '<td>' + money(PRICING.originalImageUnitCents) + '</td>'; }).join('') +
+        '<td>各档同价，不含在包量内、不占调用次数，按张直接扣充值余额</td></tr>';
+      r += '<tr><td>一次性开通部署</td><td>—</td><td colspan="3">' + esc(PRICING.onboardNote) + '</td>' +
+        '<td>数据基座部署、著录字段映射、账号与密钥开通、联调支持</td></tr>';
+      r += '<tr><td>归档 TIFF G4 母版</td><td>—</td><td colspan="3">不对外分发 / 不可调用</td>' +
+        '<td>仅底层归档存储，不产生请求与流量</td></tr>';
+      r += '<tr><td>结构化著录字段</td><td>全量</td><td colspan="3">包含</td>' +
+        '<td>印名 / 释文 / 朝代 / 材质 / 玺印类型</td></tr>';
+      rows.innerHTML = r;
+    }
+
+    var steps = $('deduct-steps');
+    if (steps) {
+      steps.innerHTML =
+        '<div class="step"><b>① 先用月包量</b><span>每 1 次计费调用优先消耗当月剩余包量（quotaRemainCalls）</span></div>' +
+        '<div class="step"><b>② 后扣充值余额</b><span>包量耗尽后，超出部分按该档超量单价从充值余额扣减</span></div>' +
+        '<div class="step"><b>③ 原图单独扣余额</b><span>高清原图不计入包量、不占调用次数，按张扣余额</span></div>' +
+        '<div class="step"><b>包量不跨月结转</b><span>每月 1 日 00:00（Asia/Shanghai）重置，上月余量作废</span></div>';
+    }
+
+    var sc = $('scenario-rows');
+    if (sc) {
+      var s = PRICING.scenario;
+      var billable = s.sessions; /* 单次会话为 1 次批量请求，按请求计 1 次调用 */
+      var imgFee = s.originals * PRICING.originalImageUnitCents;
+      var out = '';
+      PRICING.plans.forEach(function (p) {
+        var over = Math.max(0, billable - p.quotaCalls);
+        var overFee = over * p.overageUnitCents;
+        var annualMonth = Math.round(p.annualFeeCents / 12);
+        var total = overFee + imgFee + annualMonth;
+        out += '<tr><td>' + esc(p.name) + '</td>' +
+          '<td>' + callsFmt(billable) + ' ≤ 包量 ' + callsFmt(p.quotaCalls) + '（超量 ' + callsFmt(over) + '，' + money(overFee) + '）</td>' +
+          '<td>' + numFmt(s.originals) + ' 张 × ' + money(PRICING.originalImageUnitCents) + ' = ' + money(imgFee) + '</td>' +
+          '<td>' + money(annualMonth) + '（年费 ÷ 12）</td>' +
+          '<td>' + money(total) + ' / 月</td></tr>';
+      });
+      sc.innerHTML = out;
+    }
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-onboard-note]'), function (el) {
+      el.textContent = PRICING.onboardNote;
+    });
+  }
+
+  /* =====================================================================
+     5. 密钥管理（§6）：kid 格式 / 一次性明文 / 禁用启用 / 重生（kid 不变）
+     ===================================================================== */
+  var KEYS = [
+    { kid: 'key_7F3K2M9QP0AB', label: '线上展厅（生产）', env: 'live', last4: 'a1b2', revealed: false,
+      mask: 'ys_live_••••••••••••••••••••••••••••a1b2',
+      scopes: ['seal:search', 'image:preview', 'image:original'], status: 'ACTIVE',
+      createdAt: '2026-03-12', lastUsedAt: '2026-09-19 09:12', rotatedAt: '' },
+    { kid: 'key_4B8N1X5TR7CD', label: '学术检索（生产）', env: 'live', last4: 'm9p4', revealed: false,
+      mask: 'ys_live_••••••••••••••••••••••••••••m9p4',
+      scopes: ['seal:search', 'usage:read'], status: 'ACTIVE',
+      createdAt: '2026-04-02', lastUsedAt: '2026-09-19 08:41', rotatedAt: '' },
+    { kid: 'key_2Q6H8J4LW3EF', label: '展陈调试（沙箱）', env: 'test', last4: 'z7k1', revealed: true,
+      mask: 'ys_test_••••••••••••••••••••••••••••z7k1',
+      scopes: ['seal:search', 'image:preview'], status: 'DISABLED',
+      createdAt: '2026-08-19', lastUsedAt: '2026-08-26 15:03', rotatedAt: '' }
+  ];
+  var KEY_LIMIT = 5;
+  var B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  var B62 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+  function rnd(n, alphabet) {
+    var buf = new Uint8Array(n);
+    if (window.crypto && window.crypto.getRandomValues) { window.crypto.getRandomValues(buf); }
+    else { for (var i = 0; i < n; i++) { buf[i] = Math.floor(Math.random() * 256); } }
+    var out = '';
+    for (var j = 0; j < n; j++) { out += alphabet.charAt(buf[j] % alphabet.length); }
+    return out;
+  }
+  function newKid() { return 'key_' + rnd(12, B32); }
+  /* 明文：ys_test_/ys_live_ + 32 位 Base62（总长 40）；生成时与掩码末 4 位保持一致（演示实现） */
+  function newPlaintext(env, last4) { return 'ys_' + env + '_' + rnd(28, B62) + last4; }
+  function findByKid(kid) {
+    for (var i = 0; i < KEYS.length; i++) { if (KEYS[i].kid === kid) return KEYS[i]; }
+    return null;
+  }
+  function envName(env) { return env === 'live' ? '生产 live' : '沙箱 test'; }
+
+  function renderKeys() {
+    var tb = $('key-rows');
+    if (tb) {
+      var h = '';
+      KEYS.forEach(function (k) {
+        var active = k.status === 'ACTIVE';
+        h += '<tr>' +
+          '<td>' + esc(k.label) + '</td>' +
+          '<td class="mono">' + k.kid + '</td>' +
+          '<td><span class="mono">' + k.mask + '</span></td>' +
+          '<td>' + esc(envName(k.env)) + '</td>' +
+          '<td class="scopes">' + esc(k.scopes.join(', ')) + '</td>' +
+          '<td>' + THEME.status(active ? 'ok' : 'bad', active ? '启用 ACTIVE' : '禁用 DISABLED') + '</td>' +
+          '<td>' + k.createdAt + '</td>' +
+          '<td>' + (k.lastUsedAt || '—') + '</td>' +
+          '<td>' + (k.rotatedAt || '—') + '</td>' +
+          '<td class="rowacts">' +
+          THEME.rowBtn('data-key-act="copy" data-kid="' + k.kid + '"', '复制 kid') +
+          (k.revealed
+            ? THEME.rowBtn('data-key-act="revealed" data-kid="' + k.kid + '" disabled aria-disabled="true"', '已展示')
+            : THEME.rowBtn('data-key-act="reveal" data-kid="' + k.kid + '"', '显示明文')) +
+          THEME.rowBtn('data-key-act="toggle" data-kid="' + k.kid + '"', active ? '禁用' : '启用') +
+          THEME.rowBtn('data-key-act="reset" data-kid="' + k.kid + '"', '重置') +
+          THEME.rowBtn('data-key-act="delete" data-kid="' + k.kid + '"', '删除') +
+          '</td></tr>';
+      });
+      tb.innerHTML = h || '<tr><td colspan="10">尚无密钥，点击「新建密钥」。（演示空态）</td></tr>';
+    }
+    var act = 0;
+    KEYS.forEach(function (k) { if (k.status === 'ACTIVE') act++; });
+    if ($('key-summary')) {
+      $('key-summary').textContent = '共 ' + KEYS.length + ' 个密钥（上限 ' + KEY_LIMIT + '）· 启用 ' + act + ' / 禁用 ' + (KEYS.length - act);
+    }
+    if ($('key-new')) {
+      var full = KEYS.length >= KEY_LIMIT;
+      $('key-new').disabled = full;
+      $('key-new').setAttribute('aria-disabled', full ? 'true' : 'false');
+    }
+  }
+
+  /* 一次性明文弹层：打开即标记已展示，关闭时丢弃明文（无法再次取回，§6.2） */
+  var plainOwner = null;
+  function showPlainOnce(k, plaintext, headline) {
+    if (!$('plain-modal')) { toast('明文（仅此一次）：' + plaintext); return; }
+    $('plain-value').textContent = plaintext;
+    if ($('plain-kid')) $('plain-kid').textContent = k.kid;
+    if ($('plain-headline')) $('plain-headline').textContent = headline || 'API 密钥明文（仅显示一次）';
+    plainOwner = k;
+    k.revealed = true;
+    openModal($('plain-modal'));
+    renderKeys();
+    toast('明文仅显示一次：请立即复制保存，关闭后无法再次查看');
+  }
+  function dismissPlain() {
+    if (plainOwner) { plainOwner.plaintext = null; }
+    plainOwner = null;
+    if ($('plain-value')) $('plain-value').textContent = '';
+    closeModal($('plain-modal'));
+    renderKeys();
+  }
+
+  function onKeyAct(btn) {
+    var act = btn.getAttribute('data-key-act');
+    var k = findByKid(btn.getAttribute('data-kid'));
+    if (!k) return;
+    if (act === 'copy') {
+      copyText(k.kid, '已复制 kid：' + k.kid + '（kid 非机密，用于列表 / 日志 / 用量归属）');
+      return;
+    }
+    if (act === 'revealed') {
+      toast('明文仅可查看一次：该密钥明文已展示过，任何入口都无法再取回（§6.2）');
+      return;
+    }
+    if (act === 'reveal') {
+      if (k.revealed) { toast('明文仅可查看一次：该密钥明文已展示过（§6.2）'); return; }
+      var pt = newPlaintext(k.env, k.last4);
+      k.plaintext = pt;
+      showPlainOnce(k, pt, 'API 密钥明文（仅显示一次）');
+      return;
+    }
+    if (act === 'toggle') {
+      var toDisable = k.status === 'ACTIVE';
+      askConfirm(
+        toDisable ? '禁用密钥' : '启用密钥',
+        (toDisable ? '确认禁用「' + k.label + '」？禁用后该密钥立即失效（后续请求返回 401 / 403），记录保留、可再启用。'
+          : '确认启用「' + k.label + '」？启用后该密钥恢复可用。'),
+        toDisable ? '确认禁用' : '确认启用',
+        function () {
+          k.status = toDisable ? 'DISABLED' : 'ACTIVE';
+          renderKeys();
+          toast('密钥「' + k.label + '」已' + (toDisable ? '禁用（DISABLED）' : '启用（ACTIVE）') + '，状态列已联动');
+        }
+      );
+      return;
+    }
+    if (act === 'reset') {
+      askConfirm(
+        '重置（重生）密钥',
+        '确认重置「' + k.label + '」？将生成新明文并立即替换旧明文：kid 保持不变（' + k.kid + '）、rotatedAt 更新、旧明文立即失效。',
+        '确认重置',
+        function () {
+          k.rotatedAt = nowCst();
+          k.revealed = false;
+          var pt = newPlaintext(k.env, k.last4);
+          k.plaintext = pt;
+          k.revealed = true;
+          showPlainOnce(k, pt, '重置成功：新明文（仅显示一次）');
+          toast('已重置：kid 不变（' + k.kid + '），旧明文立即失效，rotatedAt 已更新');
+        }
+      );
+      return;
+    }
+    if (act === 'delete') {
+      askConfirm(
+        '删除密钥',
+        '确认删除「' + k.label + '」？记录将移除（已产生的用量记录保留 kid 快照，不删除）。',
+        '确认删除',
+        function () {
+          var idx = KEYS.indexOf(k);
+          if (idx >= 0) KEYS.splice(idx, 1);
+          renderKeys();
+          toast('已删除密钥「' + k.label + '」（用量记录中的 kid 快照保留）');
+        }
+      );
+    }
+  }
+
+  function submitNewKey() {
+    if (KEYS.length >= KEY_LIMIT) { toast('已达密钥数量上限（' + KEY_LIMIT + ' 个），请先删除或禁用后新建'); return; }
+    var label = ($('newkey-label') && $('newkey-label').value.trim()) || '未命名密钥';
+    var env = ($('newkey-env') && $('newkey-env').value) || 'live';
+    var scopes = [];
+    Array.prototype.forEach.call(document.querySelectorAll('[data-newkey-scope]'), function (c) {
+      if (c.checked) scopes.push(c.value);
+    });
+    if (!scopes.length) scopes = ['seal:search'];
+    var last4 = rnd(4, B62.toLowerCase());
+    var k = {
+      kid: newKid(), label: label, env: env, last4: last4, revealed: false,
+      mask: 'ys_' + env + '_••••••••••••••••••••••••' + last4,
+      scopes: scopes, status: 'ACTIVE', createdAt: '2026-09-19', lastUsedAt: '', rotatedAt: ''
+    };
+    KEYS.unshift(k);
+    closeModal($('newkey-modal'));
+    if ($('newkey-label')) $('newkey-label').value = '';
+    var pt = newPlaintext(env, last4);
+    k.plaintext = pt;
+    showPlainOnce(k, pt, '新建密钥成功：明文仅显示一次');
+  }
+
+  /* =====================================================================
+     6. 用量明细：三维聚合（按密钥 / 按接口 / 按日）+ 筛选 + 导出（§7）
+     ===================================================================== */
+  var USAGE = [
+    { t: '2026-09-19 09:12', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/seals', method: 'GET', status: 200, ms: 198, calls: 268, billable: 268, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_9f21c4d7a3' },
+    { t: '2026-09-19 09:14', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/seals/{id}/images', method: 'GET', status: 200, ms: 96, calls: 96, billable: 0, images: 96, bytes: 499200, originals: 0, env: 'live', trace: 'tr_9f21c4d8b1' },
+    { t: '2026-09-19 09:21', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/assets/{id}/original', method: 'GET', status: 200, ms: 412, calls: 620, billable: 0, images: 620, bytes: 1363148800, originals: 620, env: 'live', trace: 'tr_9f21c4e22c' },
+    { t: '2026-09-18 15:02', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/seals', method: 'GET', status: 200, ms: 205, calls: 236, billable: 236, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_8d75b1f9c0' },
+    { t: '2026-09-18 15:08', kid: 'key_4B8N1X5TR7CD', endpoint: '/v1/seals/{id}', method: 'GET', status: 200, ms: 142, calls: 104, billable: 104, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_8d75b2034d' },
+    { t: '2026-09-18 16:44', kid: 'key_4B8N1X5TR7CD', endpoint: '/v1/assets/{id}/original', method: 'GET', status: 200, ms: 388, calls: 480, billable: 0, images: 480, bytes: 1055916032, originals: 480, env: 'live', trace: 'tr_8d75c71a55' },
+    { t: '2026-09-17 11:31', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/seals', method: 'GET', status: 200, ms: 221, calls: 296, billable: 296, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_7a12e0c4f6' },
+    { t: '2026-09-17 11:36', kid: 'key_4B8N1X5TR7CD', endpoint: '/v1/seals/{id}/images', method: 'GET', status: 200, ms: 504, calls: 104, billable: 0, images: 104, bytes: 540800, originals: 0, env: 'live', trace: 'tr_7a12e0d190' },
+    { t: '2026-09-17 11:52', kid: 'key_4B8N1X5TR7CD', endpoint: '/v1/assets/{id}/original', method: 'GET', status: 200, ms: 431, calls: 420, billable: 0, images: 420, bytes: 923795200, originals: 420, env: 'live', trace: 'tr_7a12e14bb7' },
+    { t: '2026-09-17 12:03', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/seals', method: 'GET', status: 429, ms: 12, calls: 2, billable: 0, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_7a12e1f2aa' },
+    { t: '2026-09-16 10:19', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/seals', method: 'GET', status: 200, ms: 188, calls: 208, billable: 208, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_6b03d9a771' },
+    { t: '2026-09-16 10:26', kid: 'key_7F3K2M9QP0AB', endpoint: '/v1/assets/{id}/original', method: 'GET', status: 200, ms: 402, calls: 322, billable: 0, images: 322, bytes: 708182016, originals: 322, env: 'live', trace: 'tr_6b03d9f0c9' },
+    { t: '2026-09-15 14:07', kid: 'key_4B8N1X5TR7CD', endpoint: '/v1/seals', method: 'GET', status: 200, ms: 176, calls: 172, billable: 172, images: 0, bytes: 0, originals: 0, env: 'live', trace: 'tr_5c92f4e1b8' },
+    { t: '2026-09-14 09:58', kid: 'key_4B8N1X5TR7CD', endpoint: '/v1/seals/{id}/images', method: 'GET', status: 200, ms: 91, calls: 76, billable: 0, images: 76, bytes: 395200, originals: 0, env: 'live', trace: 'tr_4d81a2c36e' },
+    { t: '2026-09-13 17:22', kid: 'key_2Q6H8J4LW3EF', endpoint: '/v1/seals', method: 'GET', status: 403, ms: 8, calls: 24, billable: 0, images: 0, bytes: 0, originals: 0, env: 'test', trace: 'tr_3e70b5d902' }
+  ];
+  var USAGE_DAYS = [{ d: '09-13', v: 24, pct: 2 }, { d: '09-14', v: 76, pct: 8 }, { d: '09-15', v: 172, pct: 17 },
+    { d: '09-16', v: 530, pct: 54 }, { d: '09-17', v: 822, pct: 84 }, { d: '09-18', v: 820, pct: 83 }, { d: '09-19', v: 984, pct: 100 }];
+
+  var usageState = { range: '7d', kid: '', endpoint: '', dim: 'day' };
+  var RANGE_FROM = { '7d': '2026-09-13 00:00', '30d': '2026-08-21 00:00', cycle: '2026-09-01 00:00' };
+
+  function usageFiltered() {
+    var from = RANGE_FROM[usageState.range] || RANGE_FROM['7d'];
+    return USAGE.filter(function (r) {
+      if (r.t < from) return false;
+      if (usageState.kid && r.kid !== usageState.kid) return false;
+      if (usageState.endpoint && r.endpoint !== usageState.endpoint) return false;
+      return true;
+    });
+  }
+  function usageTotals(rows) {
+    var s = { calls: 0, billable: 0, images: 0, bytes: 0, originals: 0, failed: 0 };
+    rows.forEach(function (r) {
+      s.calls += r.calls; s.billable += r.billable; s.images += r.images;
+      s.bytes += r.bytes; s.originals += r.originals;
+      if (r.status >= 400) s.failed += r.calls;
+    });
+    return s;
+  }
+  function labelOfKid(kid) { var k = findByKid(kid); return k ? k.label : '（已删除密钥快照）'; }
+
+  function renderUsage() {
+    var rows = usageFiltered();
+    var total = usageTotals(rows);
+    var dims = { day: {}, endpoint: {}, kid: {} };
+    rows.forEach(function (r) {
+      var dk = r.t.slice(5, 10);
+      var ek = r.endpoint;
+      var kk = r.kid;
+      dims.day[dk] = dims.day[dk] || { calls: 0, billable: 0, images: 0, bytes: 0, originals: 0, failed: 0 };
+      dims.endpoint[ek] = dims.endpoint[ek] || { calls: 0, billable: 0, images: 0, bytes: 0, originals: 0, failed: 0 };
+      dims.kid[kk] = dims.kid[kk] || { calls: 0, billable: 0, images: 0, bytes: 0, originals: 0, failed: 0 };
+      [dims.day[dk], dims.endpoint[ek], dims.kid[kk]].forEach(function (b) {
+        b.calls += r.calls; b.billable += r.billable; b.images += r.images;
+        b.bytes += r.bytes; b.originals += r.originals;
+        if (r.status >= 400) b.failed += r.calls;
+      });
+    });
+    function ordered(obj, keyFn) {
+      var out = Object.keys(obj).map(function (k) { return { k: k, v: obj[k] }; });
+      out.sort(function (a, b) { return b.v.calls - a.v.calls; });
+      return out;
+    }
+    var dim = usageState.dim;
+    var headMap = {
+      day: '日期（CST 自然日）',
+      endpoint: '接口（路由模板）',
+      kid: '密钥（kid + 备注名）'
+    };
+    if ($('usage-dim-head')) $('usage-dim-head').textContent = headMap[dim];
+    var tb = $('usage-tbody');
+    if (tb) {
+      var list;
+      if (dim === 'day') list = ordered(dims.day).sort(function (a, b) { return a.k < b.k ? 1 : -1; });
+      else if (dim === 'endpoint') list = ordered(dims.endpoint);
+      else list = ordered(dims.kid);
+      var h = '';
+      list.forEach(function (item) {
+        var label = item.k;
+        if (dim === 'kid') label = item.k + '　' + labelOfKid(item.k);
+        var pct = total.calls ? (item.v.calls / total.calls * 100).toFixed(1) : '0.0';
+        h += '<tr><td class="mono">' + esc(label) + '</td>' +
+          '<td>' + numFmt(item.v.calls) + '</td>' +
+          '<td>' + numFmt(item.v.billable) + '</td>' +
+          '<td>' + numFmt(item.v.originals) + '</td>' +
+          '<td>' + bytesFmt(item.v.bytes) + '</td>' +
+          '<td>' + (item.v.failed ? numFmt(item.v.failed) : '—') + '</td>' +
+          '<td>' + pct + '%</td></tr>';
+      });
+      if ($('usage-tbody')) {
+        $('usage-tbody').innerHTML = h || '<tr><td colspan="7">当前筛选无可展示记录（空态，非零行残骸）</td></tr>';
+      }
+    }
+    if ($('usage-foot')) {
+      $('usage-foot').innerHTML = '<tr><td>合计（当前筛选）</td>' +
+        '<td>' + numFmt(total.calls) + '</td><td>' + numFmt(total.billable) + '</td>' +
+        '<td>' + numFmt(total.originals) + '</td><td>' + bytesFmt(total.bytes) + '</td>' +
+        '<td>' + (total.failed ? numFmt(total.failed) : '—') + '</td><td>100.0%</td></tr>';
+    }
+    if ($('usage-summary')) {
+      $('usage-summary').textContent = '汇总：调用次数 ' + numFmt(total.calls) + ' · 计费调用 ' + numFmt(total.billable) +
+        ' · 高清原图 ' + numFmt(total.originals) + ' 张 · 图片流量 ' + bytesFmt(total.bytes) +
+        ' · 失败请求 ' + numFmt(total.failed) + '（不计费）';
+    }
+    if ($('usage-bars')) {
+      var bh = '';
+      USAGE_DAYS.forEach(function (d) {
+        bh += '<div class="bcol"><span class="bval">' + d.v + '</span><span class="bar" style="height:' + d.pct + '%"></span><span class="blabel">' + d.d + '</span></div>';
+      });
+      $('usage-bars').innerHTML = bh;
+    }
+  }
+
+  function buildUsageCsv() {
+    var rows = usageFiltered();
+    var total = usageTotals(rows);
+    var from = RANGE_FROM[usageState.range] || RANGE_FROM['7d'];
+    var rangeText = from.slice(0, 10) + ' — 2026-09-19';
+    var keyText = usageState.kid ? (usageState.kid + ' ' + labelOfKid(usageState.kid)) : '全部密钥';
+    var epText = usageState.endpoint || '全部接口';
+    var lines = [];
+    lines.push('# 印索用量明细导出（浏览器本地生成并下载，不触发任何外部请求）');
+    lines.push('# 区间(Asia/Shanghai): ' + rangeText + '　筛选: 密钥=' + keyText + '；接口=' + epText);
+    lines.push('# 汇总: 调用次数=' + total.calls + ' 计费调用=' + total.billable + ' 原图张数=' + total.originals +
+      ' 图片流量(字节)=' + total.bytes + ' 失败请求=' + total.failed);
+    lines.push('requestedAt(CST),kid,label,endpoint,method,statusCode,latencyMs,isBillable,callCount,imageCount,imageBytes,originalImageCount,env,traceId');
+    rows.forEach(function (r) {
+      lines.push([r.t, r.kid, labelOfKid(r.kid), r.endpoint, r.method, r.status, r.ms,
+        r.billable > 0 ? 1 : 0, r.calls, r.images, r.bytes, r.originals, r.env, r.trace].join(','));
+    });
+    var text = '\ufeff' + lines.join('\n'); /* UTF-8 BOM（§7.6） */
+    return { text: text, rowCount: rows.length, bytes: text.length, range: rangeText, keyText: keyText, endpointText: epText };
+  }
+
+  /* P2-5：真实落盘下载（Blob + objectURL，浏览器本地生成，零外部请求 / 零 CDN） */
+  function csvFileName(pkg) {
+    var r = pkg.range.replace(/[^0-9A-Za-z]+/g, '-').replace(/^-+|-+$/g, '');
+    var k = usageState.kid ? usageState.kid : 'all';
+    var ep = usageState.endpoint ? usageState.endpoint.replace(/[^0-9A-Za-z]+/g, '-').replace(/^-+|-+$/g, '') : 'all';
+    return 'yinsuo-usage_' + r + '_key-' + k + '_ep-' + ep + '.csv';
+  }
+  function downloadCsv(filename, text) {
+    try {
+      var blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      window.setTimeout(function () {
+        URL.revokeObjectURL(url);
+        if (a.parentNode) { a.parentNode.removeChild(a); }
+      }, 0);
+      return true;
+    } catch (err) { return false; }
+  }
+
+  function exportUsage() {
+    var pkg = buildUsageCsv();
+    var name = csvFileName(pkg);
+    pkg.fileName = name;
+    window.__insuo.lastExport = pkg;
+    var ok = downloadCsv(name, pkg.text);
+    toast((ok ? '已下载对账凭据 CSV：' : '已生成对账凭据 CSV（浏览器未放行下载）：') + name +
+      ' · ' + pkg.rowCount + ' 行 / ' + pkg.bytes + ' 字节 · 区间 ' + pkg.range +
+      ' · 密钥=' + pkg.keyText + ' · 严格等于当前筛选结果');
+  }
+
+  /* ---------- 6.1 概览 KPI 与账期账单（数值全部来自配置 / 适配层，不写死在标记里） ---------- */
+  function renderKpis() {
+    var p = planOfCode(ACCOUNT.planCode);
+    var remain = Math.max(0, p.quotaCalls - ACCOUNT.quotaUsedCalls);
+    var pct = p.quotaCalls ? Math.min(100, Math.round(ACCOUNT.quotaUsedCalls / p.quotaCalls * 100)) : 0;
+    var t = usageTotals(USAGE);
+    var tp = bytesParts(t.bytes);
+    if ($('kpi-calls')) $('kpi-calls').innerHTML = numFmt(ACCOUNT.quotaUsedCalls) + '<em>/ ' + callsFmt(p.quotaCalls) + '</em>';
+    if ($('kpi-calls-bar')) $('kpi-calls-bar').style.width = pct + '%';
+    if ($('kpi-calls-note')) $('kpi-calls-note').textContent = '包量余量 ' + numFmt(remain) + ' 次 · 包量不跨月结转';
+    if ($('kpi-images')) $('kpi-images').innerHTML = numFmt(ACCOUNT.originalImageCount) + '<em>张</em>';
+    if ($('kpi-images-note')) $('kpi-images-note').textContent = money(PRICING.originalImageUnitCents) + ' / 张 · 不含在包量内，按张扣余额';
+    if ($('kpi-traffic')) $('kpi-traffic').innerHTML = tp[0] + '<em>' + tp[1] + '</em>';
+    if ($('kpi-traffic-note')) $('kpi-traffic-note').textContent = '预览 WebP 优先 / PNG 2 色兜底 · 原图按张计流量';
+  }
+
+  var BILLS = [
+    { period: '2026-09（计费中）', quotaUsed: 1284, overageCalls: 0, originals: 1842, settle: '充值余额实时扣减', status: '计费中', kind: 'warn' },
+    { period: '2026-08', quotaUsed: 2000, overageCalls: 2000, originals: 1284, settle: '包量 → 充值余额', status: '已结算', kind: 'ok' },
+    { period: '2026-06', quotaUsed: 2000, overageCalls: 1250, originals: 640, settle: '包量 → 充值余额', status: '已结算', kind: 'ok' },
+    { period: '2026-03（开通）', quotaUsed: 0, overageCalls: 0, originals: 0, settle: '年费单独收取', status: '已结清', kind: 'ok', annual: true }
+  ];
+  function renderBills() {
+    var tb = $('bill-rows');
+    if (!tb) return;
+    var p = planOfCode(ACCOUNT.planCode);
+    var h = '';
+    BILLS.forEach(function (b) {
+      var overFee = b.overageCalls * p.overageUnitCents;
+      var imgFee = b.originals * PRICING.originalImageUnitCents;
+      var total = b.annual ? p.annualFeeCents : (overFee + imgFee);
+      h += '<tr>' +
+        '<td>' + esc(b.period) + '</td>' +
+        '<td>' + (b.annual ? '—' : (numFmt(p.quotaCalls) + ' / ' + numFmt(b.quotaUsed) + ' 次')) + '</td>' +
+        '<td>' + (b.overageCalls ? numFmt(b.overageCalls) + ' 次 × ' + money(p.overageUnitCents) + ' = ' + money(overFee) : '超量 0 次') + '</td>' +
+        '<td>' + (b.originals ? numFmt(b.originals) + ' 张 × ' + money(PRICING.originalImageUnitCents) + ' = ' + money(imgFee) : '—') + '</td>' +
+        '<td>' + money(total) + (b.annual ? '（年费）' : '') + '</td>' +
+        '<td>' + esc(b.settle) + '</td>' +
+        '<td>' + THEME.status(b.kind, b.status) + '</td></tr>';
+    });
+    tb.innerHTML = h;
+  }
+
+  /* =====================================================================
+     7. 假支付闭环（§5）：CREATED → PENDING_PAY → PAID → SETTLED；
+        FAILED / EXPIRED / CANCELLED 分支零副作用；同一 orderId 只入账一次
+     ===================================================================== */
+  var LEDGER = [
+    { cst: '2026-09-19 09:12', type: 'DEDUCT_QUOTA', direction: 'OUT', amountCents: 0, callCount: 1284, ref: 'QTA-202609', note: '本月计费调用 1,284 次消耗月包量（不产生金额）' },
+    { cst: '2026-09-19 09:12', type: 'ORIGINAL_IMAGE', direction: 'OUT', amountCents: 368400, ref: 'IMG-202609', note: '高清原图 1,842 张 × ¥2.00（按张扣余额）' },
+    { cst: '2026-08-31 23:59', type: 'ORIGINAL_IMAGE', direction: 'OUT', amountCents: 256800, ref: 'IMG-202608', note: '高清原图 1,284 张 × ¥2.00' },
+    { cst: '2026-08-31 23:59', type: 'DEDUCT_BALANCE', direction: 'OUT', amountCents: 160000, callCount: 2000, ref: 'OVR-202608', note: '超量 2,000 次 × ¥0.80（包量已耗尽，扣充值余额）' },
+    { cst: '2026-08-05 14:12', type: 'RECHARGE', direction: 'IN', amountCents: 1000000, ref: 'R-20260805-01', note: '在线支付入账' },
+    { cst: '2026-06-30 23:59', type: 'DEDUCT_BALANCE', direction: 'OUT', amountCents: 100000, callCount: 1250, ref: 'OVR-202606', note: '超量 1,250 次 × ¥0.80（包量已耗尽，扣充值余额）' },
+    { cst: '2026-06-30 23:59', type: 'ORIGINAL_IMAGE', direction: 'OUT', amountCents: 128000, ref: 'IMG-202606', note: '高清原图 640 张 × ¥2.00' },
+    { cst: '2026-06-11 09:05', type: 'RECHARGE', direction: 'IN', amountCents: 900000, ref: 'R-20260611-01', note: '对公转账入账' },
+    { cst: '2026-03-14 10:25', type: 'ANNUAL_FEE', direction: 'OUT', amountCents: 360000, ref: 'INV-2026-001', note: '标准版年费（2026-03-14 — 2027-03-13）' },
+    { cst: '2026-03-14 10:20', type: 'RECHARGE', direction: 'IN', amountCents: 5000000, ref: 'R-20260314-01', note: '对公转账入账' }
+  ];
+  var ORDERS = [];
+  var orderSeq = 0;
+  var ACCOUNT = { planCode: 'standard', quotaUsedCalls: 1284, originalImageCount: 1842, annualFrom: '2026-03-14', annualTo: '2027-03-13' };
+  var pay = { order: null, remain: 0, tick: null };
+
+  function balanceCents() {
+    var s = 0;
+    LEDGER.forEach(function (e) { s += (e.direction === 'IN' ? e.amountCents : -e.amountCents); });
+    return s;
+  }
+  var TYPE_LABEL = {
+    RECHARGE: 'RECHARGE 充值', ANNUAL_FEE: 'ANNUAL_FEE 年费', DEDUCT_QUOTA: 'DEDUCT_QUOTA 包量扣减',
+    DEDUCT_BALANCE: 'DEDUCT_BALANCE 超量扣余额', OVERAGE: 'OVERAGE 超量结算', ORIGINAL_IMAGE: 'ORIGINAL_IMAGE 高清原图',
+    ADJUST: 'ADJUST 人工调整', REFUND: 'REFUND 退款'
+  };
+  function ledgerAmountText(e) {
+    if (e.type === 'DEDUCT_QUOTA') return numFmt(e.callCount) + ' 次（¥0.00）';
+    return (e.direction === 'IN' ? '+ ' : '− ') + money(e.amountCents).replace('¥ ', '¥');
+  }
+  function renderLedger() {
+    var tb = $('recharge-rows');
+    if (tb) {
+      var running = balanceCents(); /* 顶行为最新，从最新余额向下回溯 */
+      var h = '';
+      LEDGER.forEach(function (e, i) {
+        var after = running;
+        running = running - (e.direction === 'IN' ? e.amountCents : -e.amountCents);
+        var status = e.type === 'RECHARGE' ? '已入账' : (e.type === 'DEDUCT_QUOTA' ? '已扣减（包量）' : '已扣减');
+        h += '<tr>' +
+          '<td class="mono">' + e.cst + '</td>' +
+          '<td>' + esc(TYPE_LABEL[e.type] || e.type) + '</td>' +
+          '<td>' + THEME.status(e.type === 'RECHARGE' ? 'ok' : 'warn', status) + '</td>' +
+          '<td>' + (e.direction === 'IN' ? 'IN' : 'OUT') + '</td>' +
+          '<td>' + ledgerAmountText(e) + '</td>' +
+          '<td class="mono">' + esc(e.ref) + '</td>' +
+          '<td>' + money(after) + '</td>' +
+          '<td>' + esc(e.note) + '</td>' +
+          '</tr>';
+      });
+      tb.innerHTML = h;
+    }
+    var bal = balanceCents();
+    if ($('balance-amount')) $('balance-amount').textContent = money(bal);
+    if ($('kpi-balance')) $('kpi-balance').textContent = money(bal);
+    if ($('ledger-check')) {
+      var sum = 0;
+      LEDGER.forEach(function (e) { sum += (e.direction === 'IN' ? e.amountCents : -e.amountCents); });
+      var ok = sum === bal;
+      $('ledger-check').textContent = '一致性自检：Σ流水 ' + money(sum) + ' = 余额 ' + money(bal) + (ok ? ' ✓ 一致' : ' ⚠ 不一致（演示告警）');
+      $('ledger-check').className = 'note' + (ok ? '' : ' warn');
+    }
+    if ($('quota-remain')) {
+      var p = PRICING.plans[0];
+      for (var i = 0; i < PRICING.plans.length; i++) { if (PRICING.plans[i].code === ACCOUNT.planCode) p = PRICING.plans[i]; }
+      var remain = Math.max(0, p.quotaCalls - ACCOUNT.quotaUsedCalls);
+      $('quota-remain').textContent = '本月包量 ' + callsFmt(p.quotaCalls) + '，已用 ' + callsFmt(ACCOUNT.quotaUsedCalls) +
+        '，余 ' + callsFmt(remain) + '（包量不跨月结转，每月 1 日 00:00 CST 重置）';
+    }
+    if ($('account-plan')) {
+      var pl = planOfCode(ACCOUNT.planCode);
+      $('account-plan').textContent = pl.name + ' · 年费 ' + money(pl.annualFeeCents) + ' / 年（已缴，有效期 ' +
+        ACCOUNT.annualFrom + ' 至 ' + ACCOUNT.annualTo + '）';
+    }
+    renderKpis();
+  }
+
+  function orderStatusText(o) {
+    return ({ CREATED: '已下单', PENDING_PAY: '待支付', PAID: '已支付', SETTLED: '已入账',
+      FAILED: '支付失败', EXPIRED: '已关闭（超时）', CANCELLED: '已取消' })[o.status] || o.status;
+  }
+  function renderOrders() {
+    var tb = $('order-rows');
+    if (!tb) return;
+    var h = '';
+    ORDERS.forEach(function (o) {
+      var acts = '';
+      if (o.status === 'CREATED' || o.status === 'PENDING_PAY') {
+        acts = THEME.rowBtn('data-order-act="resume" data-order="' + o.id + '"', '继续支付') +
+          THEME.rowBtn('data-order-act="close" data-order="' + o.id + '"', '关闭');
+      } else if (o.status === 'SETTLED') {
+        acts = THEME.rowBtn('data-order-act="ledger" data-order="' + o.id + '"', '查看流水');
+      } else {
+        acts = THEME.rowBtn('data-order-act="reorder" data-order="' + o.id + '"', '重新下单（新订单号）');
+      }
+      var kind = o.status === 'SETTLED' ? 'ok' : (o.status === 'PENDING_PAY' || o.status === 'CREATED' || o.status === 'PAID') ? 'warn' : 'bad';
+      h += '<tr>' +
+        '<td class="mono">' + o.id + '</td>' +
+        '<td class="mono">' + o.createdAt + '</td>' +
+        '<td>' + money(o.amountCents) + '</td>' +
+        '<td>' + esc(o.channel) + '</td>' +
+        '<td>' + THEME.status(kind, orderStatusText(o)) + '</td>' +
+        '<td>' + (o.ledgerEntryId ? '流水 ' + esc(o.ledgerEntryId) : '—') + '</td>' +
+        '<td class="rowacts">' + acts + '</td></tr>';
+    });
+    tb.innerHTML = h || '<tr><td colspan="7">尚无充值订单（演示空态：选择金额后点「去支付」）</td></tr>';
+  }
+
+  function selectedAmountCents() {
+    var custom = document.querySelector('.chip[data-amount="custom"].is-active, .tile[data-amount="custom"].is-active');
+    if (custom) {
+      var v = $('custom-amount') ? parseInt($('custom-amount').value, 10) : NaN;
+      if (!v || v < 1 || v > 100000) return { cents: 0, text: '自定义金额（请输入 1–100,000 的整数元）' };
+      return { cents: v * 100, text: money(v * 100) };
+    }
+    var el = document.querySelector('.chip.is-active[data-amount], .tile.is-active[data-amount]');
+    if (!el) return { cents: 0, text: '未选择金额' };
+    var n = parseInt(el.getAttribute('data-amount'), 10);
+    return { cents: (n || 0) * 100, text: money((n || 0) * 100) };
+  }
+  function currentChannel() {
+    var r = document.querySelector('[data-pay-channel]:checked');
+    return r ? r.value : '微信支付';
+  }
+  function syncAmountLabel() {
+    var a = selectedAmountCents();
+    if ($('amount-label')) $('amount-label').textContent = a.text;
+    var customOn = document.querySelector('.chip[data-amount="custom"].is-active, .tile[data-amount="custom"].is-active');
+    if ($('custom-amount')) $('custom-amount').style.display = customOn ? '' : 'none';
+  }
+
+  function stopTick() { if (pay.tick) { window.clearInterval(pay.tick); pay.tick = null; } }
+  function drawQr(seed) {
+    var qr = $('pay-qr');
+    if (!qr) return;
+    var N = 21, cells = '', s = seed || 20260919;
+    function rndBit() { s = (s * 1103515245 + 12345) & 0x7fffffff; return s % 7 < 3 ? 1 : 0; }
+    for (var y = 0; y < N; y++) {
+      for (var x = 0; x < N; x++) {
+        var on = rndBit();
+        var inFinder = (x < 7 && y < 7) || (x >= N - 7 && y < 7) || (x < 7 && y >= N - 7);
+        if (inFinder) {
+          var lx = x >= N - 7 ? x - (N - 7) : x;
+          var ly = y >= N - 7 ? y - (N - 7) : y;
+          on = (lx === 0 || lx === 6 || ly === 0 || ly === 6 || (lx >= 2 && lx <= 4 && ly >= 2 && ly <= 4)) ? 1 : 0;
+        }
+        cells += '<i class="qr-c' + (on ? ' on' : '') + '"></i>';
+      }
+    }
+    qr.innerHTML = cells;
+  }
+  function updatePayView() {
+    var o = pay.order;
+    if (!o) return;
+    if ($('pay-order-id')) $('pay-order-id').textContent = o.id;
+    if ($('pay-state')) $('pay-state').textContent = orderStatusText(o);
+    if ($('pay-amt')) $('pay-amt').textContent = money(o.amountCents);
+    if ($('pay-channel-text')) $('pay-channel-text').textContent = o.channel;
+    if ($('pay-countdown')) $('pay-countdown').textContent = Math.floor(pay.remain / 60) + ':' + pad2(pay.remain % 60);
+    var pending = o.status === 'PENDING_PAY';
+    if ($('pay-qr-wrap')) $('pay-qr-wrap').style.display = pending ? '' : 'none';
+    if ($('pay-expired')) $('pay-expired').style.display = pending ? 'none' : 'block';
+    if ($('pay-tip')) $('pay-tip').textContent = pending ? '待支付：倒计时归零后订单自动关闭（超时，零副作用）'
+      : (o.status === 'SETTLED' ? '支付成功（PAID）→ 已入账（SETTLED）：余额与流水同时更新，订单为终态不可逆'
+        : (o.status === 'FAILED' ? '支付失败（FAILED）：余额不变、未产生流水；可重新下单（生成新订单号）'
+          : '订单终态：' + orderStatusText(o) + '，无余额变动；可重新下单（生成新订单号）'));
+    Array.prototype.forEach.call(document.querySelectorAll('[data-demo-pay]'), function (b) {
+      b.style.display = pending ? '' : 'none';
+    });
+    if ($('pay-accel-line')) $('pay-accel-line').style.display = pending ? '' : 'none';
+    if ($('go-pay')) {
+      var latest = ORDERS[0];
+      var blocked = latest && (latest.status === 'EXPIRED' || latest.status === 'FAILED');
+      $('go-pay').disabled = !!blocked;
+      $('go-pay').setAttribute('aria-disabled', blocked ? 'true' : 'false');
+    }
+  }
+  function startTick() {
+    stopTick();
+    pay.tick = window.setInterval(function () {
+      if (!pay.order || pay.order.status !== 'PENDING_PAY') { stopTick(); return; }
+      pay.remain = Math.max(0, pay.remain - 1);
+      updatePayView();
+      if (pay.remain === 0) { expireOrder(); }
+    }, 1000);
+  }
+  function expireOrder() {
+    var o = pay.order;
+    if (!o || o.status !== 'PENDING_PAY') return;
+    o.status = 'EXPIRED';
+    stopTick();
+    renderOrders();
+    updatePayView();
+    toast('支付超时：订单已关闭（超时），「去支付」置灰，可在订单列表「重新下单」');
+  }
+  function openPay() {
+    var a = selectedAmountCents();
+    if (!a.cents || a.cents < 100 || a.cents > 10000000) {
+      toast('金额校验未通过：须为 1–100,000 元的整数（演示校验）');
+      return;
+    }
+    orderSeq++;
+    var o = {
+      id: 'YS-20260919-' + ('000' + orderSeq).slice(-4),
+      createdAt: '2026-09-19 11:' + pad2(20 + orderSeq), amountCents: a.cents, channel: currentChannel(),
+      status: 'CREATED', failReason: '', ledgerEntryId: null
+    };
+    ORDERS.unshift(o);
+    pay.order = o;
+    renderOrders();
+    transitionToPending();
+    openModal($('pay-modal'));
+    toast('订单已创建（CREATED）→ 生成支付码（PENDING_PAY）：默认 15 分钟倒计时');
+  }
+  function transitionToPending() {
+    var o = pay.order;
+    o.status = 'PENDING_PAY';
+    pay.remain = 900;
+    if ($('pay-accel')) $('pay-accel').checked = false;
+    drawQr(o.amountCents);
+    renderOrders();
+    updatePayView();
+    startTick();
+  }
+  function resumeOrder(id) {
+    var o = null;
+    ORDERS.forEach(function (x) { if (x.id === id) o = x; });
+    if (!o) return;
+    if (o.status === 'CREATED' || o.status === 'PENDING_PAY') {
+      pay.order = o;
+      if (o.status === 'CREATED' || pay.remain <= 0) { transitionToPending(); } else { updatePayView(); }
+      openModal($('pay-modal'));
+      toast('已恢复待支付订单 ' + o.id + '（按 expiresAt 重算剩余时间）');
+    } else {
+      toast('订单 ' + o.id + ' 处于终态「' + orderStatusText(o) + '」，不可再变更状态');
+    }
+  }
+  function simulatePay(kind) {
+    var o = pay.order;
+    if (!o) { toast('当前无支付中的订单'); return; }
+    if (o.status === 'SETTLED' || o.ledgerEntryId) {
+      toast('该订单已入账：同一 orderId 重复入账已被幂等拦截（只产生 1 条 RECHARGE 流水）');
+      return;
+    }
+    if (kind === 'cancel') {
+      if (o.status !== 'PENDING_PAY' && o.status !== 'CREATED') { stopTick(); closeModal($('pay-modal')); return; }
+      o.status = 'CANCELLED';
+      stopTick();
+      renderOrders();
+      updatePayView();
+      toast('订单已取消（CANCELLED）：无余额变动');
+      return;
+    }
+    if (o.status !== 'PENDING_PAY') {
+      toast('订单处于终态「' + orderStatusText(o) + '」，不可再变更；请重新下单（生成新订单号）');
+      return;
+    }
+    if (kind === 'success') {
+      o.status = 'PAID';
+      var entry = {
+        cst: nowCst(), type: 'RECHARGE', direction: 'IN', amountCents: o.amountCents,
+        ref: o.id, note: '假支付入账（演示）· ' + o.channel
+      };
+      LEDGER.unshift(entry);
+      /* P2-6：入账时间取本机当前时钟（分钟粒度，与既有流水格式一致），新入账仍排首位 */
+      o.ledgerEntryId = o.id;
+      o.status = 'SETTLED';
+      stopTick();
+      renderLedger();
+      renderOrders();
+      updatePayView();
+      toast('支付成功（PAID）→ 已入账（SETTLED）：+ ' + money(o.amountCents) + '，余额与充值记录同时更新');
+    } else if (kind === 'fail') {
+      o.status = 'FAILED';
+      o.failReason = '演示：渠道返回支付失败';
+      stopTick();
+      renderOrders();
+      updatePayView();
+      toast('支付失败（FAILED）：余额不变、未产生流水；可重新下单（生成新订单号）');
+    }
+  }
+  function orderAct(btn) {
+    var act = btn.getAttribute('data-order-act');
+    var id = btn.getAttribute('data-order');
+    if (act === 'resume') { resumeOrder(id); return; }
+    if (act === 'close') {
+      var o = null;
+      ORDERS.forEach(function (x) { if (x.id === id) o = x; });
+      if (o && (o.status === 'CREATED' || o.status === 'PENDING_PAY')) {
+        o.status = 'CANCELLED';
+        if (pay.order === o) { stopTick(); updatePayView(); }
+        renderOrders();
+        toast('订单 ' + id + ' 已取消（CANCELLED），无余额变动');
+      }
+      return;
+    }
+    if (act === 'ledger') { toast('订单 ' + id + ' 已入账，流水见「充值记录（账单流水）」表顶部 RECHARGE 行'); return; }
+    if (act === 'reorder') {
+      pay.order = null;
+      if ($('go-pay')) { $('go-pay').disabled = false; $('go-pay').setAttribute('aria-disabled', 'false'); }
+      openPay();
+    }
+  }
+
+  /* =====================================================================
+     8. 事件委托：点击 / 键盘 / 初始化
+     ===================================================================== */
+  document.addEventListener('click', function (e) {
+    var el = e.target;
+    if (!el || !el.closest) return;
+
+    var tab = el.closest('.segs .seg');
+    if (tab) { if (activate(tab.getAttribute('data-goto'))) e.preventDefault(); return; }
+
+    var gotoTab = el.closest('[data-goto]');
+    if (gotoTab) { e.preventDefault(); activate(gotoTab.getAttribute('data-goto')); return; }
+
+    var sub = el.closest('.subtab');
+    if (sub) { e.preventDefault(); setSubtabs(sub); return; }
+
+    var envBtn = el.closest('[data-env]');
+    if (envBtn) {
+      e.preventDefault();
+      setGroupActive(envBtn, 'button');
+      toast('已切换到「' + envBtn.textContent.trim() + '」（演示）');
+      return;
+    }
+
+    var side = el.closest('[data-side]');
+    if (side) {
+      var nav = side.parentNode;
+      if (nav) { Array.prototype.forEach.call(nav.querySelectorAll('a'), function (a) { a.classList.remove('is-active'); }); }
+      side.classList.add('is-active');
+      var href = side.getAttribute('href') || '';
+      if (href.charAt(0) === '#') {
+        var t = document.getElementById(href.slice(1));
+        if (t) { e.preventDefault(); t.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+      }
+      e.preventDefault();
+      return;
+    }
+
+    var amountBtn = el.closest('[data-amount]');
+    if (amountBtn) {
+      e.preventDefault();
+      setGroupActive(amountBtn, '.chip, .tile');
+      syncAmountLabel();
+      return;
+    }
+
+    var dimBtn = el.closest('[data-dim]');
+    if (dimBtn) {
+      e.preventDefault();
+      setGroupActive(dimBtn, 'button');
+      Array.prototype.forEach.call(dimBtn.parentNode.querySelectorAll('button'), function (b) {
+        b.setAttribute('aria-pressed', b === dimBtn ? 'true' : 'false');
+      });
+      usageState.dim = dimBtn.getAttribute('data-dim');
+      renderUsage();
+      toast('用量维度已切换为「' + dimBtn.textContent.trim() + '」：三张表同源重算，页面未刷新');
+      return;
+    }
+
+    var keyBtn = el.closest('[data-key-act]');
+    if (keyBtn) { e.preventDefault(); onKeyAct(keyBtn); return; }
+
+    var newKeyBtn = el.closest('[data-open-newkey]');
+    if (newKeyBtn) {
+      e.preventDefault();
+      if (KEYS.length >= KEY_LIMIT) { toast('已达密钥数量上限（' + KEY_LIMIT + ' 个）：「新建」已禁用'); return; }
+      openModal($('newkey-modal'));
+      return;
+    }
+
+    var orderBtn = el.closest('[data-order-act]');
+    if (orderBtn) { e.preventDefault(); orderAct(orderBtn); return; }
+
+    var exportBtn = el.closest('[data-export-usage]');
+    if (exportBtn) { e.preventDefault(); exportUsage(); return; }
+
+    var payBtn = el.closest('[data-open-pay]');
+    if (payBtn) { e.preventDefault(); openPay(); return; }
+
+    var payHide = el.closest('[data-pay-hide]');
+    if (payHide) {
+      e.preventDefault();
+      stopTick();
+      closeModal($('pay-modal'));
+      toast('支付弹层已收起：订单仍为待支付，可在订单列表「继续支付」按 expiresAt 恢复倒计时');
+      return;
+    }
+
+    var payDemo = el.closest('[data-demo-pay]');
+    if (payDemo) { e.preventDefault(); simulatePay(payDemo.getAttribute('data-demo-pay')); return; }
+
+    var modalCopy = el.closest('[data-modal-copy]');
+    if (modalCopy) {
+      e.preventDefault();
+      var v = $('plain-value') ? $('plain-value').textContent : '';
+      if (!v) { toast('明文已丢弃（仅可查看一次）'); return; }
+      copyText(v, '已复制明文：请立即保存（关闭后无法再次查看）');
+      return;
+    }
+    var modalClose = el.closest('[data-modal-close]');
+    if (modalClose) { e.preventDefault(); dismissPlain(); return; }
+    var confirmOk = el.closest('[data-confirm-ok]');
+    if (confirmOk) { e.preventDefault(); resolveConfirm(true); return; }
+    var confirmCancel = el.closest('[data-confirm-cancel]');
+    if (confirmCancel) { e.preventDefault(); resolveConfirm(false); return; }
+    var newKeySubmit = el.closest('[data-newkey-submit]');
+    if (newKeySubmit) { e.preventDefault(); submitNewKey(); return; }
+    var newKeyCancel = el.closest('[data-newkey-cancel]');
+    if (newKeyCancel) { e.preventDefault(); closeModal($('newkey-modal')); return; }
+
+    var actBtn = el.closest('[data-act]');
+    if (actBtn) {
+      var act = actBtn.getAttribute('data-act');
+      if (act === 'copy') { e.preventDefault(); copyText(actBtn.getAttribute('data-copy') || '', '已复制（演示值）'); return; }
+      if (act === 'reveal') {
+        e.preventDefault();
+        var secret = actBtn.closest('tr') ? actBtn.closest('tr').querySelector('[data-secret]') : null;
+        if (secret) {
+          var on = secret.getAttribute('data-revealed') === '1';
+          secret.textContent = on ? secret.getAttribute('data-masked') : secret.getAttribute('data-secret');
+          secret.setAttribute('data-revealed', on ? '0' : '1');
+          actBtn.textContent = on ? '显示密钥' : '隐藏密钥';
+          toast(on ? '密钥已掩码显示' : '密钥为界面示意值');
+        }
+        return;
+      }
+      /* 其它 data-act（reset 等）不劫持：继续落到 data-demo 分支，语义与文案保持 */
+    }
+
+    var demo = el.closest('[data-demo]');
+    if (demo) { e.preventDefault(); toast(demo.getAttribute('data-demo')); return; }
+
+    var anchor = el.closest('a[href^="#"]');
+    if (anchor) {
+      var h = anchor.getAttribute('href') || '';
+      if (h.length > 1) {
+        var tgt = document.getElementById(h.slice(1));
+        if (tgt) { e.preventDefault(); tgt.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      } else { e.preventDefault(); }
+    }
+  });
+
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    if (!el) return;
+    if (el.id === 'usage-range') { usageState.range = el.value; renderUsage(); return; }
+    if (el.id === 'usage-key') { usageState.kid = el.value; renderUsage(); return; }
+    if (el.id === 'usage-endpoint') { usageState.endpoint = el.value; renderUsage(); return; }
+    if (el.id === 'pay-accel') {
+      if (el.checked) {
+        pay.remain = 30;
+        updatePayView();
+        toast('演示开关：倒计时已加速到 30 秒（默认 15 分钟）');
+      } else if (pay.order && pay.order.status === 'PENDING_PAY') {
+        pay.remain = 900;
+        updatePayView();
+        toast('演示开关已关闭：倒计时恢复为默认 15 分钟');
+      }
+      return;
+    }
+    if (el.id === 'custom-amount') { syncAmountLabel(); return; }
+  });
+
+  /* P2-2：方向键仅在 tablist 内响应；焦点在输入控件时不劫持，且 preventDefault */
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
+    var t = e.target;
+    if (t && t.closest && t.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return;
+    var list = t && t.closest ? t.closest('.segs[role="tablist"]') : null;
+    if (!list) return;
+    var idx = -1;
+    tabs.forEach(function (x, i) { if (x.classList.contains('is-active')) idx = i; });
+    if (idx < 0) return;
+    e.preventDefault();
+    var next = idx;
+    if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else next = tabs.length - 1;
+    activate(tabs[next].getAttribute('data-goto'));
+    tabs[next].focus();
+  });
+
+  /* 注册即自动开通（R2 主路径）：演示态直接跳控制台概览 + 一次性开通提示 */
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f || !f.closest) return;
+    if (f.closest('#pane-reg')) {
+      e.preventDefault();
+      var org = $('reg-org');
+      var mail = $('reg-mail');
+      var err = $('reg-err');
+      var msg = '';
+      if (org && org.value.trim().length < 2) msg = '请填写机构名称（≥2 字）';
+      else if (mail && mail.value.indexOf('@') < 0) msg = '请填写有效的机构邮箱';
+      if (err) { err.textContent = msg; err.style.display = msg ? 'block' : 'none'; }
+      if (msg) { toast('校验未通过：' + msg); return; }
+      var name = org.value.trim();
+      if ($('console-org-name')) $('console-org-name').textContent = name;
+      if ($('console-org-sub')) $('console-org-sub').textContent = '已开通 · 标准版（演示）';
+      activate('screen-console');
+      toast('注册即自动开通（演示）：已生成机构账号与沙箱密钥，可自助生成 API 密钥');
+      return;
+    }
+  });
+
+  /* ---------- 初始化 ---------- */
+  function init() {
+    syncTabFocus();
+    renderScaleOptions();
+    renderPricing();
+    renderKeys();
+    renderUsage();
+    renderLedger();
+    renderOrders();
+    renderBills();
+    syncAmountLabel();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+
+  window.__insuo = {
+    activate: activate,
+    screens: screens,
+    PRICING: PRICING,
+    renderPricing: renderPricing,
+    renderAll: function () { renderPricing(); renderScaleOptions(); renderKeys(); renderUsage(); renderLedger(); renderOrders(); renderBills(); syncAmountLabel(); },
+    keys: KEYS,
+    usage: USAGE,
+    usageState: usageState,
+    usageFiltered: usageFiltered,
+    ledger: LEDGER,
+    orders: ORDERS,
+    account: ACCOUNT,
+    balanceCents: balanceCents,
+    buildUsageCsv: buildUsageCsv,
+    renderKpis: renderKpis,
+    planOfCode: planOfCode,
+    lastExport: null,
+    openPay: openPay,
+    simulate: simulatePay,
+    expireNow: function () { pay.remain = 0; updatePayView(); expireOrder(); },
+    pay: pay,
+    dismissPlain: dismissPlain,
+    toast: toast
+  };
+})();
+</script>
+</body>
+</html>

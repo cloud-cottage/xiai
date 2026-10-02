@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>玺爱 · 藏品广场 · v2 墨底金线</title>
+<style>
+/* ============================================================
+   一、设计令牌：本文件唯一的色值来源
+   ------------------------------------------------------------
+   本块之外不得出现任何裸色值；组件一律引用下列令牌。
+   两层结构：基底令牌（底色/卡面/次级面、主色、暖点缀、文字、描边）
+   与槽位令牌（页头、侧栏、筛选、卡片、遮罩、提示）——
+   槽位令牌只描述用途，必要时引用基底令牌，便于逐个替换。
+   ============================================================ */
+:root{
+  /* ---- 基底：底色 / 卡面 / 次级面 ---- */
+  --c-bg:#14120f;                    /* 页面底板：墨 */
+  --c-surface:#1e1b17;               /* 卡面：墨面 */
+  --c-surface-sunken:#100e0c;        /* 次级面：深墨 */
+  /* ---- 基底：主色 / 暖点缀 ---- */
+  --c-brand:#b23a2c;                 /* 主色：暗红 */
+  --c-brand-strong:#cf5c44;          /* 主色亮端 */
+  --c-brand-soft:rgba(178,58,44,0.20);
+  --c-on-brand:#14120f;              /* 主色块上的文字 */
+  --c-gold:#c9a24a;                  /* 暖点缀：金 */
+  --c-gold-strong:#e0bd6d;           /* 金亮端 */
+  --c-gold-soft:rgba(201,162,74,0.16);
+  --c-gold-on-bg:#e0bd6d;            /* 底板上的金 */
+  /* ---- 基底：文字 ---- */
+  --c-text:#ece5d6;                  /* 文字 */
+  --c-text-muted:#b3a794;            /* 次级文字 */
+  --c-text-on-bg:#ece5d6;            /* 底板上的文字 */
+  --c-text-on-bg-muted:#b3a794;      /* 底板上的次级文字 */
+  /* ---- 基底：描边 ---- */
+  --c-line:rgba(201,162,74,0.55);    /* 分隔线 */
+  --c-line-strong:rgba(201,162,74,0.88); /* 控件与卡片轮廓 */
+  --c-line-on-bg:rgba(201,162,74,0.60);  /* 底板上的分隔线 */
+  --c-line-on-bg-strong:rgba(201,162,74,0.88); /* 底板上的控件轮廓 */
+  /* ---- 装饰纹理（不承担信息传递，不参与对比考核） ---- */
+  --tex-a:rgba(201,162,74,0.055);
+  --tex-b:rgba(236,229,214,0.035);
+  --c-transparent:transparent;
+  /* ---- 槽位：页头 ---- */
+  --slot-hdr-bg:#1a1714;
+  --slot-hdr-text:var(--c-text);
+  --slot-hdr-muted:var(--c-text-muted);
+  --slot-hdr-line:var(--c-line-strong);
+  --slot-hdr-hover-bg:var(--c-gold-soft);
+  --slot-hdr-mark:var(--c-brand-strong);
+  --slot-search-bg:var(--c-surface-sunken);
+  --slot-search-line:var(--c-line-strong);
+  --slot-search-text:var(--c-text);
+  --slot-search-muted:var(--c-text-muted);
+  --slot-search-ico:var(--c-gold-strong);
+  --slot-badge-bg:var(--c-brand-strong);
+  --slot-badge-text:var(--c-on-brand);
+  --slot-gold-bg:var(--c-gold-soft);
+  --slot-gold-line:var(--c-gold);
+  --slot-gold-text:var(--c-gold-strong);
+  --slot-avatar-bg:var(--c-brand-strong);
+  --slot-avatar-text:var(--c-on-brand);
+  --slot-avatar-line:var(--c-gold-strong);
+  /* ---- 槽位：侧栏 ---- */
+  --slot-side-hover-bg:var(--c-gold-soft);
+  --slot-side-on-bg:var(--c-brand-soft);
+  --slot-side-on-text:var(--c-gold-strong);
+  --slot-side-mark:var(--c-gold);
+  --slot-side-n-bg:var(--c-gold);
+  --slot-side-n-text:var(--c-on-brand);
+  --slot-side-note-bg:var(--c-gold-soft);
+  /* ---- 槽位：面板与筛选 ---- */
+  --slot-panel-bg:var(--c-surface);
+  --slot-panel-line:var(--c-line);
+  --slot-chip-bg:var(--c-surface-sunken);
+  --slot-chip-text:#c6baa6;
+  --slot-chip-line:var(--c-line-strong);
+  --slot-chip-text-hover:var(--c-gold-strong);
+  --slot-chip-line-hover:var(--c-gold-strong);
+  --slot-chip-on-bg:var(--c-brand-strong);
+  --slot-chip-on-text:var(--c-on-brand);
+  --slot-chip-on-line:var(--c-gold-strong);
+  /* ---- 槽位：印章卡片 ---- */
+  --slot-card-bg:var(--c-surface);
+  --slot-card-line:var(--c-line-strong);
+  --slot-card-line-hover:var(--c-gold-strong);
+  --slot-card-title:var(--c-text);
+  --slot-card-meta:var(--c-text-muted);
+  --slot-face-bg:var(--c-surface-sunken);
+  --slot-seal-field:#0d0b0a;         /* 印面底 */
+  --slot-seal-ink:var(--c-gold-strong); /* 印文笔画 / 白文印面 */
+  --slot-seal-frame:var(--c-brand);
+  --slot-seal-shadow:0 2px 8px rgba(0,0,0,0.75);
+  --slot-tag-bg:var(--c-gold-soft);
+  --slot-tag-text:var(--c-gold-strong);
+  --slot-tag-line:var(--c-gold);
+  /* ---- 槽位：卡片遮罩与遮罩上的按钮 ---- */
+  --slot-veil-bg:rgba(8,7,6,0.86);
+  --slot-veil-cap:var(--c-gold-strong);
+  --slot-veil-btn-bg:var(--c-text);
+  --slot-veil-btn-text:var(--c-bg);
+  --slot-veil-btn-line:var(--c-gold-strong);
+  --slot-veil-ghost-text:var(--c-gold-strong);
+  --slot-veil-ghost-line:rgba(201,162,74,0.90);
+  /* ---- 槽位：按钮与提示 ---- */
+  --slot-btn-bg:var(--c-brand-strong);
+  --slot-btn-text:var(--c-on-brand);
+  --slot-btn-line:var(--c-on-brand);
+  --slot-btn-hover-bg:var(--c-gold-strong);
+  --slot-btn-ghost-bg:rgba(201,162,74,0.08);
+  --slot-btn-ghost-text:var(--c-gold-strong);
+  --slot-btn-ghost-line:var(--c-line-on-bg-strong);
+  --slot-btn-ghost-hover-bg:rgba(201,162,74,0.18);
+  --slot-toast-bg:var(--c-gold);
+  --slot-toast-text:var(--c-on-brand);
+  --slot-toast-line:var(--c-bg);
+  /* ---- 阴影与焦点 ---- */
+  --shadow-1:0 1px 2px rgba(0,0,0,0.55);
+  --shadow-2:0 12px 30px rgba(0,0,0,0.62);
+  --focus-ring:0 0 0 2px #14120f, 0 0 0 4px #e0bd6d;
+  /* ---- 版式尺寸（非色值） ---- */
+  --font-serif:"Songti SC","STSong","Noto Serif CJK SC",serif;
+  --font-sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-seal:"STKaiti","Kaiti SC","KaiTi","Songti SC",serif;
+  --t-xs:12px;--t-sm:13px;--t-md:14px;--t-lg:17px;--t-xl:21px;--t-2xl:26px;--t-3xl:34px;
+  --s-1:2px;--s-2:8px;--s-3:12px;--s-4:16px;--s-5:24px;--s-6:32px;--s-7:48px;
+  --r-xs:2px;--r-sm:4px;--r-md:6px;--r-lg:10px;--r-round:999px;
+  --hdr-h:60px;--side-w:216px;--layout-max:1180px;
+}
+/* ============================================================
+   二、版式与组件（一律引用上方令牌，不出现裸色值）
+   ============================================================ */
+*,*::before,*::after{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;
+  background-color:var(--c-bg);
+  background-image:radial-gradient(var(--tex-a) 0.6px,var(--c-transparent) 0.7px),
+                   radial-gradient(var(--tex-b) 0.6px,var(--c-transparent) 0.7px);
+  background-size:9px 9px,13px 13px;background-position:0 0,4px 5px;
+  color:var(--c-text-on-bg);font-family:var(--font-sans);font-size:var(--t-md);line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,p{margin:0}
+ul{margin:0;padding:0;list-style:none}
+button{font-family:inherit}
+:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+
+/* ---------- 页头 ---------- */
+.hdr{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:var(--s-5);
+  height:var(--hdr-h);padding:0 var(--s-6);background:var(--slot-hdr-bg);
+  border-bottom:1px solid var(--slot-hdr-line);box-shadow:var(--shadow-1)}
+.brand{display:flex;align-items:center;gap:var(--s-3);flex:0 0 auto;text-decoration:none}
+.brand__seal{width:32px;height:32px}
+.brand__frame{fill:none;stroke:var(--slot-hdr-text);stroke-width:2.4}
+.brand__stroke{fill:none;stroke:var(--slot-hdr-text);stroke-width:2.4}
+.brand__dot{fill:var(--slot-hdr-mark)}
+.brand__name{font-family:var(--font-serif);font-size:var(--t-xl);font-weight:700;letter-spacing:0.16em;color:var(--slot-hdr-text)}
+.brand__slogan{padding-left:var(--s-3);border-left:1px solid var(--slot-hdr-line);
+  font-size:var(--t-xs);letter-spacing:0.1em;color:var(--slot-hdr-muted)}
+.search{flex:1 1 auto;max-width:540px;margin:0 auto;display:flex;align-items:center;gap:var(--s-3);
+  height:38px;padding:0 var(--s-4);background:var(--slot-search-bg);
+  border:1px solid var(--slot-search-line);border-radius:var(--r-round)}
+.search__ico{flex:0 0 auto;width:16px;height:16px;fill:none;stroke:var(--slot-search-ico);stroke-width:1.8}
+.search__in{flex:1 1 auto;min-width:0;border:0;outline:0;background:var(--c-transparent);
+  color:var(--slot-search-text);font-family:var(--font-sans);font-size:var(--t-md);letter-spacing:0.02em}
+.search__in::placeholder{color:var(--slot-search-muted)}
+.search__hint{flex:0 0 auto;padding:var(--s-1) var(--s-2);font-size:var(--t-xs);
+  border:1px solid var(--slot-search-line);border-radius:var(--r-xs);color:var(--slot-search-muted)}
+.hdr__right{flex:0 0 auto;display:flex;align-items:center;gap:var(--s-4)}
+.ico-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;
+  width:36px;height:36px;cursor:pointer;background:var(--c-transparent);
+  border:1px solid var(--slot-hdr-line);border-radius:var(--r-md);color:var(--slot-hdr-text)}
+.ico-btn:hover{background:var(--slot-hdr-hover-bg)}
+.ico{width:18px;height:18px;fill:none;stroke:var(--slot-hdr-text);stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.badge{position:absolute;top:-6px;right:-6px;min-width:17px;height:17px;padding:0 var(--s-1);
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;
+  background:var(--slot-badge-bg);color:var(--slot-badge-text);
+  border:1.5px solid var(--slot-hdr-bg);border-radius:var(--r-round)}
+.gold{display:inline-flex;align-items:center;gap:var(--s-2);height:30px;padding:0 var(--s-3);
+  background:var(--slot-gold-bg);border:1px solid var(--slot-gold-line);border-radius:var(--r-round)}
+.gold__k{font-family:var(--font-serif);font-size:var(--t-sm);color:var(--slot-gold-text)}
+.gold__v{font-size:var(--t-sm);font-weight:700;letter-spacing:0.04em;color:var(--slot-gold-text)}
+.avatar{width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+  font-family:var(--font-seal);font-size:var(--t-md);background:var(--slot-avatar-bg);
+  color:var(--slot-avatar-text);border:1px solid var(--slot-avatar-line);border-radius:var(--r-round)}
+
+/* ---------- 主体骨架 ---------- */
+.shell{display:flex;gap:var(--s-5);max-width:var(--layout-max);margin:0 auto;
+  padding:var(--s-6) var(--s-6) var(--s-7);align-items:flex-start}
+
+/* ---------- 侧栏 ---------- */
+.side{flex:0 0 var(--side-w);position:sticky;top:calc(var(--hdr-h) + var(--s-6))}
+.side__cap{margin-bottom:var(--s-3);padding-left:var(--s-3);font-size:var(--t-xs);
+  letter-spacing:0.2em;color:var(--c-gold-on-bg)}
+.side__list{display:flex;flex-direction:column;gap:var(--s-1)}
+.side__it{display:flex;align-items:center;gap:var(--s-3);height:42px;padding:0 var(--s-3);
+  border-radius:var(--r-md);text-decoration:none;font-size:var(--t-sm);color:var(--c-text-on-bg-muted);
+  border-left:3px solid var(--c-transparent);
+  transition:background-color .15s ease,color .15s ease,border-color .15s ease}
+.side__it .ico{width:17px;height:17px;stroke:var(--c-text-on-bg-muted)}
+.side__it:hover{background:var(--slot-side-hover-bg);color:var(--c-text-on-bg)}
+.side__it:hover .ico{stroke:var(--c-text-on-bg)}
+.side__it.is-on{background:var(--slot-side-on-bg);color:var(--slot-side-on-text);
+  border-left-color:var(--slot-side-mark);font-weight:600}
+.side__it.is-on .ico{stroke:var(--slot-side-mark)}
+.side__n{margin-left:auto;min-width:20px;height:19px;padding:0 var(--s-2);
+  display:inline-flex;align-items:center;justify-content:center;font-size:var(--t-xs);
+  background:var(--slot-side-n-bg);color:var(--slot-side-n-text);border-radius:var(--r-round)}
+.side__note{margin-top:var(--s-5);padding:var(--s-4);border-radius:var(--r-md);
+  background:var(--slot-side-note-bg);border:1px solid var(--c-line-on-bg)}
+.side__note-t{margin-bottom:var(--s-2);font-family:var(--font-serif);font-size:var(--t-lg);color:var(--c-gold-on-bg)}
+.side__note-b{font-size:var(--t-xs);line-height:1.75;color:var(--c-text-on-bg-muted)}
+
+/* ---------- 主内容区 ---------- */
+.main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:var(--s-5)}
+.page{display:flex;align-items:flex-end;justify-content:space-between;gap:var(--s-4);flex-wrap:wrap}
+.page__title{font-family:var(--font-serif);font-size:var(--t-3xl);font-weight:700;
+  letter-spacing:0.12em;color:var(--c-text-on-bg)}
+.page__sub{margin-top:var(--s-2);font-size:var(--t-xs);letter-spacing:0.04em;color:var(--c-text-on-bg-muted)}
+.page__tools{display:flex;gap:var(--s-3)}
+
+/* ---------- 按钮 ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 var(--s-4);
+  font-size:var(--t-sm);cursor:pointer;border-radius:var(--r-sm);
+  background:var(--c-transparent);color:var(--c-text);border:1px solid var(--c-transparent);
+  transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.btn--primary{background:var(--slot-btn-bg);color:var(--slot-btn-text);border-color:var(--slot-btn-line)}
+.btn--primary:hover{background:var(--slot-btn-hover-bg)}
+.btn--ghost{background:var(--slot-btn-ghost-bg);color:var(--slot-btn-ghost-text);border-color:var(--slot-btn-ghost-line)}
+.btn--ghost:hover{background:var(--slot-btn-ghost-hover-bg)}
+
+/* ---------- 筛选条 ---------- */
+.panel{background:var(--slot-panel-bg);border:1px solid var(--slot-panel-line);
+  border-radius:var(--r-lg);box-shadow:var(--shadow-1);color:var(--c-text)}
+.filters{padding:var(--s-4) var(--s-5);display:flex;flex-direction:column;gap:var(--s-4)}
+.filters__row{display:flex;align-items:center;gap:var(--s-4);flex-wrap:wrap}
+.filters__lab{flex:0 0 auto;padding-right:var(--s-4);font-family:var(--font-serif);font-size:var(--t-md);
+  letter-spacing:0.16em;color:var(--c-gold-strong);border-right:1px solid var(--slot-panel-line)}
+.filters__count{margin-left:auto;font-size:var(--t-xs);color:var(--c-text-muted)}
+.chips{display:flex;flex-wrap:wrap;gap:var(--s-2)}
+.chip{height:32px;padding:0 var(--s-4);font-size:var(--t-sm);cursor:pointer;border-radius:var(--r-round);
+  background:var(--slot-chip-bg);color:var(--slot-chip-text);border:1px solid var(--slot-chip-line);
+  transition:background-color .15s ease,color .15s ease,border-color .15s ease}
+.chip:hover{color:var(--slot-chip-text-hover);border-color:var(--slot-chip-line-hover)}
+.chip.is-on{background:var(--slot-chip-on-bg);color:var(--slot-chip-on-text);
+  border-color:var(--slot-chip-on-line);font-weight:600}
+
+/* ---------- 印章卡片 ---------- */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:var(--s-5)}
+.card{display:flex;flex-direction:column;overflow:hidden;background:var(--slot-card-bg);
+  border:1px solid var(--slot-card-line);border-radius:var(--r-lg);box-shadow:var(--shadow-1);
+  transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease}
+.card:hover{transform:translateY(-3px);box-shadow:var(--shadow-2);border-color:var(--slot-card-line-hover)}
+.card__face{position:relative;display:flex;align-items:center;justify-content:center;
+  min-height:180px;padding:var(--s-5);background:var(--slot-face-bg);
+  border-bottom:1px solid var(--c-line)}
+.seal{width:132px;height:132px;max-width:100%;filter:drop-shadow(var(--slot-seal-shadow))}
+.seal__field{fill:var(--seal-f)}
+.seal__bar,.seal__dot{fill:var(--seal-i)}
+.seal__inset,.seal__ring{fill:none;stroke:var(--seal-i);stroke-width:2}
+.seal__frame{fill:none;stroke:var(--seal-k);stroke-width:3}
+.seal--zhu{--seal-f:var(--slot-seal-field);--seal-i:var(--slot-seal-ink);--seal-k:var(--slot-seal-frame)}
+.seal--bai{--seal-f:var(--slot-seal-ink);--seal-i:var(--slot-seal-field);--seal-k:var(--slot-seal-field)}
+.card__acts{position:absolute;top:0;right:0;bottom:0;left:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:var(--s-3);
+  background:var(--slot-veil-bg);transition:opacity .18s ease}
+.card__acts-cap{font-size:var(--t-xs);letter-spacing:0.12em;color:var(--slot-veil-cap)}
+@media (hover:hover){
+  .card__acts{opacity:0}
+  .card:hover .card__acts,.card:focus-within .card__acts{opacity:1}
+}
+.btn--veil{width:132px;background:var(--slot-veil-btn-bg);color:var(--slot-veil-btn-text);
+  border-color:var(--slot-veil-btn-line)}
+.btn--veil-ghost{width:132px;background:var(--c-transparent);color:var(--slot-veil-ghost-text);
+  border-color:var(--slot-veil-ghost-line)}
+.card__body{flex:1 1 auto;display:flex;flex-direction:column;gap:var(--s-2);padding:var(--s-4)}
+.card__top{display:flex;align-items:center;gap:var(--s-2)}
+.tag{padding:var(--s-1) var(--s-2);font-size:var(--t-xs);border-radius:var(--r-xs);
+  background:var(--slot-tag-bg);color:var(--slot-tag-text);border:1px solid var(--slot-tag-line)}
+.card__author{font-size:var(--t-xs);letter-spacing:0.06em;color:var(--slot-card-meta)}
+.card__text{font-family:var(--font-seal);font-size:var(--t-xl);line-height:1.35;
+  letter-spacing:0.14em;color:var(--slot-card-title)}
+.card__meta{font-size:var(--t-xs);line-height:1.6;color:var(--slot-card-meta)}
+.card__foot{margin-top:auto;padding-top:var(--s-3);border-top:1px solid var(--c-line);
+  display:flex;align-items:center;justify-content:space-between;font-size:var(--t-xs);color:var(--slot-card-meta)}
+.foot{padding-top:var(--s-2);text-align:center;font-size:var(--t-xs);
+  letter-spacing:0.06em;color:var(--c-text-on-bg-muted)}
+
+/* ---------- 操作提示 ---------- */
+.toast{position:fixed;left:50%;bottom:var(--s-6);z-index:40;transform:translate(-50%,12px);
+  min-height:38px;display:inline-flex;align-items:center;padding:0 var(--s-5);
+  font-size:var(--t-sm);background:var(--slot-toast-bg);color:var(--slot-toast-text);
+  border:1px solid var(--slot-toast-line);border-radius:var(--r-round);box-shadow:var(--shadow-2);
+  opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease}
+.toast.is-on{opacity:1;transform:translate(-50%,0)}
+
+/* ---------- 窄屏 ---------- */
+@media (max-width:1024px){
+  .hdr{height:auto;flex-wrap:wrap;gap:var(--s-3);padding:var(--s-3) var(--s-4)}
+  .brand__slogan{display:none}
+  .search{order:3;width:100%;max-width:none;margin:0}
+  .shell{flex-direction:column;padding:var(--s-5) var(--s-5) var(--s-7)}
+  .side{position:static;flex:1 1 auto;width:100%}
+  .side__list{flex-direction:row;flex-wrap:wrap}
+  .side__it{height:38px;border-left:0;border-bottom:3px solid var(--c-transparent)}
+  .side__it.is-on{border-bottom-color:var(--slot-side-mark)}
+  .side__note{display:none}
+  .page__title{font-size:var(--t-2xl)}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:var(--s-4)}
+  .card__face{min-height:142px;padding:var(--s-4)}
+  .seal{width:104px;height:104px}
+  .btn--veil,.btn--veil-ghost{width:104px}
+  .card__body{padding:var(--s-3)}
+}
+</style>
+</head>
+<body>
+<header class="hdr">
+  <a class="brand" href="#main">
+    <svg class="brand__seal" viewBox="0 0 40 40" role="img" aria-label="玺爱标识">
+      <rect class="brand__frame" x="1.5" y="1.5" width="37" height="37" rx="5"/>
+      <path class="brand__stroke" d="M10 13h20M10 20h20M10 27h20"/>
+      <rect class="brand__dot" x="10" y="13" width="6" height="14" rx="1"/>
+    </svg>
+    <span class="brand__name">玺爱</span>
+    <span class="brand__slogan">篆刻知识分享</span>
+  </a>
+  <form class="search" role="search" onsubmit="return false">
+    <svg class="search__ico" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="9" cy="9" r="6"/><path d="M13.5 13.5 18 18"/>
+    </svg>
+    <input class="search__in" type="search" aria-label="全局搜索" placeholder="搜印文、作者或朝代，例如「平安」">
+    <span class="search__hint">回车</span>
+  </form>
+  <div class="hdr__right">
+    <button class="ico-btn" type="button" aria-label="消息通知，3 条未读">
+      <svg class="ico" viewBox="0 0 22 22" aria-hidden="true">
+        <path d="M11 3.5a5 5 0 0 0-5 5v3.5l-1.5 3h13L16 12V8.5a5 5 0 0 0-5-5Z"/>
+        <path d="M9 18.5a2 2 0 0 0 4 0"/>
+      </svg>
+      <span class="badge">3</span>
+    </button>
+    <span class="gold" title="我的积分余额">
+      <span class="gold__k">金</span><span class="gold__v">1,280</span>
+    </span>
+    <span class="avatar" role="img" aria-label="我的头像">印</span>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="side" aria-label="主导航">
+    <p class="side__cap">我的工作台</p>
+    <ul class="side__list">
+      <li><a class="side__it is-on" href="#main" aria-current="page">
+        <svg class="ico" viewBox="0 0 22 22" aria-hidden="true"><rect x="4" y="4" width="14" height="14" rx="2"/><path d="M7.5 8h7M7.5 11h7M7.5 14h4"/></svg>
+        <span>藏品广场</span></a></li>
+      <li><a class="side__it" href="#main">
+        <svg class="ico" viewBox="0 0 22 22" aria-hidden="true"><path d="M4 6h14M4 11h14M4 16h9"/><path d="m16 15.5 1.6 1.6 2.4-2.6"/></svg>
+        <span>我的勘误记录</span><span class="side__n">2</span></a></li>
+      <li><a class="side__it" href="#main">
+        <svg class="ico" viewBox="0 0 22 22" aria-hidden="true"><rect x="3.5" y="5" width="15" height="12" rx="2"/><path d="m4 14 4-3.2 3 2.2 3-3 4.5 3.6"/></svg>
+        <span>我的实物照片</span><span class="side__n">5</span></a></li>
+      <li><a class="side__it" href="#main">
+        <svg class="ico" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M11 7.5v7M7.5 11h7"/></svg>
+        <span>积分中心</span></a></li>
+      <li><a class="side__it" href="#main">
+        <svg class="ico" viewBox="0 0 22 22" aria-hidden="true"><path d="M11 3 4.5 6.5v5c0 3.8 2.8 6.8 6.5 7.5 3.7-.7 6.5-3.7 6.5-7.5v-5L11 3Z"/><path d="m8.5 11.3 2 2 3.4-4"/></svg>
+        <span>管理员专区</span></a></li>
+    </ul>
+    <div class="side__note">
+      <p class="side__note-t">勘误有奖</p>
+      <p class="side__note-b">指出印文释读或年代标注的错误，记录一旦被采纳即可获得 50 金，可用于兑换高清拓片。</p>
+    </div>
+  </nav>
+
+  <main class="main" id="main">
+    <div class="page">
+      <div>
+        <h1 class="page__title">藏品广场</h1>
+        <p class="page__sub">共 128 方印拓可查 · 今日新增 6 方 · 均支持下载高清图</p>
+      </div>
+      <div class="page__tools">
+        <button class="btn btn--ghost" type="button" data-act="已按年代重新排序" data-name="全部印拓">按年代排序</button>
+        <button class="btn btn--primary" type="button" data-act="正在打开上传入口" data-name="我的实物照片">上传实物照片</button>
+      </div>
+    </div>
+
+    <section class="panel filters" aria-label="筛选条件">
+      <div class="filters__row">
+        <span class="filters__lab">朝代</span>
+        <div class="chips">
+          <button class="chip is-on" type="button">不限</button>
+          <button class="chip" type="button">先秦两汉</button>
+          <button class="chip" type="button">魏晋南北朝</button>
+          <button class="chip" type="button">隋唐</button>
+          <button class="chip" type="button">宋元</button>
+          <button class="chip" type="button">明清</button>
+          <button class="chip" type="button">近现代</button>
+        </div>
+      </div>
+      <div class="filters__row">
+        <span class="filters__lab">分类</span>
+        <div class="chips">
+          <button class="chip is-on" type="button">不限</button>
+          <button class="chip" type="button">姓名章</button>
+          <button class="chip" type="button">闲章</button>
+          <button class="chip" type="button">官印</button>
+          <button class="chip" type="button">肖形印</button>
+          <button class="chip" type="button">收藏印</button>
+        </div>
+        <span class="filters__count">当前 128 方</span>
+      </div>
+    </section>
+
+    <section class="grid" aria-label="印章列表">
+        <article class="card">
+          <div class="card__face">
+            <svg class="seal seal--zhu" viewBox="0 0 132 132" role="img" aria-label="印面示意：平安（朱文）">
+              <rect class="seal__field" x="6" y="6" width="120" height="120" rx="8"/>
+        <rect class="seal__frame" x="12" y="12" width="108" height="108" rx="4"/>
+        <rect class="seal__bar" x="24" y="26" width="9" height="80" rx="1"/>
+        <rect class="seal__bar" x="39" y="40" width="26" height="9" rx="1"/>
+        <rect class="seal__bar" x="39" y="62" width="26" height="9" rx="1"/>
+        <rect class="seal__bar" x="39" y="84" width="26" height="9" rx="1"/>
+        <rect class="seal__bar" x="86" y="26" width="9" height="80" rx="1"/>
+        <rect class="seal__bar" x="98" y="40" width="22" height="9" rx="1"/>
+        <rect class="seal__bar" x="98" y="64" width="22" height="9" rx="1"/>
+        <rect class="seal__bar" x="98" y="88" width="22" height="9" rx="1"/>
+            </svg>
+            <div class="card__acts">
+              <span class="card__acts-cap">明 · 文彭</span>
+              <button class="btn btn--veil" type="button" data-act="正在打开详情" data-name="「平安」">查看详情</button>
+              <button class="btn btn--veil-ghost" type="button" data-act="已加入下载队列" data-name="「平安」高清图">下载高清图</button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div class="card__top"><span class="tag">明</span><span class="card__author">文彭</span></div>
+            <p class="card__text">平安</p>
+            <p class="card__meta">朱文 · 寿山石  · 3.4 × 3.4 厘米</p>
+            <div class="card__foot"><span>收录于 2026 年春</span><span>下载 216 次</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card__face">
+            <svg class="seal seal--bai" viewBox="0 0 132 132" role="img" aria-label="印面示意：江上清风（白文）">
+              <rect class="seal__field" x="6" y="6" width="120" height="120" rx="8"/>
+        <rect class="seal__inset" x="18" y="18" width="96" height="96" rx="2"/>
+        <rect class="seal__bar" x="26" y="26" width="8" height="34" rx="1"/>
+        <rect class="seal__bar" x="40" y="26" width="8" height="34" rx="1"/>
+        <rect class="seal__bar" x="82" y="28" width="30" height="8" rx="1"/>
+        <rect class="seal__bar" x="82" y="44" width="22" height="8" rx="1"/>
+        <rect class="seal__bar" x="26" y="72" width="30" height="8" rx="1"/>
+        <rect class="seal__bar" x="26" y="88" width="22" height="8" rx="1"/>
+        <rect class="seal__bar" x="82" y="72" width="8" height="34" rx="1"/>
+        <rect class="seal__bar" x="96" y="72" width="8" height="34" rx="1"/>
+            </svg>
+            <div class="card__acts">
+              <span class="card__acts-cap">清 · 邓石如</span>
+              <button class="btn btn--veil" type="button" data-act="正在打开详情" data-name="「江上清风」">查看详情</button>
+              <button class="btn btn--veil-ghost" type="button" data-act="已加入下载队列" data-name="「江上清风」高清图">下载高清图</button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div class="card__top"><span class="tag">清</span><span class="card__author">邓石如</span></div>
+            <p class="card__text">江上清风</p>
+            <p class="card__meta">白文 · 青田石  · 3.8 × 3.8 厘米</p>
+            <div class="card__foot"><span>收录于 2025 年冬</span><span>下载 341 次</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card__face">
+            <svg class="seal seal--zhu" viewBox="0 0 132 132" role="img" aria-label="印面示意：石不能言最可人（朱文）">
+              <rect class="seal__field" x="6" y="6" width="120" height="120" rx="8"/>
+        <rect class="seal__frame" x="14" y="14" width="104" height="104" rx="3"/>
+        <rect class="seal__bar" x="24" y="26" width="84" height="9" rx="1"/>
+        <rect class="seal__bar" x="24" y="46" width="60" height="9" rx="1"/>
+        <rect class="seal__bar" x="24" y="66" width="84" height="9" rx="1"/>
+        <rect class="seal__bar" x="24" y="86" width="46" height="9" rx="1"/>
+        <circle class="seal__dot" cx="106" cy="90" r="7"/>
+            </svg>
+            <div class="card__acts">
+              <span class="card__acts-cap">清 · 吴昌硕</span>
+              <button class="btn btn--veil" type="button" data-act="正在打开详情" data-name="「石不能言最可人」">查看详情</button>
+              <button class="btn btn--veil-ghost" type="button" data-act="已加入下载队列" data-name="「石不能言最可人」高清图">下载高清图</button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div class="card__top"><span class="tag">清</span><span class="card__author">吴昌硕</span></div>
+            <p class="card__text">石不能言最可人</p>
+            <p class="card__meta">朱文 · 芙蓉石  · 4.1 × 4.1 厘米</p>
+            <div class="card__foot"><span>收录于 2026 年夏</span><span>下载 528 次</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card__face">
+            <svg class="seal seal--bai" viewBox="0 0 132 132" role="img" aria-label="印面示意：家在黄山白岳间（白文）">
+              <rect class="seal__field" x="6" y="6" width="120" height="120" rx="8"/>
+        <rect class="seal__bar" x="60" y="22" width="12" height="88" rx="2"/>
+        <rect class="seal__bar" x="26" y="38" width="80" height="12" rx="2"/>
+        <rect class="seal__bar" x="26" y="76" width="80" height="12" rx="2"/>
+        <rect class="seal__bar" x="32" y="22" width="10" height="24" rx="2"/>
+        <rect class="seal__bar" x="32" y="88" width="10" height="22" rx="2"/>
+            </svg>
+            <div class="card__acts">
+              <span class="card__acts-cap">清 · 黄士陵</span>
+              <button class="btn btn--veil" type="button" data-act="正在打开详情" data-name="「家在黄山白岳间」">查看详情</button>
+              <button class="btn btn--veil-ghost" type="button" data-act="已加入下载队列" data-name="「家在黄山白岳间」高清图">下载高清图</button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div class="card__top"><span class="tag">清</span><span class="card__author">黄士陵</span></div>
+            <p class="card__text">家在黄山白岳间</p>
+            <p class="card__meta">白文 · 昌化石  · 3.6 × 3.6 厘米</p>
+            <div class="card__foot"><span>收录于 2025 年秋</span><span>下载 189 次</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card__face">
+            <svg class="seal seal--zhu" viewBox="0 0 132 132" role="img" aria-label="印面示意：知白守黑（朱文）">
+              <rect class="seal__field" x="6" y="6" width="120" height="120" rx="8"/>
+        <rect class="seal__frame" x="12" y="12" width="108" height="108" rx="3"/>
+        <rect class="seal__inset" x="22" y="22" width="88" height="88" rx="2"/>
+        <rect class="seal__bar" x="30" y="30" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="56" y="30" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="82" y="30" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="30" y="56" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="56" y="56" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="82" y="56" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="30" y="82" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="56" y="82" width="16" height="16" rx="2"/>
+        <rect class="seal__bar" x="82" y="82" width="16" height="16" rx="2"/>
+            </svg>
+            <div class="card__acts">
+              <span class="card__acts-cap">民国 · 陈巨来</span>
+              <button class="btn btn--veil" type="button" data-act="正在打开详情" data-name="「知白守黑」">查看详情</button>
+              <button class="btn btn--veil-ghost" type="button" data-act="已加入下载队列" data-name="「知白守黑」高清图">下载高清图</button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div class="card__top"><span class="tag">民国</span><span class="card__author">陈巨来</span></div>
+            <p class="card__text">知白守黑</p>
+            <p class="card__meta">朱文 · 象牙  · 2.9 × 2.9 厘米</p>
+            <div class="card__foot"><span>收录于 2026 年春</span><span>下载 402 次</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card__face">
+            <svg class="seal seal--bai" viewBox="0 0 132 132" role="img" aria-label="印面示意：一尘不染（白文）">
+              <rect class="seal__field" x="6" y="6" width="120" height="120" rx="8"/>
+        <circle class="seal__ring" cx="66" cy="58" r="29"/>
+        <rect class="seal__bar" x="28" y="96" width="76" height="12" rx="2"/>
+        <rect class="seal__bar" x="44" y="24" width="10" height="24" rx="2"/>
+        <rect class="seal__bar" x="78" y="24" width="10" height="24" rx="2"/>
+        <rect class="seal__bar" x="52" y="54" width="28" height="8" rx="2"/>
+        <rect class="seal__bar" x="52" y="72" width="28" height="8" rx="2"/>
+            </svg>
+            <div class="card__acts">
+              <span class="card__acts-cap">清 · 赵之谦</span>
+              <button class="btn btn--veil" type="button" data-act="正在打开详情" data-name="「一尘不染」">查看详情</button>
+              <button class="btn btn--veil-ghost" type="button" data-act="已加入下载队列" data-name="「一尘不染」高清图">下载高清图</button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div class="card__top"><span class="tag">清</span><span class="card__author">赵之谦</span></div>
+            <p class="card__text">一尘不染</p>
+            <p class="card__meta">白文 · 寿山石  · 3.2 × 3.2 厘米</p>
+            <div class="card__foot"><span>收录于 2025 年冬</span><span>下载 275 次</span></div>
+          </div>
+        </article>
+    </section>
+
+    <p class="foot">本稿视觉方向：v2 墨底金线 · 页面内容为示意，非真实藏品数据</p>
+  </main>
+</div>
+
+<div class="toast" role="status" aria-live="polite"></div>
+<script>
+(function () {
+  var chips = document.querySelectorAll('.chip');
+  for (var i = 0; i < chips.length; i++) {
+    chips[i].addEventListener('click', function () {
+      var row = this.parentNode.querySelectorAll('.chip');
+      for (var j = 0; j < row.length; j++) { row[j].classList.remove('is-on'); }
+      this.classList.add('is-on');
+    });
+  }
+  var toast = document.querySelector('.toast');
+  var timer;
+  var acts = document.querySelectorAll('[data-act]');
+  for (var k = 0; k < acts.length; k++) {
+    acts[k].addEventListener('click', function () {
+      toast.textContent = this.getAttribute('data-act') + '：' + this.getAttribute('data-name');
+      toast.classList.add('is-on');
+      clearTimeout(timer);
+      timer = setTimeout(function () { toast.classList.remove('is-on'); }, 2400);
+    });
+  }
+})();
+</script>
+</body>
+</html>
