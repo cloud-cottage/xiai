@@ -6,7 +6,10 @@ defineProps({
   detail: { type: String, default: '' },
   hint: { type: String, default: '' },
   confirmText: { type: String, default: '確定' },
-  cancelText: { type: String, default: '取消' }
+  cancelText: { type: String, default: '取消' },
+  /* 可选：确认 / 取消按钮的 `data-action` 取证钩子（缺省 ⇒ 不渲染该属性，既有用法零影响）。 */
+  confirmAction: { type: String, default: '' },
+  cancelAction: { type: String, default: '' }
 })
 
 const emit = defineEmits(['confirm', 'cancel'])
@@ -19,9 +22,25 @@ const emit = defineEmits(['confirm', 'cancel'])
       <p v-if="message" class="confirm-box__message">{{ message }}</p>
       <p v-if="detail" class="confirm-box__detail">{{ detail }}</p>
       <p v-if="hint" class="confirm-box__hint">{{ hint }}</p>
+      <!-- 可选正文插槽：调用方自行注入（如批量驳回的可选理由输入）；缺省无内容 ⇒ 既有用法零影响。 -->
+      <slot />
       <div class="confirm-box__foot">
-        <button class="btn btn--ghost" type="button" @click="emit('cancel')">{{ cancelText }}</button>
-        <button class="btn btn--primary" type="button" @click="emit('confirm')">{{ confirmText }}</button>
+        <button
+          class="btn btn--ghost"
+          type="button"
+          :data-action="cancelAction || null"
+          @click="emit('cancel')"
+        >
+          {{ cancelText }}
+        </button>
+        <button
+          class="btn btn--primary"
+          type="button"
+          :data-action="confirmAction || null"
+          @click="emit('confirm')"
+        >
+          {{ confirmText }}
+        </button>
       </div>
     </div>
   </div>

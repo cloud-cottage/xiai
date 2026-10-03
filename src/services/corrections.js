@@ -16,6 +16,7 @@ import {
   listPendingCorrectionRowsForAdmin,
   writeCorrectionDecision,
   markCorrectionRewarded,
+  listUserRows,
   PermissionError
 } from '../data/db.js'
 import { currentUser } from '../data/session.js'
@@ -92,6 +93,30 @@ export function summarizeCorrections(rows) {
 function makeId() {
   return `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 }
+
+/**
+ * **提交单号工厂**（R-B2）：一次表单提交生成一次、N 条共享同一值。
+ * 形如 `cb-<base36 時間>-<隨機>`，与勘误行 `cr-` 前缀**明确区分**（不会误当行 id）。
+ * @returns {string}
+ */
+export function newBatchId() {
+  return `cb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+/**
+ * 提交单号上限（**服务层本地护栏**）：R-B2′ 下 `batchId` 是**前端专有字段**、
+ * **绝不进提交载荷**（云函数键面封闭），故与云函数**无关**（云函数源码已回滚到 HEAD）。
+ */
+export const MAX_BATCH_ID_LENGTH = 64
+
+/**
+ * 旧数据回落窗口（R-B3）：无 `batchId` 的行按「提交人 ＋ 印面 ＋ `created_at` 60 秒窗」归批。
+ * **服务层单点**实现，视图层不得另写第二套分组。
+ */
+export const LEGACY_BATCH_WINDOW_MS = 60000
+
+/** 驳回理由上限（与数据层 `writeCorrectionDecision` / 视图弹窗 `maxlength` **同值**）。 */
+export const MAX_REVIEW_NOTE_LENGTH = 200
 
 function nowIso() {
   return new Date().toISOString()
@@ -201,7 +226,15 @@ function rowsOfFace(face) {
  *      **云端形态** ⇒ 本地只写**服务端回传的那一行**（镜像；不是前端自建行）；回传缺行 ⇒
  *      `STORAGE_UNAVAILABLE`（**不冒充成功、不冒充越权**），返回 `authority` 供调用方区分。
  */
-export async function submitCorrection({ faceId = '', sealId = '', stampId = '', field, value, basis = '' } = {}) {
+export async function submitCorrection({
+  faceId = '',
+  sealId = '',
+  stampId = '',
+  field,
+  value,
+  basis = '',
+  batchId = ''
+} = {}) {
   const user = currentUser()
   if (!user) return { ok: false, message: '請先登錄後再提交勘誤' }
   const meta = markableMeta(field)
@@ -215,11 +248,29 @@ export async function submitCorrection({ faceId = '', sealId = '', stampId = '',
   const text = String(value === null || value === undefined ? '' : value).trim()
   if (!text) return { ok: false, message: `請填寫${meta.label}` }
 
+  /* 提交单号（R-B2）：**判定在写之前** —— 传了非法值 ⇒ `INVALID_VALUE` ＋ 零写入；
+     **未传 / 空串 ⇒ 服务层为该次调用生成一个**（一条一批），**不报错**。 */
+  if (batchId !== undefined && batchId !== null && typeof batchId !== 'string') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '提交單號必須是文字；本次零寫入。' }
+  }
+  const rawBatch = batchId === undefined || batchId === null ? '' : String(batchId).trim()
+  if (rawBatch.length > MAX_BATCH_ID_LENGTH) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `提交單號超出上限（${MAX_BATCH_ID_LENGTH} 字）；本次零寫入。`
+    }
+  }
+  const batch = rawBatch || newBatchId()
+
   /* 值域门（R-20 / R-30 / R-31）：**写之前**判定，拒绝即零写入（不新增勘误行、不改动既有行）。
      看 `FIELD_VALUE_DOMAINS` 里登记了哪些封闭字段；未登记字段（作者 / 印文…）不受影响。 */
   const denied = domainValueDenial(field, meta.label, text)
   if (denied) return denied
 
+  /* **`batchId` 绝不进提交载荷**（R-B2′，生产事故级）：云函数 `ops.js` 的 `ALLOWED_KEYS`
+     是**封闭键面**，载荷含未知键 ⇒ `INVALID_FIELD` ＋ 零写入 ⇒ 传 `batchId` 会打挂**线上
+     所有**勘误提交。提交单号是**前端专有字段**，只在 local-dev 本地行 / 云端本地镜像行上落盘。 */
   const payload = {
     faceId: face.id,
     sealId: face.sealId,
@@ -251,7 +302,8 @@ export async function submitCorrection({ faceId = '', sealId = '', stampId = '',
       created_at: nowIso(),
       reviewed_at: null,
       reviewer_id: null,
-      rewarded_at: null
+      rewarded_at: null,
+      batchId: batch // 提交单号（一次表单提交共享一个；R-B2）
     }
     saveCorrectionRows([...listCorrectionRows(), row])
     return {
@@ -262,15 +314,19 @@ export async function submitCorrection({ faceId = '', sealId = '', stampId = '',
     }
   }
 
-  /* ③-b 雲端形態：**服務端已落盤** ⇒ 本地只寫服務端回傳的那一行（鏡像；身份／時間／狀態皆為服務端值）。 */
-  const row = gate.row
-  if (!row || typeof row !== 'object') {
+  /* ③-b 雲端形態：**服務端已落盤** ⇒ 本地只寫服務端回傳的那一行（鏡像；身份／時間／狀態皆為服務端值）。
+     本地镜像行 = `{ ...gate.row, batchId }` —— **只加这一个前端字段**（提交单号；云端权威行暂无该键：
+     云函数键面封闭 ＋ 本单无合规部署通道 ⇒ 云端权威行不落 `batchId`），**其余键逐字仍为服务端权威值**。
+     分组读面的 `batchId` 取自本机 localStorage 的该镜像行 ⇒ 云端形态**无功能差异**。 */
+  const serverRow = gate.row
+  if (!serverRow || typeof serverRow !== 'object') {
     return {
       ok: false,
       reason: 'STORAGE_UNAVAILABLE',
       message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。'
     }
   }
+  const row = { ...serverRow, batchId: batch }
   saveCorrectionRows([...listCorrectionRows(), row])
   return {
     ok: true,
@@ -401,17 +457,19 @@ function isPermissionError(err) {
  * - 采纳 ⇒ 给**提交者**发放 10 金（`勘误奖励` 流水），**每条只奖一次**（重复审核被拒、
  *   重复采纳不二次发奖）；驳回 ⇒ 余额与流水均不变。
  * - 终态不回退：已审过的条目再调 ⇒ `{ok:false, reason:'ALREADY_REVIEWED'}`。
+ * - 第 4 参 `note`（**可选，默认空串**）：**仅驳回且非空**时作为理由落盘（`review_note`，≤200 字）；
+ *   单条驳回不传 ⇒ 行为逐字不变（**不写理由**）。
  * @returns {{ok:boolean, status?:string, accepted?:boolean, reward?:object, row?:object,
  *   reason?:string, message:string}}
  */
-export function review(actor, correctionId, decision) {
+export function review(actor, correctionId, decision, note = '') {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈勘誤' }
   }
   let decided
   try {
-    decided = writeCorrectionDecision(who, correctionId, decision)
+    decided = writeCorrectionDecision(who, correctionId, decision, note)
   } catch (err) {
     if (isPermissionError(err)) return { ok: false, reason: 'FORBIDDEN', message: err.message }
     return { ok: false, reason: 'ERROR', message: `審覈失敗：${(err && err.message) || '未知原因'}` }
@@ -458,4 +516,236 @@ export function reviewCorrection(id, decision) {
     return { ok: false, message: '該勘誤已審覈，不可重複處理' }
   }
   return review(user, id, decision)
+}
+
+/* ============================================================================
+   按提交单（batch）批量审核（R-B1 〜 R-B8）
+   ----------------------------------------------------------------------------
+   分组口径**单点在此**（视图层不得另写第二套）：
+     · 有 `batchId` 的行 ⇒ 同号一批（一次表单提交生成一次、N 条共享，见 `newBatchId`）；
+     · 无 `batchId` 的旧行 ⇒ 按「提交人 ＋ 印面 ＋ `created_at` 60 秒窗」归批（`LEGACY_BATCH_WINDOW_MS`）。
+   批量写 **逐条走既有 `review`**（＝ `writeCorrectionDecision` ＋ `awardCorrectionReward`）⇒
+   逐条独立成败、幂等与发奖语义**逐字不变**；有一条成功即 `ok:true` 并如实回报失败条数。
+   ============================================================================ */
+
+/** 提交人展示名（`暱稱（手機號）`；查无 ⇒「未知賬號」）。 */
+function submitterLabelOf(userId) {
+  if (!userId) return '未知賬號'
+  const user = listUserRows().find((item) => item.id === userId)
+  return user ? `${user.nickname}（${user.phone}）` : '未知賬號'
+}
+
+/** 印面归属键：优先 `faceId`；旧数据只有印章编号时回落 `sealId` / `stamp_id`。 */
+function faceKeyOf(row) {
+  return row.faceId || sealIdOf(row) || ''
+}
+
+function submitterIdOf(row) {
+  return row.user_id || row.userId || ''
+}
+
+function createdAtMsOf(row) {
+  const parsed = Date.parse(String(row.created_at || ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+/** 批内稳定排序：先按 `MARKABLE_FIELDS` 声明序（字段），再按行 id（同字段多条时定序）。 */
+function batchRowComparator(a, b) {
+  const indexOf = (row) => {
+    const index = MARKABLE_FIELDS.findIndex((meta) => meta.key === row.field)
+    return index === -1 ? MARKABLE_FIELDS.length : index
+  }
+  return indexOf(a) - indexOf(b) || String(a.id).localeCompare(String(b.id))
+}
+
+/** 由一组行装配一个提交单（`createdAt` ＝ 批内最早提交时间）。 */
+function makeBatch(key, batchId, group) {
+  const rows = group.slice().sort(batchRowComparator)
+  const first = rows[0]
+  const createdAt = rows.reduce((acc, row) => {
+    const at = String(row.created_at || '')
+    if (!at) return acc
+    return acc === '' || at < acc ? at : acc
+  }, '')
+  const sealId = sealIdOf(first)
+  const faceId = first.faceId || ''
+  const submitterId = submitterIdOf(first)
+  return {
+    key,
+    batchId: batchId || '',
+    submitterId,
+    submitterLabel: submitterLabelOf(submitterId),
+    sealId,
+    faceId,
+    faceLabel: faceLabelOf(faceId, sealId),
+    createdAt,
+    count: rows.length,
+    rows
+  }
+}
+
+/**
+ * 把待审行归批（**服务层单点**；视图层不得另写第二套分组）。
+ * @param {Array<object>} rows 待审勘误行
+ * @returns {Array<object>} 批对象数组（按 `createdAt` 倒序；批内按字段稳定排序）
+ */
+function buildPendingBatches(rows) {
+  const list = Array.isArray(rows) ? rows.slice() : []
+  const batches = []
+  const byBatchId = new Map()
+  const legacyRows = []
+  list.forEach((row) => {
+    const id = row && row.batchId ? String(row.batchId) : ''
+    if (id) {
+      if (!byBatchId.has(id)) byBatchId.set(id, [])
+      byBatchId.get(id).push(row)
+    } else {
+      legacyRows.push(row)
+    }
+  })
+  byBatchId.forEach((group, batchId) => batches.push(makeBatch(`batch:${batchId}`, batchId, group)))
+
+  /* 旧数据回落：按「提交人 ＋ 印面」分桶后，用 60 秒滑窗（相邻间隔 ≤ 窗口 ⇒ 同批）。 */
+  const legacyBuckets = new Map()
+  legacyRows.forEach((row) => {
+    const bucketKey = `${submitterIdOf(row)}|${faceKeyOf(row)}`
+    if (!legacyBuckets.has(bucketKey)) legacyBuckets.set(bucketKey, [])
+    legacyBuckets.get(bucketKey).push(row)
+  })
+  legacyBuckets.forEach((group) => {
+    group.sort((a, b) => createdAtMsOf(a) - createdAtMsOf(b) || String(a.id).localeCompare(String(b.id)))
+    let current = []
+    let previousMs = null
+    const flush = () => {
+      if (!current.length) return
+      const first = current[0]
+      const key = `legacy:${submitterIdOf(first)}|${faceKeyOf(first)}|${first.id}`
+      batches.push(makeBatch(key, '', current))
+      current = []
+    }
+    group.forEach((row) => {
+      const ms = createdAtMsOf(row)
+      if (previousMs !== null && ms - previousMs > LEGACY_BATCH_WINDOW_MS) flush()
+      current.push(row)
+      previousMs = ms
+    })
+    flush()
+  })
+
+  batches.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+  return batches
+}
+
+/**
+ * **批量审核读入口（R-B4）**：管理员可见的**待审提交单**（按批分组）。
+ *
+ * 非管理员 ⇒ 与 `listPendingForAdmin` **同字面值**的结构化拒绝（`FORBIDDEN`、零读取面）；
+ * 管理员 ⇒ `{ok:true, batches}`（批按时间倒序、批内按字段稳定排序）。
+ * 落位：**复用** `listPendingForAdmin`（读面与逐条审核完全同源，不另开读路径）。
+ * @param {object|null} actor 操作者（须为管理员；缺省回落到当前登录态）
+ * @returns {{ok:true, batches:Array<object>}|{ok:false, reason:string, message:string}}
+ */
+export function listPendingBatchesForAdmin(actor) {
+  const who = actor || currentUser()
+  if (!canReviewCorrections(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
+  }
+  const pending = listPendingForAdmin(who)
+  if (!pending.ok) return pending
+  return { ok: true, batches: buildPendingBatches(pending.rows) }
+}
+
+/**
+ * 驳回理由归一（**写之前**判定）：非文字 / 去空白后超 200 字 ⇒ `INVALID_VALUE`。
+ * @returns {{ok:true, note:string}|{ok:false, reason:'INVALID_VALUE', message:string}}
+ */
+function normalizeReviewNote(note) {
+  const raw = note === undefined || note === null ? '' : note
+  if (typeof raw !== 'string') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '駁回理由必須是文字；本次零寫入。' }
+  }
+  const text = raw.trim()
+  if (text.length > MAX_REVIEW_NOTE_LENGTH) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `駁回理由不得超過 ${MAX_REVIEW_NOTE_LENGTH} 字；本次零寫入。`
+    }
+  }
+  return { ok: true, note: text }
+}
+
+/**
+ * **批量审核写入口（R-B5）**：对一批 `ids` 逐条审核（采纳 / 驳回）。
+ *
+ * - 仅管理员；非管理员 ⇒ `FORBIDDEN` ＋ **零写入**。
+ * - `ids` 非法 / 空 ⇒ 结构化拒绝（`INVALID_VALUE`）＋ 零写入。
+ * - `note`（**可选**）非文字 / 超 200 字 ⇒ `INVALID_VALUE` ＋ 零写入（判定在**任何逐条写入之前**）。
+ * - **逐条独立成败**：每条走既有 `review`（`writeCorrectionDecision` ＋ `awardCorrectionReward`），
+ *   幂等 / 发奖语义**逐字不变**；有一条成功即 `ok:true` 并如实回报失败条数；全失败 ⇒ `ok:false`。
+ * @param {object|null} actor 操作者（须为管理员）
+ * @param {Array<string>} ids 勘误行 id 列表
+ * @param {'ACCEPTED'|'REJECTED'} decision 审核决定
+ * @param {string} [note=''] 驳回理由（≤200 字；仅驳回时落盘）
+ * @returns {{ok:boolean, decided:{accepted:number, rejected:number}, failed:Array<{id:string,reason:string,message:string}>, message:string}}
+ */
+export function reviewBatch(actor, ids, decision, note = '') {
+  const who = actor || currentUser()
+  if (!canReviewCorrections(who)) {
+    return {
+      ok: false,
+      reason: 'FORBIDDEN',
+      decided: { accepted: 0, rejected: 0 },
+      failed: [],
+      message: '僅管理員可以審覈勘誤'
+    }
+  }
+  const noteCheck = normalizeReviewNote(note)
+  if (!noteCheck.ok) {
+    return { ok: false, reason: noteCheck.reason, decided: { accepted: 0, rejected: 0 }, failed: [], message: noteCheck.message }
+  }
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      decided: { accepted: 0, rejected: 0 },
+      failed: [],
+      message: '缺少要審覈的勘誤標識；本次零寫入。'
+    }
+  }
+  const list = ids
+    .map((id) => String(id === null || id === undefined ? '' : id).trim())
+    .filter((id) => id !== '')
+  if (list.length === 0) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      decided: { accepted: 0, rejected: 0 },
+      failed: [],
+      message: '缺少要審覈的勘誤標識；本次零寫入。'
+    }
+  }
+  const decided = { accepted: 0, rejected: 0 }
+  const failed = []
+  list.forEach((id) => {
+    const result = review(who, id, decision, noteCheck.note)
+    if (result && result.ok) {
+      if (result.accepted) decided.accepted += 1
+      else decided.rejected += 1
+    } else {
+      failed.push({
+        id,
+        reason: (result && result.reason) || 'ERROR',
+        message: (result && result.message) || '審覈失敗'
+      })
+    }
+  })
+  const successCount = decided.accepted + decided.rejected
+  const ok = successCount > 0
+  const verb = decision === CORRECTION_STATUS.ACCEPTED ? '採納' : '駁回'
+  const message = ok
+    ? `已批量${verb} ${successCount} 條勘誤（採納 ${decided.accepted} 條，駁回 ${decided.rejected} 條）` +
+      (failed.length ? `；${failed.length} 條未處理。` : '。')
+    : `批量審覈未處理任何勘誤（失敗 ${failed.length} 條）。`
+  return { ok, decided, failed, message }
 }

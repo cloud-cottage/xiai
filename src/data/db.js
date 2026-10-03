@@ -3153,11 +3153,27 @@ export function listPendingCorrectionRowsForAdmin(actor) {
 /**
  * 审核勘误的状态写（数据层写方法⑤）：仅管理员；只允许 `PENDING → ACCEPTED / REJECTED`。
  * **奖励的发放不在这里**（`points.awardCorrectionReward` 负责幂等，服务层 `review` 串起来）。
+ *
+ * 第 4 参 `note`（**可选，默认空串**）：**仅「驳回且有理由」**时把新键 `review_note` 写进行上；
+ * 采纳 / 单条驳回不传理由 ⇒ 行上**不出现该键**（读路径须容忍「无 `review_note` 键」的行）。
+ * `note` 非字符串 / 去空白后超 200 字 ⇒ `INVALID_VALUE` ＋ **零写入**（判定在任何写入之前）。
+ * 既有三态语义 / 幂等 / reason 字面值 / 零写入纪律**逐字不变**。
+ * @param {string} [note=''] 驳回理由（≤200 字；仅驳回时落盘）
  * @returns {{ok:boolean, row?:object, status?:string, accepted?:boolean, reason?:string, message:string}}
  */
-export function writeCorrectionDecision(actor, correctionId, decision) {
+export function writeCorrectionDecision(actor, correctionId, decision, note = '') {
   const denied = forbiddenFor(actor, '僅管理員可以審覈勘誤')
   if (denied) return denied
+  /* 理由值域门（**写之前**）：非文字 / 超 200 字 ⇒ 结构化拒绝 ＋ 零写入。
+     与「单条驳回不写理由」不冲突：默认空串放行，且空串不落 `review_note` 键。 */
+  const rawNote = note === null || note === undefined ? '' : note
+  if (typeof rawNote !== 'string') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '駁回理由必須是文字；該勘誤狀態未變更。' }
+  }
+  const noteText = rawNote.trim()
+  if (noteText.length > 200) {
+    return { ok: false, reason: 'INVALID_VALUE', message: '駁回理由不得超過 200 字；該勘誤狀態未變更。' }
+  }
   const rows = listCorrectionRows()
   const target = rows.find((row) => row.id === correctionId)
   if (!target) return { ok: false, reason: 'NOT_FOUND', message: '未找到該勘誤' }
@@ -3208,14 +3224,19 @@ export function writeCorrectionDecision(actor, correctionId, decision) {
   }
   const status = accepted ? 'ACCEPTED' : 'REJECTED'
   const at = nowIso()
-  saveCorrectionRows(
-    rows.map((row) =>
-      row.id === correctionId ? { ...row, status, reviewed_at: at, reviewer_id: actor.id } : row
-    )
-  )
+  /* **仅驳回且有理由**才落 `review_note`（采纳 / 空理由不出现该键）。 */
+  const writeNote = !accepted && noteText !== ''
+  const decidedRow = {
+    ...target,
+    status,
+    reviewed_at: at,
+    reviewer_id: actor.id,
+    ...(writeNote ? { review_note: noteText } : {})
+  }
+  saveCorrectionRows(rows.map((row) => (row.id === correctionId ? decidedRow : row)))
   return {
     ok: true,
-    row: { ...target, status, reviewed_at: at, reviewer_id: actor.id },
+    row: decidedRow,
     status,
     accepted,
     message: accepted ? '已採納該勘誤' : '已駁回該勘誤'

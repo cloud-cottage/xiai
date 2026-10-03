@@ -407,10 +407,12 @@ function submitFaceEntry(face) {
     return
   }
   const sealId = seal.value ? seal.value.stamp_id : face.sealId || ''
+  /* 一次表单提交 ＝ 一个提交单号（R-B2）：本批 N 条共享同一 `batchId`。 */
+  const batchId = corrections.newBatchId()
   let accepted = 0
   let firstError = ''
   pairs.forEach(({ field, label, value }) => {
-    const result = corrections.submitCorrection({ faceId: face.id, sealId, field, value })
+    const result = corrections.submitCorrection({ faceId: face.id, sealId, field, value, batchId })
     if (result.ok) accepted += 1
     else if (!firstError) firstError = result.message || `「${label}」提交失敗`
   })
@@ -615,6 +617,8 @@ async function submitCorrection() {
   }
   let accepted = 0
   let firstError = ''
+  /* 一次表单提交 ＝ 一个提交单号（R-B2）：本批 N 条共享同一 `batchId`。 */
+  const batchId = corrections.newBatchId()
   /* 写面 Phase A：`submitCorrection` 改为 `async`（经云函数验签后落盘）⇒ 本处由 `forEach`
      改为**串行 `await`**（逐条过门、逐条独立成败，与改前语义一致：一条失败不影响其余）。 */
   for (const item of filled) {
@@ -623,7 +627,8 @@ async function submitCorrection() {
       sealId: seal.value.stamp_id,
       field: item.key,
       value: form[item.key],
-      basis: form.basis
+      basis: form.basis,
+      batchId
     })
     if (result.ok) accepted += 1
     else if (!firstError) firstError = result.message
