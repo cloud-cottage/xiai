@@ -393,7 +393,7 @@ function faceMarkableValue(face, key, raw) {
  * 提交本印面的【印面内容】/【印面风格】勘误（只提交**有选择**的项）。
  * 成功后 `dataVersion + 1` ⇒ 「待审核」计数与本块读数**不刷新即反映**。
  */
-function submitFaceEntry(face) {
+async function submitFaceEntry(face) {
   const draft = faceEntryDraftOf(face)
   const pairs = []
   if (String(draft.content || '').trim()) {
@@ -411,11 +411,13 @@ function submitFaceEntry(face) {
   const batchId = corrections.newBatchId()
   let accepted = 0
   let firstError = ''
-  pairs.forEach(({ field, label, value }) => {
-    const result = corrections.submitCorrection({ faceId: face.id, sealId, field, value, batchId })
+  /* OBS-1：`submitCorrection` 已改 `async`（经云函数验签后落盘）⇒ 本处由逐项并发
+     改为**串行 `await`**（逐条独立成败，与改前语义一致：一条失败不影响其余）。 */
+  for (const { field, label, value } of pairs) {
+    const result = await corrections.submitCorrection({ faceId: face.id, sealId, field, value, batchId })
     if (result.ok) accepted += 1
     else if (!firstError) firstError = result.message || `「${label}」提交失敗`
-  })
+  }
   if (accepted === 0) {
     faceEntryFeedback[face.id] = firstError
     return
@@ -619,7 +621,7 @@ async function submitCorrection() {
   let firstError = ''
   /* 一次表单提交 ＝ 一个提交单号（R-B2）：本批 N 条共享同一 `batchId`。 */
   const batchId = corrections.newBatchId()
-  /* 写面 Phase A：`submitCorrection` 改为 `async`（经云函数验签后落盘）⇒ 本处由 `forEach`
+  /* 写面 Phase A：`submitCorrection` 改为 `async`（经云函数验签后落盘）⇒ 本处由逐项并发
      改为**串行 `await`**（逐条过门、逐条独立成败，与改前语义一致：一条失败不影响其余）。 */
   for (const item of filled) {
     const result = await corrections.submitCorrection({
