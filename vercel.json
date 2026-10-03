@@ -1,65 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "installCommand": "npm install && npm --prefix yinyuan install",
-  "buildCommand": "npm run build -- --outDir dist/xiai && npm --prefix yinyuan run build -- --outDir ../dist/yinyuan --emptyOutDir",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build -- --outDir dist/xiai",
   "outputDirectory": "dist",
   "rewrites": [
-    {
-      "source": "/assets/:path*",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/assets/:path*"
-    },
-    {
-      "source": "/console",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/console.html"
-    },
-    {
-      "source": "/console/:path*",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/console.html"
-    },
-    {
-      "source": "/pricing",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/docs",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/docs/quickstart",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/org",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/demo",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/help",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
-    {
-      "source": "/((?!assets/|yinyuan/|xiai/).*)",
-      "has": [{ "type": "host", "value": "yinyuan.nvshen.love" }],
-      "destination": "/yinyuan/index.html"
-    },
     {
       "source": "/assets/:path*",
       "destination": "/xiai/assets/:path*"
