@@ -2,7 +2,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sealGlyph } from '../utils/format.js'
-import { seals, imageFaces } from '../services/index.js'
+import { seals, corrections, imageFaces } from '../services/index.js'
 
 const props = defineProps({
   seal: { type: Object, required: true }
@@ -10,8 +10,8 @@ const props = defineProps({
 const emit = defineEmits(['download', 'save'])
 
 const glyph = computed(() => sealGlyph(props.seal.seal_name))
-/* R-65：显示名只用 `seal_name`（空 ⇒「佚名」），**不再回落** `transcription_simplified`。 */
-const currentText = computed(() => props.seal.seal_name || '佚名')
+/* r2：显示名单点（采纳值 → 原始 `seal_name` →「佚名」），与详情页 / 属性表同源。 */
+const currentText = computed(() => corrections.resolveSealDisplayName(props.seal))
 
 /* 主印面（服務層判定）：是**影像編號的來源**（不是元數據載體）。 */
 const face = computed(() => seals.primaryFaceOf(props.seal.stamp_id))
@@ -142,7 +142,7 @@ onBeforeUnmount(revokeThumb)
 
       <h3 class="seal-card__title">
         <router-link :to="{ name: 'seal-detail', params: { id: seal.stamp_id } }">
-          {{ seal.seal_name || '佚名' }}
+          {{ currentText }}
         </router-link>
       </h3>
 

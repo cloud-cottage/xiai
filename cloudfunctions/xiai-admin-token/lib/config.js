@@ -41,6 +41,18 @@ const DEFAULT_LEEWAY_SECONDS = 60
 /** 生产**默认卡死**的兜底版本号（撤销面：改环境变量即全体旧令牌失效）。 */
 const DEFAULT_VERSION = '1'
 
+/** 手机号形态（与 `src/services/auth.js::isPhoneLike` / 用户函数 `lib/config.js` **逐字同正则**）。 */
+const PHONE_PATTERN = /^1[3-9]\d{9}$/
+
+/** uid 前缀（与前端 `auth.js` 的 `u-${phone}` / 用户函数 `uidOf` **同一约定**）。 */
+const UID_PREFIX = 'u-'
+
+/**
+ * 环境 Id 的三个候选环境变量（**运行期注入**；与用户函数 `lib/config.js` / liwu 既有函数同一读法；
+ * 工程纪律「envId 不在代码里写死」照旧成立）。
+ */
+const ENV_ID_NAMES = Object.freeze(['TCB_ENV', 'SCF_NAMESPACE', 'CLOUDBASE_ENV_ID'])
+
 /**
  * 结构化拒绝（**恰 3 键**：`{ok:false, reason, message}` —— 与工程既有拒绝形态同形，不加旁路字段）。
  * @param {string} reason 冻结字面值（取值面见 `REASONS`）
@@ -80,6 +92,31 @@ function maskedPhone(value) {
   return `${digits.slice(0, 3)}****${digits.slice(-4)}`
 }
 
+/** 手机号形态判定（归一后逐个匹配；**不猜格式**）。 */
+function isPhoneLike(value) {
+  return PHONE_PATTERN.test(normalizePhone(value))
+}
+
+/**
+ * **服务端唯一的 reviewer_id 派生**：`u-<11 位手机号>`。
+ * 明文：审核人身份**不以客户端自称为准**，一律由已验签令牌声明里的手机号派生
+ * （与用户写面 `uid = u-<手机号>` **同一约定**）⇒ 前端无法自称审核人。
+ */
+function uidOf(value) {
+  const digits = normalizePhone(value)
+  return isPhoneLike(digits) ? `${UID_PREFIX}${digits}` : ''
+}
+
+/** 运行期环境 Id（缺位 ⇒ 空串 ⇒ 由 SDK 走「当前环境」语义；**不写死**）。 */
+function readEnvId(env) {
+  const source = env || process.env
+  for (const name of ENV_ID_NAMES) {
+    const value = readString(source, name)
+    if (value) return value
+  }
+  return ''
+}
+
 /**
  * 读配置。
  * @param {object} [env] 环境（缺省 `process.env`；测试可注入）
@@ -111,18 +148,25 @@ function readConfig(env) {
     secret,
     version: readString(source, ENV_NAMES.VERSION) || DEFAULT_VERSION,
     ttlSeconds: readInteger(source, ENV_NAMES.TTL_SECONDS, DEFAULT_TTL_SECONDS),
-    leewaySeconds: readInteger(source, ENV_NAMES.LEEWAY_SECONDS, DEFAULT_LEEWAY_SECONDS)
+    leewaySeconds: readInteger(source, ENV_NAMES.LEEWAY_SECONDS, DEFAULT_LEEWAY_SECONDS),
+    envId: readEnvId(source)
   }
 }
 
 module.exports = {
   REASONS,
   ENV_NAMES,
+  ENV_ID_NAMES,
   DEFAULT_TTL_SECONDS,
   DEFAULT_LEEWAY_SECONDS,
   DEFAULT_VERSION,
+  PHONE_PATTERN,
+  UID_PREFIX,
   deny,
   normalizePhone,
+  isPhoneLike,
+  uidOf,
+  readEnvId,
   fingerprint,
   maskedPhone,
   readConfig

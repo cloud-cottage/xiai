@@ -33,7 +33,7 @@
 import { FIXED_ATTR_LABELS, SEAL_FIXED_ATTR_LABELS, isAdminSession } from './admin.js'
 import { faceLabelOf, fixedAttributesOf, getSealById, imageDisplaySourceOf, imageSourceOf, listFacesOf } from './seals.js'
 import { listPhotosByStamp, loadPhotoDataUrl } from './photos.js'
-import { resolveMarkable } from './corrections.js'
+import { resolveMarkable, resolveSealDisplayName } from './corrections.js'
 import { clientKindOf, fetchSlices } from './imageFaces.js'
 import { displayDataUrlOf } from './displayImage.js'
 import { bytesToDataUrl } from '../data/assetmeta.js'
@@ -358,7 +358,7 @@ export function buildSheetContent(seal, faces, tasks) {
   const push = (cells) => rows.push(cells)
   const imageRows = []
 
-  push([boldCell(`璽愛 · 印章數據 · ${seal.stamp_id} · ${seal.seal_name || '佚名'}`)])
+  push([boldCell(`璽愛 · 印章數據 · ${seal.stamp_id} · ${resolveSealDisplayName(seal)}`)])
   push([boldCell('藏品編號'), textCell(seal.stamp_id)])
   push([boldCell('印面數'), { value: faces.length, type: Number }])
   push([])
@@ -460,7 +460,9 @@ export function sanitizeFilenamePart(text) {
  */
 export function exportFilenameOf(seal) {
   const id = sanitizeFilenamePart((seal && seal.stamp_id) || '') || '未編號'
-  const name = sanitizeFilenamePart((seal && seal.seal_name) || '') || '佚名'
+  /* 印文段取**显示名单点**（采纳值 → 原始 `seal_name` →「佚名」），与表头 / 详情页同源；
+     `sanitizeFilenamePart` 之后仍为空（全是不允许字符）才回落到「佚名」。 */
+  const name = sanitizeFilenamePart(resolveSealDisplayName(seal)) || '佚名'
   const stem = `璽愛印章-${id}-${name}`
   const limit = Math.max(1, FILENAME_MAX_LENGTH - EXPORT_EXTENSION.length)
   const points = Array.from(stem)
@@ -562,6 +564,6 @@ export async function exportSealData(stampId, actor) {
     library: EXPORT_LIBRARY_SPECIFIER,
     images: images.length,
     faces: faces.length,
-    message: `已導出「${seal.seal_name || '佚名'}」（${filename}）：${faces.length} 個印面、${images.length} 張影像。`
+    message: `已導出「${resolveSealDisplayName(seal)}」（${filename}）：${faces.length} 個印面、${images.length} 張影像。`
   }
 }

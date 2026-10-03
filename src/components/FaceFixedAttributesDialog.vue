@@ -18,7 +18,7 @@
  */
 
 import { computed, reactive, ref } from 'vue'
-import { seals } from '../services/index.js'
+import { seals, corrections } from '../services/index.js'
 
 const props = defineProps({
   face: { type: Object, required: true },
@@ -116,7 +116,7 @@ function submit() {
     <div class="fixed-box">
       <h3 class="fixed-box__title">編輯固定屬性</h3>
       <p class="fixed-box__lede">
-        編輯對象：{{ face.seal_name || '佚名' }} · {{ face.id }}（固定屬性按印面歸屬）。
+        編輯對象：{{ corrections.resolveSealDisplayName(face) }} · {{ face.id }}（固定屬性按印面歸屬）。
         只提交發生改動的項目。
       </p>
       <p class="fixed-box__lede">

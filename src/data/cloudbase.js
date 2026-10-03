@@ -35,11 +35,15 @@ import { sniffBytesMime } from '../utils/image.js'
    1. 集合与口径常量（唯一一处定义点）
    --------------------------------------------------------------------------- */
 
-/** 本单读取面涉及的三个集合（应用名 → CloudBase 集合名；**逐字**，见 mapping.md §0）。 */
+/** 本单读取面涉及的四个集合（应用名 → CloudBase 集合名；**逐字**，见 mapping.md §0）。
+ *  第 4 个 `correctionsPublic` ＝ **公开只读投影集合**（已采纳勘误的公开投影，
+ *  匿名可读；本机镜像键见 `storage.js` 的 `correctionsPublic`）—— 它是「已采纳的勘误值
+ *  全站一致展示」的唯一跨浏览器来源（`seals` / `faces` / `images` 三个键的口径一字未改）。 */
 export const CLOUD_COLLECTIONS = Object.freeze({
   seals: 'xiai_seals',
   faces: 'xiai_faces',
-  images: 'xiai_images'
+  images: 'xiai_images',
+  correctionsPublic: 'xiai_corrections_public'
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */
@@ -249,7 +253,7 @@ const statusRef = shallowRef({
   reason: 'NOT_CONFIGURED',
   message: '未配置 CloudBase 数据源，使用本地实现',
   envId: '',
-  counts: { seals: 0, faces: 0, images: 0 },
+  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
   /* **空集诊断（§3c）**：`emptyVerified` ＝ 诚实空态（云端 0 行 + 本地也空 ⇒ 不回落）；
      `emptySuspect` ＝ 可疑空集（云端 0 行 + 本地有数据 ⇒ 已走失败状态机回落本地）。 */
   emptyVerified: [],
@@ -396,10 +400,25 @@ function withBudget(promise, deadline, stage) {
    纪律：本判定**只读不写** —— 读本地走 `readKey()`，**不调** `ensureSeed()`、**不灌**种子、
    **不写** localStorage；不改变 v2 既有语义（超时护栏 / fileID 形态 / 分页稳定次序 /
    本地同 `_id` 覆盖层**一字未动**）；只影响 `seals` / `faces` / `images` 三个集合。
+   **例外（r2 读面接线）**：公开投影集合 `correctionsPublic` **豁免**本判定（见
+   `CLOUD_EMPTY_VERDICT_EXEMPT`）—— 它的本机行只是自写的展示缓存，云端 0 行是合法空态，
+   不得据此判可疑、更不得让整站回落本地。
    --------------------------------------------------------------------------- */
 
 /** 可疑空集的**结构化 reason**（与 `QUERY_FAILED` 共用同一条失败状态机）。 */
 export const CLOUD_EMPTY_SUSPECT = 'CLOUD_EMPTY_SUSPECT'
+
+/**
+ * **不参与「可疑空集 ⇒ 回落」判定的集合**（r2 读面接线新增）。
+ *
+ * 为什么：`seals` / `faces` / `images` 是**藏品本体**——云端 0 行而本机有数据，意味着
+ * 读权限 / 配置被挡（可疑），必须回落本地而不是显示空广场。而 `correctionsPublic` 是
+ * **公开投影面**：它的「本机数据」只是我们自己写的**展示缓存**（采纳镜像），云端 0 行
+ * 是**合法空态**（还没有任何采纳，或投影集合尚未建立）⇒ 若按同一判据判可疑，会把
+ * 「本机缓存有一行、云端还没同步」误判成权限事故、进而**让整站回落本地种子**（把三个
+ * 本体集合一起拖下水）。故本集合**恒走诚实空态**（不回落、不冒充）。
+ */
+export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze(['correctionsPublic'])
 
 /**
  * 本地同集合的**现有行数**（**只读**：不灌种子、不写存储、不碰其它集合）。
@@ -416,21 +435,26 @@ export function cloudBaseLocalRowCount(collectionKey) {
 
 /**
  * 云端读数的**空集裁定**（诊断字段：集合名 / 云端行数 / 本地行数）。
+ *
+ * `exempt`：本集合是否**豁免**可疑判定（见 `CLOUD_EMPTY_VERDICT_EXEMPT` —— 公开投影面
+ * 恒走诚实空态）。豁免集合 `suspect` 恒为 `false`。
  * @param {string} collectionKey 本地集合键
  * @param {Array<object>} cloudRows 本次云端读回的行
- * @returns {{key:string, collection:string, cloud:number, local:number, suspect:boolean}}
+ * @returns {{key:string, collection:string, cloud:number, local:number, suspect:boolean, exempt:boolean}}
  *   `suspect === true` ⇒ 云端 0 行而本地有数据（可疑 ⇒ 回落）；`cloud === 0 && !suspect`
  *   ⇒ 诚实空态（不回落）。
  */
 export function cloudEmptyVerdict(collectionKey, cloudRows) {
   const cloud = Array.isArray(cloudRows) ? cloudRows.length : 0
   const local = cloudBaseLocalRowCount(collectionKey)
+  const exempt = CLOUD_EMPTY_VERDICT_EXEMPT.includes(collectionKey)
   return {
     key: collectionKey,
     collection: CLOUD_COLLECTIONS[collectionKey] || '',
     cloud,
     local,
-    suspect: cloud === 0 && local > 0
+    suspect: !exempt && cloud === 0 && local > 0,
+    exempt
   }
 }
 
@@ -555,10 +579,45 @@ export function normalizeImageRow(doc, options = {}) {
   }
 }
 
+/**
+ * **公开勘误投影行**（`xiai_corrections_public` → 本机 `corrections-public` 行形状）。
+ *
+ * 口径：本集合是**已采纳勘误的公开投影**（匿名可读、只读），行只承载展示所需的最少字段；
+ * 身份 / 奖励 / 审阅人等敏感字段**不在本集合**（由写入侧裁剪，读面不臆造）。
+ * 归一（只做空值与别名，不做业务值改写）：
+ *   · `faceId` / `sealId` / `stamp_id` 三个归属键补别名（同值）；
+ *   · 文本 NULL ⇒ `''`；`reviewed_at` 空 ⇒ 回落 `created_at`；
+ *   · `status` **缺键 ⇒ 按 `'ACCEPTED'` 归一**（本集合的契约就是「已采纳投影」；
+ *     显式给了别的状态值则**逐字保留** ⇒ 展示侧仍按 `ACCEPTED` 过滤，`PENDING` 不参与）。
+ */
+export function normalizePublicCorrectionRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const id = text(firstOf(row.id, row._id))
+  const faceId = text(firstOf(row.faceId, row.face_id))
+  const sealId = text(firstOf(row.sealId, row.seal_id, row.stamp_id))
+  return {
+    ...row,
+    _id: text(row._id),
+    id,
+    faceId,
+    face_id: faceId,
+    sealId,
+    seal_id: sealId,
+    stamp_id: text(firstOf(row.stamp_id, sealId)),
+    field: text(row.field),
+    field_label: text(row.field_label),
+    value: text(row.value),
+    status: text(firstOf(row.status, 'ACCEPTED')),
+    reviewed_at: text(firstOf(row.reviewed_at, row.updated_at, row.created_at)),
+    created_at: text(row.created_at)
+  }
+}
+
 const NORMALIZERS = Object.freeze({
   seals: normalizeSealRow,
   faces: normalizeFaceRow,
-  images: normalizeImageRow
+  images: normalizeImageRow,
+  correctionsPublic: normalizePublicCorrectionRow
 })
 
 /* ---------------------------------------------------------------------------
@@ -880,7 +939,7 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     timeoutMs: budget,
     attempt,
     timeoutStage: '',
-    counts: { seals: 0, faces: 0, images: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
     fetchedAt: ''
   })
   let sdk = null
@@ -969,14 +1028,16 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
   }
   appRef = app
   snapshotRef.value = snapshot
-  const counts = {
-    seals: snapshot.seals.length,
-    faces: snapshot.faces.length,
-    images: snapshot.images.length
+  /* 计数按 `CLOUD_COLLECTIONS` 的键面**动态汇总**（新增集合自动纳入，不再写死三个键）。 */
+  const counts = {}
+  let hydratedRows = 0
+  for (const key of Object.keys(CLOUD_COLLECTIONS)) {
+    counts[key] = Array.isArray(snapshot[key]) ? snapshot[key].length : 0
+    hydratedRows += counts[key]
   }
   setStatus('ready', {
     reason: 'OK',
-    message: `雲端資料已就緒（${counts.seals + counts.faces + counts.images} 列）`,
+    message: `雲端資料已就緒（${hydratedRows} 列）`,
     envId: config.envId,
     counts,
     paging,
@@ -1056,7 +1117,7 @@ function scheduleHydrationRetry(budget, err) {
     timeoutStage: err.stage,
     retryBudgetMs: CLOUD_HYDRATE_RETRY_BUDGET_MS,
     attempt: 2,
-    counts: { seals: 0, faces: 0, images: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
     fetchedAt: ''
   })
   return new Promise((resolve) => {
@@ -1119,7 +1180,7 @@ export function resetCloudBaseSource() {
     reason: 'NOT_CONFIGURED',
     message: '未配置 CloudBase 数据源，使用本地实现',
     envId: '',
-    counts: { seals: 0, faces: 0, images: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
     attempt: 0,
     timeoutStage: '',
     emptyVerified: [],

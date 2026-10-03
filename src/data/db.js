@@ -243,7 +243,8 @@ function ensureSeed() {
    ----------------------------------------------------------------------------
    背景（质检实据）：云模式下写入仍落 localStorage，而读走云端快照 ⇒ 写后读**不可见**
    （管理员的编辑静默丢失）。口径（Zang 裁定，逐条执行）：
-     · **只管三个集合**（`CLOUD_COLLECTION_KEYS` ＝ `seals` / `faces` / `images`）；
+     · **只管读取面接管的集合**（`CLOUD_COLLECTION_KEYS` ＝ `seals` / `faces` / `images`
+       ＋ 公开投影面 `correctionsPublic`）；
        其余 10 个集合的读 / 写路径**一律不变**（仍走既有本地实现）；
      · 读 = **云端快照 ∪ 本地同 `_id` 覆盖（本地优先）**：同 `_id` 的行**逐键合并、本地键优先**
        （本地行未携带的云端键保留 ⇒ 不会因为一条本地编辑而静默丢字段）；
@@ -1602,6 +1603,33 @@ export function saveCorrectionRows(rows) {
   return writeCollection(STORAGE_KEYS.corrections, rows)
 }
 
+/**
+ * 读**公开勘误投影行**（云端公开只读集合 `xiai_corrections_public` 的读面）。
+ *
+ * 读序与既有集合一致（`readCollection`）：云端 `ready` ⇒ 云端快照 ∪ 本机同 `_id` 覆盖；
+ * 其余 ⇒ 本机 `corrections-public` 键。行是**已采纳勘误的公开投影**（`status` 缺键按
+ * `ACCEPTED` 归一，见 `cloudbase.js::normalizePublicCorrectionRow`），**只在展示面使用**。
+ * 本函数**只读**（不灌种子、不写存储）。
+ */
+export function listPublicCorrectionRows() {
+  return readCollection(STORAGE_KEYS.correctionsPublic, [])
+}
+
+/**
+ * 读**公开投影行的本机镜像**（**只读本机 `corrections-public` 键**，不过云端快照）。
+ * 用途：采纳写面同步镜像时做**幂等 upsert**（按 `id` 覆盖）——若走
+ * `listPublicCorrectionRows()`（含云端行）会把云端行一并写回本机键，故此处只读本机。
+ */
+export function listPublicCorrectionMirrorRows() {
+  const rows = readKey(STORAGE_KEYS.correctionsPublic)
+  return Array.isArray(rows) ? rows : []
+}
+
+/** 写**公开投影行的本机镜像**（整键覆盖写；调用方负责先合并成幂等结果）。 */
+export function savePublicCorrectionRows(rows) {
+  return writeCollection(STORAGE_KEYS.correctionsPublic, rows)
+}
+
 export function listPhotoRows() {
   return readCollection(STORAGE_KEYS.photos, [])
 }
@@ -2216,14 +2244,21 @@ export const REQUIRED_SEAL_FIELDS = [
 ]
 
 /**
- * **印章显示名（R-61 冻结链）**：`seal_name`（印文）非空 ⇒ 印文本身；空 ⇒ 「佚名」。
+ * **印章显示名（R-61 冻结链 ＋ r2 读面接线扩展）**：
+ *   **采纳值 → 原始 `seal_name`（印文） → 「佚名」**。
  *
- * 链上**不再有**「印文简体字」这一环（该字段 R-59 起整体退役）；`seal_name` 的键名不变。
- * 本函数是数据层显示名的**单点实现**（对印章行与印面行同样适用 —— 两者都带 `seal_name`）。
+ * - `acceptedName`（第 2 参，**可选**）：由**勘误汇总单点**（`services/corrections.js::resolveMarkable`，
+ *   只认 `ACCEPTED`；同值取出现次数最多、次数相同取最近）算出的「印文」采纳值；
+ *   非空 ⇒ **优先于**原始 `seal_name`（这就是「采纳后的标题修正」）。缺省 / 空 ⇒ 走原始链。
+ * - `seal_name` 的键名**不变**；链上**不再有**「印文简体字」这一环（该字段 R-59 起整体退役）。
+ * - 本函数是**数据层显示名的单点实现**（对印章行与印面行同样适用 —— 两者都带 `seal_name`）；
+ *   视图 / 服务层**不得**再内联 `seal_name || '佚名'`。
  * @param {object|null} row 印章行 / 印面行
- * @returns {string} 印文；空则「佚名」
+ * @param {string} [acceptedName=''] 勘误汇总单点给出的「印文」采纳值（无采纳 ⇒ 空串）
+ * @returns {string} 采纳值 / 原始印文；两者皆空则「佚名」
  */
-export function sealDisplayName(row) {
+export function sealDisplayName(row, acceptedName = '') {
+  if (hasText(acceptedName)) return String(acceptedName)
   const name = row ? row.seal_name : ''
   return hasText(name) ? String(name) : '佚名'
 }

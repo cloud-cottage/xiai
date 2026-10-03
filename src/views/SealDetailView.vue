@@ -1032,7 +1032,7 @@ onBeforeUnmount(() => {
   <section v-if="seal">
     <div class="page-head detail__head">
       <div>
-        <h1>{{ seal.seal_name || '佚名' }}</h1>
+        <h1>{{ corrections.resolveSealDisplayName(seal) }}</h1>
         <p>
           <span class="detail__tag detail__tag--era">{{ seal.dynasty }}</span>
           <span class="detail__tag">{{ seal.seal_type }}</span>
@@ -1160,7 +1160,7 @@ onBeforeUnmount(() => {
           <span class="face-block__badge" :class="{ 'face-block__badge--edge': face.isEdge }">
             {{ faceLabel(face) }}
           </span>
-          <span class="face-block__name">{{ face.seal_name || '佚名' }}</span>
+          <span class="face-block__name">{{ corrections.resolveSealDisplayName(face) }}</span>
           <span class="face-block__id">{{ face.id }}</span>
         </h2>
         <div class="face-block__admin-actions">
@@ -1411,7 +1411,7 @@ onBeforeUnmount(() => {
       data-admin-dialog="edit-seal-attributes"
     >
       <div class="seal-attr-box">
-        <h3 class="seal-attr-box__title">編輯印章屬性 · {{ seal.seal_name || '佚名' }}</h3>
+        <h3 class="seal-attr-box__title">編輯印章屬性 · {{ corrections.resolveSealDisplayName(seal) }}</h3>
         <p class="seal-attr-box__lede">
           藏品編號 {{ seal.stamp_id }}。形制與材質都是印章級固定屬性（整枚印章各一個）：
           自由文本、不強制枚舉、不參與廣場篩選。留空即清除已有值（改爲「未設置」）。

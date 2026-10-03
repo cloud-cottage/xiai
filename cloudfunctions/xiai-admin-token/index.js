@@ -15,11 +15,16 @@
  *     只看自己签发的令牌 ⇒ 伪造本地 `role` 不产生任何效力。
  *   · **网络 / 内部失败不得伪装成 `FORBIDDEN`**（R-WF2）：未配置 / 内部异常一律 `STORAGE_UNAVAILABLE`；
  *     `FORBIDDEN` 只用于**真正的授权判定**（无令牌 / 验签失败 / 过期 / 手机号不符 / 已撤销）。
- *   · **本函数 Phase 1 不做任何持久化写入**（授权面与持久化面分离）⇒ **负向调用天然零写入**；
+ *   · **Phase 1 的 `setInviteReward` 不做任何持久化写入**（授权面与持久化面分离）⇒ **其负向调用天然零写入**；
  *     落盘发生在客户端**且仅在 `ok:true` 之后**（见 `src/services/admin.js::setInviteReward`）。
+ *   · **Phase 2 新增写面 `reviewCorrection`（勘误审核）**：服务端验签后**权威落盘两处** ——
+ *     ① 私有集合 `xiai_corrections` 的状态（`status` / `reviewed_at` / `reviewer_id`，驳回另加 `review_note`）；
+ *     ② 新公开只读集合 `xiai_corrections_public` 的**脱敏投影行**（**零身份字段**，供全站只读展示）。
+ *     **判定全部在写之前**（拒绝 ⇒ 零写入）；落库经 `lib/ops.js` 的**唯一写点** `persist()`，
+ *     用函数运行环境的管理端凭据（云数据库 SDK 延迟 require，不入仓 / 不下发前端）。
  *   · **失败形状恒为 `{ok:false, reason, message}`（恰 3 键）**：不加旁路诊断字段；
  *     内部判别码（`detail`）**只进函数日志**，不回客户端（防探测）。
- *   · **不碰 liwu 任何集合 / 函数**（R-WF4）；本函数零外部依赖（只用 Node 内置 `crypto`）。
+ *   · **不碰 liwu 任何集合 / 函数**（R-WF4）；Phase 1 零外部依赖，Phase 2 写面按需延迟 require 云数据库 SDK。
  */
 
 const {
@@ -27,11 +32,13 @@ const {
   ENV_NAMES,
   deny,
   normalizePhone,
+  uidOf,
   fingerprint,
   maskedPhone,
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
+const { OPS: ADMIN_OPS, persist } = require('./lib/ops.js')
 
 /** 对外文案（**繁體、如实、不泄漏内部标识**；按内部判别码映射，逐条一一对应）。 */
 const DENIAL_MESSAGES = Object.freeze({
@@ -160,10 +167,13 @@ function handleIssue(event, config) {
 
 /**
  * 动作：校验（**供写函数复用的那一层**）。
- * 顺序：① 验签（含格式 / 签名 / 版本）→ ② 有效期 → ③ 手机号 ∈ 白名单 → ④ op 值域 / 字段门。
- * **任一环失败 ⇒ 结构化拒绝且零写入**；成功 ⇒ **滑动续期**（回吐新令牌，`exp = now + ttl`）。
+ * 顺序：① 验签（含格式 / 签名 / 版本）→ ② 有效期 → ③ 手机号 ∈ 白名单 →
+ *      ④ op 值域 / 字段门（legacy）或「读私有行 → 状态门 → 值域门」（persistent）→
+ *      ⑤ **权威落盘**（仅 persistent op；`reviewCorrection` 写私有状态 ＋ 公开脱敏投影）。
+ * **任一环失败 ⇒ 结构化拒绝且零写入**；落盘失败 ⇒ `STORAGE_UNAVAILABLE`（**绝不伪装 `FORBIDDEN`**）；
+ * 成功 ⇒ **滑动续期**（回吐新令牌，`exp = now + ttl`）。
  */
-function handleVerify(event, config) {
+async function handleVerify(event, config) {
   const now = serverNowSeconds()
   const op = typeof event.op === 'string' ? event.op.trim() : ''
   const checked = verifyToken({
@@ -189,18 +199,55 @@ function handleVerify(event, config) {
     })
     return deny(REASONS.FORBIDDEN, '僅管理員可以執行此操作（手機號不在白名單）；本次零寫入。')
   }
-  /* ④ op 面：未知 op ⇒ `INVALID_FIELD`（**不静默放行**）。 */
-  const validator = Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : null
-  if (!validator) {
+  /* ④ op 面：未知 op ⇒ `INVALID_FIELD`（**不静默放行**）。两个注册面：
+     · `OPS`（Phase 1 遗留，`setInviteReward`；**不产落盘计划** ⇒ 行为逐字不变）；
+     · `ADMIN_OPS`（Phase 2 写面，`reviewCorrection`；产落盘计划 ⇒ 由本函数权威落盘）。 */
+  const legacyValidator = Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : null
+  const persistentValidator = Object.prototype.hasOwnProperty.call(ADMIN_OPS, op) ? ADMIN_OPS[op] : null
+  if (!legacyValidator && !persistentValidator) {
     audit({ action: 'verify', outcome: REASONS.INVALID_FIELD, op, serverNow: now })
     return deny(REASONS.INVALID_FIELD, `未知的寫入操作（op）：${op || '（空）'}；本次零寫入。`)
   }
-  const opResult = validator(event.payload)
+  /* ⑤ **动笔之前的全部判定**：op 值域 / 字段门（legacy）或「读私有行 → 状态门 → 值域门」（persistent）。
+     身份＝服务端从**已验签令牌声明**派生（载荷里的身份类键在 op 门里被拒）。 */
+  const identity = Object.freeze({ uid: uidOf(subject), phone: subject })
+  let opResult = null
+  try {
+    opResult = legacyValidator ? legacyValidator(event.payload) : await persistentValidator(event.payload, identity, now)
+  } catch (error) {
+    /* 读私有行失败（网络 / 内部）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**。 */
+    audit({
+      action: 'verify',
+      outcome: REASONS.STORAGE_UNAVAILABLE,
+      op,
+      stage: 'prepare',
+      detail: (error && error.message) || 'unknown',
+      serverNow: now
+    })
+    return deny(REASONS.STORAGE_UNAVAILABLE, '管理員寫入服務的權威存儲不可用；本次零寫入。')
+  }
   if (!opResult.ok) {
     audit({ action: 'verify', outcome: opResult.reason, op, serverNow: now })
     return opResult
   }
-  /* 滑动续期：**只续期、不续权** —— 续期仍走完上面全部判定（本节即在其后）。 */
+  /* ⑥ 权威落盘（**仅当 op 产出了落盘计划**；`setInviteReward` 无计划 ⇒ 不做持久化，逐字不变）。
+     失败 ⇒ `STORAGE_UNAVAILABLE`（**绝不伪装 `FORBIDDEN`**）。 */
+  if (opResult.plan) {
+    try {
+      opResult.wrote = await persist(opResult.plan)
+    } catch (error) {
+      audit({
+        action: 'verify',
+        outcome: REASONS.STORAGE_UNAVAILABLE,
+        op,
+        stage: 'persist',
+        detail: (error && error.message) || 'unknown',
+        serverNow: now
+      })
+      return deny(REASONS.STORAGE_UNAVAILABLE, '管理員寫入服務的權威存儲不可用；本次零寫入。')
+    }
+  }
+  /* ⑦ 滑动续期：**只续期、不续权** —— 续期仍走完上面全部判定（本节即在其后）。 */
   const renewed = issueToken({
     sub: config.phone,
     secret: config.secret,
@@ -220,12 +267,9 @@ function handleVerify(event, config) {
     ver: renewed.claims.ver,
     serverNow: now
   })
-  return {
+  const response = {
     ok: true,
     op,
-    /* Phase 1：本函数**不做持久化** ⇒ 明确回吐 `wrote:false` 语义的字段名不采用（保持成功态自述）。
-       落盘由客户端在 `ok:true` 之后执行（`src/services/admin.js::setInviteReward`）。 */
-    value: opResult.value,
     sub: maskedPhone(config.phone),
     subFingerprint: fingerprint(config.phone),
     serverNow: now,
@@ -235,6 +279,21 @@ function handleVerify(event, config) {
     renewedTtlSeconds: config.ttlSeconds,
     ver: renewed.claims.ver
   }
+  /* `setInviteReward`（Phase 1，无持久化）：保持原成功态自述（回吐 `value`，字段面不变）。 */
+  if (opResult.value !== undefined) response.value = opResult.value
+  /* `reviewCorrection`（Phase 2，已持久化）：回吐**服务端权威行** ＋ 公开投影行 ＋ 落盘读数。 */
+  if (opResult.row !== undefined) {
+    response.authority = 'SERVER'
+    response.row = opResult.row
+    response.projection = opResult.projection
+    response.wrote = opResult.wrote
+    response.identity = {
+      uid: identity.uid,
+      phone: maskedPhone(subject),
+      phoneFingerprint: fingerprint(subject)
+    }
+  }
+  return response
 }
 
 /**
@@ -257,7 +316,7 @@ exports.main = async function main(event) {
   }
   try {
     if (action === 'issue') return handleIssue(input, config)
-    if (action === 'verify') return handleVerify(input, config)
+    if (action === 'verify') return await handleVerify(input, config)
     return deny(REASONS.FORBIDDEN, `未知的操作（action）：${action || '（空）'}；本次零寫入。`)
   } catch {
     /* 内部异常 ⇒ **不得伪装 FORBIDDEN**（R-WF2）；如实报 `STORAGE_UNAVAILABLE`。 */
@@ -268,5 +327,6 @@ exports.main = async function main(event) {
 
 /* 供测试 / Phase 2 的写函数复用（同一函数内的动作分发面）。 */
 exports.OPS = OPS
+exports.ADMIN_OPS = ADMIN_OPS
 exports.DENIAL_MESSAGES = DENIAL_MESSAGES
 exports.ENV_NAMES = ENV_NAMES

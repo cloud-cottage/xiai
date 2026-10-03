@@ -133,7 +133,22 @@ export const STORAGE_KEYS = {
    * `migration-backup:r57trad`＝v1 / v2 那一代，本键＝v3 那一代。
    * 路由与读 / 写 / 清除统一走文件末的「回滚副本的代际键」段（`MIGRATION_BACKUP_GENERATIONS`）。
    */
-  migrationBackupPalette: 'migration-backup:r83palette'
+  migrationBackupPalette: 'migration-backup:r83palette',
+  /**
+   * **用途：公開勘誤投影行的本機鏡像**（读面接线新增；写方 ＝ `db.js` 的
+   * `savePublicCorrectionRows` / `services/corrections.js` 的采纳镜像，读方 ＝ `db.js`
+   * `listPublicCorrectionRows`）。真实键名 `xiai:v1:corrections-public`。
+   * 行 ＝ **已采纳勘误的公开投影**（键面与云端 `xiai_corrections_public` 文档**逐字对齐**：
+   * `_id = 'cp-<correction_id>'` ＋ `{correction_id, faceId, sealId, stamp_id, field, field_label,
+   * value, status:'ACCEPTED', reviewed_at, updated_at, schema:'xiai-corrections-public-v1'}`；
+   * 身份类键（`user_id` / `reviewer_id` / `review_note`）**一律不落**）。
+   * `_id` 与云端文档键**同值** ⇒ 云端形态下数据层覆盖层按 `_id` 配对合成一行，
+   * 行身份（`correction_id` → `id`，剥 `cp-`）去重归一，同一条勘误**只计一次**。
+   * 它是云端公开只读集合 `xiai_corrections_public` 的**本机镜像 / 展示缓存**，
+   * **不是**勘误本体（本体在 `corrections` 键 / 云端 `xiai_corrections`）。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  correctionsPublic: 'corrections-public'
 }
 
 /* ============================================================================

@@ -263,6 +263,8 @@ export function createTokenChannel(profile) {
         value: result.value,
         /* **服务端权威行**（只有「经云端落盘」的 op 才有；本地只做镜像）。 */
         row: result.row,
+        /* **服务端公开投影行**（`reviewCorrection` 等带公开投影的 op 才有；逐字采用、不在前端重建）。 */
+        projection: result.projection,
         docId: typeof result.docId === 'string' ? result.docId : '',
         authority: typeof result.authority === 'string' ? result.authority : '',
         uid: result.identity && typeof result.identity.uid === 'string' ? result.identity.uid : '',

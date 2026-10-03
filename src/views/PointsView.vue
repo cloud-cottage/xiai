@@ -25,7 +25,7 @@
  */
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
-import { admin, points, seals } from '../services/index.js'
+import { admin, corrections, points, seals } from '../services/index.js'
 import { formatDateTime } from '../utils/format.js'
 
 /** 任何一次写入（如改邀请奖励）后 +1，使派生读数立即重算。 */
@@ -64,7 +64,7 @@ const rules = computed(() => {
 function refLabel(row) {
   if (row.ref_type === 'seal' && row.ref_id) {
     const seal = seals.getSealById(row.ref_id)
-    return seal ? `${seal.seal_name || '佚名'}（${row.ref_id}）` : row.ref_id
+    return seal ? `${corrections.resolveSealDisplayName(seal)}（${row.ref_id}）` : row.ref_id
   }
   if (row.ref_type === 'correction') return '勘誤採納獎勵'
   /* 第 4 类流水（邀請註冊）的关联对象字面（§3.21.12 第 34 行）。 */

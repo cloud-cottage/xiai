@@ -22,7 +22,7 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { drive, seals } from '../services/index.js'
+import { drive, seals, corrections } from '../services/index.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -106,11 +106,11 @@ function goSquare() {
               v-if="thumbs[row.seal_id]"
               class="share-card__img"
               :src="thumbs[row.seal_id]"
-              :alt="`${row.seal_name || '佚名'}印面縮略圖`"
+              :alt="`${corrections.resolveSealDisplayName(row)}印面縮略圖`"
             />
-            <span v-else class="share-card__glyph">{{ (row.seal_name || '佚名').slice(0, 1) }}</span>
+            <span v-else class="share-card__glyph">{{ (corrections.resolveSealDisplayName(row)).slice(0, 1) }}</span>
           </div>
-          <p class="share-card__name">{{ row.seal_name || '佚名' }}</p>
+          <p class="share-card__name">{{ corrections.resolveSealDisplayName(row) }}</p>
         </article>
       </div>
       <p v-else class="share__empty" data-share-empty="true">這個資料夾還是空的。</p>

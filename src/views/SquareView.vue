@@ -8,7 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import UploadSealDialog from '../components/UploadSealDialog.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
-import { seals, points, imageFaces } from '../services/index.js'
+import { seals, corrections, points, imageFaces } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS } from '../data/seed.js'
 import { isLoggedIn } from '../data/session.js'
 import { saveLocalBinary } from '../utils/file.js'
@@ -241,7 +241,7 @@ function onSealSaved() {}
             class="square__notice-link"
             :to="{ name: 'seal-detail', params: { id: uploadedSeal.id } }"
           >
-            查看「{{ (uploadedSeal.seal && uploadedSeal.seal.seal_name) || '佚名' }}」
+            查看「{{ corrections.resolveSealDisplayName(uploadedSeal.seal) }}」
           </router-link>
         </template>
       </span>

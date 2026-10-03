@@ -24,7 +24,7 @@
  */
 import { computed, ref } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
-import { drive } from '../services/index.js'
+import { drive, corrections } from '../services/index.js'
 
 const props = defineProps({
   /** 被保存的印章编号（引用式：只传引用，**不复制印章字段**）。 */
@@ -36,6 +36,15 @@ const emit = defineEmits(['close', 'saved'])
 
 /** 任何一次写入后 +1，使下面的派生读数立即重算（服务层读的是已落盘数据）。 */
 const version = ref(0)
+
+/**
+ * 显示名（**单点**：`corrections.resolveSealDisplayName` —— 采纳值 → 原始 `seal_name` →「佚名」）：
+ * 本组件不再内联 `sealName || '佚名'`（那条链**全站恰一处**，与详情页 / 广场卡片同源）。
+ * 只借 `sealId` 做**只读**归属推断；认不出归属 ⇒ 退回原始 `seal_name` ⇒「佚名」。
+ */
+const displayName = computed(() =>
+  corrections.resolveSealDisplayName({ seal_id: props.sealId, seal_name: props.sealName })
+)
 
 const listing = computed(() => {
   void version.value
@@ -127,7 +136,7 @@ defineExpose({ feedbackKind, folders })
     <div class="picker-box">
       <h3 class="picker-box__title">存入雲盤</h3>
       <p class="picker-box__lede">
-        將印章「{{ sealName || '佚名' }}」（<span class="picker-box__code">{{ sealId }}</span>）存入資料夾；
+        將印章「{{ displayName }}」（<span class="picker-box__code">{{ sealId }}</span>）存入資料夾；
         點選一項即完成保存。
       </p>
 

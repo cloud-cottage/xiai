@@ -17,7 +17,13 @@ import {
   writeCorrectionDecision,
   markCorrectionRewarded,
   listUserRows,
-  PermissionError
+  PermissionError,
+  /* r2 读面接线：**公开只读投影集合**（`xiai_corrections_public`）的读 / 镜像写，与
+     **显示名单点** `sealDisplayName`（链：采纳值 → 原始 seal_name → 佚名）。 */
+  sealDisplayName,
+  listPublicCorrectionRows,
+  listPublicCorrectionMirrorRows,
+  savePublicCorrectionRows
 } from '../data/db.js'
 import { currentUser } from '../data/session.js'
 /* 值域真源**复用**：朝代 14 类 = `seed.js` 的 `DYNASTY_OPTIONS` / `isKnownDynasty`（R-20）；
@@ -39,6 +45,9 @@ import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND } from './seals.js'
    以管理端凭据写）；**创建者身份由服务端记录**（`uid = u-<手机号>` 从令牌声明派生），
    载荷里的身份类键一律被服务端拒（`INVALID_FIELD` ＋ 零写入）。 */
 import { userGate } from './userToken.js'
+/* **采纳写面（r2）：云端门**——审核（采纳 / 驳回）在云端形态下先经 `xiai-admin-token` 验签
+   （与 `services/admin.js::setInviteReward` 同一条管道、同一失败形态），过门后才落本机镜像。 */
+import { adminGate } from './adminToken.js'
 
 /** 勘误三态（规范冻结字面值）。 */
 export const CORRECTION_STATUS = {
@@ -205,6 +214,53 @@ function rowsOfFace(face) {
   })
 }
 
+/* ============================================================================
+   **公开投影面（r2 读面接线）**：已采纳勘误的**跨浏览器**来源
+   ----------------------------------------------------------------------------
+   为什么：本机 `corrections` 键只是**同一浏览器 profile 内的审核面镜像**（A 浏览器提交的
+   勘误，B 浏览器看不到 —— 在册既有缺口 W-54）。「采纳后的标题修正要全站一致」就必须从
+   **云端公开只读集合** `xiai_corrections_public` 取（`data/db.js::listPublicCorrectionRows`），
+   且**只认已采纳**：公开集合是「已采纳投影」，`PENDING` 一律不参与展示。
+   归并口径 = **本机勘误行（本地优先）∪ 公开投影行**，按**行身份**去重 ⇒ 同一条被采纳的
+   勘误即使同时存在于本机镜像与云端投影也**只计一次**（不重复计数、不改变众数结论）。
+   ============================================================================ */
+
+/**
+ * 行身份（去重键）：**规范单号优先**（`correction_id` → `id`，剥 `cp-` 前缀 ⇒
+ * 本机勘误行 / 本机公开镜像行 / 云端公开投影行**归一到同一键**）；
+ * 无单号时按「归属 ＋ 字段 ＋ 值」结构化拼键。
+ */
+function correctionIdentityOf(row) {
+  const canonical = canonicalCorrectionIdOf(row)
+  if (canonical) return `id:${canonical}`
+  return `k:${sealIdOf(row)}|${String((row && row.faceId) || '')}|${String((row && row.field) || '')}|${String((row && row.value) || '')}`
+}
+
+/** 某印面的**公开投影**勘误行（已采纳；只看 `ACCEPTED`，`PENDING` / `REJECTED` 不参与展示）。 */
+function publicRowsOfFace(face) {
+  if (!face) return []
+  return listPublicCorrectionRows().filter((row) => {
+    if (normalizeCorrectionStatus(row.status) !== CORRECTION_STATUS.ACCEPTED) return false
+    if (row.faceId) return row.faceId === face.id
+    return sealIdOf(row) === face.sealId && face.kind === FACE_KIND.FACE
+  })
+}
+
+/** **展示用**勘误行 = 本机勘误行（本地优先，含 PENDING —— 供 pendingCount）× 公开投影行；
+    按行身份去重（本地行在前 ⇒ 同 id 时本地行胜出）。 */
+function mergedRowsOfFace(face) {
+  if (!face) return []
+  const seen = new Set()
+  const out = []
+  ;[...rowsOfFace(face), ...publicRowsOfFace(face)].forEach((row) => {
+    const key = correctionIdentityOf(row)
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(row)
+  })
+  return out
+}
+
 /**
  * 提交勘误：一条勘误对应一个印面上的一个属性字段，状态自 PENDING 起。
  *
@@ -362,7 +418,8 @@ export function listAllCorrections({ status = '' } = {}) {
  */
 export function resolveMarkable(target) {
   const face = target && target.kind ? target : target ? primaryFaceOf(target.stamp_id) : null
-  const rows = face ? rowsOfFace(face) : []
+  /* 展示用行 = 本机勘误行 ∪ **公开投影行**（已采纳；跨浏览器一致）—— 见 `mergedRowsOfFace`。 */
+  const rows = face ? mergedRowsOfFace(face) : []
   return MARKABLE_FIELDS.map((meta) => {
     const original = face ? face[meta.key] : ''
     const all = rows.filter((row) => row.field === meta.key)
@@ -387,6 +444,41 @@ export function resolveMarkable(target) {
       pendingCount: all.filter((row) => row.status === CORRECTION_STATUS.PENDING).length
     }
   })
+}
+
+/**
+ * **印章 / 印面显示名的单点入口（r2 读面接线）**：
+ *   **采纳值 → 原始 `seal_name` →「佚名」**（链的实现在 `data/db.js::sealDisplayName`）。
+ *
+ * 视图 / 服务层**一律**经本函数取名（不得再内联 `seal_name || '佚名'`）——
+ * 「采纳后的标题修正」由此**全站一致**（采纳值来自本机勘误行 ∪ **云端公开投影集合**，
+ * 见 `resolveMarkable` / `mergedRowsOfFace`）。
+ *
+ * 入参接受多种行形态（只做**只读**的归属推断，不改任何数据）：
+ *   · 印面（视图模型 / 行，带 `kind`）⇒ 直接按其自身汇总；
+ *   · 印章（视图模型 / 行，带 `stamp_id`）/ 雲盤簡報（带 `seal_id`）/ 照片行（带 `stamp_id`）
+ *     ⇒ 取其**主印面**（`primaryFaceOf`，R-44 口径）汇总；
+ *   · 认不出归属 ⇒ 退回原始 `seal_name` ⇒「佚名」（**不冒充**采纳值）。
+ * @param {object|null} row 印章 / 印面 / 投影行
+ * @returns {string} 采纳值 / 原始印文 /「佚名」
+ */
+export function resolveSealDisplayName(row) {
+  const face = faceTargetOf(row)
+  let accepted = ''
+  if (face) {
+    const item = resolveMarkable(face).find((meta) => meta.key === 'seal_name')
+    if (item && item.source === 'CORRECTION') accepted = item.display
+  }
+  return sealDisplayName(row, accepted)
+}
+
+/** 由任意行形态推断「用于汇总的印面」（只读；认不出 ⇒ `null`）。 */
+function faceTargetOf(row) {
+  if (!row || typeof row !== 'object') return null
+  if (row.kind) return row
+  const sealId = String(row.sealId || row.stamp_id || row.seal_id || '').trim()
+  if (!sealId) return null
+  return primaryFaceOf(sealId)
 }
 
 /* ============================================================================
@@ -449,6 +541,132 @@ function isPermissionError(err) {
   return err instanceof PermissionError || (err && err.name === 'PermissionError')
 }
 
+/** 采纳写面（r2）的**云端门 op 名**（须与云函数 `xiai-admin-token` 的 `OPS` 注册面逐字一致）。 */
+export const REVIEW_OP = 'reviewCorrection'
+
+/**
+ * 采纳写面载荷的**封闭键面**（**须与云函数 `lib/ops.js::ALLOWED_KEYS` 逐字同值**）。
+ *
+ * 为什么必须逐字：云函数侧 `ALLOWED_KEYS` 是**服务端封闭面** —— 载荷里出现未登记键
+ * ⇒ `INVALID_FIELD` ＋ **零写入**（明文不许静默丢键）。实测踩过：客户端曾用 `id`
+ * 作单号键，而服务端登记的是 `correction_id` ⇒ **云端形态下采纳写面被全量拒绝**
+ * （本地 dev 形态照样通过 ⇒ 本地绿、线上红）。密钥名对齐由
+ * `scripts/verify-correction-display.mjs` 的 `D1` **机械断言**（两处逐字相等）。
+ */
+export const REVIEW_PAYLOAD_KEYS = ['correction_id', 'decision', 'note']
+
+/**
+ * 公开只读投影行的**封闭键面**（**须与云函数 `lib/ops.js::PUBLIC_PROJECTION_KEYS` 逐字同值**；
+ * 以 `_id` 作文档键 ⇒ 该键**不在**本表，单列在 `PUBLIC_ID_FIELD`）。
+ * 身份 / 奖励 / 理由类字段**一律不在本表**（脱敏投影）。
+ */
+export const PUBLIC_PROJECTION_KEYS = [
+  'correction_id',
+  'faceId',
+  'sealId',
+  'stamp_id',
+  'field',
+  'field_label',
+  'value',
+  'status',
+  'reviewed_at',
+  'updated_at',
+  'schema'
+]
+
+/** 公开投影行的文档键名（云端落 `_id`；本机镜像落同名字段 ⇒ 覆盖层可按 `_id` 配对）。 */
+export const PUBLIC_ID_FIELD = '_id'
+
+/** 公开投影 schema 版本（与云函数 `PUBLIC_SCHEMA` 逐字同值）。 */
+export const PUBLIC_PROJECTION_SCHEMA = 'xiai-corrections-public-v1'
+
+/** 公开投影行文档键前缀（与云函数 `PUBLIC_ID_PREFIX` 逐字同值）。 */
+export const PUBLIC_ID_PREFIX = 'cp-'
+
+/**
+ * 勘误行的**规范单号**（公开投影行以 `correction_id` 为主；兼容只有 `id` 的历史行，
+ * 并把云端投影文档键前缀 `cp-` 剥掉）。
+ * 用途：让「本机勘误行（`id`）」「本机公开镜像行（`correction_id`）」与
+ * 「云端公开投影行（`correction_id` ＋ `_id='cp-…'`）」**归一到同一个行身份**
+ * （去重 / 覆盖层配对都靠它，见 `correctionIdentityOf`）。
+ */
+function canonicalCorrectionIdOf(row) {
+  if (!row || typeof row !== 'object') return ''
+  const explicit = String(row.correction_id || '').trim()
+  if (explicit) return explicit
+  return String(row.id || '').trim().replace(/^cp-/, '')
+}
+
+/**
+ * 把一条**已采纳**勘误裁剪成**公开投影行**（只留展示所需字段）。
+ * 身份（`user_id` / `reviewer_id`）/ 奖励（`rewarded_at`）/ 理由（`review_note`）**一律不落**——
+ * 公开集合是匿名可读面，只承载「展示所需的最少字段」。
+ *
+ * **键面与云函数 `buildProjection` 逐字对齐**：主键用 `correction_id`（**不再用 `id`**），
+ * 带 `schema` / `updated_at`；文档键 `_id` 由 `mirrorAcceptedToPublic` 统一补
+ * `cp-<correction_id>`（与云端落盘形态一致 ⇒ 覆盖层可配对、去重可归一）。
+ */
+function publicProjectionOf(row, at = '') {
+  const sealId = sealIdOf(row)
+  const stamp = String((row && row.stamp_id) || sealId || '')
+  return {
+    correction_id: canonicalCorrectionIdOf(row),
+    faceId: String((row && row.faceId) || ''),
+    sealId,
+    stamp_id: stamp,
+    field: String((row && row.field) || ''),
+    field_label: String((row && row.field_label) || ''),
+    value: String((row && row.value) || ''),
+    status: CORRECTION_STATUS.ACCEPTED,
+    reviewed_at: String((row && row.reviewed_at) || at || ''),
+    updated_at: String((row && row.updated_at) || (row && row.reviewed_at) || at || ''),
+    schema: PUBLIC_PROJECTION_SCHEMA
+  }
+}
+
+/**
+ * 把已采纳勘误写进**公开投影的本机镜像**（键 `xiai:v1:corrections-public`）。
+ *
+ * **幂等 upsert**：按**规范行身份**（`correction_id` → `id`，剥 `cp-` 前缀）覆盖既有行、
+ * 无则追加（重复采纳 / 重放不会新增第二行；历史 `id` 形态的镜像行也能被覆盖）。
+ * 只读 **本机镜像**（`listPublicCorrectionMirrorRows`）——不把云端行一并写回本机键。
+ *
+ * **与云端落盘逐字对齐**：优先采用云函数回包的 `projection`（服务端权威公开行）；
+ * 缺省（dev / 離線形態，无云端）才由 `publicProjectionOf` 本地派生。落盘统一补
+ * `_id = 'cp-<correction_id>'`（与云端文档键同值）⇒ 云端形态下数据层覆盖层
+ * （`db.js::withLocalOverlay`，按 `_id` 配对）会把本机镜像与云端投影行**合成一行**，
+ * 不产生「同一条勘误两行」的重复。
+ * @param {object} row 已采纳的勘误行（本机权威行）
+ * @param {object} [serverProjection] 云函数回包的公开投影行（可选；服务端权威形态）
+ */
+function mirrorAcceptedToPublic(row, serverProjection) {
+  const source = serverProjection && typeof serverProjection === 'object' ? serverProjection : publicProjectionOf(row)
+  const correctionId = canonicalCorrectionIdOf(source)
+  if (!correctionId) return null
+  const projection = {
+    [PUBLIC_ID_FIELD]: `${PUBLIC_ID_PREFIX}${correctionId}`,
+    correction_id: correctionId,
+    faceId: String(source.faceId || ''),
+    sealId: String(source.sealId || ''),
+    stamp_id: String(source.stamp_id || source.sealId || ''),
+    field: String(source.field || ''),
+    field_label: String(source.field_label || ''),
+    value: String(source.value || ''),
+    status: CORRECTION_STATUS.ACCEPTED,
+    reviewed_at: String(source.reviewed_at || ''),
+    updated_at: String(source.updated_at || source.reviewed_at || ''),
+    schema: String(source.schema || PUBLIC_PROJECTION_SCHEMA)
+  }
+  const identity = correctionIdentityOf(projection)
+  const rows = listPublicCorrectionMirrorRows()
+  const exists = rows.some((item) => correctionIdentityOf(item) === identity)
+  const next = exists
+    ? rows.map((item) => (correctionIdentityOf(item) === identity ? { ...item, ...projection } : item))
+    : [...rows, projection]
+  savePublicCorrectionRows(next)
+  return projection
+}
+
 /**
  * **冻结 API ④**：审核一条勘误（采纳 / 驳回）。
  *
@@ -459,14 +677,36 @@ function isPermissionError(err) {
  * - 终态不回退：已审过的条目再调 ⇒ `{ok:false, reason:'ALREADY_REVIEWED'}`。
  * - 第 4 参 `note`（**可选，默认空串**）：**仅驳回且非空**时作为理由落盘（`review_note`，≤200 字）；
  *   单条驳回不传 ⇒ 行为逐字不变（**不写理由**）。
- * @returns {{ok:boolean, status?:string, accepted?:boolean, reward?:object, row?:object,
- *   reason?:string, message:string}}
+ *
+ * **采纳写面（r2）：云端门 ＋ 同步本机镜像**——判定顺序改为：
+ *   ① **云端门**（`adminGate(REVIEW_OP, {id, decision, note})`）：云端形态下这是**唯一授权判据**
+ *      （服务端验签 ＋ 手机号白名单 ＋ op 值域 / 字段门，由服务端在云端落盘 / 写公开投影）；
+ *      拒絶 ⇒ **原样透传**（传输层失败 ⇒ `STORAGE_UNAVAILABLE`，**絕不偽裝 `FORBIDDEN`**）＋ **零写入**；
+ *      dev / 離線形態 ⇒ 放行到本地判定（明確標注非正式寫入路徑）。
+ *   ② **本機鏡像**：過門後仍走既有 `writeCorrectionDecision`（**三態語義 / 冪等 / 值域門 /
+ *      零寫入紀律逐字不變**）—— dev / 離線形態下它就是本地權威；雲端形態下它是服務端權威的本機鏡像。
+ *   ③ 已採納 ⇒ 同步**公開投影的本機鏡像**（`mirrorAcceptedToPublic`；標題 / 屬性表跨瀏覽器一致的來源）。
+ *
+ * ⇒ 本函式由**同步改為 `async`**（呼叫方須 `await`）；返回形狀與改前**逐字一致**。
+ * @returns {Promise<{ok:boolean, status?:string, accepted?:boolean, reward?:object, row?:object,
+ *   reason?:string, message:string}>}
  */
-export function review(actor, correctionId, decision, note = '') {
+export async function review(actor, correctionId, decision, note = '') {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈勘誤' }
   }
+  /* ① 雲端門（唯一授權判據；dev / 離線形態返回放行標記）。
+     载荷键面**逐字**取服务端封闭面（云函数 `lib/ops.js::ALLOWED_KEYS` ＝
+     `REVIEW_PAYLOAD_KEYS`）：`correction_id` / `decision` / `note`；
+     键名不符（曾误用 `id`）会被服务端判 `INVALID_FIELD` ＋ 零写入。 */
+  const gate = await adminGate(REVIEW_OP, {
+    correction_id: String(correctionId === null || correctionId === undefined ? '' : correctionId),
+    decision: String(decision === null || decision === undefined ? '' : decision),
+    note: String(note === null || note === undefined ? '' : note)
+  })
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* ② 本機鏡像（dev / 離線 = 本地權威；雲端 = 服務端權威後的本機鏡像）。 */
   let decided
   try {
     decided = writeCorrectionDecision(who, correctionId, decision, note)
@@ -475,6 +715,8 @@ export function review(actor, correctionId, decision, note = '') {
     return { ok: false, reason: 'ERROR', message: `審覈失敗：${(err && err.message) || '未知原因'}` }
   }
   if (!decided.ok) return decided
+  /* ③ 已採納 ⇒ 同步公開投影的本機鏡像（冪等 upsert；雲端形態優先採用服務端回包的投影行）。 */
+  if (decided.accepted) mirrorAcceptedToPublic(decided.row, gate.projection)
 
   let reward = { ok: true, awarded: false, message: '駁回不發獎' }
   if (decided.accepted) {
@@ -504,9 +746,10 @@ export function review(actor, correctionId, decision, note = '') {
 
 /**
  * 兼容入口：既有调用方（管理员专区页）按「当前登录态」审核。
- * 行为与 `review` 一致，签名保持 `(id, decision)`（**勿改**，既有页面在用）。
+ * 行为与 `review` 一致，签名保持 `(id, decision)`（**勿改**，既有页面在用）——
+ * **r2 起本函式亦为 `async`**（内部 `review` 已 async）。
  */
-export function reviewCorrection(id, decision) {
+export async function reviewCorrection(id, decision) {
   const user = currentUser()
   if (!user || user.role !== 'admin') return { ok: false, message: '僅管理員可以審覈勘誤' }
   const rows = listCorrectionRows()
@@ -515,7 +758,7 @@ export function reviewCorrection(id, decision) {
   if (normalizeCorrectionStatus(target.status) !== CORRECTION_STATUS.PENDING) {
     return { ok: false, message: '該勘誤已審覈，不可重複處理' }
   }
-  return review(user, id, decision)
+  return await review(user, id, decision)
 }
 
 /* ============================================================================
@@ -683,13 +926,15 @@ function normalizeReviewNote(note) {
  * - `note`（**可选**）非文字 / 超 200 字 ⇒ `INVALID_VALUE` ＋ 零写入（判定在**任何逐条写入之前**）。
  * - **逐条独立成败**：每条走既有 `review`（`writeCorrectionDecision` ＋ `awardCorrectionReward`），
  *   幂等 / 发奖语义**逐字不变**；有一条成功即 `ok:true` 并如实回报失败条数；全失败 ⇒ `ok:false`。
+ * - **r2 起 `review` 为 `async`（采纳写面走云端门）⇒ 本函式亦为 `async`**：逐条**串行** `await`
+ *   （不并发发门 —— 令牌滑动续期 / 逐条独立成败都要求串行、确定序）。
  * @param {object|null} actor 操作者（须为管理员）
  * @param {Array<string>} ids 勘误行 id 列表
  * @param {'ACCEPTED'|'REJECTED'} decision 审核决定
  * @param {string} [note=''] 驳回理由（≤200 字；仅驳回时落盘）
- * @returns {{ok:boolean, decided:{accepted:number, rejected:number}, failed:Array<{id:string,reason:string,message:string}>, message:string}}
+ * @returns {Promise<{ok:boolean, decided:{accepted:number, rejected:number}, failed:Array<{id:string,reason:string,message:string}>, message:string}>}
  */
-export function reviewBatch(actor, ids, decision, note = '') {
+export async function reviewBatch(actor, ids, decision, note = '') {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
     return {
@@ -727,8 +972,9 @@ export function reviewBatch(actor, ids, decision, note = '') {
   }
   const decided = { accepted: 0, rejected: 0 }
   const failed = []
-  list.forEach((id) => {
-    const result = review(who, id, decision, noteCheck.note)
+  /* 逐条**串行** await（确定序；不并发发门）。 */
+  for (const id of list) {
+    const result = await review(who, id, decision, noteCheck.note)
     if (result && result.ok) {
       if (result.accepted) decided.accepted += 1
       else decided.rejected += 1
@@ -739,7 +985,7 @@ export function reviewBatch(actor, ids, decision, note = '') {
         message: (result && result.message) || '審覈失敗'
       })
     }
-  })
+  }
   const successCount = decided.accepted + decided.rejected
   const ok = successCount > 0
   const verb = decision === CORRECTION_STATUS.ACCEPTED ? '採納' : '駁回'

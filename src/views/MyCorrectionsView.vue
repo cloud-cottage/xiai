@@ -97,11 +97,11 @@ const batchConfirmAction = computed(() => {
 })
 const BATCH_CANCEL_ACTION = 'correction-batch-cancel'
 
-function confirmBatch() {
+async function confirmBatch() {
   const dialog = batchDialog.value
   if (!dialog) return
   const note = dialog.decision === corrections.CORRECTION_STATUS.REJECTED ? batchNote.value : ''
-  const result = corrections.reviewBatch(
+  const result = await corrections.reviewBatch(
     actor.value,
     dialog.batch.rows.map((row) => row.id),
     dialog.decision,
@@ -116,8 +116,9 @@ const reward = points.CORRECTION_REWARD
 
 function sealLabel(sealId) {
   const seal = seals.getSealById(sealId)
-  /* R-65：显示名链只用 `seal_name`（空 ⇒「佚名」）；印章行缺失时才用「未知印章」。 */
-  return seal ? seal.seal_name || '佚名' : '未知印章'
+  /* r2 显示名单点：采纳值 → 原始 seal_name →「佚名」（`corrections.resolveSealDisplayName`）；
+     印章行缺失时才用「未知印章」。 */
+  return seal ? corrections.resolveSealDisplayName(seal) : '未知印章'
 }
 
 function sealKeyOf(row) {
@@ -141,8 +142,8 @@ function submitterOf(row) {
 }
 
 /** 采纳 / 驳回：结果一律读服务层返回的 `message` 原文展示（不做一闪而过的提示）。 */
-function decide(row, decision) {
-  const result = corrections.review(actor.value, row.id, decision)
+async function decide(row, decision) {
+  const result = await corrections.review(actor.value, row.id, decision)
   feedback.value = result.message
   dataVersion.value += 1
 }

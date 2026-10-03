@@ -82,22 +82,30 @@ export function readImageAsDataUrl(file) {
  * `db.primaryFaceIn` —— 选出的**主印面的印面图片（影像行）**；本函数只消费它
  * （＝「向上接受一个已选好的主印面」，不在此处再写一份 `kind === 'FACE'` 的规则）。
  *
- * 为什么不 import 数据层的 `primaryFaceIn`（**不得硬塞依赖**）：本文件由**页面 / 组件**
+ * 为什么不是自己 import 数据层的 `primaryFaceIn`（**不得硬塞依赖**）：本文件由**页面 / 组件**
  * （`SquareView.vue` / `SealDetailView.vue`）直接 import，而数据层文件头写明
- * 「本文件是 services 层的下游；**组件不得直接 import 本文件**」—— 若在此 import，
- * 页面 → `utils/file.js` → `data/db.js` 的模块图就绕开了服务层（层级倒置）。
+ * 「本文件是 services 层的下游；**组件不得直接 import 本文件**」—— 若在此 import，页面 →
+ * `utils/file.js` → `data/db.js` 的模块图就绕开了服务层（层级倒置）。
  * 故**收敛方式＝消费上游已选好的主印面影像**，本文件内**不得**再出现
  * `kind === 'FACE'` 之流的主印面选择谓词。
+ *
+ * **显示名（r2 读面接线）同一条纪律**：本函数**不 import** `services/corrections.js`
+ * （同为层级倒置）⇒ 印文显示值由**调用方**按**单点** `resolveSealDisplayName` 算好后经
+ * 第 2 参 `displayName` 传入（采纳值 → 原始 `seal_name` →「佚名」恰一处）；缺省才回落到
+ * 行自带的 `seal_name`，两者皆空才「佚名」。
+ * @param {object} seal 印章视图模型（含 `faces` / `faceImage` / `edgeImages`）
+ * @param {string} [displayName=''] 由 `services/corrections.js::resolveSealDisplayName` 算出的显示印文
  */
-export function hdManifestText(seal) {
+export function hdManifestText(seal, displayName = '') {
   const faces = (seal && seal.faces) || []
   const face = (seal && seal.faceImage) || {}
   const edges = (seal && seal.edgeImages) || []
+  const rawName = displayName || String((seal && seal.seal_name) || '')
   const lines = [
     '璽愛 · 高清印面資料',
     '（本清單爲印面資料與影像摘要；影像原件請於頁面以「下載高清原圖」下載）',
     `印章編號：${seal.stamp_id}`,
-    `印文：${seal.seal_name || '佚名'}`,
+    `印文：${rawName || '佚名'}`,
     `朝代：${seal.dynasty || '—'}`,
     `分類：${seal.seal_type || '—'}`,
     `作者：${seal.author || '—'}`,

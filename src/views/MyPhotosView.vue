@@ -12,7 +12,7 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import SliceImage from '../components/SliceImage.vue'
-import { photos as photoService, seals } from '../services/index.js'
+import { photos as photoService, seals, corrections } from '../services/index.js'
 import { formatBytes, formatDateTime } from '../utils/format.js'
 import {
   IMAGE_LIMITS,
@@ -406,7 +406,7 @@ async function onUpload() {
           <label for="photo-stamp">歸屬印章</label>
           <select id="photo-stamp" v-model="stampId" :disabled="busy">
             <option v-for="item in sealOptions" :key="item.stamp_id" :value="item.stamp_id">
-              {{ item.seal_name || '佚名' }}（{{ item.stamp_id }}）
+              {{ corrections.resolveSealDisplayName(item) }}（{{ item.stamp_id }}）
             </option>
           </select>
           <p v-if="!sealOptions.length" class="field__hint">暫無印章可選，請先在璽印匯類上傳印章。</p>
@@ -515,7 +515,7 @@ async function onUpload() {
             <p v-else class="photo-card__pending">{{ renderErrors[row.id] || '正在讀取照片…' }}</p>
             <div class="photo-card__body">
               <p class="photo-card__name">
-                {{ sealOf(row.stamp_id) ? sealOf(row.stamp_id).seal_name || '佚名' : row.stamp_id }}
+                {{ sealOf(row.stamp_id) ? corrections.resolveSealDisplayName(sealOf(row.stamp_id)) : row.stamp_id }}
               </p>
               <p class="photo-card__meta">{{ row.stamp_id }}</p>
               <p class="photo-card__meta">

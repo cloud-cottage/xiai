@@ -26,7 +26,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import ShareDialog from '../components/ShareDialog.vue'
-import { drive, seals } from '../services/index.js'
+import { drive, seals, corrections } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 
 const route = useRoute()
@@ -265,16 +265,16 @@ function onShareChanged() {
                   v-if="thumbs[row.seal_id]"
                   class="drive-item__img"
                   :src="thumbs[row.seal_id]"
-                  :alt="`${row.seal_name || '佚名'}印面縮略圖`"
+                  :alt="`${corrections.resolveSealDisplayName(row)}印面縮略圖`"
                 />
-                <span v-else class="drive-item__glyph">{{ (row.seal_name || '佚名').slice(0, 1) }}</span>
+                <span v-else class="drive-item__glyph">{{ (corrections.resolveSealDisplayName(row)).slice(0, 1) }}</span>
               </router-link>
               <div class="drive-item__body">
                 <router-link
                   class="drive-item__name"
                   :to="{ name: 'seal-detail', params: { id: row.seal_id } }"
                 >
-                  {{ row.seal_name || '佚名' }}
+                  {{ corrections.resolveSealDisplayName(row) }}
                 </router-link>
                 <span class="drive-item__meta">藏品編號 {{ row.seal_id }}</span>
               </div>
