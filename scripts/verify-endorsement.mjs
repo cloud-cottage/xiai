@@ -114,7 +114,10 @@ process.env.XIAI_USER_SMS_CODE = SMS_CODE
 process.env.XIAI_USER_TOKEN_SECRET = SECRET
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
-const uidOfPhone = (phone) => `u-${String(phone).replace(/[^0-9]/g, '')}`
+/* **uid 派生单点**：客户端 `src/data/uid.js::uidOf`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。
+   自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */
+const uidUtil = await import(path.join(ROOT, 'src/data/uid.js'))
+const uidOfPhone = (phone) => uidUtil.uidOf(phone)
 const UID_ME = uidOfPhone(PHONE)
 const UID_OTHER = uidOfPhone(OTHER_PHONE)
 const UID_THIRD = uidOfPhone(THIRD_PHONE)
@@ -302,14 +305,17 @@ check('B3', '落盘顺序：先采信行（私有）、后公开计数行', ['xi
 check('B3b', '两处皆为确定性 `set`（幂等 upsert）', ['set', 'set'], store.stats.writes.slice(w0).map((w) => w.action))
 const endorseRow = countRowFor('xiai_endorsements', FACE_ID, 'author', VALUE_OTHER_PENDING)
 check('B4', '采信行身份 ＝ 服务端派生 uid（**非前端自称**）', UID_ME, endorseRow.user_id)
-check('B4b', '采信行记录服务端手机号', PHONE, endorseRow.user_phone)
+check('B4b', '**采信私有行不落手机号**：**无 `user_phone` 键**（人类口径 ②）', false, Object.prototype.hasOwnProperty.call(endorseRow, 'user_phone'))
+check('B4b2', '采信私有行任一字段值不含 11 位手机号（uid 允许）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(endorseRow)))
 check('B4c', '采信行身份来源标记', 'SERVER_TOKEN', endorseRow.identity_source)
 const pubRow = countRowFor('xiai_endorsement_counts', FACE_ID, 'author', VALUE_OTHER_PENDING)
 check('B5', '公开计数行 count ＝ 1', 1, pubRow.count)
 check('B5b', '公开计数行 schema', 'xiai-endorsement-counts-v1', pubRow.schema)
 check('B5c', '公开计数行文档键形态 `e-<faceId>-<field>-<sha256(value)前16>`', `e-${FACE_ID}-author-` + createHash('sha256').update(VALUE_OTHER_PENDING, 'utf8').digest('hex').slice(0, 16), pubRow._id)
 check('B5d', '**公开计数行零身份字段**（服务端落盘面）', [], Object.keys(pubRow).filter((key) => IDENTITY_KEYS.includes(key)))
+check('B5d2', '**公开计数行零手机号**（含 11 位数字正则；uid 允许）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(pubRow)))
 check('B5e', '**回包 projection 零身份字段**（服务端下发面）', [], Object.keys(first.projection || {}).filter((key) => IDENTITY_KEYS.includes(key)))
+check('B5e2', '**回包 projection 亦零手机号**（含 11 位数字正则）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(first.projection || {})))
 check('B5f', '回包 row ＝ 服务端权威采信行', true, first.row && first.row._id === endorseRow._id)
 
 /* ② 重复采信（我 → 同键）：ALREADY_ENDORSED ＋ 零写入、count 仍 1。 */
@@ -326,6 +332,10 @@ store.load(CLOUD_SEED)
   const wSelf = store.stats.writes.length
   const mineSubmit = await fn.main({ action: 'verify', token: TOKEN_ME, op: 'submitCorrection', payload: { faceId: FACE_ID, sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: VALUE_MINE_PENDING, basis: '' } })
   check('B7', '前置：我为该印面提交了一个值', true, mineSubmit.ok === true && store.stats.writes.length === wSelf + 1)
+  /* **业务行不落手机号**（人类口径 ②）：服务端权威勘误私有行无 `user_phone` 键、零 11 位数字。 */
+  const mySubmitRow = [...store.mapOf('xiai_corrections').values()].find((row) => row.value === VALUE_MINE_PENDING) || {}
+  check('B7b', '服务端落盘的勘误私有行**无 `user_phone` 键**', false, Object.prototype.hasOwnProperty.call(mySubmitRow, 'user_phone'))
+  check('B7c', '该勘误私有行任一字段值不含 11 位手机号（uid 允许）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(mySubmitRow)))
   const wSelf2 = store.stats.writes.length
   const selfEndorse = await fn.main({ action: 'verify', token: TOKEN_ME, op: 'endorseCorrection', payload: endorsePayload(VALUE_MINE_PENDING) })
   check('B8', '自采（同值为本人提交）⇒ 拒（FORBIDDEN；待规范单确认的新字面值，暂用 FORBIDDEN）', true, isDenial(selfEndorse) && selfEndorse.reason === 'FORBIDDEN')

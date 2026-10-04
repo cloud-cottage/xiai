@@ -8,9 +8,12 @@
  *      一律返回结构化拒绝，`reason` 取**既有冻结字面值** `STORAGE_UNAVAILABLE`
  *      （语义 ＝ 权威存储 / 内部不可用；**属「内部不可用」，不是「越权」⇒ 不得用 `FORBIDDEN` 冒充**）；
  *   ③ **本文件不打印任何密钥 / 令牌**；`fingerprint()` 只给不可逆摘要前 12 位（诊断用）；
- *   ④ **uid 由服务端确定性派生**（`uidOf(phone)` ＝ `u-<11 位手机号>`，与前端
- *      `src/services/auth.js` 的 `id: u-${normalized}` **同一约定**）⇒ **前端无法自称 uid**
+ *   ④ **uid 由服务端确定性派生、且不可反推手机号**（`uidOf(phone)` ＝
+ *      `u-` ＋ `sha256(手机号).hex` 前 16 位；与前端 `src/data/uid.js::uidOf`
+ *      **同一算法 ⇒ 同值**）⇒ **前端无法自称 uid**
  *      （若把 uid 塞进令牌由客户端在签发时自选，等于把身份交回客户端 ⇒ 本单显式不那样做）。
+ *      明文：uid **不是密码学保密**（单向、可复算）—— 它的作用只是**不把手机号写进数据行 /
+ *      不直接露出**；手机号只活在**服务端环境变量**与**本人本地会话**里。
  */
 
 const crypto = require('crypto')
@@ -62,8 +65,11 @@ const DEFAULT_VERSION = '1'
 /** 手机号形态（与前端 `auth.js::isPhoneLike` 逐字同正则）。 */
 const PHONE_PATTERN = /^1[3-9]\d{9}$/
 
-/** uid 前缀（与前端 `auth.js` 的 `u-${phone}` 同一约定）。 */
+/** uid 前缀（与前端 `src/data/uid.js` / 管理员函数 `uidOf` **同一约定**）。 */
 const UID_PREFIX = 'u-'
+
+/** 摘要十六进制取前多少位（与前端 `src/data/uid.js::UID_HEX_LENGTH` 逐字同值）。 */
+const UID_HEX_LENGTH = 16
 
 /** 令牌里 `role` 的取值（**本函数只认 `user`**；管理员令牌由另一个函数签、另一把密钥）。 */
 const USER_ROLE = 'user'
@@ -101,13 +107,16 @@ function isPhoneLike(value) {
 }
 
 /**
- * **服务端唯一的 uid 派生**：`u-<11 位手机号>`。
+ * **服务端唯一的 uid 派生**：`u-` ＋ `sha256(手机号).hex` 前 16 位（**单向、不可反推手机号**）。
+ * 与前端 `src/data/uid.js::uidOf` / 管理员函数 `uidOf` **同一算法 ⇒ 同值**（自检机械断言）。
+ * 明文：uid **不是密码学保密** —— 作用只是不把手机号写进数据行 / 不直接露出。
  * 明文：uid **不由客户端提供**（既不在载荷里读、也不在令牌里由客户端自选）⇒
  * 「创建者 uid」是服务端按已通过验证码校验的手机号**确定性算出**的。
  */
 function uidOf(value) {
   const digits = normalizePhone(value)
-  return isPhoneLike(digits) ? `${UID_PREFIX}${digits}` : ''
+  if (!isPhoneLike(digits)) return ''
+  return `${UID_PREFIX}${crypto.createHash('sha256').update(digits, 'utf8').digest('hex').slice(0, UID_HEX_LENGTH)}`
 }
 
 /** 运行期环境 Id（缺位 ⇒ 空串 ⇒ 由 node-sdk 走「当前环境」语义；**不写死**）。 */
@@ -177,6 +186,7 @@ module.exports = {
   DEFAULT_VERSION,
   PHONE_PATTERN,
   UID_PREFIX,
+  UID_HEX_LENGTH,
   USER_ROLE,
   deny,
   normalizePhone,

@@ -6,7 +6,7 @@
  *      `xiai-user-token` 的 `action:'verify'`）＋ 手机号 ∈ **管理员白名单**
  *      ⇒ 采纳 / 驳回、改邀请奖励**永不需要第二个码、零弹窗**；
  *   ② 令牌**只存内存**（`src/services/token.js` 的通道闭包）⇒ **刷新页面即丢**，
- *      而本地会话只持久化 `{userId}`（形如 `u-<手机号>`）⇒ 刷新后直接写会被服务端
+ *      而本地会话只持久化 `{userId}`（形如 `u-<16 位十六进制>`，**不可反推手机号**）⇒ 刷新后直接写会被服务端
  *      以「未攜帶有效令牌」拒（**既有缺陷**）。
  *
  * 本文件把这两件事收口到**单点**：
@@ -16,7 +16,7 @@
  *   · 它是**编排**，不是判据：过门之后 `userGate` 仍把请求交给云函数，
  *     **服务端验签 / 白名单 / 值域才是唯一判据**（本文件从不产出「可以写」的结论）。
  *
- * 补签的手机号**由会话 userId `u-<手机号>` 派生**（与 `auth.js` 建号约定同一来源）；
+ * 补签的手机号**从本人本地会话的 `user.phone` 取**（**不得**从 uid 反推 —— uid 是单向派生）；
  * 验证码用**公开演示常量** `DEMO_SMS_CODE`（它随前端包公开，不是一个秘密 —— 见 `auth.js` 文件头）。
  *
  * 失败形状恒为 `{ok:false, reason, message}`（`reason` ∈ 既有冻结表），
@@ -37,8 +37,11 @@ const PHONE_PATTERN = /^1[3-9]\d{9}$/
 const LOGIN_REQUIRED = 'FORBIDDEN'
 
 /**
- * 从登录会话派生手机号：**先看 `user.phone`，再回落 `user.id` 的 `u-<手机号>` 形态**。
- * 派生不出（游客 / 形态不符）⇒ 空串（调用方据此判定「无可补签的会话」）。
+ * 从登录会话取手机号：**只从本人本地会话的 `user.phone` 取**。
+ *
+ * **不得**再从 `user.id`（uid）反推 —— uid 已改为**单向派生**（`u-` ＋ sha256(手机号) 前 16 位，
+ * 不可反推手机号）；手机号只允许从**本人本地会话**读（人类口径 ④），**绝不从数据行读**。
+ * 取不到（游客 / 形态不符）⇒ 空串（调用方据此判定「无可补签的会话」）。
  * @param {{id?:string, phone?:string}|null} [user]
  * @returns {string}
  */
@@ -46,10 +49,7 @@ export function sessionPhoneOf(user) {
   const source = user || currentUser()
   if (!source) return ''
   const direct = String(source.phone || '').replace(/[^0-9]/g, '')
-  if (PHONE_PATTERN.test(direct)) return direct
-  const id = String(source.id || '')
-  const fromId = id.indexOf('u-') === 0 ? id.slice(2).replace(/[^0-9]/g, '') : ''
-  return PHONE_PATTERN.test(fromId) ? fromId : ''
+  return PHONE_PATTERN.test(direct) ? direct : ''
 }
 
 /**

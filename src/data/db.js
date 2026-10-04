@@ -37,6 +37,8 @@ import {
   blobstoreInfo
 } from './blobstore.js'
 import { normalizeImagePayload, bytesToDataUrl, dataUrlToBytes, imageSize, sha256Hex, toUint8Array } from './assetmeta.js'
+/* **身份标识（uid）单点**：`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号。 */
+import { uidOf } from './uid.js'
 /* **CloudBase 讀取面（v1）**：雲端快照的**唯一讀入口**（同步、零網絡）。
    本文件在 `readCollection` 裏**只讀它** —— 是否接管、接管到哪一步（pending / ready / failed）
    全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。 */
@@ -165,7 +167,7 @@ export function reconcileAdminRoles() {
 
   if (!users.some((row) => row && row.phone === ADMIN_PHONE)) {
     users.push({
-      id: `u-${ADMIN_PHONE}`,
+      id: uidOf(ADMIN_PHONE),
       phone: ADMIN_PHONE,
       nickname: ADMIN_NICKNAME,
       role: 'admin',

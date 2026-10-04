@@ -99,7 +99,10 @@ process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
 const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE']
-const uidOfPhone = (phone) => `u-${String(phone).replace(/[^0-9]/g, '')}`
+/* **uid 派生单点**：客户端 `src/data/uid.js::uidOf`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。
+   自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */
+const uidUtil = await import(path.join(ROOT, 'src/data/uid.js'))
+const uidOfPhone = (phone) => uidUtil.uidOf(phone)
 const nowS = () => Math.floor(Date.now() / 1000)
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
 const isDenial = (value) =>

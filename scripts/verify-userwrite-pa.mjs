@@ -103,7 +103,10 @@ const FROZEN_REASONS = [
   'ALREADY_ENDORSED',
   'DUPLICATE_VALUE'
 ]
-const uidOfPhone = (phone) => `u-${String(phone).replace(/[^0-9]/g, '')}`
+/* **uid 派生单点**：客户端 `src/data/uid.js::uidOf`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。
+   自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */
+const uidUtil = await import(path.join(ROOT, 'src/data/uid.js'))
+const uidOfPhone = (phone) => uidUtil.uidOf(phone)
 
 /* ---------------------------------------------------------------------------
    3. 加载被测件（云函数本体 ＋ 令牌库 ＋ 集合面）
@@ -191,7 +194,9 @@ console.log(JSON.stringify({ section: 'A', title: '云函数 xiai-user-token 本
 const issuedA1 = await fn.main({ action: 'issue', phone: PHONE, code: SMSCode })
 check('A1', '签发成功', true, issuedA1.ok === true)
 check('A1b', 'TTL ＝ 900 s（与管理员令牌同值）', 900, issuedA1.ttlSeconds)
-check('A1c', 'uid 由服务端派生 ＝ u-<手机号>', uidOfPhone(PHONE), issuedA1.uid)
+check('A1c', 'uid 由服务端派生 ＝ 不透明 uid（u-＋sha256 前 16 位，不可反推手机号）', uidOfPhone(PHONE), issuedA1.uid)
+check('A1c2', 'uid 形态 `u-<16 位小写十六进制>`（**不含手机号**）', true, /^u-[0-9a-f]{16}$/.test(String(issuedA1.uid)))
+check('A1c3', 'uid **不含**手机号数字串（不可反推的机械判据）', false, String(issuedA1.uid).includes(PHONE))
 check('A1d', '签发回传不含令牌以外的身份原文', true, typeof issuedA1.token === 'string' && issuedA1.token.length > 0)
 console.log(
   JSON.stringify({
@@ -261,7 +266,8 @@ check('A4b', '落盘恰 1 行（集合 xiai_corrections）', 1, bucket.adds.leng
 check('A4c', '落盘集合名', 'xiai_corrections', bucket.adds[beforeA4].collection)
 check('A4d', '行内 userId ＝ 服务端派生 uid', uidOfPhone(PHONE), bucket.adds[beforeA4].doc.user_id)
 check('A4e', '行内 user_id ＝ userId（兼容别名）', uidOfPhone(PHONE), bucket.adds[beforeA4].doc.userId)
-check('A4f', '行内记录了服务端手机号', PHONE, bucket.adds[beforeA4].doc.user_phone)
+check('A4f', '**业务行不落手机号**：新行**无 `user_phone` 键**（人类口径 ②）', false, Object.prototype.hasOwnProperty.call(bucket.adds[beforeA4].doc, 'user_phone'))
+check('A4f2', '新行任一字段值都不含 11 位手机号（含 uid 允许）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(bucket.adds[beforeA4].doc)))
 check('A4g', '行内身份来源标记', 'SERVER_TOKEN', bucket.adds[beforeA4].doc.identity_source)
 check('A4h', '状态自 PENDING 起', 'PENDING', bucket.adds[beforeA4].doc.status)
 check('A4i', 'field_label 由服务端填', '作者', bucket.adds[beforeA4].doc.field_label)
@@ -525,6 +531,50 @@ check('D1', '令牌库两副本 **sha256 恒等**（机制与管理员令牌共�
   check('D2', '服务端字段表与前端真源**逐字相等**（不让副本静默漂移）', serviceMarkable, serverMarkable)
 }
 check('D3', '集合白名单全部 `^xiai_` 前缀', true, Object.values(ops.COLLECTIONS).every((name) => /^xiai_/.test(name)))
+/* **D8 段：uid 派生单点 ＋ 客户端/服务端同值 ＋ 不可反推手机号**（人类口径 ①⑥）。 */
+{
+  const adminConfig = require(path.join(ROOT, 'cloudfunctions/xiai-admin-token/lib/config.js'))
+  const samples = [PHONE, '13800000002', '13000000001', '19912345678']
+  check(
+    'D8',
+    '**客户端与服务端 uidOf 逐样本同值**（同一算法；单点）',
+    samples.map((phone) => uidUtil.uidOf(phone)),
+    samples.map((phone) => config.uidOf(phone))
+  )
+  check(
+    'D8b',
+    '管理员函数 uidOf 与用户函数逐字同值',
+    samples.map((phone) => config.uidOf(phone)),
+    samples.map((phone) => adminConfig.uidOf(phone))
+  )
+  check(
+    'D8c',
+    'uid 形态 `u-<16 位小写十六进制>`（两侧同形态）',
+    true,
+    samples.every((phone) => /^u-[0-9a-f]{16}$/.test(config.uidOf(phone)) && /^u-[0-9a-f]{16}$/.test(uidUtil.uidOf(phone)))
+  )
+  check(
+    'D8d',
+    'uid 前缀 / 摘要长度常量两侧同值',
+    { prefix: uidUtil.UID_PREFIX, hexLength: uidUtil.UID_HEX_LENGTH },
+    { prefix: config.UID_PREFIX, hexLength: config.UID_HEX_LENGTH }
+  )
+  check(
+    'D8e',
+    '**uid 不可反推手机号**：任一 uid 都不含其手机号数字串',
+    false,
+    samples.some((phone) => config.uidOf(phone).includes(phone))
+  )
+  /* **单点**：全仓不得再有第二处 `u-${<手机号>}` 形态的派生（旧形态已删干净）。 */
+  const repoFiles = [
+    ...walk(path.join(ROOT, 'src')).filter((file) => /\.(js|vue)$/.test(file)),
+    ...walk(path.join(ROOT, 'cloudfunctions')).filter((file) => /\.js$/.test(file))
+  ]
+  const secondDerivation = repoFiles
+    .filter((file) => /u-\$\{/.test(readFileSync(file, 'utf8')))
+    .map((file) => path.relative(ROOT, file))
+  check('D8f', '全仓 `u-${…}` 旧形态派生 **命中 0**（uid 派生恰一处）', [], secondDerivation)
+}
 {
   const authSrc = readFileSync(path.join(ROOT, 'src/services/auth.js'), 'utf8')
   const fnSrc = functionFiles.map((file) => readFileSync(file, 'utf8')).join('\n')

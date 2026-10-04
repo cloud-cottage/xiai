@@ -39,6 +39,8 @@ import {
   isKnownFaceStyle
 } from '../data/seed.js'
 import { awardCorrectionReward } from './points.js'
+/* **身份标识（uid）单点**：上屏短碼（`u-` ＋ sha256 前 16 位 ⇒ 前 6 位展示），**不得回退成手机号**。 */
+import { uidShortOf } from '../data/uid.js'
 import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND } from './seals.js'
 /* **写面 Phase A（用户写面切片）**：勘误提交经云函数 `xiai-user-token` 的 `action:'verify'`
    服务端验签后才落盘（落盘在**云端**，`xiai_corrections` 的 ACL 是 `PRIVATE` ⇒ 只能由云函数
@@ -913,11 +915,22 @@ export async function reviewCorrection(id, decision) {
    逐条独立成败、幂等与发奖语义**逐字不变**；有一条成功即 `ok:true` 并如实回报失败条数。
    ============================================================================ */
 
-/** 提交人展示名（`暱稱（手機號）`；查无 ⇒「未知賬號」）。 */
-function submitterLabelOf(userId) {
-  if (!userId) return '未知賬號'
-  const user = listUserRows().find((item) => item.id === userId)
-  return user ? `${user.nickname}（${user.phone}）` : '未知賬號'
+/**
+ * 提交人展示名（`暱稱（uid 短碼）`；查无账号 ⇒ 仍给 uid 短碼，完全认不出 ⇒「未知賬號」）。
+ *
+ * **人类口径 ④**：上屏**不得显示他人手机号** —— 一律改用**不透明 uid 的短碼**
+ * （`src/data/uid.js::uidShortOf`，前 6 位十六进制）。自己看自己的手机号只允许从**本地会话**取
+ * （`AppHeader` / `LoginView`），**不得从数据行取**。
+ * @param {string} userId 提交人 uid（`u-<16 hex>`），或历史行的其它形态
+ * @returns {string} 展示名
+ */
+export function submitterLabelOf(userId) {
+  const id = String(userId === undefined || userId === null ? '' : userId)
+  if (!id) return '未知賬號'
+  const user = listUserRows().find((item) => item.id === id)
+  const short = uidShortOf(id)
+  if (user) return short ? `${user.nickname}（${short}）` : String(user.nickname || '未知賬號')
+  return short ? `未知賬號（${short}）` : '未知賬號'
 }
 
 /** 印面归属键：优先 `faceId`；旧数据只有印章编号时回落 `sealId` / `stamp_id`。 */

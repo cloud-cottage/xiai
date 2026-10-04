@@ -14,7 +14,7 @@
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { auth, corrections, points, seals } from '../services/index.js'
+import { corrections, points, seals } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 import { statusLabel, formatDateTime } from '../utils/format.js'
 
@@ -152,8 +152,9 @@ function statusClass(status) {
 }
 
 function submitterOf(row) {
-  const user = auth.findUserById(row.user_id || row.userId)
-  return user ? `${user.nickname}（${user.phone}）` : '未知賬號'
+  /* **上屏不显示他人手机号**（人类口径 ④）：一律用服务层单点 `submitterLabelOf` ⇒
+     `暱稱（uid 短碼）`；**不得**再拼 `user.phone`。 */
+  return corrections.submitterLabelOf(row.user_id || row.userId)
 }
 
 /** 跑一次审核（服务层 `message` 原文展示）；结果原样回传供调用方判断。 */

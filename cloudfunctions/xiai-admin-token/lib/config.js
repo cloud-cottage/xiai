@@ -44,8 +44,11 @@ const DEFAULT_VERSION = '1'
 /** 手机号形态（与 `src/services/auth.js::isPhoneLike` / 用户函数 `lib/config.js` **逐字同正则**）。 */
 const PHONE_PATTERN = /^1[3-9]\d{9}$/
 
-/** uid 前缀（与前端 `auth.js` 的 `u-${phone}` / 用户函数 `uidOf` **同一约定**）。 */
+/** uid 前缀（与前端 `src/data/uid.js` / 用户函数 `uidOf` **同一约定**）。 */
 const UID_PREFIX = 'u-'
+
+/** 摘要十六进制取前多少位（与前端 `src/data/uid.js::UID_HEX_LENGTH` 逐字同值）。 */
+const UID_HEX_LENGTH = 16
 
 /**
  * 环境 Id 的三个候选环境变量（**运行期注入**；与用户函数 `lib/config.js` / liwu 既有函数同一读法；
@@ -98,13 +101,16 @@ function isPhoneLike(value) {
 }
 
 /**
- * **服务端唯一的 reviewer_id 派生**：`u-<11 位手机号>`。
+ * **服务端唯一的 reviewer_id 派生**：`u-` ＋ `sha256(手机号).hex` 前 16 位
+ * （**单向、不可反推手机号**；与用户函数 `uidOf` / 前端 `src/data/uid.js::uidOf`
+ * **同一算法 ⇒ 同值**）。
  * 明文：审核人身份**不以客户端自称为准**，一律由已验签令牌声明里的手机号派生
- * （与用户写面 `uid = u-<手机号>` **同一约定**）⇒ 前端无法自称审核人。
+ * ⇒ 前端无法自称审核人；**管理员手机号只活在服务端环境变量**，绝不进任何数据行。
  */
 function uidOf(value) {
   const digits = normalizePhone(value)
-  return isPhoneLike(digits) ? `${UID_PREFIX}${digits}` : ''
+  if (!isPhoneLike(digits)) return ''
+  return `${UID_PREFIX}${crypto.createHash('sha256').update(digits, 'utf8').digest('hex').slice(0, UID_HEX_LENGTH)}`
 }
 
 /** 运行期环境 Id（缺位 ⇒ 空串 ⇒ 由 SDK 走「当前环境」语义；**不写死**）。 */
@@ -162,6 +168,7 @@ module.exports = {
   DEFAULT_VERSION,
   PHONE_PATTERN,
   UID_PREFIX,
+  UID_HEX_LENGTH,
   deny,
   normalizePhone,
   isPhoneLike,

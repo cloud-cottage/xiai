@@ -8,6 +8,7 @@
  * 硬口径（逐条）：
  *   ① **创建者身份以服务端为准** ✗ 不采信前端自称：`identity` 由 `index.js` 从**令牌声明**派生
  *      （`uid = uidOf(sub)`、`phone = sub`），载荷里的任何身份类键一律 ⇒ `INVALID_FIELD` ＋ 零写入；
+ *      **落盘行只落不透明 uid（`u-`＋sha256 前 16 位），不落手机号**（人类口径 ①②）。
  *   ② **判定全部在写之前**（缺字段 / 值域 / 字段面任一不过 ⇒ 返回拒绝，**不触库写**）；
  *   ③ **落库用管理端凭据**（`@cloudbase/node-sdk` 在函数运行环境内取凭据，**不入仓、不下发前端**）；
  *      `xiai_corrections` / `xiai_endorsements` 的 ACL 是 `PRIVATE` ⇒ **只能这样写**，前端直连 SDK 写必被拒；
@@ -32,7 +33,7 @@ const { REASONS, deny, normalizePhone } = require('./config.js')
  * 集合白名单（封闭；**一律 `xiai_` 前缀**）。
  * 映射真源 ＝ `src/data/storage.js` 的 `STORAGE_KEYS`（＋ `xiai_` 前缀）。
  *   · `corrections`        ＝ 勘误私有行（既有）；
- *   · `endorsements`       ＝ **采信私有行**（本单新增；含 user_id / user_phone ⇒ PRIVATE）；
+ *   · `endorsements`       ＝ **采信私有行**（本单新增；含 user_id［不透明 uid］⇒ PRIVATE；**不落 user_phone**）；
  *   · `endorsementCounts`  ＝ **公开计数行**（本单新增；脱敏：**零身份字段**、匿名可读）；
  *   · `correctionsPublic`  ＝ **公开只读脱敏投影集合**（V3 新增；＝ 已采纳勘误的跨浏览器投影，
  *     `_id='cp-<勘误单号>'`、键面封闭、**零身份字段**）。
@@ -491,9 +492,10 @@ const OPS = Object.freeze({
       faceId,
       sealId: sealId || stampId, // 规范字段：所属印章
       stamp_id: sealId || stampId, // 兼容别名：＝sealId，勿删
-      userId: identity.uid, // 规范字段：提交人（**服务端派生**）
+      userId: identity.uid, // 规范字段：提交人（**服务端派生、不可反推手机号**）
       user_id: identity.uid, // 兼容别名：＝userId（**服务端派生**）
-      user_phone: normalizePhone(identity.phone), // **服务端记录**的提交人手机号
+      /* **业务行不再落手机号**（人类口径 ②）：新行无 `user_phone` 键；
+         旧行保留不改、读路径容忍缺键（**不得据旧行仍含 `user_phone` 判负**）。 */
       identity_source: 'SERVER_TOKEN', // 取证用：本行的提交人身份来自服务端令牌，不由前端自称
       field,
       field_label: MARKABLE_FIELDS[field],
@@ -521,7 +523,8 @@ const OPS = Object.freeze({
    *   ⑤ 成功 ⇒ 两处落盘：采信行（私有）＋ 公开计数行（**重算 count**、幂等 upsert、零身份字段）。
    *
    * 采信行形状（服务端落盘、私有集合 `xiai_endorsements`）：
-   *   `{ _id, faceId, sealId, stamp_id, field, value, user_id, user_phone, identity_source:'SERVER_TOKEN', created_at }`
+   *   `{ _id, faceId, sealId, stamp_id, field, value, user_id, identity_source:'SERVER_TOKEN', created_at }`
+   *   （**不落手机号**：`user_id` 是不透明 uid；人类口径 ②）
    * 公开计数行形状（`xiai_endorsement_counts`、**零身份字段**）：
    *   `{ _id:`e-<faceId>-<field>-<value 的 sha256 前 16 位>`, faceId, sealId, stamp_id, field, value, count, updated_at, schema }`
    * @param {object} payload 载荷（允许键见 `ENDORSE_ALLOWED_KEYS`）
@@ -594,7 +597,7 @@ const OPS = Object.freeze({
       field,
       value,
       user_id: identity.uid,
-      user_phone: normalizePhone(identity.phone),
+      /* **业务行不再落手机号**（人类口径 ②）：采信私有行只落不透明 uid。 */
       identity_source: ENDORSEMENT_IDENTITY_SOURCE,
       created_at: at
     }
@@ -635,7 +638,7 @@ const OPS = Object.freeze({
    管理员写面 op 注册面（V3 新增；**登录令牌 ＋ 手机号白名单**）
    ---------------------------------------------------------------------------
    调用形状：`ADMIN_OPS[op](payload, identity, context)`，其中
-     · `identity` ＝ **服务端从令牌声明派生**（`{uid:'u-<手机号>', phone:'<11 位>'}`）；
+     · `identity` ＝ **服务端从令牌声明派生**（`{uid:'u-'+sha256(手机号)前16位, phone:'<11 位>'}`）；
      · `context`  ＝ `{adminPhone:'<白名单手机号>', nowSeconds:<服务端秒>}`。
    `adminPhone` 来自 `readConfig().adminPhone`（**缺 / 空 ⇒ 白名单门结构化拒绝**）；
    `nowSeconds` 是**服务端唯一时源**（`reviewed_at` 由它派生）。

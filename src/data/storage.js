@@ -152,8 +152,9 @@ export const STORAGE_KEYS = {
   /**
    * **用途：采信（採信）私有行的本機鏡像**（本单新增；写方 ＝ `services/endorsements.js`，
    * 读方 ＝ 同服务的幂等判定 `已採信`）。真实键名 `xiai:v1:endorsements`。
-   * 行 ＝ **本人**的采信行（`{_id, faceId, sealId, stamp_id, field, value, user_id, user_phone,
-   * identity_source, created_at}`）——它**不是**公开面，仅供本机判定「我是否已对该值采信」。
+   * 行 ＝ **本人**的采信行（`{_id, faceId, sealId, stamp_id, field, value, user_id,
+   * identity_source, created_at}` —— `user_id` 是不透明 uid，**不落手机号**）——
+   * 它**不是**公开面，仅供本机判定「我是否已对该值采信」。
    * 云端权威行落在私有集合 `xiai_endorsements`（ACL PRIVATE ⇒ 只能由云函数写）；本键是镜像 / 缓存。
    * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
    */

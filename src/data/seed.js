@@ -13,6 +13,9 @@
  * 种子里已含多印面样本（XAI-0001：2 个印面 + 1 个边款）。
  */
 
+/* **身份标识（uid）单点**：`src/data/uid.js`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。 */
+import { uidOf } from './uid.js'
+
 /**
  * 玺爱新增字段：斐萃 seals 表中无对应列，属平台自建口径。
  *
@@ -94,13 +97,15 @@ export const FACE_KIND = {
  * 种子用户。
  *
  * 管理员账号手机号取自 `ADMIN_PHONE`（唯一真源），账号 id 与登录服务自动建号的
- * 命名口径一致（`u-<手机号>`）。**原管理员号 `13800000001` 已不再是管理员**：
+ * 命名口径一致（**不透明 uid**：`src/data/uid.js::uidOf(手机号)` ⇒ `u-` ＋ sha256 前 16 位，
+ * **不可反推手机号**）。**原管理员号 `13800000001` 已不再是管理员**：
  * 它既不在本种子里，也不再是 `admin`；老库中若残留该账号，由
- * `reconcileAdminRoles()` 就地降为普通用户（不删行、不清库）。
+ * `reconcileAdminRoles()` 就地降为普通用户（不删行、不清库）。**老库既有 `u-<手机号>` 形态的
+ * 账号行保留不改、不迁移**（登录按手机号匹配，与 id 形态无关）。
  */
 export const SEED_USERS = [
   {
-    id: `u-${ADMIN_PHONE}`,
+    id: uidOf(ADMIN_PHONE),
     phone: ADMIN_PHONE,
     nickname: ADMIN_NICKNAME,
     role: 'admin',

@@ -265,9 +265,9 @@ export async function endorseCorrection({ faceId = '', sealId = '', stampId = ''
       sealId: targetSeal,
       stamp_id: targetSeal,
       field,
-      value: text,
+      value,
       user_id: user.id,
-      user_phone: textOf(user.phone),
+      /* **业务行不再落手机号**（人类口径 ②）：dev 形态亦只落不透明 uid。 */
       identity_source: 'LOCAL_DEV',
       created_at: nowIso()
     }

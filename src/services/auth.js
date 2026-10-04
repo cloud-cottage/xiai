@@ -11,6 +11,9 @@
 import { listUserRows, saveUserRows } from '../data/db.js'
 import { setUser, restoreSession } from '../data/session.js'
 import { ADMIN_PHONE, ADMIN_NICKNAME } from '../data/seed.js'
+/* **身份标识（uid）单点**：`u-` ＋ sha256(手机号) 前 16 位（不可反推手机号 ⇒ 可公开）。
+   与云函数 `xiai-user-token` / `xiai-admin-token` 的 `uidOf` **同一算法 ⇒ 同值**。 */
+import { uidOf } from '../data/uid.js'
 import { grantInitialGold, settleInviteReward } from './points.js'
 /* **写面 Phase A（用户写面）**：登录改为「**先服务端验证并拿到用户令牌，再写 session**」——
    云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。
@@ -95,7 +98,7 @@ export async function login(phone, code, options = {}) {
        正常路径下数据层引导已按同一常量建好管理员账号，此处仅作兜底。 */
     const isAdminPhone = normalized === ADMIN_PHONE
     user = {
-      id: `u-${normalized}`,
+      id: uidOf(normalized),
       phone: normalized,
       nickname: isAdminPhone ? ADMIN_NICKNAME : `印友${normalized.slice(-4)}`,
       role: isAdminPhone ? 'admin' : 'user',
