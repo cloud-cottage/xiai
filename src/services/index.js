@@ -8,6 +8,9 @@
 import * as auth from './auth.js'
 import * as seals from './seals.js'
 import * as corrections from './corrections.js'
+/* **采信（採信）门面（本单新增）**：对他人同 `(faceId, field, value)` 的勘误提交点【採信】
+   （只作佐证 / 可信度计数；生效仍由管理员采纳决定）。页面与组件仍**只**经本门面访问数据。 */
+import * as endorsements from './endorsements.js'
 import * as photos from './photos.js'
 import * as points from './points.js'
 import * as admin from './admin.js'
@@ -21,7 +24,7 @@ import * as drive from './drive.js'
    （逐塊，幾何只消費響應）。页面与组件仍**只**经本门面访问 —— 不得直接调 `fetch('/api/image/*')`。 */
 import * as imageFaces from './imageFaces.js'
 
-export const services = { auth, seals, corrections, photos, points, admin, drive, imageFaces, sealExport }
+export const services = { auth, seals, corrections, endorsements, photos, points, admin, drive, imageFaces, sealExport }
 
-export { auth, seals, corrections, photos, points, admin, drive, imageFaces, sealExport }
+export { auth, seals, corrections, endorsements, photos, points, admin, drive, imageFaces, sealExport }
 export default services

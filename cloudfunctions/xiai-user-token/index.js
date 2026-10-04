@@ -188,7 +188,7 @@ async function handleVerify(event, config) {
     audit({ action: 'verify', outcome: REASONS.INVALID_FIELD, op, serverNow: now })
     return deny(REASONS.INVALID_FIELD, `未知的寫入操作（op）：${op || '（空）'}；本次零寫入。`)
   }
-  const opResult = validator(event.payload, identity)
+  const opResult = await validator(event.payload, identity)
   if (!opResult.ok) {
     audit({ action: 'verify', outcome: opResult.reason, op, uid: identity.uid, serverNow: now })
     return opResult
@@ -239,6 +239,11 @@ async function handleVerify(event, config) {
     op,
     /** **服务端权威行**（前端拿到的就是它 ⇒ 本地只做镜像，不自建行）。 */
     row: opResult.row,
+    /**
+     * **公开脱敏投影行**（本单 `endorseCorrection` 的公开计数行）；无该面的 op ⇒ `undefined`
+     *   ⇒ **零身份字段**；前端只做镜像、不在前端重建（与管理员侧 `reviewCorrection` 同形）。
+     */
+    projection: opResult.projection,
     docId,
     authority: 'SERVER',
     identity: {

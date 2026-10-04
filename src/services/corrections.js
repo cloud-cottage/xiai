@@ -262,6 +262,49 @@ function mergedRowsOfFace(face) {
 }
 
 /**
+ * 某印面「**已被提交过的值**」分组（供详情页「可標記屬性」区的**采信（採信）列表**）。
+ *
+ * 分组键 ＝ `(field, value)`（**严格按值精确字符串比较、不做归一**：异体 / 标点差异都算不同的
+ * 一段文字）。同一段文字由提交侧防重（`DUPLICATE_VALUE`）保证只对应一条提交；本函数只读，
+ * 数据源 ＝ `mergedRowsOfFace`（本机勘误行 ∪ 公开投影行，按行身份去重）。
+ *
+ * 组的 `status`：组内**任一行**已采纳 ⇒ `ACCEPTED`，否则 `PENDING`
+ * （已采纳的条目不接受采信 —— 见 `services/endorsements.js::endorsementDecision`）。
+ * @param {object|null} face 印面（canonical）
+ * @returns {Array<{field:string, label:string, value:string, status:string, submitterIds:string[]}>}
+ */
+export function submissionGroupsOfFace(face) {
+  const groups = new Map()
+  mergedRowsOfFace(face).forEach((row) => {
+    const field = String((row && row.field) || '')
+    const value = String((row && row.value) === null || (row && row.value) === undefined ? '' : row.value)
+    if (!field || !value) return
+    const key = `${field}\u0001${value}`
+    if (!groups.has(key)) {
+      const meta = markableMeta(field)
+      groups.set(key, {
+        field,
+        value,
+        label: meta ? meta.label : field,
+        statuses: new Set(),
+        submitterIds: new Set()
+      })
+    }
+    const group = groups.get(key)
+    group.statuses.add(normalizeCorrectionStatus(row.status))
+    const submitter = String(row.user_id || row.userId || '')
+    if (submitter) group.submitterIds.add(submitter)
+  })
+  return [...groups.values()].map((group) => ({
+    field: group.field,
+    value: group.value,
+    label: group.label,
+    status: group.statuses.has(CORRECTION_STATUS.ACCEPTED) ? CORRECTION_STATUS.ACCEPTED : CORRECTION_STATUS.PENDING,
+    submitterIds: [...group.submitterIds]
+  }))
+}
+
+/**
  * 提交勘误：一条勘误对应一个印面上的一个属性字段，状态自 PENDING 起。
  *
  * 拒绝形态一律**结构化**（`{ok:false, reason?, message}`），**不抛未捕获异常**：
@@ -323,6 +366,22 @@ export async function submitCorrection({
      看 `FIELD_VALUE_DOMAINS` 里登记了哪些封闭字段；未登记字段（作者 / 印文…）不受影响。 */
   const denied = domainValueDenial(field, meta.label, text)
   if (denied) return denied
+
+  /* **提交侧防重（本单）**：同 `(faceId, field, value)` 已有提交行（本机前置门）⇒ `DUPLICATE_VALUE`
+     ＋ 零写入。严格判据：值**逐字相同**即重复（含异体 / 标点差异 ⇒ 按**精确字符串比较**，不做归一）；
+     同一段文字只允许一人提交 —— 第二人应改用【採信】。云端形态下另有服务端权威门（以服务端为准）。 */
+  const duplicate = rowsOfFace(face).some(
+    (row) =>
+      String((row && row.field) || '') === String(field) &&
+      String((row && row.value) === null || (row && row.value) === undefined ? '' : row.value).trim() === text
+  )
+  if (duplicate) {
+    return {
+      ok: false,
+      reason: 'DUPLICATE_VALUE',
+      message: `該印面「${meta.label}」已有完全相同的提交值「${text}」⇒ 同一段文字只允許一人提交；若你贊同該值，請改用【採信】為它佐證。`
+    }
+  }
 
   /* **`batchId` 绝不进提交载荷**（R-B2′，生产事故级）：云函数 `ops.js` 的 `ALLOWED_KEYS`
      是**封闭键面**，载荷含未知键 ⇒ `INVALID_FIELD` ＋ 零写入 ⇒ 传 `batchId` 会打挂**线上

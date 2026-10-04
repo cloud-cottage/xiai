@@ -15,13 +15,23 @@
 
 const crypto = require('crypto')
 
-/** 对外的 reason 取值面 ＝ **既有冻结表的子集**（本单**不新增**任何 reason 字面值）。 */
+/**
+ * 对外的 reason 取值面。
+ *
+ * 前 5 个＝**既有冻结表**（Phase A 沿用）。后 2 个＝**本单（採信）新增的待规范单确认字面值**：
+ *   · `ALREADY_ENDORSED` —— 幂等：同 `(faceId, field, value, user_id)` 已有采信行 ⇒ 零写入；
+ *   · `DUPLICATE_VALUE`  —— 提交侧防重：同 `(faceId, field, value)` 已有提交行 ⇒ 零写入
+ *     （同一段文字只允许一人提交，第二人应改用【採信】）。
+ * 二者**逐字登记在此**，便于规范侧确认后改名（改名只需改这两处 ＋ `ops.js` 的引用常量）。
+ */
 const REASONS = Object.freeze({
   FORBIDDEN: 'FORBIDDEN',
   INVALID_VALUE: 'INVALID_VALUE',
   INVALID_FIELD: 'INVALID_FIELD',
   MISSING_REQUIRED: 'MISSING_REQUIRED',
-  STORAGE_UNAVAILABLE: 'STORAGE_UNAVAILABLE'
+  STORAGE_UNAVAILABLE: 'STORAGE_UNAVAILABLE',
+  ALREADY_ENDORSED: 'ALREADY_ENDORSED',
+  DUPLICATE_VALUE: 'DUPLICATE_VALUE'
 })
 
 /** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。 */

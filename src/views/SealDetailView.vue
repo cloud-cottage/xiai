@@ -9,9 +9,9 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
-import { seals, corrections, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
+import { seals, corrections, endorsements, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS } from '../data/seed.js'
-import { isLoggedIn } from '../data/session.js'
+import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
 import { saveLocalBinary } from '../utils/file.js'
 import { IMAGE_LIMITS, MIN_CROP_SIDE, describeBytes, exportSquareImage, loadImageFile } from '../utils/image.js'
@@ -339,6 +339,53 @@ function faceLabel(face) {
 /** 该印面的可标记属性（勘误对象）当前对外展示值，按印面自身汇总。 */
 function markableOf(face) {
   return corrections.resolveMarkable(face)
+}
+
+/* ============================================================================
+   **採信**（本单新增）：详情页「可標記屬性」区里，某字段已有**他人**提交
+   （`PENDING` / `ACCEPTED`）时就地列出「值 ＋ N 人採信 ＋ 【採信】按钮」。
+   ----------------------------------------------------------------------------
+   口径（人类冻结，逐条）：
+     · 【採信】**只作佐证 / 可信度计数**（展示为「N 人採信」）；**生效仍由管理员采纳决定**
+       —— 因此**已 `ACCEPTED` 的条目不再接受采信**（按钮隐藏，登记 `data-endorse-accepted`）。
+     · **未登錄** ⇒ 按钮照渲染，点击走**登录引导**（`goLogin`）。
+     · **自己的提交** ⇒ 不出按钮（登记 `data-endorse-self`）。
+     · 计数经**云端公开只读集合** `xiai_endorsement_counts`（脱敏、零身份字段）全站一致。
+   判定是服务层的**纯函数** `endorsements.endorsementDecision`（视图不另写第二套）。
+   ============================================================================ */
+const viewer = computed(() => currentUser())
+const endorseFeedback = reactive({})
+
+function endorsementEntries(face) {
+  return endorsements.endorsementEntriesOf(face, viewer.value)
+}
+
+function endorseFeedbackKey(face, entry) {
+  return `${face.id}\u0001${entry.field}\u0001${entry.value}`
+}
+
+function endorseFeedbackOf(face, entry) {
+  return endorseFeedback[endorseFeedbackKey(face, entry)] || ''
+}
+
+async function onEndorse(face, entry) {
+  const key = endorseFeedbackKey(face, entry)
+  endorseFeedback[key] = ''
+  /* 未登錄（`actionable:false`）⇒ 按钮已渲染，点击走登录引导（不静默）。 */
+  if (!entry.actionable) {
+    goLogin()
+    return
+  }
+  const sealId = seal.value ? seal.value.stamp_id : face.sealId || ''
+  const result = await endorsements.endorseCorrection({
+    faceId: face.id,
+    sealId,
+    field: entry.field,
+    value: entry.value
+  })
+  endorseFeedback[key] = result.message
+  /* 成功 ⇒ +1 让「N 人採信」与列表立即重算（服务层读的是已落盘数据）。 */
+  if (result.ok) dataVersion.value += 1
 }
 
 /* ============================================================================
@@ -1344,6 +1391,49 @@ onBeforeUnmount(() => {
             </tr>
           </tbody>
         </table>
+
+        <!-- **採信（本单新增）**：「可標記屬性」区 —— 某字段已有**他人**提交（PENDING / ACCEPTED）
+             时就地列出「值 ＋ N 人採信 ＋ 【採信】按钮」。
+             · 按钮一律用 `data-action`（**不得**用 `data-admin-action`，否则管理员钩子取值集合被撑破）；
+             · 未登錄 ⇒ 按钮照渲染，点击走登录引导（`actionable:false`）；
+             · 自己的提交 / 已 `ACCEPTED` ⇒ 不出按钮（分别登记 `data-endorse-self` / `data-endorse-accepted`）。 -->
+        <div
+          v-if="endorsementEntries(face).length"
+          class="endorse"
+          data-endorse-block
+          :data-endorse-face="face.id"
+        >
+          <h4 class="endorse__title">他人提交的勘誤 · 可採信</h4>
+          <ul class="endorse__list">
+            <li
+              v-for="entry in endorsementEntries(face)"
+              :key="`${face.id}-${entry.field}-${entry.value}`"
+              class="endorse__item"
+              data-endorse-entry
+              :data-endorse-field="entry.field"
+              :data-endorse-status="entry.status"
+            >
+              <span class="endorse__field">{{ entry.label }}</span>
+              <span class="endorse__value" data-endorse-value>{{ entry.value }}</span>
+              <span class="endorse__count" data-endorse-count>{{ entry.count }} 人採信</span>
+              <button
+                v-if="entry.button"
+                class="btn btn--ghost endorse__btn"
+                type="button"
+                data-action="endorse"
+                @click="onEndorse(face, entry)"
+              >
+                採信
+              </button>
+              <span v-else-if="entry.reason === 'SELF'" class="detail__hint" data-endorse-self>你自己的提交</span>
+              <span v-else-if="entry.reason === 'ACCEPTED'" class="detail__hint" data-endorse-accepted>已採納</span>
+              <span v-if="endorseFeedbackOf(face, entry)" class="detail__hint endorse__feedback" data-endorse-feedback>
+                {{ endorseFeedbackOf(face, entry) }}
+              </span>
+            </li>
+          </ul>
+        </div>
+
         <p class="detail__hint">勘誤不會直接覆蓋原始數據，平臺彙總多條提交後擇可信者對外展示。</p>
       </div>
     </section>
@@ -1931,6 +2021,55 @@ onBeforeUnmount(() => {
 .detail__table th {
   color: var(--c-text-muted);
   font-weight: 500;
+}
+
+/* **採信（本单新增）**：他人提交的勘誤列表（可採信）。 */
+.endorse {
+  margin-top: var(--s-3);
+}
+
+.endorse__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--c-text-muted);
+  font-weight: 500;
+}
+
+.endorse__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.endorse__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-sm, 4px);
+  font-size: var(--t-sm);
+}
+
+.endorse__field {
+  color: var(--c-text-muted);
+}
+
+.endorse__value {
+  color: var(--c-text);
+}
+
+.endorse__count {
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
+}
+
+.endorse__feedback {
+  flex-basis: 100%;
 }
 
 .detail__value {

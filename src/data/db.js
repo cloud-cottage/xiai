@@ -1630,6 +1630,47 @@ export function savePublicCorrectionRows(rows) {
   return writeCollection(STORAGE_KEYS.correctionsPublic, rows)
 }
 
+/**
+ * 读**采信（採信）私有行的本机镜像**（**只读本机 `endorsements` 键**）。
+ * 用途：本机判定「我是否已对该 `(faceId, field, value)` 采信」（幂等 / 按钮态）；
+ * 行是**本人**的采信行（含 `user_id`），**不是**公开面。云端权威行落在私有集合
+ * `xiai_endorsements`（只能由云函数写）。
+ */
+export function listEndorsementRows() {
+  const rows = readKey(STORAGE_KEYS.endorsements)
+  return Array.isArray(rows) ? rows : []
+}
+
+/** 写**采信私有行的本机镜像**（整键覆盖写；调用方负责先合并成幂等结果）。 */
+export function saveEndorsementRows(rows) {
+  return writeCollection(STORAGE_KEYS.endorsements, rows)
+}
+
+/**
+ * 读**公开计数行**（云端公开只读集合 `xiai_endorsement_counts` 的读面）。
+ *
+ * 读序与既有集合一致（`readCollection`）：云端 `ready` ⇒ 云端快照 ∪ 本机同 `_id` 覆盖；
+ * 其余 ⇒ 本机 `endorsement-counts` 键。行**零身份字段**（`count` 归一为正数 / 0）。
+ * 本函数**只读**（不灌种子、不写存储）。
+ */
+export function listEndorsementCountRows() {
+  return readCollection(STORAGE_KEYS.endorsementCounts, [])
+}
+
+/**
+ * 读**公开计数行的本机镜像**（**只读本机 `endorsement-counts` 键**，不过云端快照）。
+ * 用途：采信写面同步镜像时做**幂等 upsert**（按 `_id` / `(faceId,field,value)` 覆盖）。
+ */
+export function listEndorsementCountMirrorRows() {
+  const rows = readKey(STORAGE_KEYS.endorsementCounts)
+  return Array.isArray(rows) ? rows : []
+}
+
+/** 写**公开计数行的本机镜像**（整键覆盖写；调用方负责先合并成幂等结果）。 */
+export function saveEndorsementCountRows(rows) {
+  return writeCollection(STORAGE_KEYS.endorsementCounts, rows)
+}
+
 export function listPhotoRows() {
   return readCollection(STORAGE_KEYS.photos, [])
 }

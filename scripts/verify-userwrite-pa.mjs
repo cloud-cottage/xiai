@@ -92,7 +92,16 @@ process.env.XIAI_USER_TOKEN_SECRET = SECRET
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
-const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_FIELD', 'INVALID_VALUE', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE']
+const FROZEN_REASONS = [
+  'FORBIDDEN',
+  'INVALID_FIELD',
+  'INVALID_VALUE',
+  'MISSING_REQUIRED',
+  'STORAGE_UNAVAILABLE',
+  /* 本单（採信）新增的待规范单确认字面值 ⇒ 冻结表取并集。 */
+  'ALREADY_ENDORSED',
+  'DUPLICATE_VALUE'
+]
 const uidOfPhone = (phone) => `u-${String(phone).replace(/[^0-9]/g, '')}`
 
 /* ---------------------------------------------------------------------------
@@ -108,19 +117,46 @@ const ops = require(opsPath)
 const userLib = require(tokenLibPath)
 const config = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/config.js'))
 
-/** 假 DB（记录 add 调用；可注入失败）——**证明零写入**的判据就是它的计数。 */
-const bucket = { adds: [], failNext: false }
+/** 假 DB（记录 add / set 调用；可注入失败）——**证明零写入**的判据就是它的计数。
+ *  **本单（採信）追加**：支持 `where(match).get()`（提交侧防重 / 幂等 / 自采 都要先读）
+ *  与 `doc(id).set()`（采信的两处确定性 upsert）；`add` 语义与计数口径**逐字沿用**。 */
+const bucket = { adds: [], failNext: false, maps: new Map() }
+function bucketMapOf(name) {
+  if (!bucket.maps.has(name)) bucket.maps.set(name, new Map())
+  return bucket.maps.get(name)
+}
 function fakeDbProvider() {
   return {
     collection(name) {
+      const map = bucketMapOf(name)
       return {
+        where(match) {
+          const hit = () =>
+            [...map.values()].filter((row) => Object.keys(match).every((key) => String(row[key]) === String(match[key])))
+          return {
+            async get() {
+              return { data: hit().map((row) => Object.assign({}, row)) }
+            }
+          }
+        },
+        doc(id) {
+          return {
+            async set(doc) {
+              map.set(id, Object.assign({ _id: id }, doc))
+              bucket.adds.push({ collection: name, doc, id })
+              return { updated: 1 }
+            }
+          }
+        },
         async add(doc) {
           if (bucket.failNext) {
             bucket.failNext = false
             throw new Error('injected-storage-failure')
           }
           bucket.adds.push({ collection: name, doc })
-          return { id: `doc-${bucket.adds.length}` }
+          const id = `doc-${bucket.adds.length}`
+          map.set(id, Object.assign({ _id: id }, doc))
+          return { id }
         }
       }
     }
@@ -272,10 +308,17 @@ check('A6e', '未知 action ⇒ FORBIDDEN', 'FORBIDDEN', unknownAction.reason)
 check('A6f', '以上拒绝形状全部恰 3 键', true, [unknownOp, missingFace, badField, longValue, unknownAction].every(isDenial))
 check('A6g', '零写入（A5−A6 全程 add 计数仍为 1）', 1, bucket.adds.length)
 
-/* A7：存储不可用 ⇒ STORAGE_UNAVAILABLE（**不伪装 FORBIDDEN**），且未产生行 */
+/* A7：存储不可用 ⇒ STORAGE_UNAVAILABLE（**不伪装 FORBIDDEN**），且未产生行。
+   **本单追加**：载荷换成**未提交过的值** —— A4 已写入同 `(faceId, field, value)` ⇒ 提交侧防重
+   （`DUPLICATE_VALUE`）会在落盘之前拦下，就不是本条要测的「存储失败」了。 */
 const beforeA7 = bucket.adds.length
 bucket.failNext = true
-const storageDown = await fn.main({ action: 'verify', token: okWrite.renewedToken, op: 'submitCorrection', payload: VALID_PAYLOAD })
+const storageDown = await fn.main({
+  action: 'verify',
+  token: okWrite.renewedToken,
+  op: 'submitCorrection',
+  payload: Object.assign({}, VALID_PAYLOAD, { value: '測試作者 A7 未提交過' })
+})
 check('A7', '落盘抛错 ⇒ STORAGE_UNAVAILABLE', 'STORAGE_UNAVAILABLE', storageDown.reason)
 check('A7b', '存储失败 ≠ FORBIDDEN', true, storageDown.reason !== 'FORBIDDEN')
 check('A7c', '存储失败 ⇒ 未产生行', beforeA7, bucket.adds.length)

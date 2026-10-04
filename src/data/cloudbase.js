@@ -43,7 +43,11 @@ export const CLOUD_COLLECTIONS = Object.freeze({
   seals: 'xiai_seals',
   faces: 'xiai_faces',
   images: 'xiai_images',
-  correctionsPublic: 'xiai_corrections_public'
+  correctionsPublic: 'xiai_corrections_public',
+  /* **公开计数集合（本单新增）**：采信（採信）的公开只读投影 —— 一行 ＝ 一个
+     `(faceId, field, value)` 键的采信人数；**脱敏：零身份字段**（`user_id` / `user_phone` 一律不下发）。
+     它是「N 人採信」全站一致展示的唯一跨浏览器来源；本机镜像键见 `storage.js` 的 `endorsementCounts`。 */
+  endorsementCounts: 'xiai_endorsement_counts'
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */
@@ -253,7 +257,7 @@ const statusRef = shallowRef({
   reason: 'NOT_CONFIGURED',
   message: '未配置 CloudBase 数据源，使用本地实现',
   envId: '',
-  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
+  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
   /* **空集诊断（§3c）**：`emptyVerified` ＝ 诚实空态（云端 0 行 + 本地也空 ⇒ 不回落）；
      `emptySuspect` ＝ 可疑空集（云端 0 行 + 本地有数据 ⇒ 已走失败状态机回落本地）。 */
   emptyVerified: [],
@@ -418,7 +422,7 @@ export const CLOUD_EMPTY_SUSPECT = 'CLOUD_EMPTY_SUSPECT'
  * 「本机缓存有一行、云端还没同步」误判成权限事故、进而**让整站回落本地种子**（把三个
  * 本体集合一起拖下水）。故本集合**恒走诚实空态**（不回落、不冒充）。
  */
-export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze(['correctionsPublic'])
+export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze(['correctionsPublic', 'endorsementCounts'])
 
 /**
  * 本地同集合的**现有行数**（**只读**：不灌种子、不写存储、不碰其它集合）。
@@ -613,11 +617,44 @@ export function normalizePublicCorrectionRow(doc, options = {}) {
   }
 }
 
+/**
+ * **公开计数行**（`xiai_endorsement_counts` → 本机 `endorsement-counts` 行形状）。
+ *
+ * 口径：本集合是**采信的公开只读投影**（匿名可读、只读），一行 ＝ 一个
+ * `(faceId, field, value)` 键的采信人数；**零身份字段**（`user_id` / `user_phone` 一律不下发，
+ * 由写入侧裁剪，读面不臆造）。
+ * 归一（只做空值与别名，不做业务值改写）：
+ *   · `faceId` / `sealId` / `stamp_id` 三个归属键补别名（同值）；
+ *   · 文本 NULL ⇒ `''`；`count` 缺键 / 非数 ⇒ `0`（**正向数值护栏**，不冒充有计数）；
+ *   · `schema` 缺键 ⇒ 按 `'xiai-endorsement-counts-v1'` 归一（本集合的契约就是该版本）。
+ */
+export function normalizeEndorsementCountRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const faceId = text(firstOf(row.faceId, row.face_id))
+  const sealId = text(firstOf(row.sealId, row.seal_id, row.stamp_id))
+  const parsedCount = Number(row.count)
+  return {
+    ...row,
+    _id: text(row._id),
+    faceId,
+    face_id: faceId,
+    sealId,
+    seal_id: sealId,
+    stamp_id: text(firstOf(row.stamp_id, sealId)),
+    field: text(row.field),
+    value: text(row.value),
+    count: Number.isFinite(parsedCount) && parsedCount > 0 ? Math.round(parsedCount) : 0,
+    updated_at: text(firstOf(row.updated_at, row.created_at)),
+    schema: text(firstOf(row.schema, 'xiai-endorsement-counts-v1'))
+  }
+}
+
 const NORMALIZERS = Object.freeze({
   seals: normalizeSealRow,
   faces: normalizeFaceRow,
   images: normalizeImageRow,
-  correctionsPublic: normalizePublicCorrectionRow
+  correctionsPublic: normalizePublicCorrectionRow,
+  endorsementCounts: normalizeEndorsementCountRow
 })
 
 /* ---------------------------------------------------------------------------
@@ -939,7 +976,7 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     timeoutMs: budget,
     attempt,
     timeoutStage: '',
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
     fetchedAt: ''
   })
   let sdk = null
@@ -1117,7 +1154,7 @@ function scheduleHydrationRetry(budget, err) {
     timeoutStage: err.stage,
     retryBudgetMs: CLOUD_HYDRATE_RETRY_BUDGET_MS,
     attempt: 2,
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
     fetchedAt: ''
   })
   return new Promise((resolve) => {
@@ -1180,7 +1217,7 @@ export function resetCloudBaseSource() {
     reason: 'NOT_CONFIGURED',
     message: '未配置 CloudBase 数据源，使用本地实现',
     envId: '',
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
     attempt: 0,
     timeoutStage: '',
     emptyVerified: [],
