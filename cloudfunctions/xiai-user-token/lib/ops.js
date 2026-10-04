@@ -33,12 +33,15 @@ const { REASONS, deny, normalizePhone } = require('./config.js')
  * 映射真源 ＝ `src/data/storage.js` 的 `STORAGE_KEYS`（＋ `xiai_` 前缀）。
  *   · `corrections`        ＝ 勘误私有行（既有）；
  *   · `endorsements`       ＝ **采信私有行**（本单新增；含 user_id / user_phone ⇒ PRIVATE）；
- *   · `endorsementCounts`  ＝ **公开计数行**（本单新增；脱敏：**零身份字段**、匿名可读）。
+ *   · `endorsementCounts`  ＝ **公开计数行**（本单新增；脱敏：**零身份字段**、匿名可读）；
+ *   · `correctionsPublic`  ＝ **公开只读脱敏投影集合**（V3 新增；＝ 已采纳勘误的跨浏览器投影，
+ *     `_id='cp-<勘误单号>'`、键面封闭、**零身份字段**）。
  */
 const COLLECTIONS = Object.freeze({
   corrections: 'xiai_corrections',
   endorsements: 'xiai_endorsements',
-  endorsementCounts: 'xiai_endorsement_counts'
+  endorsementCounts: 'xiai_endorsement_counts',
+  correctionsPublic: 'xiai_corrections_public'
 })
 
 /**
@@ -97,6 +100,162 @@ const ENDORSEMENT_ID_PREFIX = 'en-'
 
 /** 公开计数行文档键前缀（确定性 ⇒ 同值恒指同一行）。 */
 const ENDORSEMENT_COUNT_ID_PREFIX = 'e-'
+
+/* ---------------------------------------------------------------------------
+   管理员写面（V3：收敛到「登录令牌 ＋ 服务端手机号白名单」）
+   ---------------------------------------------------------------------------
+   本单把管理员写面（`reviewCorrection` / `setInviteReward`）从 `xiai-admin-token`
+   搬到**用户令牌函数**：服务端接受**登录令牌**（本函数 `action:'issue'` 签发的用户令牌）
+   ＋「令牌声明里的手机号 ∈ 管理员白名单（环境变量 `XIAI_ADMIN_PHONE`，挂在**本函数**上）」
+   ⇒ 采纳 / 驳回、改邀请奖励**永不需要第二个码、零弹窗**。
+   硬口径（逐条）：
+     · **白名单真源 ＝ `XIAI_ADMIN_PHONE`**；手机号取自**服务端从令牌声明派生的
+       `identity.phone`**，**绝不采信前端自称**；
+     · **缺 / 空 env ⇒ 安全默认**：所有管理员类 op 一律**结构化拒绝 ＋ 零写入**
+       （不得因未配置而放行、不得静默）；
+     · **判定（身份白名单 ＋ 值域）全部在写之前**；
+     · 失败形状恒为恰 3 键 `{ok:false, reason, message}`。
+   真源副本（与 `cloudfunctions/xiai-admin-token/lib/ops.js` **逐字同值**，由
+   `scripts/verify-admin-write-via-login.mjs` 机械断言相等 ⇒ 不让副本静默漂移）。
+   --------------------------------------------------------------------------- */
+
+/** 勘误三态（与 `src/services/corrections.js::CORRECTION_STATUS` 逐字同值）。 */
+const CORRECTION_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+})
+
+/** 旧决定字面值 → 规范值（`APPROVED` 按采纳兼容；与管理员函数 `LEGACY_DECISION` 同口径）。 */
+const LEGACY_DECISION = Object.freeze({ APPROVED: 'ACCEPTED' })
+
+/** 允许的两种终端决定（此外一律 `INVALID_VALUE` ＋ 零写入）。 */
+const DECISIONS = Object.freeze(['ACCEPTED', 'REJECTED'])
+
+/* 采纳值域真源副本（真源 ＝ `src/data/seed.js`；与管理员函数 `VALUE_DOMAINS` 逐字同值）。 */
+const DYNASTY_OPTIONS = Object.freeze([
+  '先秦',
+  '秦',
+  '漢',
+  '魏晉',
+  '隋唐',
+  '宋元',
+  '明中期',
+  '晚明',
+  '清初',
+  '清中期',
+  '晚清',
+  '民國',
+  '新中國',
+  '當代'
+])
+
+const FACE_CONTENT_OPTIONS = Object.freeze([
+  '官印',
+  '私印',
+  '姓名印',
+  '齋館印',
+  '鑑藏印',
+  '吉語印',
+  '肖形印',
+  '花押印',
+  '閒章'
+])
+
+const FACE_STYLE_OPTIONS = Object.freeze([
+  '三晉古璽',
+  '楚古璽',
+  '燕古璽',
+  '齊古璽',
+  '秦印',
+  '漢白文鑄印',
+  '漢玉印',
+  '將軍急就章',
+  '漢朱文',
+  '朱白相間印',
+  '魏晉印',
+  '隋唐九疊篆印',
+  '元朱文',
+  '浙派',
+  '鄧派',
+  '歙派',
+  '吳讓之印風',
+  '趙之謙印風',
+  '黃牧甫印風',
+  '吳昌碩印風',
+  '趙叔孺印風',
+  '陳巨來印風',
+  '來楚生印風'
+])
+
+/** 需值域门约束的字段 → 冻结真源（逐字段一对一；其余字段不受第二道门约束）。 */
+const VALUE_DOMAINS = Object.freeze({
+  dynasty: DYNASTY_OPTIONS,
+  seal_type: FACE_CONTENT_OPTIONS,
+  face_style: FACE_STYLE_OPTIONS
+})
+
+/** 审核载荷允许键（**封闭键面**；与 `src/services/corrections.js::REVIEW_PAYLOAD_KEYS` 逐字同值）。 */
+const REVIEW_ALLOWED_KEYS = Object.freeze(['correction_id', 'decision', 'note'])
+
+/** 邀请奖励载荷允许键（**封闭键面**：只有 `value`）。 */
+const REWARD_ALLOWED_KEYS = Object.freeze(['value'])
+
+/** 审核载荷里明令不可由前端提供的身份类键（防御性登记 ⇒ 文案上把「身份类」与「普通未知键」分开）。 */
+const REVIEW_IDENTITY_KEYS = Object.freeze([
+  'userId',
+  'user_id',
+  'user_phone',
+  'uid',
+  'phone',
+  'role',
+  'status',
+  'created_at',
+  'reviewed_at',
+  'reviewer_id',
+  'rewarded_at',
+  'identity_source',
+  'review_note'
+])
+
+/** 驳回理由上限（与数据层 `writeCorrectionDecision` / 管理员函数 `MAX_NOTE_LENGTH` 同值）。 */
+const MAX_NOTE_LENGTH = 200
+
+/** 勘误单号上限（防无界；超限 ⇒ `INVALID_VALUE`）。 */
+const MAX_ID_LENGTH = 128
+
+/** 公开只读投影行字段面（**封闭**；**零身份字段**；与管理员函数 `PUBLIC_PROJECTION_KEYS` 逐字同值）。 */
+const PUBLIC_PROJECTION_KEYS = Object.freeze([
+  'correction_id',
+  'faceId',
+  'sealId',
+  'stamp_id',
+  'field',
+  'field_label',
+  'value',
+  'status',
+  'reviewed_at',
+  'updated_at',
+  'schema'
+])
+
+/** 公开投影明令禁止的键（身份面 ＋ 用户自由文本 `basis`）；与投影键面交集必须为空。 */
+const IDENTITY_PROJECTION_KEYS = Object.freeze([
+  'userId',
+  'user_id',
+  'user_phone',
+  'uid',
+  'phone',
+  'reviewer_id',
+  'identity_source',
+  'basis'
+])
+
+/** 公开投影 schema 版本（与管理员函数 `PUBLIC_SCHEMA` 逐字同值）。 */
+const PUBLIC_SCHEMA = 'xiai-corrections-public-v1'
+
+/** 公开投影行 id 前缀（`cp-<勘误单号>` ⇒ 确定性，同单重放恒同一行 ⇒ 幂等 upsert）。 */
+const PUBLIC_ID_PREFIX = 'cp-'
 
 /* ---------------------------------------------------------------------------
    DB 注入缝（**离线自检 / 宿主用**；生产不注入 ⇒ 走真实 `@cloudbase/node-sdk`）
@@ -182,6 +341,96 @@ async function readRows(collection, match) {
   const query = db.collection(collection)
   if (!query || typeof query.where !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
   return rowsOfReply(await query.where(match).get())
+}
+
+/* ---------------------------------------------------------------------------
+   管理员写面：白名单门 ＋ 读数（**全部只读 / 判定，不触写**）
+   --------------------------------------------------------------------------- */
+
+/**
+ * **管理员白名单门**（V3 唯一授权判据之一；**写之前**判定）。
+ * 手机号取自**服务端从令牌声明派生的 `identity.phone`**（`index.js` 唯一来源）——
+ * 这里只做「逐字等于 `XIAI_ADMIN_PHONE`」的比对，**绝不采信前端自称**。
+ * 缺 / 空 env ⇒ **结构化拒绝 ＋ 零写入**（安全默认；**不因未配置而放行**）。
+ * @param {{uid:string, phone:string}|null|undefined} identity 服务端派生身份
+ * @param {string} adminPhone 白名单手机号（来自 `readConfig().adminPhone`；缺 / 空 ⇒ `''`）
+ * @returns {null|{ok:false, reason:string, message:string}} 放行 ⇒ `null`
+ */
+function adminWhitelistDenial(identity, adminPhone) {
+  const expected = normalizePhone(adminPhone)
+  if (!expected) {
+    /* 未配置 ⇒ **内部不可用**（不是「越权」）⇒ 与工程口径一致用 `STORAGE_UNAVAILABLE`；
+       明文：**不得**因未配置而放行，也不得静默。 */
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      '管理員寫入面未配置（缺環境變量：XIAI_ADMIN_PHONE）⇒ 拒絕所有管理員類操作；本次零寫入。'
+    )
+  }
+  if (!identity || !identity.phone) {
+    return deny(REASONS.FORBIDDEN, '缺少可驗證的管理員身份；本次零寫入。')
+  }
+  if (normalizePhone(identity.phone) !== expected) {
+    return deny(REASONS.FORBIDDEN, '僅管理員可以執行此操作（手機號不在白名單）；本次零寫入。')
+  }
+  return null
+}
+
+/** 归一化 `where(...).update(...)` 的返回为「受影响行数」（读不出 ⇒ `null`，不作强判）。 */
+function updatedCountOf(result) {
+  if (!result || typeof result !== 'object') return null
+  const candidates = [result.updated, result.modified, result.matched, result.data && result.data.updated]
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value)) return Math.floor(value)
+  }
+  return null
+}
+
+/** 归一化一行 `where(...).get()` / `doc(...).get()` 的返回（兼容 `{data:[...]}` 与裸数组）。 */
+function rowsOf(result) {
+  if (Array.isArray(result)) return result
+  if (result && Array.isArray(result.data)) return result.data
+  if (result && result.data && typeof result.data === 'object') return [result.data]
+  return []
+}
+
+/**
+ * 按勘误单号读**私有**行（`xiai_corrections`）。
+ * 先按业务键 `id` 检索；未命中再按文档 `_id` 兜底（兼容以文档 id 直接落库的历史行）。
+ * **只读**：不产生任何写入。与管理员函数 `readCorrectionRow` **同口径**。
+ * @param {string} correctionId
+ * @returns {Promise<{row:object, match:object}|null>} `match` ＝ 命中所用的检索式（更新时复用）
+ */
+async function readCorrectionRow(correctionId) {
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.corrections)
+  const byId = await collection.where({ id: correctionId }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return { row: rowsById[0], match: { id: correctionId } }
+  const byDoc = await collection.doc(correctionId).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: correctionId } }
+  return null
+}
+
+/**
+ * 由私有行 + 决定构造**公开只读投影行**（**封闭键面**；**零身份字段**）。
+ * 与管理员函数 `buildProjection` **逐字同形**。
+ */
+function buildProjection(row, decision, at, correctionId) {
+  const field = text(row.field)
+  return {
+    correction_id: text(row.id) || text(correctionId),
+    faceId: text(row.faceId),
+    sealId: text(row.sealId || row.stamp_id),
+    stamp_id: text(row.stamp_id || row.sealId),
+    field,
+    field_label: text(row.field_label) || MARKABLE_FIELDS[field] || '',
+    value: text(row.value),
+    status: decision,
+    reviewed_at: at,
+    updated_at: at,
+    schema: PUBLIC_SCHEMA
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -382,6 +631,172 @@ const OPS = Object.freeze({
   }
 })
 
+/* ---------------------------------------------------------------------------
+   管理员写面 op 注册面（V3 新增；**登录令牌 ＋ 手机号白名单**）
+   ---------------------------------------------------------------------------
+   调用形状：`ADMIN_OPS[op](payload, identity, context)`，其中
+     · `identity` ＝ **服务端从令牌声明派生**（`{uid:'u-<手机号>', phone:'<11 位>'}`）；
+     · `context`  ＝ `{adminPhone:'<白名单手机号>', nowSeconds:<服务端秒>}`。
+   `adminPhone` 来自 `readConfig().adminPhone`（**缺 / 空 ⇒ 白名单门结构化拒绝**）；
+   `nowSeconds` 是**服务端唯一时源**（`reviewed_at` 由它派生）。
+   每个 op 只**产出落盘计划**（或成功回包），落库一律在 `persist()`。
+   --------------------------------------------------------------------------- */
+
+const ADMIN_OPS = Object.freeze({
+  /**
+   * 审核勘误（**管理员写路径**；两处落盘：先公开脱敏投影、后私有状态）。
+   * 判定顺序（**全部在写之前**）：① 管理员白名单门 → ② 载荷形态 / 键面 →
+   * ③ 单号 / 决定值域 / 理由长度 → ④ 读私有行 → ⑤ 存在性 / 状态门（仅 `PENDING` 可审）→
+   * ⑥ 采纳值域门（R-20 / R-30 / R-31）。
+   * @param {object} payload 载荷（允许键见 `REVIEW_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份（唯一来源）
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context] 白名单手机号 ＋ 服务端时钟（秒）
+   * @returns {Promise<{ok:true, op:string, row:object, projection:object,
+   *          plan:{op:string, writes:Array<object>}}|{ok:false, reason:string, message:string}>}
+   */
+  async reviewCorrection(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，写之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => REVIEW_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => REVIEW_IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const correctionId = text(payload.correction_id)
+    if (!correctionId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少勘誤單號（correction_id）⇒ 拒絕審覈；本次零寫入。')
+    }
+    if (correctionId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `勘誤單號超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕審覈；本次零寫入。`)
+    }
+    const rawDecision = text(payload.decision)
+    const decision = LEGACY_DECISION[rawDecision] || rawDecision
+    if (DECISIONS.indexOf(decision) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `審覈決定「${rawDecision || '（空）'}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回；` +
+          '舊字面值 APPROVED 按採納兼容）⇒ 拒絕寫入；本次零寫入。'
+      )
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '駁回理由必須是文字 ⇒ 拒絕審覈；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
+    }
+    /* ④ 读私有行（**只读**；网络 / 内部异常由此抛出 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`）。 */
+    const found = await readCorrectionRow(correctionId)
+    if (!found) {
+      return deny(REASONS.INVALID_VALUE, `未找到該勘誤單（correction_id）：${correctionId}；本次零寫入。`)
+    }
+    const row = found.row
+    const currentStatus = text(row.status)
+    if (currentStatus !== CORRECTION_STATUS.PENDING) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `該勘誤已審覈（當前狀態：${currentStatus || '（空）'}）⇒ 不可重複處理（終態不回退）；本次零寫入。`
+      )
+    }
+    const accepted = decision === CORRECTION_STATUS.ACCEPTED
+    /* ⑥ 采纳值域门（**写之前**）：被采纳的值必须 ∈ 冻结真源；不在 ⇒ 结构化拒绝 ＋ 零写入。 */
+    if (accepted) {
+      const domain = Object.prototype.hasOwnProperty.call(VALUE_DOMAINS, text(row.field))
+        ? VALUE_DOMAINS[text(row.field)]
+        : null
+      if (domain && domain.indexOf(text(row.value)) === -1) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `採納被拒：建議值不在「${MARKABLE_FIELDS[text(row.field)] || text(row.field)}」的凍結值域內（該勘誤建議「駁回」）；本次零寫入。`
+        )
+      }
+    }
+    /* 落盘计划：**先公开投影（派生、确定性 id ⇒ 幂等 upsert）、后私有状态（权威）**。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const projection = buildProjection(row, decision, at, correctionId)
+    const privatePatch = {
+      status: decision,
+      reviewed_at: at,
+      reviewer_id: identity.uid
+    }
+    /* **僅駁回且有理由**才落 `review_note`（采納 / 空理由不出现该键）。 */
+    if (!accepted && noteText !== '') privatePatch.review_note = noteText
+    const decidedRow = Object.assign({}, row, privatePatch)
+    return {
+      ok: true,
+      op: 'reviewCorrection',
+      row: decidedRow,
+      projection,
+      plan: {
+        op: 'reviewCorrection',
+        writes: [
+          {
+            kind: 'set',
+            collection: COLLECTIONS.correctionsPublic,
+            id: `${PUBLIC_ID_PREFIX}${correctionId}`,
+            doc: projection
+          },
+          {
+            kind: 'update',
+            collection: COLLECTIONS.corrections,
+            match: found.match,
+            doc: privatePatch,
+            expectAtLeast: 1
+          }
+        ]
+      }
+    }
+  },
+
+  /**
+   * 设置邀请奖励数值（**管理员写路径**；值域门 ＋ 白名单门，**均在任何写入之前**）。
+   * 明文：**本 op 不产出云落盘计划** —— 站点配置键（`xiai:v1:invite-reward`）活在客户端
+   * localStorage（链路 `admin.js → drive.js → storage.js`，与管理员函数 Phase 1 同口径）；
+   * 本 op 的职责只是「服务端判身份 ＋ 判值域」，过门后才由**客户端**写该配置键。
+   * @param {object} payload 载荷（允许键见 `REWARD_ALLOWED_KEYS`：只有 `value`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @param {{adminPhone?:string}} [context] 白名单手机号
+   * @returns {{ok:true, op:string, value:number}|{ok:false, reason:string, message:string}}
+   */
+  setInviteReward(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，写之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => REWARD_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => REVIEW_IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const value = payload.value
+    if (!Number.isInteger(value) || value < 0) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '邀請獎勵必須是「非負整數」（非整數 / 負數 / 非數字一律拒收）；本次零寫入。'
+      )
+    }
+    return { ok: true, op: 'setInviteReward', value }
+  }
+})
+
 /**
  * 落盘（**唯一写点**）。
  *
@@ -405,11 +820,26 @@ async function persist(plan) {
       if (step && step.kind === 'set') {
         await db.collection(step.collection).doc(step.id).set(step.doc)
         if (!primary) primary = String(step.id)
-      } else {
-        const result = await db.collection(step.collection).add(step.doc)
-        const id = result && (result.id || result._id || (result.data && result.data.id))
-        if (!primary) primary = id ? String(id) : ''
+        continue
       }
+      if (step && step.kind === 'update') {
+        /* 按检索式 `update`（V3 管理员写面：私有行状态）；命中 0 行（并发改动 / 单号不存在）
+           ⇒ 抛错 ⇒ 由 `index.js` 转 `STORAGE_UNAVAILABLE`（**不伪装成功 / 不伪装 FORBIDDEN**）。 */
+        const result = await db.collection(step.collection).where(step.match).update(step.doc)
+        const updated = updatedCountOf(result)
+        if (typeof step.expectAtLeast === 'number' && updated !== null && updated < step.expectAtLeast) {
+          throw new Error(`update-matched-too-few:${updated}`)
+        }
+        if (!primary) {
+          const hit = await db.collection(step.collection).where(step.match).get()
+          const rows = rowsOf(hit)
+          if (rows.length > 0) primary = text(rows[0]._id) || text(rows[0].id)
+        }
+        continue
+      }
+      const result = await db.collection(step.collection).add(step.doc)
+      const id = result && (result.id || result._id || (result.data && result.data.id))
+      if (!primary) primary = id ? String(id) : ''
     }
     return primary
   }
@@ -430,9 +860,30 @@ module.exports = {
   ENDORSEMENT_IDENTITY_SOURCE,
   ENDORSEMENT_ID_PREFIX,
   ENDORSEMENT_COUNT_ID_PREFIX,
+  /* V3 管理员写面（登录令牌 ＋ 手机号白名单）。 */
+  CORRECTION_STATUS,
+  LEGACY_DECISION,
+  DECISIONS,
+  DYNASTY_OPTIONS,
+  FACE_CONTENT_OPTIONS,
+  FACE_STYLE_OPTIONS,
+  VALUE_DOMAINS,
+  REVIEW_ALLOWED_KEYS,
+  REWARD_ALLOWED_KEYS,
+  REVIEW_IDENTITY_KEYS,
+  MAX_NOTE_LENGTH,
+  MAX_ID_LENGTH,
+  PUBLIC_PROJECTION_KEYS,
+  IDENTITY_PROJECTION_KEYS,
+  PUBLIC_SCHEMA,
+  PUBLIC_ID_PREFIX,
   OPS,
+  ADMIN_OPS,
   setOpsDbProvider,
   opsDbInjected,
   resolveDb,
+  adminWhitelistDenial,
+  readCorrectionRow,
+  buildProjection,
   persist
 }

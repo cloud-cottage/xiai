@@ -199,7 +199,7 @@ function annotate(entry, group) {
     /* 清单式标注的逐条文字（机械可读 + 人可读）。 */
     annotation:
       status === WRITE_FACE_ENTRY_STATUS.MIGRATED
-        ? '已過雲端驗簽（Phase 1 切片）：寫入前必須由 `xiai-admin-token` 回 `ok:true`'
+        ? '已過雲端驗簽（V3：經登錄令牌寫面門 `xiai-user-token` ＋ 手機號白名單）：寫入前必須由雲函數回 `ok:true`'
         : '**未遷移**：Phase 1 未過雲端驗簽 ⇒ 生產下屬 dev / 離線形態，不得當作正式寫入路徑'
   })
 }

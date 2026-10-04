@@ -14,7 +14,7 @@
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { auth, admin, corrections, points, seals } from '../services/index.js'
+import { auth, corrections, points, seals } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 import { statusLabel, formatDateTime } from '../utils/format.js'
 
@@ -23,24 +23,12 @@ const dataVersion = ref(0)
 const feedback = ref('')
 
 /* ============================================================================
-   「取寫入令牌」面（云端写入面且当前无令牌 ⇒ 才需要；dev / 離線形态零行为变化）
+   **V3 撤除「校驗碼彈窗」**（2026-10-04）
    ----------------------------------------------------------------------------
-   判定一律走服务层单点 `admin.needsAdminWriteCode()`（形态 ＋ `hasAdminToken()`），
-   **不靠匹配服务端失败文案**（服务端失败形状恒为怡 3 键，文案不是判据）。
+   采纳 / 驳回已收敛到「一枚登录令牌 ＋ 手机号白名单」⇒ **不再有校驗碼弹窗 / 输入位**；
+   令牌的「取 / 补签（刷新后）」收口在服务层单点（`services/userWrite.js`），
+   本页**直接调** `corrections.review / reviewBatch`（零弹窗、零校驗碼输入位钩子）。
    ============================================================================ */
-/** 单条审核的「管理員寫入校驗碼」弹窗状态（`null` ＝ 未打开）。 */
-const codeDialog = ref(null)
-/** 单条审核弹窗内的写入校验码。 */
-const reviewCode = ref('')
-/** 单条审核弹窗内的失败原文（取令牌失败 ⇒ 弹窗保留、原文展示、不重试写操作）。 */
-const codeFeedback = ref('')
-const codeBusy = ref(false)
-/** 单条审核取令牌弹窗的说明文案（如实点明将执行的动作）。 */
-const codeDialogMessage = computed(() => {
-  if (!codeDialog.value) return ''
-  const verb = codeDialog.value.decision === corrections.CORRECTION_STATUS.ACCEPTED ? '採納' : '駁回'
-  return `此操作需要管理員寫入令牌：請輸入寫入校驗碼以完成本次「${verb}」；已取得有效令牌時可留空。`
-})
 
 const actor = computed(() => currentUser())
 /* 管理员专属「采纳 / 驳回」按钮的渲染条件（服务层判定；普通用户 / 游客 ⇒ false）。 */
@@ -85,18 +73,10 @@ const batchRowCount = computed(() => batches.value.reduce((sum, batch) => sum + 
 const batchDialog = ref(null)
 /** 批量驳回的可选理由（≤200 字；默认空 ⇒ 不落 `review_note`）。 */
 const batchNote = ref('')
-/** 批量审核的「管理員寫入校驗碼」（云端写入面下必需；已有未过期令牌可留空）。 */
-const batchWriteCode = ref('')
-/** 批量审核取令牌的失败原文（弹窗保留、原文展示、不重试写操作、零写入）。 */
-const batchCodeFeedback = ref('')
 const batchBusy = ref(false)
-/** 是否处于云端写入面：dev / 離線形态**不渲染**取令牌输入位 ⇒ 视觉零变化。 */
-const cloudWriteFace = computed(() => admin.isCloudWriteFace())
 
 function askBatch(batch, decision) {
   batchNote.value = ''
-  batchWriteCode.value = ''
-  batchCodeFeedback.value = ''
   batchDialog.value = { batch, decision }
 }
 
@@ -129,27 +109,17 @@ const BATCH_CANCEL_ACTION = 'correction-batch-cancel'
 async function confirmBatch() {
   const dialog = batchDialog.value
   if (!dialog || batchBusy.value) return
-  batchCodeFeedback.value = ''
   const note = dialog.decision === corrections.CORRECTION_STATUS.REJECTED ? batchNote.value : ''
   batchBusy.value = true
   try {
-    /* 云端写入面且无令牌 ⇒ 先取令牌（`ensureAdminWriteSession`），成功后才批量审核；
-       dev / 離線形态 ⇒ 直接批量审核（零云端往返）。取令牌失败 ⇒ 弹窗保留、原文展示、零写入。 */
-    const out = await admin.runWithAdminWriteSession(
-      () =>
-        corrections.reviewBatch(
-          actor.value,
-          dialog.batch.rows.map((row) => row.id),
-          dialog.decision,
-          note
-        ),
-      batchWriteCode.value
+    /* V3：登录令牌写面门（必要时**静默补签**）由服务层单点承担 ⇒ 本页**直接批量审核**、零弹窗。 */
+    const result = await corrections.reviewBatch(
+      actor.value,
+      dialog.batch.rows.map((row) => row.id),
+      dialog.decision,
+      note
     )
-    if (!out.ok) {
-      batchCodeFeedback.value = (out.session && out.session.message) || '寫入校驗失敗，請稍後再試。'
-      return
-    }
-    feedback.value = out.result.message
+    feedback.value = result.message
     batchDialog.value = null
     dataVersion.value += 1
   } finally {
@@ -195,48 +165,11 @@ async function runReview(row, decision) {
 }
 
 /**
- * 采纳 / 驳回（单条）：云端写入面且**无令牌** ⇒ 先弹「管理員寫入校驗碼」；
- * 已有未过期令牌 / dev-離線形态 ⇒ 直接调（**不弹、零行为变化**）。
+ * 采纳 / 驳回（单条）：V3 起**直接调** —— 登录令牌写面门在服务层单点承担
+ * 「无令牌 ⇒ 静默补签」，**零弹窗、不需要第二个码**；dev / 離線形态亦零行为变化。
  */
 async function decide(row, decision) {
-  if (admin.needsAdminWriteCode()) {
-    reviewCode.value = ''
-    codeFeedback.value = ''
-    codeDialog.value = { row, decision }
-    return
-  }
   await runReview(row, decision)
-}
-
-/** 单条审核弹窗内「確認並繼續」：先取令牌（云端且无令牌），成功才自动重试原审核。 */
-async function submitReviewCode() {
-  if (codeBusy.value) return
-  const pending = codeDialog.value
-  if (!pending) return
-  codeBusy.value = true
-  codeFeedback.value = ''
-  try {
-    const out = await admin.runWithAdminWriteSession(
-      () => runReview(pending.row, pending.decision),
-      reviewCode.value
-    )
-    if (!out.ok) {
-      /* 取令牌失败（码不对 / 网络）⇒ 弹窗保留、原样展示服务端 / 传输层文案；
-         **不重试写操作**（零写入）。 */
-      codeFeedback.value = (out.session && out.session.message) || '寫入校驗失敗，請稍後再試。'
-      return
-    }
-    codeDialog.value = null
-    reviewCode.value = ''
-  } finally {
-    codeBusy.value = false
-  }
-}
-
-function cancelReviewCode() {
-  codeDialog.value = null
-  reviewCode.value = ''
-  codeFeedback.value = ''
 }
 </script>
 
@@ -389,55 +322,6 @@ function cancelReviewCode() {
         ></textarea>
         <span class="batch__note-hint">填寫後將一併記錄到該批每條勘誤，提交者可在「我的提交」中看到。</span>
       </div>
-
-      <!-- 管理員寫入校驗碼（云端写入面下必需；已有未过期令牌可留空）。
-           dev / 離線形态不渲染本输入位（`cloudWriteFace` ⇒ 视觉零变化）。
-           输入框 / 失败原文只挂独立取证钩子（`data-review-write-code` / `data-review-code-feedback`），
-           **不复用 `data-admin-action`**（该去重取值集合不得被撑大）。 -->
-      <div v-if="cloudWriteFace" class="batch__note">
-        <label class="batch__note-label" for="correction-batch-write-code">管理員寫入校驗碼</label>
-        <input
-          id="correction-batch-write-code"
-          v-model="batchWriteCode"
-          class="batch__note-input"
-          type="text"
-          inputmode="numeric"
-          autocomplete="one-time-code"
-          data-review-write-code
-        />
-        <span class="batch__note-hint">雲端寫入面下必要（管理員手機號 ＋ 校驗碼換取 15 分鐘寫入令牌）；已有未過期令牌時可留空。</span>
-      </div>
-      <p v-if="batchCodeFeedback" class="review__code-feedback" data-review-code-feedback>
-        {{ batchCodeFeedback }}
-      </p>
-    </ConfirmDialog>
-
-    <!-- 单条审核的「管理員寫入校驗碼」弹窗（仅云端写入面且无令牌时开；复用 ConfirmDialog 视觉）。
-         确认钮用 `data-action`、**不带** `data-admin-action`；失败 ⇒ 弹窗保留、原文展示、不重试写操作。 -->
-    <ConfirmDialog
-      v-if="codeDialog"
-      title="管理員寫入校驗碼"
-      :message="codeDialogMessage"
-      confirm-text="確認並繼續"
-      confirm-action="correction-review-code-submit"
-      cancel-action="correction-review-code-cancel"
-      @confirm="submitReviewCode"
-      @cancel="cancelReviewCode"
-    >
-      <div class="batch__note">
-        <label class="batch__note-label" for="correction-review-write-code">管理員寫入校驗碼</label>
-        <input
-          id="correction-review-write-code"
-          v-model="reviewCode"
-          class="batch__note-input"
-          type="text"
-          inputmode="numeric"
-          autocomplete="one-time-code"
-          data-review-write-code
-        />
-        <span class="batch__note-hint">雲端寫入面下必要（管理員手機號 ＋ 校驗碼換取 15 分鐘寫入令牌）；已有未過期令牌時可留空。</span>
-      </div>
-      <p v-if="codeFeedback" class="review__code-feedback" data-review-code-feedback>{{ codeFeedback }}</p>
     </ConfirmDialog>
 
     <section v-if="rows.length" class="panel">
@@ -676,15 +560,5 @@ function cancelReviewCode() {
   margin-top: 2px;
   color: var(--c-text-muted);
   font-size: var(--t-xs);
-}
-
-/* 取令牌失败的原文提示（沿用既有弹窗内提示形态，不新造视觉）。 */
-.review__code-feedback {
-  margin-top: var(--s-3);
-  padding: var(--s-2) var(--s-3);
-  background: var(--c-surface-sunken);
-  border-radius: var(--r-md);
-  color: var(--c-text);
-  font-size: var(--t-sm);
 }
 </style>

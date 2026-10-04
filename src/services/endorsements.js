@@ -27,7 +27,7 @@ import {
   saveEndorsementCountRows
 } from '../data/db.js'
 import { currentUser } from '../data/session.js'
-import { userGate } from './userToken.js'
+import { userWriteGate } from './userWrite.js'
 import { MARKABLE_FIELDS, submissionGroupsOfFace, CORRECTION_STATUS } from './corrections.js'
 
 /** 云端写面 op 名（须与云函数 `xiai-user-token/lib/ops.js::OPS` 的注册面逐字一致）。 */
@@ -253,7 +253,7 @@ export async function endorseCorrection({ faceId = '', sealId = '', stampId = ''
   }
 
   const payload = { faceId: targetFaceId, sealId: targetSeal, stampId: targetSeal, field, value: text }
-  const gate = await userGate(ENDORSE_OP, payload)
+  const gate = await userWriteGate(ENDORSE_OP, payload)
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
 
   if (gate.mode === 'local-dev') {

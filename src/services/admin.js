@@ -26,17 +26,13 @@ import { writeInviteRewardSetting } from '../data/drive.js'
 import { currentUser } from '../data/session.js'
 import { FIXED_ATTR_FIELDS } from '../data/seed.js'
 import { listFacesOf } from './seals.js'
-/* **写面 Phase 1（写操作一律经云函数校验）**：本文件通过 `adminGate` 把「这次写是否合法」交给
-   云函数判定（服务端验签 ＋ 手机号白名单 ＋ 值域门）；**本地 `role` 不再是授权依据**（见 §四 / R-WF1）。
-   dev / 离线形态（无云写入面）下 `adminGate` 放行到本文件自己的本地角色门，且该形态**明确标注为
-   非正式写入路径**（`src/data/writeFaceMode.js`）。 */
-import { adminGate, ensureAdminWriteSession, adminTokenSnapshot, clearAdminToken, hasAdminToken } from './adminToken.js'
-/* 形态判定**单点来源**（页面 / 服务不得各自判断；只读 `data/writeFaceMode.js`）。 */
-import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
-
-/* 兼容转口（既有导出名逐字保留；`hasAdminToken` 供页面在**调用前**判「是否需要先取令牌」——
-   判定只看令牌有无，**不靠匹配服务端失败文案**）。 */
-export { ensureAdminWriteSession, adminTokenSnapshot, clearAdminToken, hasAdminToken }
+/* **V3（管理员写面收敛）**：本文件**不再经 `xiai-admin-token`**（客户端对其零引用）——
+   `setInviteReward` 与采纳 / 驳回共用**登录令牌写面门** `userWriteGate`：云端形态下把
+   「这次写是否合法」交给云函数 `xiai-user-token` 判定（服务端验签 ＋ 手机号白名单 ＋ 值域门）；
+   **本地 `role` 不再是授权依据**（见 §四 / R-WF1）；**无令牌且有会话时先静默补签**（自愈）。
+   dev / 离线形态（无云写入面）下 `userWriteGate` 放行到本文件自己的本地角色门，且该形态
+   **明确标注为非正式写入路径**（`src/data/writeFaceMode.js`）。 */
+import { userWriteGate } from './userWrite.js'
 
 export { FIXED_ATTR_FIELDS }
 /* `PermissionError` 类**保留转口**（规范明文：保留导出、不删；既有导入方与自检仍可 import）——
@@ -122,9 +118,11 @@ export function updateFixedAttributes(stampId, patch) {
 /**
  * 写邀请奖励数值（管理员专属）。
  *
- * **写面 Phase 1 切片（2026-09-30）**：本入口由**同步**改为 **`async`**，判定顺序改为：
- *   ① **服务端门（唯一授权判据）**：`adminGate('setInviteReward', { value })`
- *      ⇒ 云函数 `xiai-admin-token` 验收令牌（HMAC 验签 → 有效期待 → 手机号白名单 → 值域 / 字段门）；
+ * **写面（V3：登录令牌 ＋ 手机号白名单）**：本入口为 **`async`**，判定顺序：
+ *   ① **服务端门（唯一授权判据）**：`userWriteGate('setInviteReward', { value })`
+ *      ⇒ 云函数 `xiai-user-token` 验收**登录令牌**（HMAC 验签 → 有效期待 → `role==='user'`
+ *      → 手机号 ∈ 管理员白名单（`XIAI_ADMIN_PHONE`）→ 值域 / 字段门）；
+ *      **无令牌且有会话时先静默补签**（刷新后令牌即丢的自愈）；**零弹窗、不需要第二个码**；
  *      **不过门 ⇒ 原样透传服务端结构化拒绝 ＋ 零写入**（传输层失败 ⇒ `STORAGE_UNAVAILABLE`，**不伪装 `FORBIDDEN`**）；
  *   ② **dev / 离线形态的本地角色门**（**仅该形态生效**；生产写路径不得只依赖它）；
  *   ③ **值域门**：值不是非负整数 ⇒ `INVALID_VALUE`（本地兜底；云端形态服务端已先判过一次）；
@@ -139,8 +137,9 @@ export function updateFixedAttributes(stampId, patch) {
  */
 export async function setInviteReward(actor, value) {
   const user = actor && actor.id ? actor : currentUser()
-  /* ① 服务端门（**云端形态下这是唯一授权判据**；dev / 离线形态返回放行标记）。 */
-  const gate = await adminGate('setInviteReward', { value })
+  /* ① 服务端门（**云端形态下这是唯一授权判据**；dev / 离线形态返回放行标记）；经登录令牌
+     写面门 ⇒ 无令牌且有会话时先静默补签（修「刷新后写必失败」）。 */
+  const gate = await userWriteGate('setInviteReward', { value })
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
   /* ② dev / 离线形态：沿用改前的本地角色门（**不得**当作正式写入路径）。 */
   if (gate.mode === 'local-dev' && (!user || user.role !== 'admin')) {
@@ -154,48 +153,17 @@ export async function setInviteReward(actor, value) {
       message: `邀請獎勵必須是「非負整數」（非整數 / 負數 / 非數字一律拒收，實測 ${JSON.stringify(value)}）；本次零寫入。`
     }
   }
-  /* ④ 过门后才落盘（Phase 1 落盘点仍是本地配置键；迁移到云端权威存储属 Phase 2）。 */
+  /* ④ 过门后才落盘（落盘点仍是本地配置键；迁移到云端权威存储属 Phase 2）。 */
   return writeInviteRewardSetting(value)
 }
 
 /* ============================================================================
-   **勘误审核写面的「取令牌」编排**（my/corrections 采纳 / 驳回专用｜共用单点）
+   **V3 撤除「校驗碼彈窗」编排**（2026-10-04）
    ----------------------------------------------------------------------------
-   为什么在这里：全仓唯一的换令牌入口是 `ensureAdminWriteSession`（`adminToken.js`），
-   而「什么形态下必须先取令牌」的判定必须**单点** —— 页面若各写一份必然漂移。
-   判定只看**形态 ＋ 令牌有无**（`hasAdminToken()`），**绝不靠匹配服务端失败文案**
-   （服务端失败形状恒为怡 3 键 `{ok:false, reason, message}`，文案不是判据）。
+   上一轮为「弹校驗碼」加的 `isCloudWriteFace()` / `needsAdminWriteCode()` /
+   `runWithAdminWriteSession()` **整体删除**（零死代码、零死钩子）：
+   管理员写面已收敛到「一枚登录令牌 ＋ 手机号白名单」⇒ 采纳 / 驳回、改邀请奖励
+   **不再需要第二个码、不再有弹窗**；令牌的「取 / 补签」收口在**单点** `userWrite.js`
+   （`ensureUserTokenForWrite` / `userWriteGate`），页面与服务只调服务层，不再各自判形态。
    ============================================================================ */
 
-/** 是否处于「云端写入面」形态（`local-dev` ⇒ false）。 */
-export function isCloudWriteFace() {
-  return writeFaceMode() !== WRITE_FACE_MODES.LOCAL_DEV
-}
-
-/**
- * 审核写操作**是否需要先取写入令牌**：云端形态且当前无（内存）令牌 ⇒ true；
- * dev / 離線形态或已有令牌 ⇒ false（**不弹、零行为变化**）。
- * @returns {boolean}
- */
-export function needsAdminWriteCode() {
-  return isCloudWriteFace() && !hasAdminToken()
-}
-
-/**
- * 审核写操作的统一编排：**云端形态且无令牌 ⇒ 先 `ensureAdminWriteSession(code)`，
- * 成功后才执行写入**（令牌在 `write` 之前取得）；dev / 離線形态 ⇒ 直接执行（零云端往返）。
- *
- * 取令牌失败（码不对 / 网络）⇒ 返回 `{ok:false, session}`，**不执行 `write`（零写入）**，
- * 由调用方原样展示 `session.message`（服务端 / 传输层原文，不吞成通用提示）。
- * @param {() => Promise<object>} write 真正执行审核写操作（内部经 `adminGate` 携带令牌）
- * @param {string} [code=''] 写入校验码（已有未过期令牌时可留空）
- * @returns {Promise<{ok:true, result:object}|{ok:false, session:object}>}
- */
-export async function runWithAdminWriteSession(write, code = '') {
-  if (needsAdminWriteCode()) {
-    const session = await ensureAdminWriteSession(code)
-    if (!session.ok) return { ok: false, session }
-  }
-  const result = await write()
-  return { ok: true, result }
-}

@@ -43,7 +43,7 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
-const { OPS, persist } = require('./lib/ops.js')
+const { OPS, ADMIN_OPS, persist } = require('./lib/ops.js')
 
 /** 对外文案（**繁體、如实、不泄漏内部标识**；按内部判别码映射，逐条一一对应）。 */
 const DENIAL_MESSAGES = Object.freeze({
@@ -182,36 +182,64 @@ async function handleVerify(event, config) {
   }
   /* **身份的唯一来源**：服务端从令牌声明派生（载荷里的身份类键在 op 门里被拒）。 */
   const identity = Object.freeze({ uid: uidOf(phone), phone })
-  /* ④ op 面：未知 op ⇒ `INVALID_FIELD`（**不静默放行**）。 */
-  const validator = Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : null
-  if (!validator) {
+  /* ④ op 面：两个注册面（**都不静默放行**）——
+     · `OPS`（用户写面：`submitCorrection` / `endorseCorrection`）；
+     · `ADMIN_OPS`（**V3 管理员写面**：`reviewCorrection` / `setInviteReward`；须
+       **手机号 ∈ 白名单**，白名单由 op 内部按 `context.adminPhone` 判定 ⇒ 缺 env ⇒ 结构化拒绝）。 */
+  const userValidator = Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : null
+  const adminValidator = Object.prototype.hasOwnProperty.call(ADMIN_OPS, op) ? ADMIN_OPS[op] : null
+  if (!userValidator && !adminValidator) {
     audit({ action: 'verify', outcome: REASONS.INVALID_FIELD, op, serverNow: now })
     return deny(REASONS.INVALID_FIELD, `未知的寫入操作（op）：${op || '（空）'}；本次零寫入。`)
   }
-  const opResult = await validator(event.payload, identity)
-  if (!opResult.ok) {
-    audit({ action: 'verify', outcome: opResult.reason, op, uid: identity.uid, serverNow: now })
-    return opResult
-  }
-  /* ⑤ 落盘（**全部判定之后**；失败 ⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。 */
-  let docId = ''
+  /* `context`：**管理员白名单手机号**（唯一真源 ＝ 环境变量 `XIAI_ADMIN_PHONE`）＋ 服务端时钟。
+     用户写面 op 忽略它；管理员写面 op 以它作**身份判据**（缺 / 空 ⇒ 结构化拒绝）。 */
+  const context = Object.freeze({ adminPhone: config.adminPhone, nowSeconds: now })
+  let opResult = null
   try {
-    docId = await persist(opResult.plan)
+    opResult = userValidator
+      ? await userValidator(event.payload, identity)
+      : await adminValidator(event.payload, identity, context)
   } catch (error) {
+    /* 读私有行失败（网络 / 内部）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**。 */
     audit({
       action: 'verify',
       outcome: REASONS.STORAGE_UNAVAILABLE,
       op,
       uid: identity.uid,
-      stage: 'persist',
+      stage: 'prepare',
       detail: (error && error.message) || 'unknown',
       serverNow: now
     })
     return deny(REASONS.STORAGE_UNAVAILABLE, '用戶寫入服務的權威存儲不可用；本次零寫入。')
   }
-  if (!docId) {
-    audit({ action: 'verify', outcome: REASONS.STORAGE_UNAVAILABLE, op, uid: identity.uid, stage: 'persist-id', serverNow: now })
-    return deny(REASONS.STORAGE_UNAVAILABLE, '權威存儲未回傳文檔標識，無法確認寫入；本次零寫入。')
+  if (!opResult.ok) {
+    audit({ action: 'verify', outcome: opResult.reason, op, uid: identity.uid, serverNow: now })
+    return opResult
+  }
+  /* ⑤ 落盘（**全部判定之后**；失败 ⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。
+     **仅当 op 产出了落盘计划**（`submitCorrection` / `endorseCorrection` / `reviewCorrection` 有；
+     `setInviteReward` 无 —— 站点配置键活在客户端，与管理员函数 Phase 1 同口径）。 */
+  let docId = ''
+  if (opResult.plan) {
+    try {
+      docId = await persist(opResult.plan)
+    } catch (error) {
+      audit({
+        action: 'verify',
+        outcome: REASONS.STORAGE_UNAVAILABLE,
+        op,
+        uid: identity.uid,
+        stage: 'persist',
+        detail: (error && error.message) || 'unknown',
+        serverNow: now
+      })
+      return deny(REASONS.STORAGE_UNAVAILABLE, '用戶寫入服務的權威存儲不可用；本次零寫入。')
+    }
+    if (!docId) {
+      audit({ action: 'verify', outcome: REASONS.STORAGE_UNAVAILABLE, op, uid: identity.uid, stage: 'persist-id', serverNow: now })
+      return deny(REASONS.STORAGE_UNAVAILABLE, '權威存儲未回傳文檔標識，無法確認寫入；本次零寫入。')
+    }
   }
   /* ⑥ 滑动续期：**只续期、不续权** —— 续期仍走完上面全部判定（本节即在其后）。 */
   const renewed = issueToken({
@@ -240,10 +268,12 @@ async function handleVerify(event, config) {
     /** **服务端权威行**（前端拿到的就是它 ⇒ 本地只做镜像，不自建行）。 */
     row: opResult.row,
     /**
-     * **公开脱敏投影行**（本单 `endorseCorrection` 的公开计数行）；无该面的 op ⇒ `undefined`
-     *   ⇒ **零身份字段**；前端只做镜像、不在前端重建（与管理员侧 `reviewCorrection` 同形）。
+     * **公开脱敏投影行**（`endorseCorrection` 的公开计数行 / `reviewCorrection` 的公开只读投影）；
+     * 无该面的 op ⇒ `undefined` ⇒ **零身份字段**；前端只做镜像、不在前端重建。
      */
     projection: opResult.projection,
+    /** `setInviteReward`（无落盘计划）的成功回包：仅回吐值域判定通过的值。 */
+    value: opResult.value,
     docId,
     authority: 'SERVER',
     identity: {

@@ -8,10 +8,10 @@
  *      公开投影键面 / schema / 文档键前缀与云函数 `lib/ops.js` 的**冻结面逐字相等**；
  *      并配**负向对照**（服务端收到旧键面 `{id:…}` ⇒ `INVALID_FIELD` ＋ 零写入）证明
  *      「键名对齐」是**载荷相关**的（不是恒真判断）。
- *   B. **端到端采纳 ＋ 展示链（②）**：`corrections.review()` → `adminGate` → **真实云函数体**
+ *   B. **端到端采纳 ＋ 展示链（②）**：`corrections.review()` → `userWriteGate` → **真实云函数体**
  *      → 假 DB（两处落盘：公开脱敏投影 `xiai_corrections_public` ＋ 私有状态）→ 本机镜像 →
  *      `resolveSealDisplayName()`。逐条断言：
- *        · 传输载荷键面**恰＝** `ops.ALLOWED_KEYS`（实测抓到的那一次）；
+ *        · 传输载荷键面**恰＝** `ops.REVIEW_ALLOWED_KEYS`（实测抓到的那一次）；
  *        · 公开投影文档键面**恰＝** `ops.PUBLIC_PROJECTION_KEYS` 且与身份键**交集为空**；
  *        · **只有 ACCEPTED 参与展示**（PENDING 本机行 / REJECTED 公开行都不参与）；
  *        · **行身份去重归一**：同一条勘误同时以「云端投影行（`id='cp-…'` ＋ `correction_id`）」
@@ -40,7 +40,9 @@ import path from 'node:path'
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-const FUNCTION_DIR = path.join(ROOT, 'cloudfunctions/xiai-admin-token')
+/* **R-2 适配**：采纳写面（`reviewCorrection`）已从 `xiai-admin-token` 迁到 `xiai-user-token`
+   ⇒ 注入面随之迁移（传输按云函数名路由、user ops 注入同一假 DB、env 设 `XIAI_USER_*`）。 */
+const FUNCTION_DIR = path.join(ROOT, 'cloudfunctions/xiai-user-token')
 
 /* ---------------------------------------------------------------------------
    0. localStorage 假体（只为让数据层 / 服务层的 ESM 真源在本机 Node 下可导入）
@@ -112,6 +114,12 @@ process.env.XIAI_ADMIN_SMS_CODE = CODE
 process.env.XIAI_ADMIN_TOKEN_SECRET = SECRET
 process.env.XIAI_ADMIN_TOKEN_VERSION = process.env.XIAI_ADMIN_TOKEN_VERSION || '1'
 process.env.XIAI_ADMIN_TOKEN_TTL_SECONDS = process.env.XIAI_ADMIN_TOKEN_TTL_SECONDS || '900'
+/* **R-2 适配**：把同一组值映射到**用户函数**的环境变量名（`XIAI_USER_*` ＋ 白名单 `XIAI_ADMIN_PHONE`）。
+   采纳写面已迁到 `xiai-user-token`：服务端验签用户（登录）令牌 ＋「手机号 ∈ `XIAI_ADMIN_PHONE`」。 */
+process.env.XIAI_USER_SMS_CODE = CODE
+process.env.XIAI_USER_TOKEN_SECRET = SECRET
+process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
+process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
 const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE']
 const uidOfPhone = (phone) => `u-${String(phone).replace(/[^0-9]/g, '')}`
@@ -127,7 +135,8 @@ const NON_WHITELIST_PHONE = '139' + String(0).repeat(8) + '1'
    --------------------------------------------------------------------------- */
 const fn = require(path.join(FUNCTION_DIR, 'index.js'))
 const ops = require(path.join(FUNCTION_DIR, 'lib/ops.js'))
-const adminTokenLib = require(path.join(FUNCTION_DIR, 'lib/token.js'))
+/* 用户（登录）令牌库（`xiai-user-token/lib/token.js`；与管理员令牌库逐字节相同）。 */
+const userLib = require(path.join(FUNCTION_DIR, 'lib/token.js'))
 
 /* 假 DB（内存；按 `doc(id).set()` 的 CloudBase 语义补 `_id`）——「零写入」的判据就是它的写计数。 */
 function createStore(seed) {
@@ -224,7 +233,8 @@ const db = await import(path.join(ROOT, 'src/data/db.js'))
 const storage = await import(path.join(ROOT, 'src/data/storage.js'))
 const cloudbase = await import(path.join(ROOT, 'src/data/cloudbase.js'))
 const corrections = await import(path.join(ROOT, 'src/services/corrections.js'))
-const adminTokenSvc = await import(path.join(ROOT, 'src/services/adminToken.js'))
+/* **R-2 适配**：客户端采纳写面经用户令牌通道（云函数 `xiai-user-token`），不再是 `adminTokenSvc`。 */
+const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const sealsSvc = await import(path.join(ROOT, 'src/services/seals.js'))
 
 /* 本地库前置：先让 `ensureSeed()` 落一次（写 `seeded` 标记）⇒ 之后手写夹具不会被种子覆盖。 */
@@ -287,7 +297,7 @@ const USER = { id: 'u-13800000002', phone: '13800000002', role: 'user', nickname
 /** 传输：把请求交给**真实的云函数体**（离线端到端）；记录每次请求的载荷键面。 */
 const calls = []
 let transportMode = 'fn'
-adminTokenSvc.setAdminTokenTransport(async (name, data) => {
+userTokenSvc.setUserTokenTransport(async (name, data) => {
   calls.push({ name, action: data && data.action, token: data && data.token, op: data && data.op, payloadKeys: data && data.payload ? sorted(Object.keys(data.payload)) : null })
   if (transportMode === 'down') throw new Error('network-down')
   return { result: await fn.main(data) }
@@ -295,7 +305,7 @@ adminTokenSvc.setAdminTokenTransport(async (name, data) => {
 
 writeFace.setWriteFaceModeOverride('cloud')
 session.setUser(ADMIN)
-const issued = await adminTokenSvc.ensureAdminWriteSession(CODE, PHONE)
+const issued = await userTokenSvc.ensureUserWriteSession(CODE, PHONE)
 if (!issued.ok) {
   console.log(JSON.stringify({ fatal: 'TOKEN_ISSUE_FAILED', reason: issued.reason, message: issued.message }))
   process.exit(2)
@@ -305,20 +315,20 @@ if (!issued.ok) {
    5. A 段：契约对齐（客户端封闭面 vs 云函数冻结面）
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'A', title: '契约对齐：客户端封闭面 vs 云函数冻结面' }))
-check('A1', 'op 名逐字一致且已注册在云函数 OPS 面', true, corrections.REVIEW_OP === 'reviewCorrection' && Object.prototype.hasOwnProperty.call(ops.OPS, corrections.REVIEW_OP))
-check('A2', '采纳载荷键面逐字 ＝ ops.ALLOWED_KEYS', sorted(ops.ALLOWED_KEYS), sorted(corrections.REVIEW_PAYLOAD_KEYS))
+check('A1', 'op 名逐字一致且已注册在云函数 **ADMIN_OPS** 面（V3：迁到用户函数）', true, corrections.REVIEW_OP === 'reviewCorrection' && Object.prototype.hasOwnProperty.call(ops.ADMIN_OPS, corrections.REVIEW_OP))
+check('A2', '采纳载荷键面逐字 ＝ ops.**REVIEW_ALLOWED_KEYS**', sorted(ops.REVIEW_ALLOWED_KEYS), sorted(corrections.REVIEW_PAYLOAD_KEYS))
 check('A3', '公开投影键面逐字 ＝ ops.PUBLIC_PROJECTION_KEYS', ops.PUBLIC_PROJECTION_KEYS.slice(), corrections.PUBLIC_PROJECTION_KEYS.slice())
 check('A4', '公开投影 schema 逐字 ＝ ops.PUBLIC_SCHEMA', ops.PUBLIC_SCHEMA, corrections.PUBLIC_PROJECTION_SCHEMA)
 check('A5', '公开投影文档键前缀逐字 ＝ ops.PUBLIC_ID_PREFIX', ops.PUBLIC_ID_PREFIX, corrections.PUBLIC_ID_PREFIX)
 check('A6', '公开投影键面与身份 / 私密键面交集为空', [], ops.PUBLIC_PROJECTION_KEYS.filter((key) => ops.IDENTITY_PROJECTION_KEYS.indexOf(key) !== -1))
-console.log(JSON.stringify({ A_readout: { ALLOWED_KEYS: ops.ALLOWED_KEYS, PUBLIC_PROJECTION_KEYS: ops.PUBLIC_PROJECTION_KEYS, schema: ops.PUBLIC_SCHEMA, idPrefix: ops.PUBLIC_ID_PREFIX } }))
+console.log(JSON.stringify({ A_readout: { REVIEW_ALLOWED_KEYS: ops.REVIEW_ALLOWED_KEYS, PUBLIC_PROJECTION_KEYS: ops.PUBLIC_PROJECTION_KEYS, schema: ops.PUBLIC_SCHEMA, idPrefix: ops.PUBLIC_ID_PREFIX } }))
 
-/* A7／A8：键面相关性的**负向 / 正向对照**（服务端直调，用同环境自签令牌）。 */
-const tokenSnap = adminTokenSvc.adminTokenSnapshot()
+/* A7／A8：键面相关性的**负向 / 正向对照**（服务端直调，用同环境自签**用户**令牌）。 */
+const tokenSnap = userTokenSvc.userTokenSnapshot()
 check('A7c', '令牌已进入内存缓存（读数不含令牌原文）', true, tokenSnap.present === true && tokenSnap.tokenLength > 0 && typeof tokenSnap.tokenFingerprint === 'string')
 {
   store.load(CLOUD_SEED)
-  const direct = adminTokenLib.issueToken({ sub: PHONE, secret: SECRET, nowSeconds: nowS(), ttlSeconds: 900, version: '1', role: 'admin' })
+  const direct = userLib.issueToken({ sub: PHONE, secret: SECRET, nowSeconds: nowS(), ttlSeconds: 900, version: '1', role: 'user' })
   /* 负向：客户端**曾用的旧键面** `{id:…}` ⇒ 服务端 INVALID_FIELD ＋ 零写入。 */
   const legacyKey = await fn.main({ action: 'verify', token: direct.token, op: 'reviewCorrection', payload: { id: 'cr-name', decision: 'ACCEPTED' } })
   check('A8', '**旧键面** `{id:…}` ⇒ 服务端 INVALID_FIELD（A2 的负向对照）', true, isDenial(legacyKey) && legacyKey.reason === 'INVALID_FIELD')
@@ -341,8 +351,8 @@ console.log(JSON.stringify({ section: 'B', title: '端到端采纳 → 公开投
 store.load(CLOUD_SEED)
 resetLocal()
 calls.length = 0
-adminTokenSvc.clearAdminToken()
-await adminTokenSvc.ensureAdminWriteSession(CODE, PHONE)
+userTokenSvc.clearUserToken()
+await userTokenSvc.ensureUserWriteSession(CODE, PHONE)
 
 const sealBefore = sealsSvc.getSealById(SEAL_ID)
 const faceBefore = sealsSvc.getFaceById(FACE_ID)
@@ -358,7 +368,7 @@ check('B1', '未采纳时显示名 ＝「佚名」（`seal_name` 为空）', '�
 const beforeWrites = store.stats.writes.length
 const reviewed = await corrections.review(ADMIN, 'cr-name', 'ACCEPTED')
 check('B2', '采纳成功（ok:true / accepted:true）', { ok: true, accepted: true, status: 'ACCEPTED' }, { ok: reviewed.ok, accepted: reviewed.accepted, status: reviewed.status })
-check('B2b', '**传输载荷键面恰 ＝ ops.ALLOWED_KEYS**（键名对齐的运行时证据）', sorted(ops.ALLOWED_KEYS), calls[calls.length - 1].payloadKeys)
+check('B2b', '**传输载荷键面恰 ＝ ops.REVIEW_ALLOWED_KEYS**（键名对齐的运行时证据）', sorted(ops.REVIEW_ALLOWED_KEYS), calls[calls.length - 1].payloadKeys)
 check('B2c', '服务端恰落盘 2 处', 2, store.stats.writes.length - beforeWrites)
 const publicWrite = store.stats.writes[beforeWrites]
 check('B2d', '第 1 处落盘 ＝ 公开投影 `doc(cp-cr-name).set(…)`', { collection: 'xiai_corrections_public', action: 'set', id: 'cp-cr-name' }, { collection: publicWrite.collection, action: publicWrite.action, id: publicWrite.id })
@@ -470,7 +480,7 @@ writeFace.setWriteFaceModeOverride('cloud')
 console.log(JSON.stringify({ section: 'D', title: '机械扫描：调用点键面 / 内联点清零 / 单点' }))
 const correctionsSrc = readFileSync(path.join(ROOT, 'src/services/corrections.js'), 'utf8')
 check('D1', '審覈调用点用 `correction_id:`（静态）', true, /correction_id:\s*String\(correctionId/.test(correctionsSrc))
-check('D1b', '審覈调用点**不再**用 `id:` 作单号键（静态）', false, /adminGate\(REVIEW_OP,\s*\{\s*id:/.test(correctionsSrc))
+check('D1b', '審覈调用点**不再**用 `id:` 作单号键（静态；V3 后写面门为 `userWriteGate`）', false, /userWriteGate\(REVIEW_OP,\s*\{\s*id:/.test(correctionsSrc))
 
 /** 去注释（块注释 ＋ 行注释）后计数——「不得据源码注释判负」。 */
 function stripComments(src) {

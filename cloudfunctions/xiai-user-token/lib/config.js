@@ -34,13 +34,16 @@ const REASONS = Object.freeze({
   DUPLICATE_VALUE: 'DUPLICATE_VALUE'
 })
 
-/** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。 */
+/** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。
+ *  **V3 追加**：`ADMIN_PHONE` ＝ 管理员白名单真源（挂在**本函数**上）；缺 / 空 ⇒
+ *  所有管理员类 op 一律结构化拒绝 ＋ 零写入（**不因未配置而放行**）。 */
 const ENV_NAMES = Object.freeze({
   SMS_CODE: 'XIAI_USER_SMS_CODE',
   SECRET: 'XIAI_USER_TOKEN_SECRET',
   VERSION: 'XIAI_USER_TOKEN_VERSION',
   TTL_SECONDS: 'XIAI_USER_TOKEN_TTL_SECONDS',
-  LEEWAY_SECONDS: 'XIAI_USER_TOKEN_LEEWAY_SECONDS'
+  LEEWAY_SECONDS: 'XIAI_USER_TOKEN_LEEWAY_SECONDS',
+  ADMIN_PHONE: 'XIAI_ADMIN_PHONE'
 })
 
 /** 环境 Id 的三个候选环境变量（**运行期注入**，与 liwu 既有函数 `fortuneDailySettlement` 同一读法；
@@ -133,7 +136,7 @@ function maskedPhone(value) {
  * 读配置。
  * @param {object} [env] 环境（缺省 `process.env`；测试可注入）
  * @returns {{ready:true, smsCode:string, secret:string, version:string, ttlSeconds:number,
- *            leewaySeconds:number, envId:string}
+ *            leewaySeconds:number, envId:string, adminPhone:string}
  *          |{ready:false, reason:string, message:string}}
  */
 function readConfig(env) {
@@ -158,7 +161,10 @@ function readConfig(env) {
     version: readString(source, ENV_NAMES.VERSION) || DEFAULT_VERSION,
     ttlSeconds: readInteger(source, ENV_NAMES.TTL_SECONDS, DEFAULT_TTL_SECONDS),
     leewaySeconds: readInteger(source, ENV_NAMES.LEEWAY_SECONDS, DEFAULT_LEEWAY_SECONDS),
-    envId: readEnvId(source)
+    envId: readEnvId(source),
+    /* **管理员白名单真源**：缺 / 空 ⇒ 空串 ⇒ 所有管理员类 op 结构化拒绝（安全默认）。
+       它**不参与** `ready` 判定 —— 缺它时普通用户写面（提交 / 采信）仍应可用。 */
+    adminPhone: normalizePhone(readString(source, ENV_NAMES.ADMIN_PHONE))
   }
 }
 

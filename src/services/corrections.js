@@ -44,10 +44,10 @@ import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND } from './seals.js'
    服务端验签后才落盘（落盘在**云端**，`xiai_corrections` 的 ACL 是 `PRIVATE` ⇒ 只能由云函数
    以管理端凭据写）；**创建者身份由服务端记录**（`uid = u-<手机号>` 从令牌声明派生），
    载荷里的身份类键一律被服务端拒（`INVALID_FIELD` ＋ 零写入）。 */
-import { userGate } from './userToken.js'
-/* **采纳写面（r2）：云端门**——审核（采纳 / 驳回）在云端形态下先经 `xiai-admin-token` 验签
-   （与 `services/admin.js::setInviteReward` 同一条管道、同一失败形态），过门后才落本机镜像。 */
-import { adminGate } from './adminToken.js'
+import { userWriteGate } from './userWrite.js'
+/* **V3（管理员写面收敛）**：采纳 / 驳回**不再**经 `xiai-admin-token`（客户端对其零引用）；
+   一律走**登录令牌写面门** `userWriteGate` —— 服务端在 `xiai-user-token` 上验签 ＋
+   判「手机号 ∈ 管理员白名单（环境变量 `XIAI_ADMIN_PHONE`）」⇒ **零弹窗、不需要第二个码**。 */
 
 /** 勘误三态（规范冻结字面值）。 */
 export const CORRECTION_STATUS = {
@@ -396,8 +396,9 @@ export async function submitCorrection({
   }
   const faceLabel = faceLabelOf(face.id, face.sealId)
 
-  /* ② **服务端门**（云端形态下唯一身份判据 ＋ 权威落盘）。 */
-  const gate = await userGate('submitCorrection', payload)
+  /* ② **服务端门**（云端形态下唯一身份判据 ＋ 权威落盘）；经登录令牌写面门 ⇒
+     **无令牌且有会话时先静默补签**（修「刷新后提交勘误必失败」）。 */
+  const gate = await userWriteGate('submitCorrection', payload)
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
 
   if (gate.mode === 'local-dev') {
@@ -600,7 +601,7 @@ function isPermissionError(err) {
   return err instanceof PermissionError || (err && err.name === 'PermissionError')
 }
 
-/** 采纳写面（r2）的**云端门 op 名**（须与云函数 `xiai-admin-token` 的 `OPS` 注册面逐字一致）。 */
+/** 采纳写面（V3）的**云端门 op 名**（须与云函数 `xiai-user-token/lib/ops.js::ADMIN_OPS` 的注册面逐字一致）。 */
 export const REVIEW_OP = 'reviewCorrection'
 
 /**
@@ -777,9 +778,11 @@ function reconcileLocalMirrorFromAuthority(correctionId, authorityRow, projectio
  * - 第 4 参 `note`（**可选，默认空串**）：**仅驳回且非空**时作为理由落盘（`review_note`，≤200 字）；
  *   单条驳回不传 ⇒ 行为逐字不变（**不写理由**）。
  *
- * **采纳写面（r2）：云端门 ＋ 同步本机镜像**——判定顺序改为：
- *   ① **云端门**（`adminGate(REVIEW_OP, {id, decision, note})`）：云端形态下这是**唯一授权判据**
- *      （服务端验签 ＋ 手机号白名单 ＋ op 值域 / 字段门，由服务端在云端落盘 / 写公开投影）；
+ * **采纳写面（V3：登录令牌 ＋ 手机号白名单）＋ 同步本机镜像**——判定顺序：
+ *   ① **登录令牌写面门**（`userWriteGate(REVIEW_OP, {correction_id, decision, note})`）：
+ *      云端形态下这是**唯一授权判据**（服务端在 `xiai-user-token` 上验签 ＋
+ *      「手机号 ∈ 管理员白名单」＋ op 值域 / 字段门，由服务端在云端落盘 / 写公开投影）；
+ *      无令牌且有会话时**先静默补签**（刷新后令牌即丢的自愈）；**零弹窗、不需要第二个码**；
  *      拒絶 ⇒ **原样透传**（传输层失败 ⇒ `STORAGE_UNAVAILABLE`，**絕不偽裝 `FORBIDDEN`**）＋ **零写入**；
  *      dev / 離線形態 ⇒ 放行到本地判定（明確標注非正式寫入路徑）。
  *   ② **本機鏡像**：過門後仍走既有 `writeCorrectionDecision`（**三態語義 / 冪等 / 值域門 /
@@ -795,11 +798,12 @@ export async function review(actor, correctionId, decision, note = '') {
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈勘誤' }
   }
-  /* ① 雲端門（唯一授權判據；dev / 離線形態返回放行標記）。
-     载荷键面**逐字**取服务端封闭面（云函数 `lib/ops.js::ALLOWED_KEYS` ＝
-     `REVIEW_PAYLOAD_KEYS`）：`correction_id` / `decision` / `note`；
+  /* ① **登录令牌写面门**（V3：唯一授权判据；dev / 離線形態返回放行標記）。
+     经 `userWriteGate` ⇒ 无令牌且有会话时**先静默补签**（刷新后令牌即丢的自愈），再过云端门。
+     载荷键面**逐字**取服务端封闭面（云函数 `xiai-user-token/lib/ops.js::REVIEW_ALLOWED_KEYS`
+     ＝ `REVIEW_PAYLOAD_KEYS`）：`correction_id` / `decision` / `note`；
      键名不符（曾误用 `id`）会被服务端判 `INVALID_FIELD` ＋ 零写入。 */
-  const gate = await adminGate(REVIEW_OP, {
+  const gate = await userWriteGate(REVIEW_OP, {
     correction_id: String(correctionId === null || correctionId === undefined ? '' : correctionId),
     decision: String(decision === null || decision === undefined ? '' : decision),
     note: String(note === null || note === undefined ? '' : note)

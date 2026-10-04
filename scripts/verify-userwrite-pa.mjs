@@ -15,14 +15,14 @@
  *
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
- * 用法（密钥 / 验证码 / 手机号从**环境变量**传入）：
- *   XIAI_USER_SMS_CODE=… XIAI_USER_TOKEN_SECRET=… XIAI_USER_PHONE=… \
- *     node scripts/verify-userwrite-pa.mjs
+ * 用法（可选环境变量；缺省 ⇒ 脚本自造一次性合成环境 + 取公开演示码，绝不写进仓）：
+ *   XIAI_USER_TOKEN_SECRET=… XIAI_USER_PHONE=… node scripts/verify-userwrite-pa.mjs
+ *   （验证码恒取客户端公开演示码 `auth.js::DEMO_SMS_CODE` —— V3 自愈路径与它同源；生产不变量。）
  */
 
 import { createRequire } from 'node:module'
 import { readFileSync, readdirSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -78,15 +78,16 @@ function check(id, label, expected, actual) {
 }
 
 /* ---------------------------------------------------------------------------
-   2. 环境（**密钥 / 验证码只从环境变量来**）
-   --------------------------------------------------------------------------- */
+   2. 环境（**密钥 / 验证码只从环境变量来；缺省合成一次性假环境，绝不写进仓**）
+   ---------------------------------------------------------------------------
+   **V3 适配**：验证码必须与客户端公开演示码 `DEMO_SMS_CODE` 一致 —— 自愈路径
+   （`userWrite.js::ensureUserTokenForWrite`）用它静默补签，服务端按
+   `code === 环境变量` 判定；生产里 `XIAI_USER_SMS_CODE` 与它同值（见 `auth.js` 文件头）。
+   ⇒ 本自检**取真源**（不是放宽：该值本就随前端包公开，且是生产不变量）。 */
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000001').trim()
-const SMSCode = String(process.env.XIAI_USER_SMS_CODE || '').trim()
-const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || '').trim()
-if (!SMSCode || !SECRET) {
-  console.log(JSON.stringify({ fatal: '缺环境变量：XIAI_USER_SMS_CODE / XIAI_USER_TOKEN_SECRET（不得写进脚本）' }))
-  process.exit(2)
-}
+const authForCode = await import(path.join(ROOT, 'src/services/auth.js'))
+const SMSCode = String(authForCode.DEMO_SMS_CODE)
+const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || randomBytes(32).toString('hex')).trim()
 process.env.XIAI_USER_SMS_CODE = SMSCode
 process.env.XIAI_USER_TOKEN_SECRET = SECRET
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
@@ -373,6 +374,8 @@ const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const corrections = await import(path.join(ROOT, 'src/services/corrections.js'))
 const authSvc = await import(path.join(ROOT, 'src/services/auth.js'))
 const adminTokenSvc = await import(path.join(ROOT, 'src/services/adminToken.js'))
+/* **V3 追加**：登录令牌写面门（自愈单点）—— B3 用它做「清令牌 ＋ 有会话 ⇒ 先 issue 后 verify」。 */
+const userWriteSvc = await import(path.join(ROOT, 'src/services/userWrite.js'))
 
 /** 传输：把请求交给**真实的云函数体**（离线端到端）。 */
 const calls = []
@@ -419,13 +422,38 @@ console.log(
   })
 )
 
-/* B3：负向 —— 无令牌 ⇒ FORBIDDEN ＋ 零写入 */
+/* B3：**V3 自愈**（本单适配）—— 清令牌 ＋ 有会话 ⇒ 流程**先 issue 补签、再 verify 写**，最终 ok。
+   改前断言「清令牌 ⇒ FORBIDDEN」已随 V3 架构（管理员/用户写面收敛到一枚登录令牌 ＋ 自愈）失效。 */
 userTokenSvc.clearUserToken()
+check('B3', '清令牌后：内存无令牌（present＝false）', false, userTokenSvc.userTokenSnapshot().present)
+const callsBeforeB3 = calls.length
 const beforeB3 = bucket.adds.length
-const noTokWrite = await corrections.submitCorrection({ faceId: face.id, sealId: face.sealId, field: 'author', value: 'x' })
-check('B3', '无令牌 ⇒ 服务端 FORBIDDEN', 'FORBIDDEN', noTokWrite.reason)
-check('B3b', '零写入（云端 add 计数不变）', beforeB3, bucket.adds.length)
-check('B3c', '发生过往返（说明不是本地短路）', true, calls.length > 0)
+const healedWrite = await corrections.submitCorrection({ faceId: face.id, sealId: face.sealId, field: 'author', value: '測試作者 自愈' })
+check('B3b', 'V3 自愈：清令牌 ＋ **有会话** ⇒ 写成功（ok:true）', true, healedWrite.ok === true)
+check('B3c', '自愈权威来源 ＝ SERVER', 'SERVER', healedWrite.authority)
+{
+  const seq = calls.slice(callsBeforeB3).map((call) => call.action)
+  check('B3d', '自愈顺序：**先 issue 后 verify**', true, seq.indexOf('issue') !== -1 && seq.indexOf('verify') !== -1 && seq.indexOf('issue') < seq.indexOf('verify'))
+}
+check('B3e', '自愈后令牌已进入缓存（present＝true）', true, userTokenSvc.userTokenSnapshot().present === true)
+check('B3f', '自愈写：云端恰 1 行', 1, bucket.adds.length - beforeB3)
+check('B3g', '自愈写行内 userId ＝ 服务端派生 uid（非前端自称）', uidOfPhone(PHONE), bucket.adds[beforeB3].doc.user_id)
+
+/* B3n：**负向**（本单新增）—— 清令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ **零写入**（且零往返：连补签都不发）。
+   这条把「无会话不得静默放行」钉死，与上面「有会话才自愈」成对。 */
+userTokenSvc.clearUserToken()
+session.setUser(null)
+const callsBeforeB3n = calls.length
+const beforeB3n = bucket.adds.length
+const noSessionGate = await userWriteSvc.ensureUserTokenForWrite()
+check('B3n', '清令牌 ＋ **无会话** ⇒ userWriteGate 结构化拒绝（ok:false ＋ reason 非空）', true, noSessionGate.ok === false && typeof noSessionGate.reason === 'string' && noSessionGate.reason.length > 0)
+check('B3n2', '无会话 ⇒ 零写入（云端 add 计数不变）', beforeB3n, bucket.adds.length)
+check('B3n3', '无会话 ⇒ 零往返（连补签 request 都不发，「不得静默」的机械证据）', callsBeforeB3n, calls.length)
+const noUserWrite = await corrections.submitCorrection({ faceId: face.id, sealId: face.sealId, field: 'author', value: '不該寫入' })
+check('B3n4', '服务层本地门同样拒绝（未登录 ⇒ ok:false）', false, noUserWrite.ok)
+check('B3n5', '仍零写入', beforeB3n, bucket.adds.length)
+/* 复原会话（B4 起仍需登录态）。 */
+session.setUser(user)
 
 /* B4：负向 —— 传输失败 ⇒ STORAGE_UNAVAILABLE（**不得伪装 FORBIDDEN**）＋ 令牌不清 */
 await userTokenSvc.ensureUserLoginToken(PHONE, SMSCode)

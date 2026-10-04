@@ -108,6 +108,10 @@ function failureShape(value) {
    --------------------------------------------------------------------------- */
 const adminTokenFunction = require(path.join(ROOT, 'cloudfunctions/xiai-admin-token/index.js'))
 const tokenLib = require(path.join(ROOT, 'cloudfunctions/xiai-admin-token/lib/token.js'))
+/* **R-2 适配**：B 段的写面（`setInviteReward`）已改走**登录令牌写面门** ⇒ 函数体换成
+   `xiai-user-token`（A 段仍测 `xiai-admin-token` 本体，其判定分支一字未动）。 */
+const userTokenFunction = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/index.js'))
+const userTokenLib = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/token.js'))
 
 const PHONE = String(process.env.XIAI_ADMIN_PHONE || '').trim()
 const CODE = String(process.env.XIAI_ADMIN_SMS_CODE || '').trim()
@@ -125,6 +129,7 @@ if (PHONE === '' || CODE === '' || SECRET === '') {
 }
 
 const main = adminTokenFunction.main
+const userMain = userTokenFunction.main
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 const NON_WHITELIST_PHONE = '13900000001'
 
@@ -267,14 +272,25 @@ console.log(JSON.stringify({ section: 'B', title: '客户端管道 + 垂直切�
 const session = await import(path.join(ROOT, 'src/data/session.js'))
 const storage = await import(path.join(ROOT, 'src/data/storage.js'))
 const writeFace = await import(path.join(ROOT, 'src/data/writeFaceMode.js'))
-const adminToken = await import(path.join(ROOT, 'src/services/adminToken.js'))
+const authService = await import(path.join(ROOT, 'src/services/auth.js'))
+/* **R-2 适配**：`setInviteReward` 改走**登录令牌写面门**（云函数 `xiai-user-token`），
+   不再是 `xiai-admin-token` ⇒ B 段的客户端通道 = userToken、函数体 = userMain。 */
+const userToken = await import(path.join(ROOT, 'src/services/userToken.js'))
 const adminService = await import(path.join(ROOT, 'src/services/admin.js'))
+
+/* 用户函数的环境变量（同一组值映射；验证码取**公开演示码** —— 自愈路径需要它与服务端一致）。 */
+const USER_CODE = authService.DEMO_SMS_CODE
+process.env.XIAI_ADMIN_PHONE = PHONE
+process.env.XIAI_USER_SMS_CODE = USER_CODE
+process.env.XIAI_USER_TOKEN_SECRET = SECRET
+process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
+process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
 /** 注入「真实函数体的本地调用」实现（生产走 SDK；此处只为离线可复现）。 */
 function installLocalFunctionTransport(patch) {
-  adminToken.setAdminTokenTransport(async (name, data) => {
+  userToken.setUserTokenTransport(async (name, data) => {
     if (typeof patch === 'function') return patch(name, data)
-    const result = await main(data)
+    const result = await userMain(data)
     return { ok: true, result }
   })
 }
@@ -289,32 +305,43 @@ check('B0', '云端形态：writeFaceMode()', 'cloud', writeFace.writeFaceMode()
 check('B0b', '云端形态：本地写入口门 ⇒ 结构化拒绝（非 null）', 'FORBIDDEN', (writeFace.localWriteDenial() || {}).reason)
 check('B0c', '云端形态：本地写入口门文案含「dev / 離線形態」标注', true, String((writeFace.localWriteDenial() || {}).message || '').includes('dev / 離線形態'))
 
-/* B1 未取票时直接写 ⇒ 服务端 FORBIDDEN ＋ 零写入（**前端不预判**：请求真的发到服务端） */
+/* B1 **V3 自愈**：无令牌 ＋ **有会话** ⇒ 流程**先 issue 补签、再 verify**，最终写入成功。
+   改前断言「无令牌 ⇒ FORBIDDEN」已随 V3（写面收敛到一枚登录令牌 ＋ 自愈）失效。 */
 session.setUser({ id: 'u-harness-admin', role: 'admin', phone: PHONE })
+userToken.clearUserToken()
 let wireCalls = 0
 installLocalFunctionTransport(async (name, data) => {
   wireCalls += 1
-  const result = await main(data)
-  return { ok: true, result }
+  return { ok: true, result: await userMain(data) }
 })
 const before = readRewardKey()
-const noTokenWrite = await adminService.setInviteReward(null, 11)
-check('B1', '无令牌写 ⇒ FORBIDDEN', 'FORBIDDEN', noTokenWrite.reason)
-check('B1b', '无令牌写 ⇒ 零写入（配置键未变）', before, readRewardKey())
-check('B1c', '无令牌写确实发生了服务端往返（前端不预判）', true, wireCalls === 1)
+const healedWrite = await adminService.setInviteReward(null, 11)
+check('B1', 'V3 自愈：无令牌 ＋ **有会话** ⇒ 写成功（ok:true）', true, healedWrite.ok === true)
+check('B1b', '自愈写落盘：配置键值 = 11', JSON.stringify({ invite_reward: 11 }), readRewardKey())
+check('B1c', '自愈顺序：先 issue 补签、后 verify（恰 2 次往返）', 2, wireCalls)
+
+/* B1n **负向**：无令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ 零写入（且**零往返**：连补签都不发）。 */
+userToken.clearUserToken()
+session.setUser(null)
+wireCalls = 0
+const beforeB1n = readRewardKey()
+const anonWrite = await adminService.setInviteReward(null, 12)
+check('B1n', '无令牌 ＋ **无会话** ⇒ 结构化拒绝（FORBIDDEN）', 'FORBIDDEN', anonWrite.reason)
+check('B1n2', '无会话 ⇒ 零写入（配置键未变）', beforeB1n, readRewardKey())
+check('B1n3', '无会话 ⇒ 零往返（不发 issue，证明「不得静默」）', 0, wireCalls)
 
 /* B2 取票（签发 → 缓存） */
-const issuedSession = await adminToken.ensureAdminWriteSession(CODE)
+const issuedSession = await userToken.ensureUserWriteSession(USER_CODE, PHONE)
 check('B2', '取票成功（手机号取自登录用户，验证码来自输入）', true, issuedSession.ok === true)
-check('B2b', '令牌进入缓存（只给长度 / 指纹，不给原文）', true, adminToken.adminTokenSnapshot().present === true)
-console.log(JSON.stringify({ B2_readout: adminToken.adminTokenSnapshot() }))
+check('B2b', '令牌进入缓存（只给长度 / 指纹，不给原文）', true, userToken.userTokenSnapshot().present === true)
+console.log(JSON.stringify({ B2_readout: userToken.userTokenSnapshot() }))
 
 /* B3 端到端成功往返：签发 → 携带 → 校验通过 → 落盘 */
 const okWrite = await adminService.setInviteReward(null, 7)
 check('B3', '经云端校验后写入成功', true, okWrite.ok === true)
 check('B3b', '落盘读数：配置键值 = 7', JSON.stringify({ invite_reward: 7 }), readRewardKey())
-check('B3c', '滑动续期发生（成功校验回吐新令牌）', true, adminToken.adminTokenSnapshot().slidingRenewals >= 1)
-console.log(JSON.stringify({ B3_readout: { key: REWARD_KEY, value: okWrite, token: adminToken.adminTokenSnapshot() } }))
+check('B3c', '滑动续期发生（成功校验回吐新令牌）', true, userToken.userTokenSnapshot().slidingRenewals >= 1)
+console.log(JSON.stringify({ B3_readout: { key: REWARD_KEY, value: okWrite, token: userToken.userTokenSnapshot() } }))
 
 /* B4 值域门（携带有效令牌 + 非法值）⇒ INVALID_VALUE ＋ 零写入 */
 const afterB3 = readRewardKey()
@@ -330,21 +357,29 @@ const netFail = await adminService.setInviteReward(null, 13)
 check('B5', '传输失败 ⇒ STORAGE_UNAVAILABLE', 'STORAGE_UNAVAILABLE', netFail.reason)
 check('B5b', '传输失败 ≠ FORBIDDEN（R-WF2）', true, netFail.reason !== 'FORBIDDEN')
 check('B5c', '传输失败 ⇒ 零写入', afterB3, readRewardKey())
-check('B5d', '传输失败不清令牌（「未知」≠「无效」）', true, adminToken.adminTokenSnapshot().present === true)
+check('B5d', '传输失败不清令牌（「未知」≠「无效」）', true, userToken.userTokenSnapshot().present === true)
 
-/* B6 过期令牌（注入「只签发已过期令牌」的传输）⇒ FORBIDDEN ＋ 零写入 */
+/* B6 过期令牌（注入「verify 时替换成已过期用户令牌」的传输）⇒ FORBIDDEN ＋ 零写入 */
+const staleUser = userTokenLib.issueToken({
+  sub: PHONE,
+  secret: SECRET,
+  nowSeconds: nowSeconds() - 7200,
+  ttlSeconds: 900,
+  version: process.env.XIAI_USER_TOKEN_VERSION || '1',
+  role: 'user'
+})
 installLocalFunctionTransport(async (name, data) => {
   if (data.action === 'issue') {
-    return { ok: true, result: await main({ action: 'issue', phone: PHONE, code: CODE }) }
+    return { ok: true, result: await userMain({ action: 'issue', phone: PHONE, code: USER_CODE }) }
   }
-  return { ok: true, result: await main({ ...data, token: stale.token }) }
+  return { ok: true, result: await userMain({ ...data, token: staleUser.token }) }
 })
 const afterB3b = readRewardKey()
 const expiredWrite = await adminService.setInviteReward(null, 17)
 check('B6', '过期令牌 ⇒ FORBIDDEN', 'FORBIDDEN', expiredWrite.reason)
 check('B6b', '过期拒绝文案指向重新验证', true, String(expiredWrite.message || '').includes('過期'))
 check('B6c', '过期拒绝 ⇒ 零写入', afterB3b, readRewardKey())
-check('B6d', '授权判定失败 ⇒ 缓存令牌已清（需重新取票）', false, adminToken.adminTokenSnapshot().present)
+check('B6d', '授权判定失败 ⇒ 缓存令牌已清（需重新取票）', false, userToken.userTokenSnapshot().present)
 
 /* B7 dev / 离线形态：本地写入口保留（**明确标注为非正式写入路径**） */
 writeFace.setWriteFaceModeOverride('local-dev')
