@@ -668,6 +668,46 @@ function mirrorAcceptedToPublic(row, serverProjection) {
 }
 
 /**
+ * **本机镜像更正（云端权威优先）** —— 服务端是权威、本机只是镜像。
+ *
+ * 触发场景：**云端门已成功落盘**（`gate.mode==='cloud'` ⇒ 云函数已写权威行），而本机
+ * `writeCorrectionDecision` **未成功**（`!decided.ok`；常见成因 `ALREADY_REVIEWED` ——
+ * 本机与云端状态不一致，或同一行在另一页签已本地采纳）⇒ **不得把它当失败返回**。
+ * 做法：以**服务端回包的权威行**（`gate.row`：仅供「决定面」字段 status / reviewed_at /
+ * reviewer_id / field_label / review_note）更正**本机镜像行**（`corrections` 键），
+ * 采纳时再同步**公开投影的本机镜像**（`gate.projection` 为服务端权威投影行）。
+ * **仅本地镜像写、不额外调云**（云端已由本 op 落盘）。
+ *
+ * 本机侧**只读 / 只写**「本机状态与云端状态不一致」这一层，**不改**勘误三态语义 / 幂等 /
+ * +10 金奖励；本机行身份键（`row.id`）与本地专有字段（如 `batchId`）**原样保留**。
+ * @param {string} correctionId 勘误单号（本机行身份键 `row.id`）
+ * @param {object} authorityRow 服务端回包的权威行（`gate.row`）
+ * @param {object} [projection] 服务端回包的公开投影行（`gate.projection`）
+ * @returns {{row:object, status:string, accepted:boolean, existed:boolean}|null} 无法更正 ⇒ `null`
+ */
+function reconcileLocalMirrorFromAuthority(correctionId, authorityRow, projection) {
+  const authority = authorityRow && typeof authorityRow === 'object' ? authorityRow : null
+  if (!authority) return null
+  const status = normalizeCorrectionStatus(authority.status)
+  if (status !== CORRECTION_STATUS.ACCEPTED && status !== CORRECTION_STATUS.REJECTED) return null
+  const rows = listCorrectionRows()
+  const target = rows.find((row) => row.id === correctionId) || null
+  /* 保留本机行专有字段（`id` / `batchId` / `rewarded_at` 等）；只覆盖「决定面」权威字段。 */
+  const next = { ...(target || { id: correctionId }) }
+  next.status = status
+  if (authority.reviewed_at !== undefined && authority.reviewed_at !== null) next.reviewed_at = authority.reviewed_at
+  if (authority.reviewer_id !== undefined && authority.reviewer_id !== null) next.reviewer_id = authority.reviewer_id
+  if (authority.field_label !== undefined && authority.field_label !== '') next.field_label = authority.field_label
+  if (authority.review_note !== undefined && authority.review_note !== '') next.review_note = authority.review_note
+  else if (Object.prototype.hasOwnProperty.call(next, 'review_note')) delete next.review_note
+  const existed = target !== null
+  saveCorrectionRows(existed ? rows.map((row) => (row.id === correctionId ? next : row)) : [...rows, next])
+  /* 采纳 ⇒ 公开投影的本机镜像一键 upsert（与服务端权威投影行同源）。 */
+  if (status === CORRECTION_STATUS.ACCEPTED) mirrorAcceptedToPublic(next, projection)
+  return { row: next, status, accepted: status === CORRECTION_STATUS.ACCEPTED, existed }
+}
+
+/**
  * **冻结 API ④**：审核一条勘误（采纳 / 驳回）。
  *
  * - 仅管理员；`decision` 取 `'ACCEPTED'`（采纳）或 `'REJECTED'`（驳回），
@@ -712,9 +752,48 @@ export async function review(actor, correctionId, decision, note = '') {
     decided = writeCorrectionDecision(who, correctionId, decision, note)
   } catch (err) {
     if (isPermissionError(err)) return { ok: false, reason: 'FORBIDDEN', message: err.message }
-    return { ok: false, reason: 'ERROR', message: `審覈失敗：${(err && err.message) || '未知原因'}` }
+    decided = { ok: false, reason: 'ERROR', message: `審覈失敗：${(err && err.message) || '未知原因'}` }
   }
-  if (!decided.ok) return decided
+  /* ②-a **雲端權威優先**：雲端門已成功落盤（`gate.mode==='cloud'` 且帶回權威行），
+     但本機 `writeCorrectionDecision` 未成功（`ALREADY_REVIEWED` / `NOT_FOUND` / 本地異常等）⇒
+     **不得當失敗返回**：以服務端權威行（`gate.row` ＝ status/reviewed_at/reviewer_id…）
+     更正本機鏡像行，並以 `ok:true` 如實呈現（「雲端已…；本機鏡像已按雲端權威更正」，**不謊稱本機首次採納**）。
+     dev / 離線形態無服務端 ⇒ 不觸發本分支 ⇒ 既有本地行為逐字不變。 */
+  if (!decided.ok) {
+    if (gate.mode === 'cloud' && gate.row) {
+      const reconciled = reconcileLocalMirrorFromAuthority(correctionId, gate.row, gate.projection)
+      if (reconciled) {
+        let reward = { ok: true, awarded: false, message: '駁回不發獎' }
+        if (reconciled.accepted) {
+          const submitterId = reconciled.row.user_id || reconciled.row.userId || ''
+          reward = awardCorrectionReward(submitterId, correctionId)
+          if (reward.awarded) {
+            try {
+              markCorrectionRewarded(who, correctionId)
+            } catch {
+              /* 奖励已实际发放；标记失败不回滚（奖励幂等以流水为准，见 §7.4）。 */
+            }
+          }
+        }
+        const label = reconciled.row.field_label || (markableMeta(reconciled.row.field) || {}).label || '該屬性'
+        const faceLabel = faceLabelOf(reconciled.row.faceId, sealIdOf(reconciled.row))
+        const verb = reconciled.accepted ? '採納' : '駁回'
+        return {
+          ok: true,
+          status: reconciled.status,
+          accepted: reconciled.accepted,
+          reward,
+          row: reconciled.row,
+          /* 明确标记「本次未在本机首次写入、而是按云端权威更正」⇒ 供取证区分。 */
+          reconciled: true,
+          message: `雲端已${verb}「${faceLabel}·${label}」勘誤；本機鏡像已按雲端權威更正。${
+            reconciled.accepted ? reward.message : ''
+          }`
+        }
+      }
+    }
+    return decided
+  }
   /* ③ 已採納 ⇒ 同步公開投影的本機鏡像（冪等 upsert；雲端形態優先採用服務端回包的投影行）。 */
   if (decided.accepted) mirrorAcceptedToPublic(decided.row, gate.projection)
 
