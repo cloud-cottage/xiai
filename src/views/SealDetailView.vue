@@ -342,15 +342,18 @@ function markableOf(face) {
 }
 
 /* ============================================================================
-   **採信**（本单新增）：详情页「可標記屬性」区里，某字段已有**他人**提交
-   （`PENDING` / `ACCEPTED`）时就地列出「值 ＋ N 人採信 ＋ 【採信】按钮」。
+   **採信**（本单新增）：详情页「可標記屬性」区里，就地列出**候选值**
+   （值 ＋「N 人提交 / M 人採信」＋ 状态）与【採信】按钮。
    ----------------------------------------------------------------------------
    口径（人类冻结，逐条）：
-     · 【採信】**只作佐证 / 可信度计数**（展示为「N 人採信」）；**生效仍由管理员采纳决定**
+     · 【採信】**只作佐证 / 可信度计数**（展示为「M 人採信」）；**生效仍由管理员采纳决定**
        —— 因此**已 `ACCEPTED` 的条目不再接受采信**（按钮隐藏，登记 `data-endorse-accepted`）。
+     · **已 `REJECTED`** ⇒ 同样不出按钮（登记 `data-endorse-rejected`）。
      · **未登錄** ⇒ 按钮照渲染，点击走**登录引导**（`goLogin`）。
      · **自己的提交** ⇒ 不出按钮（登记 `data-endorse-self`）。
-     · 计数经**云端公开只读集合** `xiai_endorsement_counts`（脱敏、零身份字段）全站一致。
+     · 数据经**云端公开只读集合** `xiai_correction_summaries`（**值级公开脱敏摘要面**：
+       `submits` / `endorses` / `status` / `submitter_uids`；**零手机号**、uid 允许）全站一致
+       ⇒ 他人在**另一浏览器**提交的 `PENDING` 值同样可列出并采信（跨浏览器成立）。
    判定是服务层的**纯函数** `endorsements.endorsementDecision`（视图不另写第二套）。
    ============================================================================ */
 const viewer = computed(() => currentUser())
@@ -1392,18 +1395,20 @@ onBeforeUnmount(() => {
           </tbody>
         </table>
 
-        <!-- **採信（本单新增）**：「可標記屬性」区 —— 某字段已有**他人**提交（PENDING / ACCEPTED）
-             时就地列出「值 ＋ N 人採信 ＋ 【採信】按钮」。
+        <!-- **採信（本单新增）**：「可標記屬性」区 —— 就地列出**候选值**
+             （值 ＋「N 人提交 / M 人採信」＋ 状态）与【採信】按钮；数据源 ＝ 值级公开摘要面
+             （`xiai_correction_summaries` ⇒ 跨浏览器可见）。
              · 按钮一律用 `data-action`（**不得**用 `data-admin-action`，否则管理员钩子取值集合被撑破）；
              · 未登錄 ⇒ 按钮照渲染，点击走登录引导（`actionable:false`）；
-             · 自己的提交 / 已 `ACCEPTED` ⇒ 不出按钮（分别登记 `data-endorse-self` / `data-endorse-accepted`）。 -->
+             · 自己的提交 / 已 `ACCEPTED` / 已 `REJECTED` ⇒ 不出按钮
+               （分别登记 `data-endorse-self` / `data-endorse-accepted` / `data-endorse-rejected`）。 -->
         <div
           v-if="endorsementEntries(face).length"
           class="endorse"
           data-endorse-block
           :data-endorse-face="face.id"
         >
-          <h4 class="endorse__title">他人提交的勘誤 · 可採信</h4>
+          <h4 class="endorse__title">候選值 · 可採信</h4>
           <ul class="endorse__list">
             <li
               v-for="entry in endorsementEntries(face)"
@@ -1415,7 +1420,7 @@ onBeforeUnmount(() => {
             >
               <span class="endorse__field">{{ entry.label }}</span>
               <span class="endorse__value" data-endorse-value>{{ entry.value }}</span>
-              <span class="endorse__count" data-endorse-count>{{ entry.count }} 人採信</span>
+              <span class="endorse__count" data-endorse-count>{{ entry.submits }} 人提交 / {{ entry.count }} 人採信</span>
               <button
                 v-if="entry.button"
                 class="btn btn--ghost endorse__btn"
@@ -1427,6 +1432,7 @@ onBeforeUnmount(() => {
               </button>
               <span v-else-if="entry.reason === 'SELF'" class="detail__hint" data-endorse-self>你自己的提交</span>
               <span v-else-if="entry.reason === 'ACCEPTED'" class="detail__hint" data-endorse-accepted>已採納</span>
+              <span v-else-if="entry.reason === 'REJECTED'" class="detail__hint" data-endorse-rejected>已駁回</span>
               <span v-if="endorseFeedbackOf(face, entry)" class="detail__hint endorse__feedback" data-endorse-feedback>
                 {{ endorseFeedbackOf(face, entry) }}
               </span>

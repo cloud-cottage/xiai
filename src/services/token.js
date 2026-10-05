@@ -265,6 +265,9 @@ export function createTokenChannel(profile) {
         row: result.row,
         /* **服务端公开投影行**（`reviewCorrection` 等带公开投影的 op 才有；逐字采用、不在前端重建）。 */
         projection: result.projection,
+        /* **服务端值级公开摘要行**（`submitCorrection` / `endorseCorrection` / `reviewCorrection`）；
+           本机只镜像、不在前端重建。 */
+        summary: result.summary,
         docId: typeof result.docId === 'string' ? result.docId : '',
         authority: typeof result.authority === 'string' ? result.authority : '',
         uid: result.identity && typeof result.identity.uid === 'string' ? result.identity.uid : '',

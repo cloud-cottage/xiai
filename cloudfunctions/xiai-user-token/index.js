@@ -273,6 +273,12 @@ async function handleVerify(event, config) {
      * 无该面的 op ⇒ `undefined` ⇒ **零身份字段**；前端只做镜像、不在前端重建。
      */
     projection: opResult.projection,
+    /**
+     * **值级公开摘要行**（`submitCorrection` / `endorseCorrection` / `reviewCorrection` 均有）：
+     * `{ _id, faceId, sealId, stamp_id, field, value, submits, endorses, status, submitter_uids,
+     *   updated_at, schema }` —— **零手机号**、uid 允许；前端只做镜像、不在前端重建。
+     */
+    summary: opResult.summary,
     /** `setInviteReward`（无落盘计划）的成功回包：仅回吐值域判定通过的值。 */
     value: opResult.value,
     docId,

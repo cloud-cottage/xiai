@@ -1649,28 +1649,29 @@ export function saveEndorsementRows(rows) {
 }
 
 /**
- * 读**公开计数行**（云端公开只读集合 `xiai_endorsement_counts` 的读面）。
+ * 读**值级公开摘要行**（云端公开只读集合 `xiai_correction_summaries` 的读面）。
  *
  * 读序与既有集合一致（`readCollection`）：云端 `ready` ⇒ 云端快照 ∪ 本机同 `_id` 覆盖；
- * 其余 ⇒ 本机 `endorsement-counts` 键。行**零身份字段**（`count` 归一为正数 / 0）。
- * 本函数**只读**（不灌种子、不写存储）。
+ * 其余 ⇒ 本机 `correction-summaries` 键。行是**值级公开摘要**（`submits` / `endorses` /
+ * `status` / `submitter_uids`；**零手机号**、uid 允许），**详情页候选值列表的唯一数据源**
+ * ⇒ 跨浏览器可见（它不依赖本机 `corrections` 镜像）。本函数**只读**（不灌种子、不写存储）。
  */
-export function listEndorsementCountRows() {
-  return readCollection(STORAGE_KEYS.endorsementCounts, [])
+export function listCorrectionSummaryRows() {
+  return readCollection(STORAGE_KEYS.correctionSummaries, [])
 }
 
 /**
- * 读**公开计数行的本机镜像**（**只读本机 `endorsement-counts` 键**，不过云端快照）。
- * 用途：采信写面同步镜像时做**幂等 upsert**（按 `_id` / `(faceId,field,value)` 覆盖）。
+ * 读**值级公开摘要行的本机镜像**（**只读本机 `correction-summaries` 键**，不过云端快照）。
+ * 用途：写面同步镜像时做**幂等 upsert**（按 `_id` / `(faceId,field,value)` 覆盖）。
  */
-export function listEndorsementCountMirrorRows() {
-  const rows = readKey(STORAGE_KEYS.endorsementCounts)
+export function listCorrectionSummaryMirrorRows() {
+  const rows = readKey(STORAGE_KEYS.correctionSummaries)
   return Array.isArray(rows) ? rows : []
 }
 
-/** 写**公开计数行的本机镜像**（整键覆盖写；调用方负责先合并成幂等结果）。 */
-export function saveEndorsementCountRows(rows) {
-  return writeCollection(STORAGE_KEYS.endorsementCounts, rows)
+/** 写**值级公开摘要行的本机镜像**（整键覆盖写；调用方负责先合并成幂等结果）。 */
+export function saveCorrectionSummaryRows(rows) {
+  return writeCollection(STORAGE_KEYS.correctionSummaries, rows)
 }
 
 export function listPhotoRows() {

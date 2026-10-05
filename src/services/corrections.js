@@ -23,7 +23,11 @@ import {
   sealDisplayName,
   listPublicCorrectionRows,
   listPublicCorrectionMirrorRows,
-  savePublicCorrectionRows
+  savePublicCorrectionRows,
+  /* **值级公开摘要面（本单合并面）**：本机镜像的读 / 写 ＋ 采信私有行读（供本地重算）。 */
+  listEndorsementRows,
+  listCorrectionSummaryMirrorRows,
+  saveCorrectionSummaryRows
 } from '../data/db.js'
 import { currentUser } from '../data/session.js'
 /* 值域真源**复用**：朝代 14 类 = `seed.js` 的 `DYNASTY_OPTIONS` / `isKnownDynasty`（R-20）；
@@ -41,6 +45,9 @@ import {
 import { awardCorrectionReward } from './points.js'
 /* **身份标识（uid）单点**：上屏短碼（`u-` ＋ sha256 前 16 位 ⇒ 前 6 位展示），**不得回退成手机号**。 */
 import { uidShortOf } from '../data/uid.js'
+/* **不可逆摘要（同步、跨环境）**：值级公开摘要行 `_id` 的 `value` 摘要 —— 与云函数 `hash16`
+   （sha256 前 16 位）同构（`crypto.subtle` 非安全上下文不可用 ⇒ 复用自带同步实现）。 */
+import { sha256Hex } from '../data/assetmeta.js'
 import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND } from './seals.js'
 /* **写面 Phase A（用户写面切片）**：勘误提交经云函数 `xiai-user-token` 的 `action:'verify'`
    服务端验签后才落盘（落盘在**云端**，`xiai_corrections` 的 ACL 是 `PRIVATE` ⇒ 只能由云函数
@@ -56,6 +63,117 @@ export const CORRECTION_STATUS = {
   PENDING: 'PENDING',
   ACCEPTED: 'ACCEPTED',
   REJECTED: 'REJECTED'
+}
+
+/* ============================================================================
+   **值级公开摘要面（本单新增 / 合并面）**：未采纳提交的公开脱敏摘要行
+   ----------------------------------------------------------------------------
+   为什么：本机 `corrections` 键只是**同一浏览器 profile 内的镜像**（A 浏览器提交的勘误，
+   B 浏览器看不到 —— 在册缺口 W-54）⇒ 跨浏览器 / 跨用户的【採信】没有通道。本单新增
+   值级公开摘要行（**零手机号**、uid 允许），由**服务端**在提交 / 采信 / 采纳后重算并
+   幂等 upsert；前端详情页**只从它**渲染候选值列表 ⇒ 他人的 `PENDING` 值跨浏览器可见。
+   行形状（与云函数 `cloudfunctions/xiai-user-token/lib/ops.js::buildCorrectionSummary` 同构）：
+     `{ _id:'cs-<faceId>-<field>-<value 的 sha256 前 16 位>', faceId, sealId, stamp_id, field,
+        value, submits, endorses, status, submitter_uids, updated_at, schema }`
+   —— `submits` ＝ 未 REJECTED 的提交行**去重人数**、`endorses` ＝ 采信行**去重人数**、
+   `status` ＝ 该值当前状态、`submitter_uids` ＝ 提交人 uid 去重列表（**不带昵称 / 手机号**）。
+   本区块**只做摘要**：不改三态语义 / 不改显示名链（显示名仍只认 ACCEPTED）。
+   ============================================================================ */
+
+/** 值级公开摘要行的 schema 版本（与云函数 `ops.js::CORRECTION_SUMMARY_SCHEMA` 逐字同值）。 */
+export const CORRECTION_SUMMARY_SCHEMA = 'xiai-correction-summaries-v1'
+
+/** 值级公开摘要行文档键前缀（与云函数 `ops.js::CORRECTION_SUMMARY_ID_PREFIX` 逐字同值）。 */
+export const CORRECTION_SUMMARY_ID_PREFIX = 'cs-'
+
+/** 值级公开摘要行文档键：`cs-<faceId>-<field>-<value 的 sha256 前 16 位>`（与云函数同构）。 */
+export function correctionSummaryIdOf(faceId, field, value) {
+  return `${CORRECTION_SUMMARY_ID_PREFIX}${String(faceId)}-${String(field)}-${sha256Hex(String(value)).slice(0, 16)}`
+}
+
+/**
+ * 由「提交行集合 ＋ 采信行集合」构造**值级公开摘要行**（纯函数；镜像云函数
+ * `buildCorrectionSummary` —— 两侧同构，由 `scripts/verify-endorsement.mjs` 机械断言）。
+ * @param {{faceId:string, sealId?:string, field:string, value:string,
+ *   submissions?:Array<object>, endorsements?:Array<object>, at?:string}} input
+ * @returns {object}
+ */
+export function buildCorrectionSummaryRow({ faceId, sealId = '', field, value, submissions, endorsements, at = '' }) {
+  const statuses = []
+  const submitterUids = []
+  const seenSubmitters = new Set()
+  ;(Array.isArray(submissions) ? submissions : []).forEach((row) => {
+    const status = normalizeCorrectionStatus(row && row.status)
+    statuses.push(status)
+    if (status === CORRECTION_STATUS.REJECTED) return
+    const uid = String((row && (row.user_id || row.userId)) || '')
+    const identity = uid || String((row && (row.id || row._id)) || '')
+    if (!identity || seenSubmitters.has(identity)) return
+    seenSubmitters.add(identity)
+    if (uid) submitterUids.push(uid)
+  })
+  const seenEndorsers = new Set()
+  ;(Array.isArray(endorsements) ? endorsements : []).forEach((row) => {
+    const uid = String((row && (row.user_id || row.userId)) || '')
+    const identity = uid || String((row && (row._id || row.id)) || '')
+    if (identity) seenEndorsers.add(identity)
+  })
+  const hasAccepted = statuses.indexOf(CORRECTION_STATUS.ACCEPTED) !== -1
+  const allRejected = statuses.length > 0 && statuses.every((item) => item === CORRECTION_STATUS.REJECTED)
+  const status = hasAccepted ? CORRECTION_STATUS.ACCEPTED : allRejected ? CORRECTION_STATUS.REJECTED : CORRECTION_STATUS.PENDING
+  const normalizedSeal = String(sealId || '')
+  return {
+    _id: correctionSummaryIdOf(faceId, field, value),
+    faceId: String(faceId || ''),
+    sealId: normalizedSeal,
+    stamp_id: normalizedSeal,
+    field: String(field || ''),
+    value: String(value === null || value === undefined ? '' : value),
+    submits: seenSubmitters.size,
+    endorses: seenEndorsers.size,
+    status,
+    submitter_uids: submitterUids,
+    updated_at: String(at || ''),
+    schema: CORRECTION_SUMMARY_SCHEMA
+  }
+}
+
+/** **值级公开摘要行的本机镜像幂等 upsert**（按 `_id` 覆盖；重复写不新增第二行）。 */
+export function mirrorCorrectionSummaryRow(row) {
+  if (!row || typeof row !== 'object') return null
+  const id = String(row._id || '')
+  const rows = listCorrectionSummaryMirrorRows()
+  const exists = id !== '' ? rows.some((item) => String((item && item._id) || '') === id) : false
+  const next = exists
+    ? rows.map((item) => (String((item && item._id) || '') === id ? { ...item, ...row } : item))
+    : [...rows, row]
+  saveCorrectionSummaryRows(next)
+  return row
+}
+
+/**
+ * **本地 dev / 離線形態**：按本机提交行 ＋ 采信行重算并 upsert 值级公开摘要行（自愈：
+ * 去重后计数，重置 / 重放不涨数）。**非正式写入路径** —— 云端形态由服务端重算后回传，
+ * 前端只镜像（`mirrorCorrectionSummaryRow`）。
+ * @returns {object} 摘要行
+ */
+export function syncLocalCorrectionSummary(faceId, sealId, field, value) {
+  const key = (row) =>
+    String((row && row.faceId) || '') === String(faceId) &&
+    String((row && row.field) || '') === String(field) &&
+    String((row && row.value) === null || (row && row.value) === undefined ? '' : row.value) === String(value)
+  const submissions = listCorrectionRows().filter(key)
+  const endorsements = listEndorsementRows().filter(key)
+  const row = buildCorrectionSummaryRow({
+    faceId,
+    sealId,
+    field,
+    value,
+    submissions,
+    endorsements,
+    at: new Date().toISOString()
+  })
+  return mirrorCorrectionSummaryRow(row)
 }
 
 /**
@@ -424,6 +542,8 @@ export async function submitCorrection({
       batchId: batch // 提交单号（一次表单提交共享一个；R-B2）
     }
     saveCorrectionRows([...listCorrectionRows(), row])
+    /* **摘要行重算（本地 dev / 離線）**：upsert 该值级公开摘要行（**非正式寫入路徑**）。 */
+    syncLocalCorrectionSummary(face.id, face.sealId, field, text)
     return {
       ok: true,
       row,
@@ -446,6 +566,8 @@ export async function submitCorrection({
   }
   const row = { ...serverRow, batchId: batch }
   saveCorrectionRows([...listCorrectionRows(), row])
+  /* **摘要行镜像（云端形态）**：服务端已重算值级公开摘要行 ⇒ 本地只镜像它（非前端自建）。 */
+  mirrorCorrectionSummaryRow(gate.summary)
   return {
     ok: true,
     row,
@@ -828,6 +950,15 @@ export async function review(actor, correctionId, decision, note = '') {
     if (gate.mode === 'cloud' && gate.row) {
       const reconciled = reconcileLocalMirrorFromAuthority(correctionId, gate.row, gate.projection)
       if (reconciled) {
+        /* **摘要行同步（本单）**：服务端已重算 ⇒ 优先镜像；无服务端回包 ⇒ 本地重算。 */
+        if (gate.summary && typeof gate.summary === 'object') mirrorCorrectionSummaryRow(gate.summary)
+        else
+          syncLocalCorrectionSummary(
+            reconciled.row.faceId,
+            sealIdOf(reconciled.row),
+            reconciled.row.field,
+            reconciled.row.value
+          )
         let reward = { ok: true, awarded: false, message: '駁回不發獎' }
         if (reconciled.accepted) {
           const submitterId = reconciled.row.user_id || reconciled.row.userId || ''
@@ -861,6 +992,10 @@ export async function review(actor, correctionId, decision, note = '') {
   }
   /* ③ 已採納 ⇒ 同步公開投影的本機鏡像（冪等 upsert；雲端形態優先採用服務端回包的投影行）。 */
   if (decided.accepted) mirrorAcceptedToPublic(decided.row, gate.projection)
+  /* **摘要行同步（本单）**：值级公开摘要行的 status 随采纳 / 驳回更新
+     （云端正算 ⇒ 优先镜像；dev / 離線無服務端回包 ⇒ 本地重算）。 */
+  if (gate.summary && typeof gate.summary === 'object') mirrorCorrectionSummaryRow(gate.summary)
+  else syncLocalCorrectionSummary(decided.row.faceId, sealIdOf(decided.row), decided.row.field, decided.row.value)
 
   let reward = { ok: true, awarded: false, message: '駁回不發獎' }
   if (decided.accepted) {

@@ -160,17 +160,19 @@ export const STORAGE_KEYS = {
    */
   endorsements: 'endorsements',
   /**
-   * **用途：公开计数行的本機鏡像**（本单新增；写方 ＝ `services/endorsements.js` 的采信镜像，
-   * 读方 ＝ `db.js::listEndorsementCountRows` → 详情页「N 人採信」）。真实键名
-   * `xiai:v1:endorsement-counts`。
-   * 行 ＝ 公开计数行（`{_id:'e-<faceId>-<field>-<value 的 sha256 前 16 位>', faceId, sealId,
-   * stamp_id, field, value, count, updated_at, schema:'xiai-endorsement-counts-v1'}`）——
-   * **脱敏：零身份字段**（`user_id` / `user_phone` 一律不落）。
+   * **用途：值级公开摘要行的本機鏡像**（本单新增；写方 ＝ `services/corrections.js` /
+   * `services/endorsements.js` 的写面镜像，读方 ＝ `db.js::listCorrectionSummaryRows` →
+   * 详情页「N 人提交 / M 人採信」与候选值列表）。真实键名 `xiai:v1:correction-summaries`。
+   * 行 ＝ 值级公开摘要行（`{_id:'cs-<faceId>-<field>-<value 的 sha256 前 16 位>', faceId, sealId,
+   * stamp_id, field, value, submits, endorses, status, submitter_uids, updated_at,
+   * schema:'xiai-correction-summaries-v1'}`）—— **零手机号**、uid 允许（`submitter_uids` 是不透明
+   * uid 去重列表，**不带昵称 / 手机号**）。
    * `_id` 与云端文档键**同值** ⇒ 云端形态下数据层覆盖层按 `_id` 配对合成一行。
-   * 它是云端公开只读集合 `xiai_endorsement_counts` 的**本机镜像 / 展示缓存**。
+   * 它是云端公开只读集合 `xiai_correction_summaries` 的**本机镜像 / 展示缓存**；
+   * 取代此前尚未上线的 `endorsement-counts` 键（**不留两套**）。
    * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
    */
-  endorsementCounts: 'endorsement-counts'
+  correctionSummaries: 'correction-summaries'
 }
 
 /* ============================================================================

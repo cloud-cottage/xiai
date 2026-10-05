@@ -44,10 +44,12 @@ export const CLOUD_COLLECTIONS = Object.freeze({
   faces: 'xiai_faces',
   images: 'xiai_images',
   correctionsPublic: 'xiai_corrections_public',
-  /* **公开计数集合（本单新增）**：采信（採信）的公开只读投影 —— 一行 ＝ 一个
-     `(faceId, field, value)` 键的采信人数；**脱敏：零身份字段**（`user_id` / `user_phone` 一律不下发）。
-     它是「N 人採信」全站一致展示的唯一跨浏览器来源；本机镜像键见 `storage.js` 的 `endorsementCounts`。 */
-  endorsementCounts: 'xiai_endorsement_counts'
+  /* **值级公开摘要集合（本单合并面）**：一行 ＝ 一个 `(faceId, field, value)` 键的**值级摘要** ——
+     `submits`（未 REJECTED 的提交人数）/ `endorses`（采信人数）/ `status` / `submitter_uids`（不透明
+     uid 去重列表）；**零手机号**、uid 允许。它让「未采纳提交的公开摘要面」跨浏览器可见（他人在另一
+     浏览器提交的 `PENDING` 值也能被列出并【採信】）；本机镜像键见 `storage.js` 的 `correctionSummaries`。
+     取代此前尚未上线的 `xiai_endorsement_counts`（**不留两套公开面**）。 */
+  correctionSummaries: 'xiai_correction_summaries'
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */
@@ -257,7 +259,7 @@ const statusRef = shallowRef({
   reason: 'NOT_CONFIGURED',
   message: '未配置 CloudBase 数据源，使用本地实现',
   envId: '',
-  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
+  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
   /* **空集诊断（§3c）**：`emptyVerified` ＝ 诚实空态（云端 0 行 + 本地也空 ⇒ 不回落）；
      `emptySuspect` ＝ 可疑空集（云端 0 行 + 本地有数据 ⇒ 已走失败状态机回落本地）。 */
   emptyVerified: [],
@@ -422,7 +424,7 @@ export const CLOUD_EMPTY_SUSPECT = 'CLOUD_EMPTY_SUSPECT'
  * 「本机缓存有一行、云端还没同步」误判成权限事故、进而**让整站回落本地种子**（把三个
  * 本体集合一起拖下水）。故本集合**恒走诚实空态**（不回落、不冒充）。
  */
-export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze(['correctionsPublic', 'endorsementCounts'])
+export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze(['correctionsPublic', 'correctionSummaries'])
 
 /**
  * 本地同集合的**现有行数**（**只读**：不灌种子、不写存储、不碰其它集合）。
@@ -618,21 +620,26 @@ export function normalizePublicCorrectionRow(doc, options = {}) {
 }
 
 /**
- * **公开计数行**（`xiai_endorsement_counts` → 本机 `endorsement-counts` 行形状）。
+ * **值级公开摘要行**（`xiai_correction_summaries` → 本机 `correction-summaries` 行形状）。
  *
- * 口径：本集合是**采信的公开只读投影**（匿名可读、只读），一行 ＝ 一个
- * `(faceId, field, value)` 键的采信人数；**零身份字段**（`user_id` / `user_phone` 一律不下发，
- * 由写入侧裁剪，读面不臆造）。
+ * 口径：本集合是**未采纳提交的公开脱敏摘要面**（匿名可读、只读），一行 ＝ 一个
+ * `(faceId, field, value)` 键的**值级摘要**（`submits` / `endorses` / `status` / `submitter_uids`）；
+ * **零手机号**、uid 允许（`submitter_uids` 是不透明 uid 列表，由写入侧裁剪，读面不臆造）。
  * 归一（只做空值与别名，不做业务值改写）：
  *   · `faceId` / `sealId` / `stamp_id` 三个归属键补别名（同值）；
- *   · 文本 NULL ⇒ `''`；`count` 缺键 / 非数 ⇒ `0`（**正向数值护栏**，不冒充有计数）；
- *   · `schema` 缺键 ⇒ 按 `'xiai-endorsement-counts-v1'` 归一（本集合的契约就是该版本）。
+ *   · 文本 NULL ⇒ `''`；`submits` / `endorses` 缺键 / 非数 ⇒ `0`（**正向数值护栏**，不冒充有计数）；
+ *   · `submitter_uids` 归一为字符串数组（缺键 / 非数组 ⇒ `[]`）；
+ *   · `status` 缺键 ⇒ `'PENDING'`；`schema` 缺键 ⇒ `'xiai-correction-summaries-v1'`。
  */
-export function normalizeEndorsementCountRow(doc, options = {}) {
+export function normalizeCorrectionSummaryRow(doc, options = {}) {
   const row = withoutArchive(doc || {}, options.keepProvenance === true)
   const faceId = text(firstOf(row.faceId, row.face_id))
   const sealId = text(firstOf(row.sealId, row.seal_id, row.stamp_id))
-  const parsedCount = Number(row.count)
+  const submits = Number(row.submits)
+  const endorses = Number(row.endorses)
+  const uids = Array.isArray(row.submitter_uids)
+    ? row.submitter_uids.map((item) => text(item)).filter((item) => item !== '')
+    : []
   return {
     ...row,
     _id: text(row._id),
@@ -643,9 +650,12 @@ export function normalizeEndorsementCountRow(doc, options = {}) {
     stamp_id: text(firstOf(row.stamp_id, sealId)),
     field: text(row.field),
     value: text(row.value),
-    count: Number.isFinite(parsedCount) && parsedCount > 0 ? Math.round(parsedCount) : 0,
+    submits: Number.isFinite(submits) && submits > 0 ? Math.round(submits) : 0,
+    endorses: Number.isFinite(endorses) && endorses > 0 ? Math.round(endorses) : 0,
+    status: text(firstOf(row.status, 'PENDING')),
+    submitter_uids: uids,
     updated_at: text(firstOf(row.updated_at, row.created_at)),
-    schema: text(firstOf(row.schema, 'xiai-endorsement-counts-v1'))
+    schema: text(firstOf(row.schema, 'xiai-correction-summaries-v1'))
   }
 }
 
@@ -654,7 +664,7 @@ const NORMALIZERS = Object.freeze({
   faces: normalizeFaceRow,
   images: normalizeImageRow,
   correctionsPublic: normalizePublicCorrectionRow,
-  endorsementCounts: normalizeEndorsementCountRow
+  correctionSummaries: normalizeCorrectionSummaryRow
 })
 
 /* ---------------------------------------------------------------------------
@@ -976,7 +986,7 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     timeoutMs: budget,
     attempt,
     timeoutStage: '',
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
     fetchedAt: ''
   })
   let sdk = null
@@ -1154,7 +1164,7 @@ function scheduleHydrationRetry(budget, err) {
     timeoutStage: err.stage,
     retryBudgetMs: CLOUD_HYDRATE_RETRY_BUDGET_MS,
     attempt: 2,
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
     fetchedAt: ''
   })
   return new Promise((resolve) => {
@@ -1217,7 +1227,7 @@ export function resetCloudBaseSource() {
     reason: 'NOT_CONFIGURED',
     message: '未配置 CloudBase 数据源，使用本地实现',
     envId: '',
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, endorsementCounts: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
     attempt: 0,
     timeoutStage: '',
     emptyVerified: [],

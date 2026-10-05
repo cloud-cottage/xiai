@@ -21,9 +21,16 @@
  *     （含云端：以服务端为准）⇒ 已有 ⇒ `DUPLICATE_VALUE` ＋ 零写入；
  *   · **新 op `endorseCorrection`**：幂等（同 `(faceId, field, value, user_id)` ⇒ `ALREADY_ENDORSED`
  *     ＋ 零写入）、**不得自采**（同值的提交人就是本人 ⇒ 拒）、成功时**两处落盘**
- *     （采信行 `xiai_endorsements`［私有］＋ 公开计数行 `xiai_endorsement_counts`［脱敏、零身份字段］）；
+ *     （采信行 `xiai_endorsements`［私有］＋ 值级公开摘要行 `xiai_correction_summaries`［脱敏］）；
  *     计数由服务端**重算**并幂等 upsert（自愈：重试 / 重放不涨数）。
- *   · **公开计数面零身份字段**：`xi` 一律不下发 `user_id` / `user_phone`（本文件构造的计数行里根本没有）。
+ *   · **值级公开摘要行（本单合并面）**：`{ faceId, sealId, stamp_id, field, value, submits,
+ *     endorses, status, submitter_uids, updated_at, schema }` —— **零手机号**、uid 允许；
+ *     `submits` ＝ 未 REJECTED 的提交行**去重人数**、`endorses` ＝ 采信行**去重人数**、
+ *     `status` ＝ 该值当前状态、`submitter_uids` ＝提交人 uid 去重列表（**不带昵称 / 手机号**）。
+ *     `submitCorrection` / `endorseCorrection` / `reviewCorrection` **成功后一律重算并 upsert**
+ *     该 `(faceId, field, value)` 的摘要行（幂等：重读 / 重放不涨数）。
+ *   · **公开摘要面零手机号**：`xi` 一律不下发 `user_phone`（本文件构造的摘要行里根本没有；
+ *     只有不透明 uid 列表）。
  */
 
 const crypto = require('crypto')
@@ -33,15 +40,18 @@ const { REASONS, deny, normalizePhone } = require('./config.js')
  * 集合白名单（封闭；**一律 `xiai_` 前缀**）。
  * 映射真源 ＝ `src/data/storage.js` 的 `STORAGE_KEYS`（＋ `xiai_` 前缀）。
  *   · `corrections`        ＝ 勘误私有行（既有）；
- *   · `endorsements`       ＝ **采信私有行**（本单新增；含 user_id［不透明 uid］⇒ PRIVATE；**不落 user_phone**）；
- *   · `endorsementCounts`  ＝ **公开计数行**（本单新增；脱敏：**零身份字段**、匿名可读）；
- *   · `correctionsPublic`  ＝ **公开只读脱敏投影集合**（V3 新增；＝ 已采纳勘误的跨浏览器投影，
+ *   · `endorsements`       ＝ **采信私有行**（既有；含 user_id［不透明 uid］⇒ PRIVATE；**不落 user_phone**）；
+ *   · `correctionSummaries`＝ **值级公开脱敏摘要行**（本单**合并**面；含 `submits` / `endorses` /
+ *     `status` / `submitter_uids`；**零手机号**、uid 允许、匿名可读 ⇒ 「未采纳提交的公开摘要面」，
+ *     让【採信】**跨浏览器 / 跨用户**成立。取代此前尚未上线的 `xiai_endorsement_counts`，
+ *     **不留两套公开面**）；
+ *   · `correctionsPublic`  ＝ **公开只读脱敏投影集合**（V3；＝ 已采纳勘误的跨浏览器投影，
  *     `_id='cp-<勘误单号>'`、键面封闭、**零身份字段**）。
  */
 const COLLECTIONS = Object.freeze({
   corrections: 'xiai_corrections',
   endorsements: 'xiai_endorsements',
-  endorsementCounts: 'xiai_endorsement_counts',
+  correctionSummaries: 'xiai_correction_summaries',
   correctionsPublic: 'xiai_corrections_public'
 })
 
@@ -90,8 +100,8 @@ const MAX_TEXT_LENGTH = 500
 /** 勘误初态（与 `src/services/corrections.js::CORRECTION_STATUS.PENDING` 逐字同值）。 */
 const CORRECTION_PENDING = 'PENDING'
 
-/** 公开计数行的 schema 版本（与 `src/services/endorsements.js::ENDORSEMENT_SCHEMA` 逐字同值）。 */
-const ENDORSEMENT_SCHEMA = 'xiai-endorsement-counts-v1'
+/** 值级公开摘要行的 schema 版本（与 `src/services/corrections.js::CORRECTION_SUMMARY_SCHEMA` 逐字同值）。 */
+const CORRECTION_SUMMARY_SCHEMA = 'xiai-correction-summaries-v1'
 
 /** 采信行身份来源标记（取证用：本行的身份来自服务端令牌，不由前端自称）。 */
 const ENDORSEMENT_IDENTITY_SOURCE = 'SERVER_TOKEN'
@@ -99,8 +109,8 @@ const ENDORSEMENT_IDENTITY_SOURCE = 'SERVER_TOKEN'
 /** 采信行文档键前缀（确定性 ⇒ 重放落同一行）。 */
 const ENDORSEMENT_ID_PREFIX = 'en-'
 
-/** 公开计数行文档键前缀（确定性 ⇒ 同值恒指同一行）。 */
-const ENDORSEMENT_COUNT_ID_PREFIX = 'e-'
+/** 值级公开摘要行文档键前缀（`cs-`；确定性 ⇒ 同值恒指同一行）。 */
+const CORRECTION_SUMMARY_ID_PREFIX = 'cs-'
 
 /* ---------------------------------------------------------------------------
    管理员写面（V3：收敛到「登录令牌 ＋ 服务端手机号白名单」）
@@ -309,9 +319,60 @@ function endorsementDocId(faceId, field, value, uid) {
   return `${ENDORSEMENT_ID_PREFIX}${hash16(JSON.stringify([faceId, field, value, uid]))}`
 }
 
-/** 公开计数行文档键：`e-<faceId>-<field>-<value 的 sha256 前 16 位>`（与前端 / 规范同构）。 */
-function endorsementCountDocId(faceId, field, value) {
-  return `${ENDORSEMENT_COUNT_ID_PREFIX}${faceId}-${field}-${hash16(value)}`
+/** 值级公开摘要行文档键：`cs-<faceId>-<field>-<value 的 sha256 前 16 位>`（与前端 / 规范同构）。 */
+function correctionSummaryDocId(faceId, field, value) {
+  return `${CORRECTION_SUMMARY_ID_PREFIX}${faceId}-${field}-${hash16(value)}`
+}
+
+/**
+ * 由「提交行集合 ＋ 采信行集合」构造**值级公开摘要行**（纯函数；**零手机号**、uid 允许）。
+ *
+ * 口径（人类冻结）：
+ *   · `submits` ＝ **未 REJECTED 的提交行去重人数**（按 uid 去重；无 uid 时按行 id）；
+ *   · `endorses` ＝ **采信行去重人数**（按 uid 去重；无 uid 时按行 `_id`）；
+ *   · `status` ＝ 任一行 `ACCEPTED` ⇒ `ACCEPTED`；全 `REJECTED`（且非空）⇒ `REJECTED`；否则 `PENDING`；
+ *   · `submitter_uids` ＝ **未 REJECTED** 提交行的提交人 uid 去重列表（**不得带昵称 / 手机号**）；
+ *   · `_id` 确定性 ⇒ **幂等 upsert**（重读 / 重放不涨数）。
+ * @returns {object} 摘要行
+ */
+function buildCorrectionSummary({ faceId, sealId, field, value, submissions, endorsements, at }) {
+  const statuses = []
+  const submitterUids = []
+  const seenSubmitters = new Set()
+  ;(Array.isArray(submissions) ? submissions : []).forEach((row) => {
+    const status = text(row && row.status) || CORRECTION_PENDING
+    statuses.push(status)
+    if (status === CORRECTION_STATUS.REJECTED) return // 被驳回的提交不计入 submits / submitter_uids
+    const uid = text(row && (row.user_id || row.userId))
+    const identity = uid || text(row && (row.id || row._id))
+    if (!identity || seenSubmitters.has(identity)) return
+    seenSubmitters.add(identity)
+    if (uid) submitterUids.push(uid)
+  })
+  const seenEndorsers = new Set()
+  ;(Array.isArray(endorsements) ? endorsements : []).forEach((row) => {
+    const uid = text(row && (row.user_id || row.userId))
+    const identity = uid || text(row && (row._id || row.id))
+    if (identity) seenEndorsers.add(identity)
+  })
+  const hasAccepted = statuses.indexOf(CORRECTION_STATUS.ACCEPTED) !== -1
+  const allRejected = statuses.length > 0 && statuses.every((item) => item === CORRECTION_STATUS.REJECTED)
+  const status = hasAccepted ? CORRECTION_STATUS.ACCEPTED : allRejected ? CORRECTION_STATUS.REJECTED : CORRECTION_PENDING
+  const normalizedSeal = text(sealId)
+  return {
+    _id: correctionSummaryDocId(faceId, field, value),
+    faceId: text(faceId),
+    sealId: normalizedSeal,
+    stamp_id: normalizedSeal,
+    field: text(field),
+    value: text(value),
+    submits: seenSubmitters.size,
+    endorses: seenEndorsers.size,
+    status,
+    submitter_uids: submitterUids,
+    updated_at: text(at),
+    schema: CORRECTION_SUMMARY_SCHEMA
+  }
 }
 
 /**
@@ -487,6 +548,7 @@ const OPS = Object.freeze({
           '同一段文字只允許一人提交；若你贊同該值，請改用【採信】為它佐證；本次零寫入。'
       )
     }
+    const at = new Date().toISOString()
     const row = {
       id: makeId(),
       faceId,
@@ -502,12 +564,34 @@ const OPS = Object.freeze({
       value,
       basis,
       status: CORRECTION_PENDING,
-      created_at: new Date().toISOString(),
+      created_at: at,
       reviewed_at: null,
       reviewer_id: null,
       rewarded_at: null
     }
-    return { ok: true, op: 'submitCorrection', row, plan: { collection: COLLECTIONS.corrections, doc: row } }
+    /* **摘要行重算（本单）**：提交成功后 upsert 该 `(faceId, field, value)` 的**值级公开摘要行**
+       （`submits` 含本次新增行 ⇒ 1；`status` 自 `PENDING` 起；`submitter_uids` ＝ 本人 uid）。 */
+    const summaryRow = buildCorrectionSummary({
+      faceId,
+      sealId: row.sealId,
+      field,
+      value,
+      submissions: [...duplicate, row],
+      endorsements: [],
+      at
+    })
+    return {
+      ok: true,
+      op: 'submitCorrection',
+      row,
+      summary: summaryRow,
+      plan: {
+        writes: [
+          { kind: 'add', collection: COLLECTIONS.corrections, doc: row },
+          { kind: 'set', collection: COLLECTIONS.correctionSummaries, id: summaryRow._id, doc: summaryRow }
+        ]
+      }
+    }
   },
 
   /**
@@ -525,8 +609,9 @@ const OPS = Object.freeze({
    * 采信行形状（服务端落盘、私有集合 `xiai_endorsements`）：
    *   `{ _id, faceId, sealId, stamp_id, field, value, user_id, identity_source:'SERVER_TOKEN', created_at }`
    *   （**不落手机号**：`user_id` 是不透明 uid；人类口径 ②）
-   * 公开计数行形状（`xiai_endorsement_counts`、**零身份字段**）：
-   *   `{ _id:`e-<faceId>-<field>-<value 的 sha256 前 16 位>`, faceId, sealId, stamp_id, field, value, count, updated_at, schema }`
+   * 值级公开摘要行形状（`xiai_correction_summaries`、**零手机号**、uid 允许）：
+   *   `{ _id:`cs-<faceId>-<field>-<value 的 sha256 前 16 位>`, faceId, sealId, stamp_id, field, value,
+   *     submits, endorses, status, submitter_uids, updated_at, schema }`
    * @param {object} payload 载荷（允许键见 `ENDORSE_ALLOWED_KEYS`）
    * @param {{uid:string, phone:string}} identity **服务端派生**的身份
    */
@@ -584,11 +669,10 @@ const OPS = Object.freeze({
         '你已經採信過該值（同一段文字只記一次）；本次零寫入。'
       )
     }
-    /* ⑤ 成功：构造两处落盘计划（采信行 ＋ 公开计数行）。 */
+    /* ⑤ 成功：构造两处落盘计划（采信行 ＋ 值级公开摘要行）。 */
     const normalizedSeal = sealId || stampId
     const at = new Date().toISOString()
     const endorsementId = endorsementDocId(faceId, field, value, identity.uid)
-    const countId = endorsementCountDocId(faceId, field, value)
     const row = {
       _id: endorsementId,
       faceId,
@@ -601,33 +685,30 @@ const OPS = Object.freeze({
       identity_source: ENDORSEMENT_IDENTITY_SOURCE,
       created_at: at
     }
-    /* **计数重算（自愈）**：读该键的全部采信行，按 `_id` 去重后计数（含本次新增的那一行）
-       ⇒ 重试 / 重放 / 并发落同一 `_id` 都不会把 count 涨多；**绝不**用「原 count ＋ 1」。 */
+    /* **摘要行重算（自愈）**：读该键的全部采信行（含本次新增的那一行）＋ 该键的提交行，
+       重算 `submits` / `endorses` / `status` / `submitter_uids` ⇒ 重试 / 重放 / 并发落同一 `_id`
+       都不会把计数涨多；**绝不**用「原计数 ＋ 1」。 */
     const all = await readRows(COLLECTIONS.endorsements, { faceId, field, value })
-    const ids = new Set(all.map((item) => text(item && (item._id || item.id))).filter((id) => id !== ''))
-    ids.add(endorsementId)
-    const count = ids.size
-    const countRow = {
-      _id: countId,
+    const endorsements = [...all, { _id: endorsementId, user_id: identity.uid }]
+    const summaryRow = buildCorrectionSummary({
       faceId,
       sealId: normalizedSeal,
-      stamp_id: normalizedSeal,
       field,
       value,
-      count,
-      updated_at: at,
-      schema: ENDORSEMENT_SCHEMA
-    }
+      submissions,
+      endorsements,
+      at
+    })
     return {
       ok: true,
       op: 'endorseCorrection',
       row,
-      /* 公开计数行（**零身份字段**；服务端下发面 ⇒ 前端只做镜像，不在前端重建）。 */
-      projection: countRow,
+      /* 值级公开摘要行（**零手机号**、uid 允许；服务端下发面 ⇒ 前端只做镜像，不在前端重建）。 */
+      summary: summaryRow,
       plan: {
         writes: [
           { kind: 'set', collection: COLLECTIONS.endorsements, id: endorsementId, doc: row },
-          { kind: 'set', collection: COLLECTIONS.endorsementCounts, id: countId, doc: countRow }
+          { kind: 'set', collection: COLLECTIONS.correctionSummaries, id: summaryRow._id, doc: summaryRow }
         ]
       }
     }
@@ -723,12 +804,53 @@ const ADMIN_OPS = Object.freeze({
         )
       }
     }
+    /* **摘要行读面（本单）**：读该 `(faceId, field, value)` 的全部提交行 ＋ 采信行（**只读**，
+       在写之前）——用于重算值级公开摘要行；本次决定**就地覆盖**目标行的 `status`（不改库，仅内存）。 */
+    const summaryFaceId = text(row.faceId)
+    const summaryField = text(row.field)
+    const summaryValue = text(row.value)
+    const summarySeal = text(row.sealId || row.stamp_id)
+    const siblings = await readRows(COLLECTIONS.corrections, {
+      faceId: summaryFaceId,
+      field: summaryField,
+      value: summaryValue
+    })
+    const endorsements = await readRows(COLLECTIONS.endorsements, {
+      faceId: summaryFaceId,
+      field: summaryField,
+      value: summaryValue
+    })
+    const submissions = siblings.map((item) => {
+      const sameRow =
+        text(item && item.id) === correctionId ||
+        text(item && item._id) === text(row._id) ||
+        text(item && item._id) === correctionId
+      return sameRow ? Object.assign({}, item, { status: decision }) : item
+    })
+    /* 兜底：若检索式没命中本次被审的那一行（历史行缺 `faceId` 等）⇒ 显式并入（status 取本次决定）。 */
+    const targetPresent = submissions.some(
+      (item) =>
+        text(item && item.id) === correctionId ||
+        text(item && item._id) === correctionId ||
+        text(item && item._id) === text(row._id)
+    )
+    if (!targetPresent) submissions.push(Object.assign({}, row, { status: decision }))
     /* 落盘计划：**先公开投影（派生、确定性 id ⇒ 幂等 upsert）、后私有状态（权威）**。 */
     const seconds = Number.isFinite(Number(context && context.nowSeconds))
       ? Math.floor(Number(context.nowSeconds))
       : Math.floor(Date.now() / 1000)
     const at = new Date(seconds * 1000).toISOString()
     const projection = buildProjection(row, decision, at, correctionId)
+    /* **摘要行重算（本单）**：采纳 / 驳回成功后 upsert 值级公开摘要行（status 随之更新）。 */
+    const summaryRow = buildCorrectionSummary({
+      faceId: summaryFaceId,
+      sealId: summarySeal,
+      field: summaryField,
+      value: summaryValue,
+      submissions,
+      endorsements,
+      at
+    })
     const privatePatch = {
       status: decision,
       reviewed_at: at,
@@ -742,6 +864,8 @@ const ADMIN_OPS = Object.freeze({
       op: 'reviewCorrection',
       row: decidedRow,
       projection,
+      /* 值级公开摘要行（status 已随采纳 / 驳回更新）。 */
+      summary: summaryRow,
       plan: {
         op: 'reviewCorrection',
         writes: [
@@ -757,6 +881,12 @@ const ADMIN_OPS = Object.freeze({
             match: found.match,
             doc: privatePatch,
             expectAtLeast: 1
+          },
+          {
+            kind: 'set',
+            collection: COLLECTIONS.correctionSummaries,
+            id: summaryRow._id,
+            doc: summaryRow
           }
         ]
       }
@@ -859,10 +989,13 @@ module.exports = {
   IDENTITY_KEYS,
   MAX_TEXT_LENGTH,
   CORRECTION_PENDING,
-  ENDORSEMENT_SCHEMA,
+  CORRECTION_SUMMARY_SCHEMA,
   ENDORSEMENT_IDENTITY_SOURCE,
   ENDORSEMENT_ID_PREFIX,
-  ENDORSEMENT_COUNT_ID_PREFIX,
+  CORRECTION_SUMMARY_ID_PREFIX,
+  /* 纯函数：值级公开摘要行的构造 / 文档键（供离线自检与报告直接执行）。 */
+  buildCorrectionSummary,
+  correctionSummaryDocId,
   /* V3 管理员写面（登录令牌 ＋ 手机号白名单）。 */
   CORRECTION_STATUS,
   LEGACY_DECISION,
