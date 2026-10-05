@@ -281,8 +281,8 @@ const accepted = await corrections.review(ADMIN, CORRECTION_ID, 'ACCEPTED')
 check('A1', '登录令牌直通采纳成功（ok:true / accepted:true / status ACCEPTED）', { ok: true, accepted: true, status: 'ACCEPTED' }, { ok: accepted.ok, accepted: accepted.accepted, status: accepted.status })
 const actionsA1 = calls.map((call) => call.action)
 check('A2', '**零第二码**：全程只 verify 一次、无 issue（机械证据）', { verify: 1, issue: 0 }, { verify: actionsA1.filter((a) => a === 'verify').length, issue: actionsA1.filter((a) => a === 'issue').length })
-check('A2b', '服务端权威落盘恰 2 处', 2, store.stats.writes.length)
-check('A2c', '落盘顺序：先公开脱敏投影、后私有状态', ['xiai_corrections_public', 'xiai_corrections'], store.stats.writes.map((w) => w.collection))
+check('A2b', '服务端权威落盘恰 3 处（公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length)
+check('A2c', '落盘顺序：先公开脱敏投影、次私有状态、末值级公开摘要', ['xiai_corrections_public', 'xiai_corrections', 'xiai_correction_summaries'], store.stats.writes.map((w) => w.collection))
 check('A2d', '公开投影文档键 `cp-cr-name` 且零身份字段', { id: 'cp-cr-name', identity: [] }, (() => {
   const pub = store.collections.xiai_corrections_public.get('cp-cr-name') || {}
   return { id: (store.stats.writes.find((w) => w.collection === 'xiai_corrections_public') || {}).id, identity: Object.keys(pub).filter((k) => ops.IDENTITY_PROJECTION_KEYS.indexOf(k) !== -1) }
@@ -309,7 +309,7 @@ check('B0b', '非白名单 ⇒ 零写入', 0, store.stats.writes.length)
 store.load(CLOUD_SEED)
 const whitelisted = await fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'reviewCorrection', payload: { correction_id: CORRECTION_ID, decision: 'ACCEPTED' } })
 check('B1', '白名单手机号 ⇒ 放行（ok:true）', true, whitelisted.ok === true)
-check('B1b', '正向对照确有落盘（恰 2 处）', 2, store.stats.writes.length)
+check('B1b', '正向对照确有落盘（恰 3 处：公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length)
 check('B1c', '回包带服务端权威行（status ACCEPTED）与公开投影', { status: 'ACCEPTED', hasProjection: true }, { status: whitelisted.row && whitelisted.row.status, hasProjection: !!whitelisted.projection })
 check('B1d', '公开投影零身份字段（服务端下发面）', [], Object.keys(whitelisted.projection || {}).filter((k) => ops.IDENTITY_PROJECTION_KEYS.indexOf(k) !== -1))
 
@@ -333,7 +333,7 @@ delete process.env.XIAI_ADMIN_PHONE
   store.load(CLOUD_SEED)
   const submitOk = await fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'submitCorrection', payload: { faceId: 'fc-env-safe', sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: '缺 env 仍可提交', basis: '' } })
   check('C1', '缺 env ⇒ 普通用户提交勘误**仍可用**（ok:true）', true, submitOk.ok === true)
-  check('C1b', '缺 env ⇒ 普通用户写面确有落盘（不误伤）', 1, store.stats.writes.length)
+  check('C1b', '缺 env ⇒ 普通用户写面确有落盘（不误伤；提交 ＝ 2 处：勘误行 ＋ 值级公开摘要）', 2, store.stats.writes.length)
   /* C1c：负向对照 —— 采信（另一普通用户 op）在缺 env 下同样不受影响。 */
   store.load(CLOUD_SEED)
   const endorsePayload = { faceId: 'fc-env-safe', sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: '甲值' }
@@ -357,7 +357,7 @@ const healed = await corrections.review(ADMIN, CORRECTION_ID, 'ACCEPTED')
 check('D0', '清令牌 ＋ **有会话** ⇒ 采纳成功（ok:true）', true, healed.ok === true && healed.accepted === true)
 check('D0b', '自愈顺序：**先 issue 补签、后 verify**', true, firstIndex('issue') !== -1 && firstIndex('verify') !== -1 && firstIndex('issue') < firstIndex('verify'))
 check('D0c', '自愈后令牌已入内存（present＝true）', true, userTokenSvc.userTokenSnapshot().present === true)
-check('D0d', '自愈写：服务端恰落盘 2 处', 2, store.stats.writes.length)
+check('D0d', '自愈写：服务端恰落盘 3 处（公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length)
 /* D1（负向）：清令牌 ＋ 无会话 ⇒ 结构化拒绝 ＋ 零写入 ＋ 零往返。 */
 userTokenSvc.clearUserToken()
 session.setUser(null)

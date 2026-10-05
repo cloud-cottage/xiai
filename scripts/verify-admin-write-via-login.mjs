@@ -117,7 +117,7 @@ const userLib = require(path.join(USER_FN_DIR, 'lib/token.js'))
 const adminOps = require(path.join(ADMIN_FN_DIR, 'lib/ops.js'))
 
 function createStore(seed) {
-  const collections = { xiai_corrections: new Map(), xiai_corrections_public: new Map(), xiai_endorsements: new Map(), xiai_endorsement_counts: new Map() }
+  const collections = { xiai_corrections: new Map(), xiai_corrections_public: new Map(), xiai_endorsements: new Map(), xiai_correction_summaries: new Map() }
   const stats = { writes: [], reads: 0 }
   const load = (rows) => {
     Object.keys(collections).forEach((name) => collections[name].clear())
@@ -265,8 +265,8 @@ console.log(JSON.stringify({ section: 'B', title: '① 白名单 ⇒ reviewCorre
 store.load(CLOUD_SEED)
 const reviewed = await fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'reviewCorrection', payload: { correction_id: CORRECTION_ID, decision: 'ACCEPTED' } })
 check('B1', '白名单手机号 ⇒ ok:true', true, reviewed.ok === true)
-check('B2', '恰落盘 2 处', 2, store.stats.writes.length)
-check('B3', '落盘顺序：**先**公开投影、**后**私有状态', ['xiai_corrections_public', 'xiai_corrections'], store.stats.writes.map((w) => w.collection))
+check('B2', '恰落盘 3 处（公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length)
+check('B3', '落盘顺序：**先**公开投影、**次**私有状态、**末**值级公开摘要', ['xiai_corrections_public', 'xiai_corrections', 'xiai_correction_summaries'], store.stats.writes.map((w) => w.collection))
 check('B3b', '公开投影落 `doc(cp-<单号>).set(…)`（确定性键 ⇒ 幂等）', { id: 'cp-' + CORRECTION_ID, action: 'set' }, { id: store.stats.writes[0].id, action: store.stats.writes[0].action })
 check('B3c', '私有状态落 `where(match).update(…)`', 'update', store.stats.writes[1].action)
 const pub = store.collections.xiai_corrections_public.get('cp-' + CORRECTION_ID) || {}
@@ -312,7 +312,7 @@ delete process.env.XIAI_ADMIN_PHONE
   store.load(CLOUD_SEED)
   const submitOk = await fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'submitCorrection', payload: { faceId: 'fc-env-safe', sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: '缺 env 仍可提交', basis: '' } })
   check('D3', '缺 env ⇒ 普通用户 `submitCorrection` **仍可用**（ok:true）', true, submitOk.ok === true)
-  check('D3b', '缺 env ⇒ 普通用户提交确有落盘（不误伤）', 1, store.stats.writes.length)
+  check('D3b', '缺 env ⇒ 普通用户提交确有落盘（不误伤；提交 ＝ 2 处：勘误行 ＋ 值级公开摘要）', 2, store.stats.writes.length)
   store.load(CLOUD_SEED)
   const endorsePayload = { faceId: 'fc-env-safe', sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: '甲值' }
   await fn.main({ action: 'verify', token: tokenFor(NON_WHITELIST_PHONE), op: 'submitCorrection', payload: { ...endorsePayload, basis: '' } })

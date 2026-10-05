@@ -262,8 +262,9 @@ check('A3g', '六种拒绝的形状全部恰 3 键 ＋ reason ∈ 冻结表', tr
 const beforeA4 = bucket.adds.length
 const okWrite = await fn.main({ action: 'verify', token: tokenOk, op: 'submitCorrection', payload: VALID_PAYLOAD })
 check('A4', '合法校验 ⇒ ok:true', true, okWrite.ok === true)
-check('A4b', '落盘恰 1 行（集合 xiai_corrections）', 1, bucket.adds.length - beforeA4)
-check('A4c', '落盘集合名', 'xiai_corrections', bucket.adds[beforeA4].collection)
+check('A4b', '落盘恰 2 处（勘误私有行 add ＋ 值级公开摘要行 set）', 2, bucket.adds.length - beforeA4)
+check('A4c', '落盘集合名（首写）', 'xiai_corrections', bucket.adds[beforeA4].collection)
+check('A4c2', '落盘顺序：先勘误私有行、后值级公开摘要行', ['xiai_corrections', 'xiai_correction_summaries'], bucket.adds.slice(beforeA4, beforeA4 + 2).map((entry) => entry.collection))
 check('A4d', '行内 userId ＝ 服务端派生 uid', uidOfPhone(PHONE), bucket.adds[beforeA4].doc.user_id)
 check('A4e', '行内 user_id ＝ userId（兼容别名）', uidOfPhone(PHONE), bucket.adds[beforeA4].doc.userId)
 check('A4f', '**业务行不落手机号**：新行**无 `user_phone` 键**（人类口径 ②）', false, Object.prototype.hasOwnProperty.call(bucket.adds[beforeA4].doc, 'user_phone'))
@@ -272,6 +273,13 @@ check('A4g', '行内身份来源标记', 'SERVER_TOKEN', bucket.adds[beforeA4].d
 check('A4h', '状态自 PENDING 起', 'PENDING', bucket.adds[beforeA4].doc.status)
 check('A4i', 'field_label 由服务端填', '作者', bucket.adds[beforeA4].doc.field_label)
 check('A4j', '滑动续期回吐新令牌（长度/指纹）', true, typeof okWrite.renewedToken === 'string' && okWrite.renewedToken.length > 0)
+/* **本单适配**：`submitCorrection` 服务端回包新增值级公开摘要行（`summary`）——
+   零手机号、`submits`/`submitter_uids` 已重算；摘要行与落盘第 2 处 `set` 逐字一致。 */
+check('A4k', '回包带 `summary`（值级公开摘要行）', true, !!okWrite.summary)
+check('A4l', '摘要行零手机号（11 位数字正则命中 0；uid 允许）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(okWrite.summary || {})))
+check('A4m', '摘要行 `submits` ＝ 1、`submitter_uids` ＝ [我 uid]', { submits: 1, submitter_uids: [uidOfPhone(PHONE)] }, { submits: okWrite.summary && okWrite.summary.submits, submitter_uids: okWrite.summary && okWrite.summary.submitter_uids })
+check('A4n', '摘要行 `_id` 前缀 ＝ `cs-`、schema ＝ `xiai-correction-summaries-v1`', true, String(okWrite.summary && okWrite.summary._id).startsWith('cs-') && okWrite.summary.schema === 'xiai-correction-summaries-v1')
+check('A4o', '落盘第 2 处（set）的 doc 逐字 ＝ 回包 summary（服务端权威）', true, JSON.stringify(bucket.adds[beforeA4 + 1].doc) === JSON.stringify(okWrite.summary))
 console.log(
   JSON.stringify({
     A4_readout: {
@@ -313,7 +321,7 @@ check('A6c', '字段不可勘误 ⇒ INVALID_FIELD', 'INVALID_FIELD', badField.r
 check('A6d', '超长文本 ⇒ INVALID_VALUE', 'INVALID_VALUE', longValue.reason)
 check('A6e', '未知 action ⇒ FORBIDDEN', 'FORBIDDEN', unknownAction.reason)
 check('A6f', '以上拒绝形状全部恰 3 键', true, [unknownOp, missingFace, badField, longValue, unknownAction].every(isDenial))
-check('A6g', '零写入（A5−A6 全程 add 计数仍为 1）', 1, bucket.adds.length)
+check('A6g', '零写入（A5−A6 全程落盘计数仍为 A4 的 2 处）', 2, bucket.adds.length)
 
 /* A7：存储不可用 ⇒ STORAGE_UNAVAILABLE（**不伪装 FORBIDDEN**），且未产生行。
    **本单追加**：载荷换成**未提交过的值** —— A4 已写入同 `(faceId, field, value)` ⇒ 提交侧防重
@@ -418,7 +426,7 @@ const submitted = await corrections.submitCorrection({
 })
 check('B2', '切片端到端成功', true, submitted.ok === true)
 check('B2b', '权威来源 ＝ SERVER', 'SERVER', submitted.authority)
-check('B2c', '云端恰 1 行', 1, bucket.adds.length - beforeB2)
+check('B2c', '云端恰 2 处（勘误私有行 ＋ 值级公开摘要行）', 2, bucket.adds.length - beforeB2)
 check('B2d', '行内 userId ＝ 服务端派生 uid（**非前端自称**）', uidOfPhone(PHONE), bucket.adds[beforeB2].doc.user_id)
 check('B2e', '本机镜像行 ＝ 服务端权威行（逐字，非前端自建）', true, submitted.row.id === bucket.adds[beforeB2].doc.id)
 check('B2f', '本机镜像已落（读回可见）', true, corrections.listMyCorrections().some((row) => row.id === submitted.row.id))
@@ -442,7 +450,7 @@ check('B3c', '自愈权威来源 ＝ SERVER', 'SERVER', healedWrite.authority)
   check('B3d', '自愈顺序：**先 issue 后 verify**', true, seq.indexOf('issue') !== -1 && seq.indexOf('verify') !== -1 && seq.indexOf('issue') < seq.indexOf('verify'))
 }
 check('B3e', '自愈后令牌已进入缓存（present＝true）', true, userTokenSvc.userTokenSnapshot().present === true)
-check('B3f', '自愈写：云端恰 1 行', 1, bucket.adds.length - beforeB3)
+check('B3f', '自愈写：云端恰 2 处（勘误私有行 ＋ 值级公开摘要行）', 2, bucket.adds.length - beforeB3)
 check('B3g', '自愈写行内 userId ＝ 服务端派生 uid（非前端自称）', uidOfPhone(PHONE), bucket.adds[beforeB3].doc.user_id)
 
 /* B3n：**负向**（本单新增）—— 清令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ **零写入**（且零往返：连补签都不发）。

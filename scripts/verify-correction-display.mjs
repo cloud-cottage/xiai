@@ -343,8 +343,8 @@ check('A7c', '令牌已进入内存缓存（读数不含令牌原文）', true, 
   /* 正向对照：新键面放行且确有落盘。 */
   const newKey = await fn.main({ action: 'verify', token: direct.token, op: 'reviewCorrection', payload: { correction_id: 'cr-name', decision: 'ACCEPTED' } })
   check('A8c', '**新键面** `{correction_id:…}` ⇒ 服务端放行（正向对照）', true, newKey.ok === true)
-  check('A8d', '正向对照确有落盘（恰 2 处：公开投影 ＋ 私有状态）', 2, store.stats.writes.length)
-  check('A8e', '落盘顺序：先公开投影、后私有状态', ['xiai_corrections_public', 'xiai_corrections'], store.stats.writes.map((w) => w.collection))
+  check('A8d', '正向对照确有落盘（恰 3 处：公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length)
+  check('A8e', '落盘顺序：先公开投影、次私有状态、末值级公开摘要', ['xiai_corrections_public', 'xiai_corrections', 'xiai_correction_summaries'], store.stats.writes.map((w) => w.collection))
 }
 
 /* ---------------------------------------------------------------------------
@@ -372,13 +372,21 @@ const beforeWrites = store.stats.writes.length
 const reviewed = await corrections.review(ADMIN, 'cr-name', 'ACCEPTED')
 check('B2', '采纳成功（ok:true / accepted:true）', { ok: true, accepted: true, status: 'ACCEPTED' }, { ok: reviewed.ok, accepted: reviewed.accepted, status: reviewed.status })
 check('B2b', '**传输载荷键面恰 ＝ ops.REVIEW_ALLOWED_KEYS**（键名对齐的运行时证据）', sorted(ops.REVIEW_ALLOWED_KEYS), calls[calls.length - 1].payloadKeys)
-check('B2c', '服务端恰落盘 2 处', 2, store.stats.writes.length - beforeWrites)
+check('B2c', '服务端恰落盘 3 处（公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length - beforeWrites)
 const publicWrite = store.stats.writes[beforeWrites]
 check('B2d', '第 1 处落盘 ＝ 公开投影 `doc(cp-cr-name).set(…)`', { collection: 'xiai_corrections_public', action: 'set', id: 'cp-cr-name' }, { collection: publicWrite.collection, action: publicWrite.action, id: publicWrite.id })
 const publicDoc = store.collections.xiai_corrections_public.get('cp-cr-name')
 check('B2e', '公开投影文档键面恰 ＝ PUBLIC_PROJECTION_KEYS（`_id` 为文档键，不在表内）', sorted(ops.PUBLIC_PROJECTION_KEYS), sorted(Object.keys(publicDoc).filter((key) => key !== '_id')))
 check('B2f', '公开投影**零身份字段**（与身份面交集为空）', [], Object.keys(publicDoc).filter((key) => ops.IDENTITY_PROJECTION_KEYS.indexOf(key) !== -1))
 check('B2g', '公开投影自述 schema / 状态', { schema: ops.PUBLIC_SCHEMA, status: 'ACCEPTED' }, { schema: publicDoc.schema, status: publicDoc.status })
+/* B2h / B2i / B2j / B2k：**值级公开摘要行**（本单合并面）随采纳落盘 —— 键面 / schema / 零手机号 / 计数。 */
+const summaryDocId = ops.correctionSummaryDocId(FACE_ID, 'seal_name', ACCEPTED_NAME)
+const summaryWrite = store.stats.writes[beforeWrites + 2]
+check('B2h', '第 3 处落盘 ＝ 值级公开摘要行 `doc(cs-…).set(…)`（确定性键 ⇒ 幂等）', { collection: 'xiai_correction_summaries', action: 'set', id: summaryDocId }, { collection: summaryWrite.collection, action: summaryWrite.action, id: summaryWrite.id })
+const summaryDoc = store.collections.xiai_correction_summaries.get(summaryDocId)
+check('B2i', '摘要行自述 schema / status（随采纳更新为 ACCEPTED）', { schema: ops.CORRECTION_SUMMARY_SCHEMA, status: 'ACCEPTED' }, { schema: summaryDoc && summaryDoc.schema, status: summaryDoc && summaryDoc.status })
+check('B2j', '摘要行**零手机号**（无 `user_phone` 键、行内不含手机号原文）', { hasPhoneKey: false, containsPhone: false }, { hasPhoneKey: Object.prototype.hasOwnProperty.call(summaryDoc || {}, 'user_phone'), containsPhone: JSON.stringify(summaryDoc || {}).indexOf(PHONE) !== -1 })
+check('B2k', '摘要行计数如实（submits ＝ 1 / endorses ＝ 0）', { submits: 1, endorses: 0 }, { submits: summaryDoc && summaryDoc.submits, endorses: summaryDoc && summaryDoc.endorses })
 
 /* B3：本机镜像 ＋ 展示链 */
 const mirrorRows = storage.readKey(storage.STORAGE_KEYS.correctionsPublic)
