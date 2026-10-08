@@ -798,12 +798,23 @@ export async function ensureAnonymousLogin(auth) {
    7. 影像展示件：对象键 → 临时链接 → 字节（**不做转码、不做切块**）
    --------------------------------------------------------------------------- */
 
+/** 源件（`.tiff` 原图）对象键形态（本单新增；既有 `IMAGE_OBJECT_KEY_PATTERN` 一字不动）。 */
+const IMAGE_SOURCE_TIFF_KEY_PATTERN = /^xiai\/images\/([0-9a-f]{2})\/([0-9a-f]{64})\.tiff$/
+
 /**
  * 影像行的**展示件对象键**（机械可判）：
  *   · 行 `storage` 必须**逐字**等于既有取值 `server`（mapping.md §3）；
  *   · 行内 `sha256` 必须 64 位小写十六进制；
- *   · `storage_key` 必须匹配 `xiai/images/<sha 前两位>/<sha>.<png|webp>`，且 sha 段 ≡ 行内 sha256
- *     （不一致 ⇒ **拒绝**，返回空串 —— 不猜、不拼）。
+ *   · **源件行（本单新增）**：`storage_key` 以 `.tiff` 结尾 ⇒ 返回**派生展示键**
+ *     `xiai/images/<sha 前两位>/<sha>.png`（展示件由云函数 `ensureDisplayArtifact`
+ *     服务端转码上传，内容寻址同名键）。桶安全规则按扩展名放行（实测）：`.png` 匿名可读、
+ *     `.tiff` 匿名拒读 ⇒ 读面永远只取展示件、原图字节不下发前端。键内摘要必须 ≡ 行内
+ *     `sha256`（不符 ⇒ 空串，不猜不拼）；
+ *   · 其余（`.png` / `.webp` 展示件行）：`storage_key` 必须匹配
+ *     `xiai/images/<sha 前两位>/<sha>.<png|webp>`，且 sha 段 ≡ 行内 sha256
+ *     （不一致 ⇒ **拒绝**，返回空串 —— 不猜、不拼）；
+ *   · 无 `sha256` 的旧行 ⇒ 到不了解派生分支，落到既有模式判定（不匹配 ⇒ 空串）＝
+ *     **显式结构化失败，不静默造键**。
  * @param {object|null} row 影像行
  * @returns {string} 对象键；判不过 ⇒ `''`
  */
@@ -813,6 +824,12 @@ export function cloudBaseObjectKeyOf(row) {
   const digest = String(row.sha256 || '').trim().toLowerCase()
   if (!/^[0-9a-f]{64}$/.test(digest)) return ''
   const key = String(row.storage_key || '').trim()
+  /* 【本单新增｜读面单点扩展】源件行 ⇒ 派生展示键（`.png`；键内摘要 ≡ 行内 sha256）。 */
+  const tiffMatched = IMAGE_SOURCE_TIFF_KEY_PATTERN.exec(key)
+  if (tiffMatched) {
+    if (tiffMatched[2] !== digest || tiffMatched[1] !== digest.slice(0, 2)) return ''
+    return `xiai/images/${tiffMatched[1]}/${tiffMatched[2]}.png`
+  }
   const matched = IMAGE_OBJECT_KEY_PATTERN.exec(key)
   if (!matched) return ''
   if (matched[2] !== digest || matched[1] !== digest.slice(0, 2)) return ''

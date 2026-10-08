@@ -184,8 +184,11 @@ async function handleVerify(event, config) {
   /* **身份的唯一来源**：服务端从令牌声明派生（载荷里的身份类键在 op 门里被拒）。 */
   const identity = Object.freeze({ uid: uidOf(phone), phone })
   /* ④ op 面：两个注册面（**都不静默放行**）——
-     · `OPS`（用户写面：`submitCorrection` / `endorseCorrection` / **`registerArtifact`**（本单新增：
-       **只回读验证、零落盘** —— 客户端直传云存储后的服务端摘要／体量复核））；
+     · `OPS`（用户写面：`submitCorrection` / `endorseCorrection` / **`registerArtifact`**
+       （**只回读验证、零落盘** —— 客户端直传云存储后的服务端摘要／体量复核）/
+       **`ensureDisplayArtifact`**（本單新增：**展示件转码** —— 服务端把 `.tiff` 原图
+       转码成展示件 PNG 并上传到内容寻址展示键 `…/<sha>.png`；不落集合，仅写对象存储；
+       客户端把它当 best-effort，失败不影响已成功的上传/落行））；
      · `ADMIN_OPS`（**V3 管理员写面**：`reviewCorrection` / `setInviteReward`；须
        **手机号 ∈ 白名单**，白名单由 op 内部按 `context.adminPhone` 判定 ⇒ 缺 env ⇒ 结构化拒绝）。 */
   const userValidator = Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : null
@@ -283,12 +286,18 @@ async function handleVerify(event, config) {
     /** `setInviteReward`（无落盘计划）的成功回包：仅回吐值域判定通过的值。 */
     value: opResult.value,
     /**
-     * **回讀驗證面（本單｜`registerArtifact`）**：该 op **不落盘、只回读验证** ⇒ 把它的
+     * **回讀驗證面（`registerArtifact`）**：该 op **不落盘、只回读验证** ⇒ 把它的
      * 分组回读结果（`{sha256,bytesLength,mime,storageKey,idempotent}`）原样叠进回包
      * （键名与 op 回包逐字一致；其扁平六键亦在 `opResult` 内）。其余 op ⇒ `undefined`，
      * **既有回包逐字不变**。
      */
     artifact: opResult.artifact,
+    /**
+     * **展示件轉碼面（本單｜`ensureDisplayArtifact`）**：`{sha256, displayKey, bytesLength,
+     * width, height}` 原样叠进回包（键名与 op 回包逐字一致）。其余 op ⇒ `undefined`
+     * （序列化后不出现该键 ⇒ **既有回包逐字不变**）。
+     */
+    display: opResult.display,
     docId,
     authority: 'SERVER',
     identity: {

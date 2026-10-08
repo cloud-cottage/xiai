@@ -361,7 +361,12 @@ const viaCloud = await imageAuthority.storeArtifactBytes(TIFF)
 check('B1', 'A 路不可达 ⇒ B 路成功', true, viaCloud.ok === true)
 check('B1b', '直传恰 1 次，打到内容寻址键', [{ cloudPath: CLOUD_PATH, digest: TIFF_DIGEST, length: TIFF.length }], uploads.map((item) => ({ cloudPath: item.cloudPath, digest: item.digest, length: item.length })))
 check('B1c', 'fileID 由**既有唯一构造点**产出（`cloud://` ＋ 桶段 ＋ 对象键）', true, /^cloud:\/\/.*\.tiff$/.test(uploads[0].fileID) && uploads[0].fileID.endsWith(`/${CLOUD_PATH}`))
-check('B1d', '注册恰 1 次、op 名逐字 ＝ registerArtifact', true, fnCalls.length === 1 && fnCalls[0].data.op === 'registerArtifact' && fnCalls[0].data.action === 'verify')
+/* 【本单适配｜展示件转码】B 路在 `registerArtifact` 成功后追加一次 best-effort
+   `ensureDisplayArtifact`（失败隔离、不改写入口回包形状）⇒ 云函数调用数 1 → 2。
+   原断言「注册恰 1 次、op 名逐字＝registerArtifact」拆为：fnCalls[0] 的 op 名与 action
+   逐字保留 ＋ 新增第 2 次调用的 op 名断言（断言条数只增不减；第 2 次调用载荷键面另见 B1d2）。 */
+check('B1d', '云函数恰 2 次：fnCalls[0] op 逐字 ＝ registerArtifact（原断言保留）＋ fnCalls[1] ＝ 本单追加的 ensureDisplayArtifact', true, fnCalls.length === 2 && fnCalls[0].data.op === 'registerArtifact' && fnCalls[0].data.action === 'verify' && fnCalls[1].data.op === 'ensureDisplayArtifact')
+check('B1d2', '追加调用载荷键面 ＝ {cloudPath,sha256}（封闭键面，不含任何身份类键）', 'cloudPath,sha256', shapeOf(fnCalls[1].data.payload))
 check('B1e', '注册载荷键面逐字 ＝ {cloudPath,sha256,bytesLength}', 'bytesLength,cloudPath,sha256', shapeOf(fnCalls[0].data.payload))
 check('B1f', 'B 路回包：sha256/bytesLength/mime/relPath', { sha256: TIFF_DIGEST, bytesLength: TIFF.length, mime: 'image/tiff', relPath: REL_PATH }, { sha256: viaCloud.sha256, bytesLength: viaCloud.bytesLength, mime: viaCloud.mime, relPath: viaCloud.relPath })
 check('B1g', 'B 路 `storageKey` ＝ 对象键（＝ 行上 `storage_key`）', CLOUD_PATH, viaCloud.storageKey)
@@ -372,7 +377,9 @@ resetCounters()
 fetchMode = 'html'
 const viaHtml = await imageAuthority.storeArtifactBytes(TIFF)
 check('B2', 'A 路回 200 HTML（SPA 兜底）⇒ 回落 B 路成功', true, viaHtml.ok === true)
-check('B2b', '该形态下直传 1 次、注册 1 次', [1, 1], [uploads.length, fnCalls.length])
+/* 【本单适配｜展示件转码】追加的 ensureDisplayArtifact 使云函数调用数 1 → 2（直传次数不变：
+   展示件上传走服务端写存储点，不经客户端直传缝）。 */
+check('B2b', '该形态下直传 1 次、云函数 2 次（registerArtifact ＋ 本单追加的 ensureDisplayArtifact）', [1, 2], [uploads.length, fnCalls.length])
 
 /* B3 负对照：A 路给**业务性**拒绝（不在回落集内）⇒ 原样上抛，**不改走 B 路** */
 resetCounters()

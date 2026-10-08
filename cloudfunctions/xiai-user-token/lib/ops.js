@@ -35,6 +35,8 @@
 
 const crypto = require('crypto')
 const { REASONS, deny, normalizePhone } = require('./config.js')
+/* 展示件轉碼器（本單新增；純 JS 零新依賴 —— node:zlib ＋ 自寫 CRC32）。 */
+const { tiffToPng } = require('./tiffToPng.js')
 
 /**
  * 集合白名单（封闭；**一律 `xiai_` 前缀**）。
@@ -307,6 +309,19 @@ const ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 /** 摘要形态（64 位小写十六进制；与 `src/services/imageAuthority.js::normalizeDigest` 同口径）。 */
 const ARTIFACT_DIGEST_PATTERN = /^[0-9a-f]{64}$/
 
+/* ---------------------------------------------------------------------------
+   **展示件轉碼面（本單新增 op `ensureDisplayArtifact`）**
+   ---------------------------------------------------------------------------
+   背景（人類已實測定案）：瀏覽器不能原生解 TIFF ⇒ 新上傳的 `.tiff` 原圖在線上無法顯示；
+   桶安全規則**按擴展名放行**（同會話同前綴 `.png` ⇒ `getTempFileURL` 成功；`.tiff` ⇒
+   `STORAGE_EXCEED_AUTHORITY`）⇒ 原圖 TIFF 不暴露給匿名讀（恰好是想要的安全面），而
+   `.png` 展示件天然可讀。⇒ 展示件由**服務端**轉碼並上傳到**同目錄同名內容尋址鍵**
+   `xiai/images/<摘要前兩位>/<摘要>.png`（讀面單點按行派生該鍵，見 `src/data/cloudbase.js`）。
+   --------------------------------------------------------------------------- */
+
+/** 展示件轉碼載荷允許鍵（**封閉鍵面**：只有 `cloudPath` / `sha256`；身份類鍵一律拒）。 */
+const DISPLAY_ALLOWED_KEYS = Object.freeze(['cloudPath', 'sha256'])
+
 /** TIFF 魔数（小端 `II*\0` / 大端 `MM\0*`；与 `src/utils/tiff.js` 同值、只作墨数门）。 */
 const TIFF_MAGIC_LE = Object.freeze([0x49, 0x49, 0x2a, 0x00])
 const TIFF_MAGIC_BE = Object.freeze([0x4d, 0x4d, 0x00, 0x2a])
@@ -370,6 +385,27 @@ function opsStorageInjected() {
   return storageProvider !== null
 }
 
+/* ---------------------------------------------------------------------------
+   对象存储**上传**缝（**离线自检 / 宿主用**；生产不注入 ⇒ 走真实 `@cloudbase/node-sdk`）
+   —— 本单 `ensureDisplayArtifact` 用：服务端把转码出的展示件 PNG 上传到内容寻址键。
+   --------------------------------------------------------------------------- */
+
+let storageUploadProvider = null
+
+/**
+ * 注入对象存储**上传**实现（**仅供离线自检 / 宿主**）。
+ * 形状：`async ({cloudPath, bytes}) => void`（上传失败 ⇒ **抛错**，由 op 转结构化拒绝）。
+ * @param {null|function(object):Promise<void>} fn
+ */
+function setOpsStorageUploadProvider(fn) {
+  storageUploadProvider = typeof fn === 'function' ? fn : null
+}
+
+/** 上传缝是否已注入（诊断读数用，**不含任何凭据**）。 */
+function opsStorageUploadInjected() {
+  return storageUploadProvider !== null
+}
+
 /**
  * 服务端取 **fileID**（`cloud://<envId>.<bucket>/<对象键>`）。
  *
@@ -420,6 +456,31 @@ async function readArtifactBytes(cloudPath) {
   const bytes = bufferOf(reply && reply.fileContent)
   if (!bytes) throw new Error('STORAGE_DOWNLOAD_EMPTY')
   return bytes
+}
+
+/**
+ * **上传展示件字节**（服务端；`ensureDisplayArtifact` 的唯一写存储点）。
+ *
+ * 顺序：① 注入缝（离线自检）→ ② 真实 node-sdk `uploadFile({cloudPath, fileContent})`。
+ * **内容寻址 ⇒ 天然幂等**：同鍵重複上傳即覆寫同內容，**不做存在性探測**（与
+ * `registerArtifact` 的「零存在性判定」同口径；重复调用安全）。
+ * 任一环失败 ⇒ **抛错**（由调用方转 `STORAGE_UNAVAILABLE`，**不得伪装 FORBIDDEN**）。
+ * @param {string} cloudPath 展示件对象键（`xiai/images/<摘要前两位>/<摘要>.png`）
+ * @param {Buffer|Uint8Array} bytes 展示件 PNG 字节
+ * @returns {Promise<void>}
+ */
+async function uploadDisplayArtifactBytes(cloudPath, bytes) {
+  const payload = bufferOf(bytes)
+  if (!payload || payload.length === 0) throw new Error('DISPLAY_UPLOAD_EMPTY')
+  if (storageUploadProvider) {
+    await storageUploadProvider({ cloudPath, bytes: payload })
+    return
+  }
+  /* 延迟 require：离线自检（注入上传缝）时**不需要**装 `@cloudbase/node-sdk`。 */
+  const tcb = require('@cloudbase/node-sdk')
+  const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
+  const app = envId ? tcb.init({ env: envId }) : tcb.init()
+  await app.uploadFile({ cloudPath, fileContent: payload })
 }
 
 /**
@@ -939,6 +1000,118 @@ const OPS = Object.freeze({
       idempotent: verified.idempotent,
       artifact: verified
     }
+  },
+
+  /**
+   * **展示件轉碼（本單新增 op｜`ensureDisplayArtifact`）**：瀏覽器不能原生解 TIFF ⇒
+   * 新上傳的 `.tiff` 原圖在線上無法顯示。本 op 在**服務端**把原圖轉碼成展示件 PNG，
+   * 並上傳到**同目錄同名內容尋址鍵** `xiai/images/<摘要前兩位>/<摘要>.png`。
+   *
+   * 順序（**鍵形態判定全部在讀回之前**；本 op 不落任何集合 —— 不產出 `plan` ⇒ `index.js`
+   * 的落盤分支不觸發，僅寫對象存儲）：
+   *   ① 載荷形態 / 鍵面（封閉 `DISPLAY_ALLOWED_KEYS`：只有 `cloudPath` / `sha256`）；
+   *   ② 鍵形態自校驗：`xiai/images/<摘要前兩位>/<摘要>.tiff` 且鍵內摘要 ≡ 聲稱摘要
+   *      ⇒ 否則拒**且不讀**（一路徑只能指一份內容）；
+   *   ③ 讀回原對象（失敗 ⇒ `STORAGE_UNAVAILABLE`，**絕不偽裝 `FORBIDDEN`**）；
+   *   ④ 空內容 / 容器墨數不是 TIFF ⇒ `INVALID_VALUE`；**重算摘要 ≠ 鍵內摘要** ⇒ `INVALID_VALUE`
+   *      （內容尋址完整性：不轉碼「內容與鍵不符」的對象，也不吐真值）；
+   *   ⑤ `tiffToPng`（純 JS 轉碼器；不支持的變體 ⇒ `TIFF_UNSUPPORTED` ⇒ 一律 `INVALID_VALUE`，
+   *      **不新增 reason 字面值**）；
+   *   ⑥ 上傳展示件（**內容尋址 ⇒ 天然冪等**：重複調用安全，不做存在性探測，同鍵覆寫同內容）；
+   *      上傳失敗 ⇒ `STORAGE_UNAVAILABLE`；
+   *   ⑦ 成功回包 `{ok:true, sha256, displayKey, bytesLength, width, height}` ＋ `display` 分組視圖。
+   *
+   * **失敗隔離（本 op 的硬口徑）**：本 op 的任何失敗都**不影響已成功的上傳 / 落行** ——
+   * 客戶端把它當 best-effort（失敗只結構化登記、不上拋、不阻斷行寫入，
+   * 見 `src/services/imageAuthority.js` 的 B 路）。
+   * @param {object} payload 载荷（允许键见 `DISPLAY_ALLOWED_KEYS`）
+   * @returns {Promise<object>} 成功 ⇒ 扁平回包 ＋ `display` 分组视图；失败 ⇒ 恰 3 键结构化拒绝
+   */
+  async ensureDisplayArtifact(payload) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => DISPLAY_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const cloudPath = text(payload.cloudPath)
+    const digest = text(payload.sha256).toLowerCase()
+    /* ② 鍵形態自校驗（**讀回之前**；與 `registerArtifact` 同一張形態表）。 */
+    const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(cloudPath)
+    if (!matched) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff）；本次零寫入。'
+      )
+    }
+    if (!ARTIFACT_DIGEST_PATTERN.test(digest)) {
+      return deny(REASONS.INVALID_VALUE, '摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+    }
+    if (matched[2] !== digest || matched[1] !== digest.slice(0, 2)) {
+      return deny(REASONS.INVALID_VALUE, '影像對象鍵內含的摘要與聲稱的 sha256 不一致；本次零寫入。')
+    }
+    /* ③ 讀回原對象。 */
+    let bytes = null
+    try {
+      bytes = await readArtifactBytes(cloudPath)
+    } catch {
+      return deny(REASONS.STORAGE_UNAVAILABLE, '雲端對象存儲不可用或該影像對象不存在；本次零寫入。')
+    }
+    if (bytes.length === 0) {
+      return deny(REASONS.INVALID_VALUE, '影像對象為空內容；本次零寫入。')
+    }
+    if (!artifactMimeOf(bytes)) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '該對象不是本面認可的影像容器（源件應為單頁 8bit Deflate TIFF）；本次零寫入。'
+      )
+    }
+    /* ④ 內容尋址完整性：鍵名摘要 ≡ 對象真身摘要（**不采信客戶端自稱**；不吐真值）。 */
+    const actual = crypto.createHash('sha256').update(bytes).digest('hex')
+    if (actual !== digest) {
+      return deny(REASONS.INVALID_VALUE, '回讀校驗失敗：對象的摘要與鍵內摘要不一致；本次零寫入。')
+    }
+    /* ⑤ 轉碼（純 JS；不支持的變體 ⇒ 結構化拒絕，**不新增 reason 字面值**）。 */
+    let decoded = null
+    try {
+      decoded = await tiffToPng(bytes)
+    } catch {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '原圖轉碼失敗：該 TIFF 不是本面支持的單頁 8bit Deflate RGB 形態；本次零寫入。'
+      )
+    }
+    /* ⑥ 上傳展示件（內容尋址鍵；冪等覆寫，不做存在性探測）。 */
+    const displayKey = `xiai/images/${matched[1]}/${matched[2]}.png`
+    try {
+      await uploadDisplayArtifactBytes(displayKey, decoded.png)
+    } catch {
+      return deny(REASONS.STORAGE_UNAVAILABLE, '展示件上傳失敗（雲端存儲不可用）；本次零寫入。')
+    }
+    /* ⑦ 成功回包（brief 冻结形态）＋ `display` 分組視圖（供信封 / 客戶端逐字透傳）。 */
+    const display = {
+      sha256: digest,
+      displayKey,
+      bytesLength: decoded.png.length,
+      width: decoded.width,
+      height: decoded.height
+    }
+    return {
+      ok: true,
+      op: 'ensureDisplayArtifact',
+      sha256: display.sha256,
+      displayKey: display.displayKey,
+      bytesLength: display.bytesLength,
+      width: display.width,
+      height: display.height,
+      display
+    }
   }
 })
 
@@ -1246,14 +1419,19 @@ module.exports = {
   ARTIFACT_OBJECT_KEY_PATTERN,
   ARTIFACT_MIME,
   ARTIFACT_MAX_BYTES,
+  /* 展示件轉碼面（本單新增 `ensureDisplayArtifact`；供離線自檢直接斷言）。 */
+  DISPLAY_ALLOWED_KEYS,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,
   opsDbInjected,
   setOpsStorageProvider,
   opsStorageInjected,
+  setOpsStorageUploadProvider,
+  opsStorageUploadInjected,
   resolveDb,
   readArtifactBytes,
+  uploadDisplayArtifactBytes,
   artifactMimeOf,
   adminWhitelistDenial,
   readCorrectionRow,

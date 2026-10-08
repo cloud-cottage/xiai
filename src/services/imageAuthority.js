@@ -61,6 +61,14 @@ export const ARTIFACT_OBJECT_KEY_EXT = 'tiff'
 /** 雲端登記 op 名（與雲函數 `OPS` 註冊面逐字一致）。 */
 export const ARTIFACT_REGISTER_OP = 'registerArtifact'
 
+/**
+ * 雲端**展示件轉碼** op 名（本單新增；與雲函數 `OPS` 註冊面逐字一致）：
+ * 瀏覽器不能原生解 TIFF ⇒ B 路在 `registerArtifact` 成功後追加一次
+ * `ensureDisplayArtifact`（best-effort），由**服務端**把 `.tiff` 原圖轉碼成展示件 PNG
+ * 並上傳到內容尋址展示鍵 `xiai/images/<摘要前兩位>/<摘要>.png`。
+ */
+export const ARTIFACT_ENSURE_DISPLAY_OP = 'ensureDisplayArtifact'
+
 const HEX_DIGITS = '0123456789abcdef'
 
 const STORE_DOWN_MESSAGE = '影像暫時無法入庫，請稍後再試（本機權威存儲服務未就緒）'
@@ -289,6 +297,86 @@ async function storeViaAuthorityApi(body, localDigest) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   ③ best-effort 展示件轉碼（本單）：B 路在 `registerArtifact` 成功後追加**一次**
+   `ensureDisplayArtifact` —— 瀏覽器不能原生解 TIFF，展示件 PNG 由服務端轉碼並上傳
+   到內容尋址展示鍵 `xiai/images/<摘要前兩位>/<摘要>.png`。
+   **失敗隔離（硬口徑）**：一切失敗（dev 形態 / 服務端結構化拒絕 / 傳輸失敗 / 回包缺
+   display 面）只**結構化登記**在 `displayArtifactAttemptSnapshot()`，**不上拋、不阻斷
+   行寫入、不改變 `storeArtifactBytes` 的回包形狀**（含成功路徑）。
+   --------------------------------------------------------------------------- */
+
+/** 最近一次 best-effort 展示件轉碼的結構化登記（單槽；供離線自檢 / 取證讀數；無調用 ⇒ `null`）。 */
+let lastDisplayAttempt = null
+
+/** 讀取最近一次展示件轉碼的結構化登記（不改變任何寫入口回包形狀）。 */
+export function displayArtifactAttemptSnapshot() {
+  return lastDisplayAttempt
+}
+
+/**
+ * 追加一次 `ensureDisplayArtifact`（best-effort）：**永不拋錯**。
+ * @param {string} cloudPath 源件對象鍵（`…/<sha>.tiff`）
+ * @param {string} digest 源件摘要（已與服務端回讀值比對一致）
+ * @returns {Promise<object>} 結構化登記 `{at, op, cloudPath, sha256, ok, outcome, reason, message,
+ *          displayKey, bytesLength, width, height}`
+ */
+async function ensureDisplayArtifactBestEffort(cloudPath, digest) {
+  const record = {
+    at: new Date().toISOString(),
+    op: ARTIFACT_ENSURE_DISPLAY_OP,
+    cloudPath,
+    sha256: digest,
+    ok: false,
+    outcome: 'failed',
+    reason: 'STORAGE_UNAVAILABLE',
+    message: '',
+    displayKey: '',
+    bytesLength: 0,
+    width: 0,
+    height: 0
+  }
+  try {
+    const gate = await userWriteGate(ARTIFACT_ENSURE_DISPLAY_OP, { cloudPath, sha256: digest })
+    if (gate && gate.dev === true) {
+      /* dev / 離線形態：`userGate` 直接放行（本門不算授權）⇒ 未經雲端 ⇒ 如實登記為跳過。 */
+      record.outcome = 'skipped-dev'
+      record.reason = 'STORAGE_UNAVAILABLE'
+      record.message = 'dev / 離線形態：未經雲端，展示件轉碼跳過（best-effort）'
+    } else if (!gate || gate.ok !== true) {
+      /* 服務端業務拒絕 / 傳輸失敗 ⇒ 原樣登記（reason 不改寫）。 */
+      record.reason = (gate && gate.reason) || 'STORAGE_UNAVAILABLE'
+      record.message = (gate && gate.message) || ''
+    } else {
+      const display = gate.display || null
+      if (display) {
+        record.ok = true
+        record.outcome = 'ok'
+        record.reason = ''
+        record.displayKey = String(display.displayKey || '')
+        record.bytesLength = Number(display.bytesLength) || 0
+        record.width = Number(display.width) || 0
+        record.height = Number(display.height) || 0
+      } else {
+        /* 雲端 op 成功（`ok:true` ⇒ 展示件已由服務端轉碼並上傳）。`gate` 回包面未透傳
+           `display` 明細（`src/services/token.js` 的回包白名單不在本單可改範圍）⇒ 展示鍵
+           按**同一內容尋址規則**就地派生（與讀面單點同構：`…/<sha>.tiff` ⇒ `…/<sha>.png`），
+           尺寸 / 體量**如實記 0（未取得）**，不編造讀數。 */
+        record.ok = true
+        record.outcome = 'ok'
+        record.reason = ''
+        record.displayKey = cloudPath.replace(/\.tiff$/, '.png')
+        record.message = '雲端轉碼成功（display 明細未透傳；尺寸／體量未取得，如實記 0）'
+      }
+    }
+  } catch {
+    record.reason = 'STORAGE_UNAVAILABLE'
+    record.message = ''
+  }
+  lastDisplayAttempt = record
+  return record
+}
+
 /**
  * **B 路**：直傳對象存儲 ＋ 雲函數 `registerArtifact` 回讀覆核。
  *
@@ -339,6 +427,11 @@ async function storeViaCloud(body, localDigest) {
   if (!verified) {
     return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: CLOUD_VERIFY_FAIL_MESSAGE }
   }
+  /* ③ **best-effort 展示件轉碼（本單追加的一次 op 調用）**：`registerArtifact` 成功後追加
+     `ensureDisplayArtifact`（服務端把 `.tiff` 原圖轉碼成展示件 PNG 並上傳到內容尋址展示鍵）。
+     **失敗隔離**：一切失敗只結構化登記（`displayArtifactAttemptSnapshot()`），不上拋、
+     不阻斷行寫入、**不改變本函數回包形狀**（既有 8 鍵逐字不動）。 */
+  await ensureDisplayArtifactBestEffort(cloudPath, serverDigest)
   return {
     ok: true,
     sha256: serverDigest,
