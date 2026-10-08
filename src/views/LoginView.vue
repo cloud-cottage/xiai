@@ -92,26 +92,62 @@ function signOut() {
         </div>
       </div>
 
-      <form v-else class="login__form" @submit.prevent="submit">
-        <div class="field">
-          <label for="login-phone">手機號</label>
-          <input id="login-phone" v-model="phone" type="tel" inputmode="numeric" maxlength="11" placeholder="請輸入 11 位手機號" />
+      <template v-else>
+        <div class="login__modes">
+          <button
+            type="button"
+            class="login__mode"
+            :class="{ 'login__mode--on': mode === 'code' }"
+            :aria-pressed="mode === 'code' ? 'true' : 'false'"
+            data-login-mode="code"
+            @click="switchMode('code')"
+          >手機號 + 驗證碼</button>
+          <button
+            type="button"
+            class="login__mode"
+            :class="{ 'login__mode--on': mode === 'password' }"
+            :aria-pressed="mode === 'password' ? 'true' : 'false'"
+            data-login-mode="password"
+            @click="switchMode('password')"
+          >手機號 + 密碼</button>
         </div>
 
-        <div class="field">
-          <label for="login-code">驗證碼</label>
-          <div class="login__code-row">
-            <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="6" placeholder="請輸入驗證碼" />
-            <button class="btn btn--ghost" type="button" @click="sendCode">獲取驗證碼</button>
+        <form v-if="mode === 'code'" class="login__form" @submit.prevent="submit">
+          <div class="field">
+            <label for="login-phone">手機號</label>
+            <input id="login-phone" v-model="phone" type="tel" inputmode="numeric" maxlength="11" placeholder="請輸入 11 位手機號" />
           </div>
-          <span class="field__hint">{{ codeHint }}</span>
-        </div>
 
-        <button class="btn btn--primary login__submit" type="submit">登錄</button>
-      </form>
+          <div class="field">
+            <label for="login-code">驗證碼</label>
+            <div class="login__code-row">
+              <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="6" placeholder="請輸入驗證碼" />
+              <button class="btn btn--ghost" type="button" @click="sendCode">獲取驗證碼</button>
+            </div>
+            <span class="field__hint">{{ codeHint }}</span>
+          </div>
+
+          <button class="btn btn--primary login__submit" type="submit">登錄</button>
+        </form>
+
+        <form v-else class="login__form" @submit.prevent="submitPassword">
+          <div class="field">
+            <label for="login-phone-password">手機號</label>
+            <input id="login-phone-password" v-model="phone" type="tel" inputmode="numeric" maxlength="11" placeholder="請輸入 11 位手機號" />
+          </div>
+
+          <div class="field">
+            <label for="login-password">密碼</label>
+            <input id="login-password" v-model="password" type="password" autocomplete="current-password" placeholder="請輸入密碼" />
+          </div>
+
+          <button class="btn btn--primary login__submit" type="submit">登錄</button>
+        </form>
+      </template>
 
       <p v-if="feedback" class="login__feedback">{{ feedback }}</p>
       <p v-if="codeSent" class="login__sent">驗證碼已自動填入，請直接點「登錄」。</p>
+      <p v-if="platformUid" class="login__sent" data-platform-uid>平台會話 UID：{{ platformUid }}</p>
     </section>
   </div>
 </template>
@@ -156,6 +192,29 @@ function signOut() {
 
 .login__form {
   display: block;
+}
+
+/* 兩條登入路的切換（並存；文案繁體，與既有登入頁同口型）。 */
+.login__modes {
+  display: flex;
+  gap: var(--s-2);
+  margin-bottom: var(--s-4);
+}
+
+.login__mode {
+  flex: 1 1 0;
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-md);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.login__mode--on {
+  border-color: var(--c-brand);
+  color: var(--c-brand);
 }
 
 .login__code-row {
