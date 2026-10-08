@@ -373,6 +373,47 @@ export function isKnownFaceStyle(value) {
 }
 
 /**
+ * **印章大類（3 值｜冻结）**：顯示名＝【大類】，键名＝**新键 `seal_class`**（**印面级**）。
+ *
+ * **顺序即显示顺序**，**值域封闭**（恰三值：`古璽` / `流派印` / `雜項`），不得增删改序。
+ * 录入面（新增印章 / 勘误）选项**只能来自本数组**；**印面级无回落**（不从印章行 / 其它键取任何值，
+ * 旧行一律无该键 ⇒ 读值＝空串）。
+ *
+ * 口径：与朝代 14 / 印面内容 9 / 印面风格 23 **同口型**（真源单点在 `seed.js`，
+ * 视图层与数据层 / 服务层**只引真源，不得硬编码副本**）。
+ */
+export const SEAL_CLASS_OPTIONS = ['古璽', '流派印', '雜項']
+
+/** **大類**值是否在冻结的 3 类之内（**纯谓词**，不抛错；供值域门复用同一真源）。 */
+export function isKnownSealClass(value) {
+  if (value === null || value === undefined) return false
+  return SEAL_CLASS_OPTIONS.includes(String(value))
+}
+
+/**
+ * **大類建议值（按朝代预填的唯一真源）**：分段覆盖 `DYNASTY_OPTIONS` 全 14 类——
+ *   - 先秦〜宋元（先秦 / 秦 / 漢 / 魏晉 / 隋唐 / 宋元）⇒ `古璽`；
+ *   - 明中期〜民國（明中期 / 晚明 / 清初 / 清中期 / 晚清 / 民國）⇒ `流派印`；
+ *   - 新中國 / 當代 ⇒ `雜項`。
+ *
+ * **仅作建议**：上传弹窗据此**预填** `seal_class`，**不锁死**（用户可手动改；改后以用户所选落盘）。
+ * 未知 / 空朝代 ⇒ 空串（**不猜**）。视图层**不得**另写第二套映射。
+ */
+export const SEAL_CLASS_SUGGESTIONS = [
+  { seal_class: '古璽', dynasties: ['先秦', '秦', '漢', '魏晉', '隋唐', '宋元'] },
+  { seal_class: '流派印', dynasties: ['明中期', '晚明', '清初', '清中期', '晚清', '民國'] },
+  { seal_class: '雜項', dynasties: ['新中國', '當代'] }
+]
+
+/** 按朝代取**建议大類**（纯函数；未命中 ⇒ 空串）。视图层只调它，**不自写第二套映射**。 */
+export function suggestSealClass(dynasty) {
+  const text = dynasty === null || dynasty === undefined ? '' : String(dynasty).trim()
+  if (!text) return ''
+  const hit = SEAL_CLASS_SUGGESTIONS.find((item) => item.dynasties.includes(text))
+  return hit ? hit.seal_class : ''
+}
+
+/**
  * **旧分类枚举（5 值）—— 只作历史留档，保留导出；当前全仓无任何消费方**。
  *
  * ⚠️ **消费方现状（2026-09-20 实测）**：**无 UI / 服务消费方** —— `UploadSealDialog.vue` 等

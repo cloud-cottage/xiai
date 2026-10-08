@@ -1,8 +1,8 @@
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
-import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS } from '../data/seed.js'
+import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS, suggestSealClass } from '../data/seed.js'
 import { seals } from '../services/index.js'
 import { pipelineNotice, runUploadPipeline } from './uploadPipeline.js'
 import { IMAGE_LIMITS, loadImageFile } from '../utils/image.js'
@@ -26,6 +26,7 @@ const form = reactive({
   dynasty: '',
   faceContent: '', // 【印面内容】（R-30，键名 seal_type；必填、封闭 9 值）
   faceStyle: '', // 【印面风格】（R-31，键名 face_style；选填、封闭 23 值）
+  sealClass: '', // 【大類】（本单，键名 seal_class；**印面级**、封闭 3 值、按朝代预填建议）
   material: '', // 材质（**印章级**固定属性，R-32/R-40；自由文本、选填）
   shape: '', // 形制（选填；**印章级**固定属性，自由文本）
   author: '',
@@ -67,6 +68,36 @@ const FACE_STYLE_READY = Array.isArray(FACE_STYLE_OPTIONS) && FACE_STYLE_OPTIONS
 const FACE_STYLE_MISSING_MESSAGE =
   '印面風格選項未就緒（真源常量 FACE_STYLE_OPTIONS 不可用），暫時無法選擇印面風格，請稍後重試。'
 const faceStyleOptions = computed(() => (FACE_STYLE_READY ? [...FACE_STYLE_OPTIONS] : []))
+
+/* 【大類】（本单，键名 `seal_class`，**印面级**）= **封闭选择框**：选项**只来自真源常量**
+   `SEAL_CLASS_OPTIONS`（逐字 3 值、顺序即真源顺序）；不追加占位项、无自由文本。
+   **按朝代预填建议**（唯一真源 `suggestSealClass(dynasty)`，本组件不自写第二套映射）：
+   - 朝代变更时**重算建议**并写入 —— 但**仅当用户尚未手动改选**（`sealClassTouched` 为假）；
+   - **不锁死**：用户手改后**以用户所选为准**，之后朝代变动**不得覆盖**（这是本单判据双向点）。 */
+const SEAL_CLASS_READY = Array.isArray(SEAL_CLASS_OPTIONS) && SEAL_CLASS_OPTIONS.length > 0
+const SEAL_CLASS_MISSING_MESSAGE =
+  '大類選項未就緒（真源常量 SEAL_CLASS_OPTIONS 不可用），暫時無法選擇大類，請稍後重試。'
+const sealClassOptions = computed(() => (SEAL_CLASS_READY ? [...SEAL_CLASS_OPTIONS] : []))
+
+/** 用户是否**已手动改选**过大類（改过 ⇒ 以用户所选为准，朝代变动不得覆盖）。 */
+const sealClassTouched = ref(false)
+
+/** 由朝代重算的建议值（仅供提示；`touched` 时不代表当前落盘值）。 */
+const sealClassSuggested = computed(() => suggestSealClass(form.dynasty))
+
+/* 朝代变更 ⇒ 重算建议；**仅未手动改选时**才把建议写进 `form.sealClass`（不覆盖用户手选值）。 */
+watch(
+  () => form.dynasty,
+  () => {
+    if (sealClassTouched.value) return
+    form.sealClass = sealClassSuggested.value
+  }
+)
+
+/** 用户在「大類」下拉里手动选择 ⇒ 标记 touched（此后朝代变动不再覆盖）。 */
+function onSealClassChange() {
+  sealClassTouched.value = true
+}
 
 
 /* ------------------------------ 取景框几何 ------------------------------ */
@@ -292,6 +323,8 @@ function buildPayload(faceBytes) {
     /* 【印面风格】（R-31）：**新键 `face_style`**，随印章创建一并**写入印面行**。
        未选择 ⇒ 空串 ⇒ 数据层落空串（不回落任何值）。 */
     face_style: form.faceStyle.trim(),
+    /* 【大類】（本单）：**新键 `seal_class`**，随印章创建一并**写入印面行**（印面级）。 */
+    seal_class: form.sealClass.trim(),
     material: form.material.trim(), // 材质（**印章级**固定属性，R-32；写印章行）
     shape: form.shape.trim(), // 形制（印章级固定属性；自由文本，可空）
     author: form.author.trim(),
@@ -418,6 +451,34 @@ onBeforeUnmount(() => {
         </span>
         <span v-if="!FACE_STYLE_READY" class="field__hint" data-face-style-degraded="upload-seal">
           {{ FACE_STYLE_MISSING_MESSAGE }}
+        </span>
+      </div>
+
+      <div class="field">
+        <label for="upload-seal-class">大類（選填）</label>
+        <!-- 【大類】（本单）：封闭选择框，选项只来自真源常量 SEAL_CLASS_OPTIONS（共 3 值，逐字规范顺序）；
+             不追加占位项、无自由文本。**按朝代预填建议**（suggestSealClass），**不锁死**：
+             用户手改（@change）后以用户所选为准，朝代变动不再覆盖。 -->
+        <select
+          id="upload-seal-class"
+          v-model="form.sealClass"
+          data-seal-class-select="upload-seal"
+          @change="onSealClassChange"
+        >
+          <option v-for="item in sealClassOptions" :key="item" :value="item">{{ item }}</option>
+        </select>
+        <span class="field__hint">
+          大類固定 3 類（本框共 {{ sealClassOptions.length }} 項），只可選不可填；按朝代自動預填建議，可手動改選（手改後以你的選擇為準）。
+        </span>
+        <span
+          v-if="sealClassSuggested && !sealClassTouched"
+          class="field__hint"
+          data-seal-class-suggestion="upload-seal"
+        >
+          依所選朝代建議為「{{ sealClassSuggested }}」，可自行改選。
+        </span>
+        <span v-if="!SEAL_CLASS_READY" class="field__hint" data-seal-class-degraded="upload-seal">
+          {{ SEAL_CLASS_MISSING_MESSAGE }}
         </span>
       </div>
 

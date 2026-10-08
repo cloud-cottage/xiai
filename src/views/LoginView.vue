@@ -13,10 +13,22 @@ const code = ref('')
 const codeSent = ref(false)
 const feedback = ref('')
 
+/* **兩條登入路並存**（人類已定：演示碼入口一字不動地保留）：`code` = 手機號 + 驗證碼（演示碼）；
+   `password` = 手機號 + 密碼（平台原生身份）。兩者共用同一個手機號輸入值。 */
+const mode = ref('code')
+const password = ref('')
+/* 平台原生登入成功後取到的**平台會話 uid**（供後續寫面使用；本單只需能取到並可見）。 */
+const platformUid = ref('')
+
 const user = computed(() => currentUser())
 
 /* 验证码提示由服务层给出（演示環境共用演示碼；按鈕點下即自動填入 ⇒ 提示只说这一步，不自稱取值）。 */
 const codeHint = auth.loginCodeHint()
+
+function switchMode(next) {
+  mode.value = next === 'password' ? 'password' : 'code'
+  feedback.value = ''
+}
 
 function sendCode() {
   const result = auth.requestCode(phone.value)
@@ -38,6 +50,19 @@ async function submit() {
   feedback.value = `歡迎回來，${result.user.nickname}`
   const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
   router.replace(redirect || { name: 'square' })
+}
+
+/* **手機號 + 密碼（平台原生身份）**：本單只做「能登入 ＋ 能取到平台會話 uid」——
+   成功不寫本機 session（那是演示碼那條路的職責）。失敗一律上屏可見文案。 */
+async function submitPassword() {
+  const result = await auth.loginWithPassword(phone.value, password.value)
+  if (!result.ok) {
+    platformUid.value = ''
+    feedback.value = result.message
+    return
+  }
+  platformUid.value = result.uid
+  feedback.value = `已登入平台（手機號 ${phone.value.trim()}）`
 }
 
 function signOut() {

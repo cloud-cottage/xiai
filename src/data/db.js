@@ -62,13 +62,15 @@ import {
   DYNASTY_OPTIONS,
   FACE_CONTENT_OPTIONS,
   FACE_STYLE_OPTIONS,
+  SEAL_CLASS_OPTIONS,
   SEAL_SHAPE_FIELD,
   SEAL_MATERIAL_FIELD,
   SEAL_FIXED_ATTR_FIELDS,
   SLICE_META_FIELD,
   isKnownDynasty,
   isKnownFaceContent,
-  isKnownFaceStyle
+  isKnownFaceStyle,
+  isKnownSealClass
 } from './seed.js'
 
 /**
@@ -1536,6 +1538,15 @@ export function faceStyleValue(faceRow) {
 }
 
 /**
+ * 【大類】读值：**无回落** —— 只读印面行 `seal_class`，缺失 / 空 ⇒ `''`
+ * （**不得**从印章行或其它键取任何值 —— 那会等于编造；旧行一律无该键）。
+ */
+export function sealClassValue(faceRow) {
+  const onFace = faceRow ? faceRow.seal_class : ''
+  return hasText(onFace) ? rawText(onFace) : ''
+}
+
+/**
  * 主印面（**R-44 冻结口径**）：给定一串印面（**原始行或视图模型皆可**，只要带 `kind`），
  * 取**存储顺序第一个** `kind = 'FACE'` 者；一个 `FACE` 都没有 ⇒ `null`。
  *
@@ -1869,6 +1880,28 @@ function faceStyleValueDenial(value) {
     reason: 'INVALID_VALUE',
     message:
       `印面風格「${text}」不在允許的 23 類之內（${FACE_STYLE_OPTIONS.join('、')}），已拒絕寫入；` +
+      '既有行的舊值保留原樣、不受影響。'
+  }
+}
+
+/**
+ * **印章大類值域门（3 值｜冻结字面值 `INVALID_VALUE`）**：凡**新写入**的
+ * `seal_class` 都必须 `∈` `SEAL_CLASS_OPTIONS`（3 值，真源＝`seed.js`）。
+ *
+ * 口径与 `faceStyleValueDenial` 同一套纪律：
+ *   - 空值不走本门（未填＝合法、落空串）；
+ *   - 只拦**显式传入**的值（不采信任何回落；旧行无该键 ⇒ 读值空串，不受影响）；
+ *   - **读路径、迁移、归一一律不调本门**。
+ * @returns {null|{ok:false, reason:'INVALID_VALUE', message:string}} 放行 ⇒ `null`
+ */
+function sealClassValueDenial(value) {
+  const text = value === null || value === undefined ? '' : String(value).trim()
+  if (!text || isKnownSealClass(text)) return null
+  return {
+    ok: false,
+    reason: 'INVALID_VALUE',
+    message:
+      `大類「${text}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕寫入；` +
       '既有行的舊值保留原樣、不受影響。'
   }
 }
@@ -2357,6 +2390,8 @@ const FACE_INSERT_INPUT_FIELDS = [
   'seal_type',
   'face_style', // 【印面风格】R-31：**印面级**新键（别名为 faceStyle）
   'faceStyle',
+  'seal_class', // 【大類】（**印面级**新键，别名为 sealClass）
+  'sealClass',
   'author',
   'transcription'
 ]
@@ -2380,6 +2415,8 @@ const SEAL_COMPOSITE_INPUT_FIELDS = [
   ...SEAL_INSERT_INPUT_FIELDS,
   'face_style', // 印面级（落在印面上，R-31）
   'faceStyle',
+  'seal_class', // 印面级（落印面，无回落）
+  'sealClass',
   'faceImage', // 印面图入参（必填门另判）
   'image',
   'edgeImage' // 边款图入参（可选）
@@ -2451,7 +2488,9 @@ function normalizeSealPayload(payload = {}) {
     transcription: pickText(payload, ['transcription']),
     sealStyle: pickText(payload, ['seal_style', 'style']),
     /* 印面风格（R-31）：**新键 `face_style`**（印面级），与旧 `seal_style` 互不回落。 */
-    faceStyle: pickText(payload, ['face_style', 'faceStyle'])
+    faceStyle: pickText(payload, ['face_style', 'faceStyle']),
+    /* 印章大類：**新键 `seal_class`**（印面级；**无回落**，与 `face_style` 同口型）。 */
+    sealClass: pickText(payload, ['seal_class', 'sealClass'])
   }
 }
 
@@ -2834,6 +2873,12 @@ export async function insertFaceRow(actor, payload = {}) {
     const styleDenied = faceStyleValueDenial(explicitFaceStyle)
     if (styleDenied) return styleDenied
   }
+  /* 第二道门（大類）：**只判“显式传入”的 `seal_class`**（新值必须 ∈ 3 类）；无回落、旧行无该键。 */
+  const explicitSealClass = pickText(payload, ['seal_class', 'sealClass'])
+  if (explicitSealClass) {
+    const classDenied = sealClassValueDenial(explicitSealClass)
+    if (classDenied) return classDenied
+  }
   /* **R-32（材质移级）**：印面级已无 `material` 字段 —— 本入口在**开头**就已按「多给了
      不该给的键」判 `INVALID_FIELD` ＋ **零写入**（见函数首段；R-49 起改为**按键存在**判定）。
 
@@ -2908,6 +2953,7 @@ export async function insertFaceRow(actor, payload = {}) {
     dynasty: clean.dynasty,
     seal_type: clean.category,
     face_style: clean.faceStyle, // 印面风格（R-31：新键，印面级）
+    seal_class: clean.sealClass, // 印章大類（**印面级**新键；**无回落**，空值即落空串）
     author: clean.author,
     transcription: clean.transcription,
     source: MANUAL_SOURCE,
@@ -3105,6 +3151,11 @@ export async function createSealWithFaceRows(actor, payload = {}) {
     const styleDenied = faceStyleValueDenial(clean.faceStyle)
     if (styleDenied) return styleDenied
   }
+  /* 第二道门（大類）：印章大類值域 —— 只判**显式传入**的值（未填 ⇒ 合法、落空串）。 */
+  if (clean.sealClass) {
+    const classDenied = sealClassValueDenial(clean.sealClass)
+    if (classDenied) return classDenied
+  }
   const faceInput = payload.faceImage !== undefined ? payload.faceImage : payload.image
   if (faceInput === undefined || faceInput === null || faceInput === '') {
     return { ok: false, reason: 'MISSING_REQUIRED', missing: ['印面圖'], message: '請補全必填項：印面圖' }
@@ -3172,6 +3223,7 @@ export async function createSealWithFaceRows(actor, payload = {}) {
       dynasty: clean.dynasty, // 广场筛选维度：真实写入
       seal_type: clean.category, // 印面内容（R-30）：印面级真源
       face_style: clean.faceStyle, // 印面风格（R-31）：新键，印面级
+      seal_class: clean.sealClass, // 印章大類（**印面级**新键；**无回落**）
       author: clean.author,
       transcription: clean.transcription,
       source: MANUAL_SOURCE,

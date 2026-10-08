@@ -9,7 +9,7 @@ import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import UploadSealDialog from '../components/UploadSealDialog.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
 import { seals, corrections, points, imageFaces } from '../services/index.js'
-import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS } from '../data/seed.js'
+import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn } from '../data/session.js'
 import { saveLocalBinary } from '../utils/file.js'
 
@@ -18,10 +18,12 @@ const router = useRouter()
 
 const logged = isLoggedIn
 const dynasty = computed(() => (typeof route.query.dynasty === 'string' ? route.query.dynasty : ''))
-/* 三维度筛选（R-34）：朝代 / 印面内容（`seal_type`）/ 印面风格（`face_style`）。
-   URL 参数名与**服务层参数名逐字一致**（`content` / `style`），便于取证与分享链接。 */
+/* 四维度筛选（R-34）：朝代 / 印面内容（`seal_type`）/ 印面风格（`face_style`）/ **大類（`seal_class`）**。
+   URL 参数名与**服务层参数名逐字一致**（`content` / `style` / `sealClass`），便于取证与分享链接。 */
 const content = computed(() => (typeof route.query.content === 'string' ? route.query.content : ''))
 const style = computed(() => (typeof route.query.style === 'string' ? route.query.style : ''))
+/* **大類**（第 4 维度，与前三者并列）：`seal_class` 是**印面级**键（无回落）。 */
+const sealClass = computed(() => (typeof route.query.sealClass === 'string' ? route.query.sealClass : ''))
 const keyword = computed(() => (typeof route.query.q === 'string' ? route.query.q.trim() : ''))
 
 /* 任何一次写入后 +1，使下面的派生读数立即重算（服务层读的是已落盘数据）。 */
@@ -36,8 +38,8 @@ const allSeals = computed(() => {
 })
 const list = computed(() => {
   void dataVersion.value
-  /* 参数名**逐字** `content` / `style`（取代旧 `sealType`）；筛选**按印面聚合**由服务层实现。 */
-  return seals.listSeals({ dynasty: dynasty.value, content: content.value, style: style.value, keyword: keyword.value })
+  /* 参数名**逐字** `content` / `style` / `sealClass`（取代旧 `sealType`）；筛选**按印面聚合**由服务层实现。 */
+  return seals.listSeals({ dynasty: dynasty.value, content: content.value, style: style.value, sealClass: sealClass.value, keyword: keyword.value })
 })
 /* **硬導航首屏（同一類終態缺陷，見 SealDetailView 的同名處理）**：直接打開 / 刷新廣場時，
    雲端快照尚未落定 ⇒ `list` 必為空。此刻渲染「沒有符合條件的印章」等於把「還沒讀到」
@@ -53,10 +55,11 @@ function retryDataSource() {
   void seals.retryDataSource()
 }
 /* ============================================================================
-   筛选条三维度值集（R-21 / R-30 / R-31 / R-34）
+   筛选条四维度值集（R-21 / R-30 / R-31 / R-34）
    ----------------------------------------------------------------------------
-   三维度＝① 朝代 `dynasty`（DYNASTY_OPTIONS 14 类）② 印面内容 `seal_type`
-   （FACE_CONTENT_OPTIONS 9 类）③ 印面风格 `face_style`（FACE_STYLE_OPTIONS 23 类）。
+   四维度＝① 朝代 `dynasty`（DYNASTY_OPTIONS 14 类）② 印面内容 `seal_type`
+   （FACE_CONTENT_OPTIONS 9 类）③ 印面风格 `face_style`（FACE_STYLE_OPTIONS 23 类）
+   ④ **大類 `seal_class`（SEAL_CLASS_OPTIONS 3 类，印面级、无回落）**。
    值集口径统一为「**真源常量（规范顺序、在前）＋ 库内旧值（去重、追加于后）**」：
    只列真源 ⇒ 旧值（`漢` / `吉語印` / 既有行的 face_style）筛不到；只列库内派生值 ⇒
    真源里的空类无选项。**选项值一律不自造**，旧值只从已落盘数据里取。
@@ -66,12 +69,15 @@ function retryDataSource() {
 const DYNASTY_LISTED = Array.isArray(DYNASTY_OPTIONS) ? DYNASTY_OPTIONS.filter(Boolean) : []
 const FACE_CONTENT_LISTED = Array.isArray(FACE_CONTENT_OPTIONS) ? FACE_CONTENT_OPTIONS.filter(Boolean) : []
 const FACE_STYLE_LISTED = Array.isArray(FACE_STYLE_OPTIONS) ? FACE_STYLE_OPTIONS.filter(Boolean) : []
+/* 大類的 3 值**引真源 `SEAL_CLASS_OPTIONS`**（不硬编码副本）。 */
+const SEAL_CLASS_LISTED = Array.isArray(SEAL_CLASS_OPTIONS) ? SEAL_CLASS_OPTIONS.filter(Boolean) : []
 
 /* 真源常量缺位 ⇒ **可读降级提示**（不静默；也不拿库内派生值冒充完整值集）。 */
 const FILTER_DEGRADED = computed(() => {
   const missing = []
   if (!FACE_CONTENT_LISTED.length) missing.push('印面內容（FACE_CONTENT_OPTIONS）')
   if (!FACE_STYLE_LISTED.length) missing.push('印面風格（FACE_STYLE_OPTIONS）')
+  if (!SEAL_CLASS_LISTED.length) missing.push('大類（SEAL_CLASS_OPTIONS）')
   return missing.length
     ? `篩選選項模塊未就緒：${missing.join('、')} 的真源常量不可用，相應維度的完整值集暫不可用，請稍後重試。`
     : ''
@@ -101,6 +107,8 @@ function unionOptions(listed, inStore) {
 const dynasties = computed(() => unionOptions(DYNASTY_LISTED, inStoreValues((row) => row.dynasty)))
 const contents = computed(() => unionOptions(FACE_CONTENT_LISTED, inStoreValues((row) => row.seal_type)))
 const styles = computed(() => unionOptions(FACE_STYLE_LISTED, inStoreValues((row) => row.face_style)))
+/* 大類：真源 3 值在前 ＋ 库内旧值（印面级 `seal_class`，无回落）追加。 */
+const sealClasses = computed(() => unionOptions(SEAL_CLASS_LISTED, inStoreValues((row) => row.seal_class)))
 
 const pendingSeal = ref(null)
 const feedback = ref('')
@@ -139,16 +147,18 @@ function applyQuery(patch) {
   const nextDynasty = 'dynasty' in patch ? patch.dynasty : dynasty.value
   const nextContent = 'content' in patch ? patch.content : content.value
   const nextStyle = 'style' in patch ? patch.style : style.value
+  const nextSealClass = 'sealClass' in patch ? patch.sealClass : sealClass.value
   const query = {}
   if (keyword.value) query.q = keyword.value
   if (nextDynasty) query.dynasty = nextDynasty
   if (nextContent) query.content = nextContent
   if (nextStyle) query.style = nextStyle
+  if (nextSealClass) query.sealClass = nextSealClass
   router.replace({ name: 'square', query })
 }
 
 function resetFilter() {
-  applyQuery({ dynasty: '', content: '', style: '' })
+  applyQuery({ dynasty: '', content: '', style: '', sealClass: '' })
 }
 
 function askDownload(seal) {
@@ -220,7 +230,7 @@ function onSealSaved() {}
     <div class="page-head square__head">
       <div>
         <h1>璽印匯類</h1>
-        <p>歷代印章與印面彙集於此，可按朝代、印面內容與印面風格篩選，亦可查看印面詳情。</p>
+        <p>歷代印章與印面彙集於此，可按朝代、印面內容、印面風格與大類篩選，亦可查看印面詳情。</p>
       </div>
       <button
         v-if="canUploadSeal"
@@ -255,14 +265,17 @@ function onSealSaved() {}
       :dynasties="dynasties"
       :contents="contents"
       :styles="styles"
+      :seal-classes="sealClasses"
       :dynasty="dynasty"
       :content="content"
       :style="style"
+      :seal-class="sealClass"
       :total="list.length"
       :degraded="FILTER_DEGRADED"
       @update:dynasty="(value) => applyQuery({ dynasty: value })"
       @update:content="(value) => applyQuery({ content: value })"
       @update:style="(value) => applyQuery({ style: value })"
+      @update:seal-class="(value) => applyQuery({ sealClass: value })"
       @reset="resetFilter"
     />
 
@@ -299,7 +312,7 @@ function onSealSaved() {}
       v-else
       glyph="覓"
       title="沒有符合條件的印章"
-      desc="可調整朝代、印面內容或印面風格，或清空檢索詞後再試。"
+      desc="可調整朝代、印面內容、印面風格或大類，或清空檢索詞後再試。"
     />
 
     <ConfirmDialog

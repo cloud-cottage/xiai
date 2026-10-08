@@ -39,8 +39,10 @@ import {
   isKnownDynasty,
   FACE_CONTENT_OPTIONS,
   FACE_STYLE_OPTIONS,
+  SEAL_CLASS_OPTIONS,
   isKnownFaceContent,
-  isKnownFaceStyle
+  isKnownFaceStyle,
+  isKnownSealClass
 } from '../data/seed.js'
 import { awardCorrectionReward } from './points.js'
 /* **身份标识（uid）单点**：上屏短碼（`u-` ＋ sha256 前 16 位 ⇒ 前 6 位展示），**不得回退成手机号**。 */
@@ -182,12 +184,17 @@ export function syncLocalCorrectionSummary(faceId, sealId, field, value) {
  * R-30 / R-31（2026-09-20）：
  *   - `seal_type` 的**显示名＝【印面内容】**（值是 9 值封闭集合，键名不变）；
  *   - 新增 `face_style` ＝【印面风格】（**新键**，印面级；23 值封闭集合）。
+ *
+ * 本单：新增 `seal_class` ＝【大類】（**新键**，**印面级**；3 值封闭集合 `古璽`/`流派印`/`雜項`）。
+ * 真源＝`seed.js::SEAL_CLASS_OPTIONS`；服务端副本＝`cloudfunctions/xiai-user-token/lib/ops.js::MARKABLE_FIELDS`
+ * （两表**逐字相等**由自检机械断言）。
  */
 export const MARKABLE_FIELDS = [
   { key: 'seal_name', label: '印文' },
   { key: 'dynasty', label: '朝代' },
   { key: 'seal_type', label: '印面內容' },
   { key: 'face_style', label: '印面風格' },
+  { key: 'seal_class', label: '大類' },
   { key: 'author', label: '作者' },
   { key: 'transcription', label: '印文釋義' }
 ]
@@ -273,10 +280,11 @@ function markableMeta(field) {
  * **封闭值域表**（可扩展）：仅登记「取值必须来自封闭集合」的字段。
  * 未登记 ⇒ 自由文本（不拦）。
  *
- * 现有三项（**真源一律在 `src/data/seed.js`，不得自写第二套**）：
+ * 现有四项（**真源一律在 `src/data/seed.js`，不得自写第二套**）：
  *   - `dynasty`（R-20）：14 类，`DYNASTY_OPTIONS` / `isKnownDynasty`；
  *   - `seal_type`（R-30｜【印面内容】）：**9 值**，`FACE_CONTENT_OPTIONS` / `isKnownFaceContent`；
- *   - `face_style`（R-31｜【印面风格】）：**23 值**，`FACE_STYLE_OPTIONS` / `isKnownFaceStyle`。
+ *   - `face_style`（R-31｜【印面风格】）：**23 值**，`FACE_STYLE_OPTIONS` / `isKnownFaceStyle`；
+ *   - `seal_class`（本单｜【大類】）：**3 值**，`SEAL_CLASS_OPTIONS` / `isKnownSealClass`。
  *
  * 拒绝形态＝结构化 `{ok:false, reason:'INVALID_VALUE', message}` ＋ **零写入**
  * （判定在写之前，见 `submitCorrection`）；**不得自写第二套**值域机制。
@@ -305,6 +313,13 @@ const FIELD_VALUE_DOMAINS = {
     accepts: (text) => isKnownFaceStyle(text),
     denyMessage: (label, text) =>
       `${label}「${text}」不在允許的 23 類之內（${FACE_STYLE_OPTIONS.join('、')}），已拒絕提交；` +
+      '請從給定選項中選擇。'
+  },
+  /* 【大類】：真源＝`SEAL_CLASS_OPTIONS`（3 值；新键 `seal_class`，印面级）。 */
+  seal_class: {
+    accepts: (text) => isKnownSealClass(text),
+    denyMessage: (label, text) =>
+      `${label}「${text}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕提交；` +
       '請從給定選項中選擇。'
   }
 }

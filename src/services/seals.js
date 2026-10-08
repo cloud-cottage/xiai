@@ -33,6 +33,7 @@ import {
   /* 读路径回落（R-30 / R-31 / R-32）：口径真源在数据层，本服务只消费，**不自写第二套回落**。 */
   faceContentValue,
   faceStyleValue,
+  sealClassValue,
   sealMaterialValue,
   /* 主印面口径（R-44）单点实现也在数据层：本服务只消费，不自写第二份 `find(kind === 'FACE')`。 */
   primaryFaceIn,
@@ -128,6 +129,8 @@ export function faceViewModel(row) {
     seal_type: faceContentValue(row, sealRow),
     /* 【印面风格】读值（R-31）：新键，**无回落**（旧行 ⇒ 空串）。 */
     face_style: faceStyleValue(row),
+    /* 【大類】读值：**印面级新键、无回落**（旧行 ⇒ 空串；不从印章行或其它键取任何值）。 */
+    seal_class: sealClassValue(row),
     faceImage: byId(row.face_image_id), // 固定属性「印面图片」解析结果
     edgeImages, // 固定属性「边款图片 ID」解析结果
     missingEdgeIds: edgeIds.filter((id) => !byId(id)) // 解析不到的编号 ⇒ 页面出空态
@@ -209,10 +212,11 @@ function markableValue(primary, sealRow, key) {
  *   - `face_style`：主印面的【印面风格】读值（无回落 ⇒ 旧行空串）；
  *   - `seal_type` / `category`：沿用既有口径（印面级真源读值，空则回落印章行镜像）。
  */
-export function listSeals({ dynasty = '', content = '', style = '', sealType = '', keyword = '' } = {}) {
+export function listSeals({ dynasty = '', content = '', style = '', sealClass = '', sealType = '', keyword = '' } = {}) {
   const kw = String(keyword || '').trim()
   const wantContent = String(content || sealType || '').trim()
   const wantStyle = String(style || '').trim()
+  const wantClass = String(sealClass || '').trim()
 
   return listSealRows()
     .map((row) => {
@@ -231,6 +235,10 @@ export function listSeals({ dynasty = '', content = '', style = '', sealType = '
         .filter(Boolean)
       const faceStyles = faces
         .map((face) => (face.face_style === undefined || face.face_style === null ? '' : String(face.face_style)))
+        .filter(Boolean)
+      /* 【大類】聚合判据：逐印面取**读值**（无回落 ⇒ 印面行原值），任一命中即命中（R-34 同口径）。 */
+      const faceClasses = faces
+        .map((face) => (face.seal_class === undefined || face.seal_class === null ? '' : String(face.seal_class)))
         .filter(Boolean)
       return {
         view: {
@@ -257,12 +265,14 @@ export function listSeals({ dynasty = '', content = '', style = '', sealType = '
         /* 判定用的**印章行原值**（不落进视图模型）：R-34 明文「dynasty 仍按印章行判」。 */
         rowDynasty: String(row.dynasty || ''),
         faceContents,
-        faceStyles
+        faceStyles,
+        faceClasses
       }
     })
     .filter((item) => (dynasty ? item.rowDynasty === dynasty : true))
     .filter((item) => (wantContent ? item.faceContents.includes(wantContent) : true))
     .filter((item) => (wantStyle ? item.faceStyles.includes(wantStyle) : true))
+    .filter((item) => (wantClass ? item.faceClasses.includes(wantClass) : true))
     .filter((item) => {
       if (!kw) return true
       const seal = item.view

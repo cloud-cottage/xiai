@@ -19,6 +19,10 @@ import { grantInitialGold, settleInviteReward } from './points.js'
    云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。
    dev / 离线形态（无云写入面）仍走改前的本地形态，并明确标注为非正式路径。 */
 import { ensureUserLoginToken } from './userToken.js'
+/* **平台原生身份（手機號 ＋ 密碼）**：复用**仓内既有的 SDK 装载缝** —— `data/cloudbaseFn.js::cloudBaseApp()`
+   （它与读面共用 `cloudbaseSdk.js::loadCloudBaseSdk()`、同一份构建期配置、同一条匿名登录，
+   `persistence:'local'` 的 auth 实例也由该缝建立）⇒ **不新开初始化路径、不新增第二套 SDK 装配**。 */
+import { cloudBaseApp } from '../data/cloudbaseFn.js'
 
 /* **演示碼常量**：值 = 部署雲函數 `xiai-user-token` 環境變量 `XIAI_USER_SMS_CODE` 的**現值**
    （唯一真源見檔案頭；本處只是它的**鏡像**）。
@@ -119,6 +123,76 @@ export async function login(phone, code, options = {}) {
     : { ok: true, settled: false, reason: registered ? 'NO_INVITER' : 'NOT_A_REGISTRATION', message: '本次未觸發邀請結算。' }
 
   return { ok: true, user, invite, registered }
+}
+
+/**
+ * **手機號 ＋ 密碼登入（平台原生身份；與演示碼登入**並存**）**
+ * ----------------------------------------------------------------------------
+ * 形态：用户名 = 用户填的 **11 位手機號**（過渡賬號由人類在控制台手動建立，密碼由人類設定）
+ * ⇒ 調平台原生 `auth.signInWithPassword({ username, password })`。
+ *
+ * **SDK 實例與持久化沿用既有裝載縫**：`cloudBaseApp()` 回的是**读面/写面同一個** app 實例
+ * （`persistence:'local'`），本函數只在其上取 auth ⇒ 不新開 `init` 路徑。
+ *
+ * ⚠️ **該版 SDK 的 auth 方法不拋異常、統一返回 `{data, error}`** ⇒ 判成敗**必須檢查 `error`**
+ * （用 try/catch 判成功會得到假綠：`persistence:'local'` 裡殘留的**匿名會話**會被當成登入成功）。
+ * 故：`error` 為真 ⇒ 失敗；`error` 為假**且**取到 uid ⇒ 才報成功。
+ *
+ * 本函數**只做到「能登入 ＋ 能取到平台會話 uid」**：不寫本機 session、不建業務行、不發金
+ * （那是演示碼那條路的職責；寫面另開單）。
+ *
+ * @param {string} phone 手機號（＝用戶名）
+ * @param {string} password 密碼
+ * @returns {Promise<{ok:boolean, uid?:string, message:string, code?:string}>}
+ *          失敗一律回**可見**的繁體 `message`（沿用登入頁既有口型）；
+ *          **不新增 reason 字面值**（`code` 只是平台原樣讀數，供排障，非判據）。
+ */
+export async function loginWithPassword(phone, password) {
+  const normalized = String(phone || '').trim()
+  const secret = String(password || '')
+  if (!isPhoneLike(normalized)) {
+    return { ok: false, message: '請輸入 11 位手機號' }
+  }
+  if (secret === '') {
+    return { ok: false, message: '請輸入密碼' }
+  }
+  const app = await cloudBaseApp()
+  if (!app || typeof app.auth !== 'function') {
+    return { ok: false, message: '雲端登入暫不可用（未配置資料源），請改用演示碼登入。' }
+  }
+  const auth = app.auth({ persistence: 'local' })
+  if (!auth || typeof auth.signInWithPassword !== 'function') {
+    return { ok: false, message: '雲端登入暫不可用（SDK 不支援密碼登入）。' }
+  }
+  let reply = null
+  try {
+    reply = await auth.signInWithPassword({ username: normalized, password: secret })
+  } catch (error) {
+    /* 契約上不該走到這裡（該版 SDK 不拋）——留作最後一道結構化失敗，不讓異常外逸。 */
+    return { ok: false, message: '網絡異常，登入失敗，請稍後再試。', code: String((error && error.code) || '') }
+  }
+  const error = reply && reply.error
+  if (error) {
+    return { ok: false, ...passwordLoginFailure(error) }
+  }
+  const uid = String(
+    (reply && reply.data && reply.data.user && reply.data.user.uid) ||
+      (auth.currentUser && auth.currentUser.uid) ||
+      ''
+  ).trim()
+  if (!uid) {
+    return { ok: false, message: '登入未取得平台會話，請稍後再試。' }
+  }
+  return { ok: true, uid, message: '' }
+}
+
+/** 平台登入失敗 ⇒ 可見繁體文案（**不新增工程 reason 字面值**；`code` 只作原樣讀數）。 */
+function passwordLoginFailure(error) {
+  const code = String((error && (error.code || error.error_code)) || '').trim()
+  if (code === 'invalid_username_or_password') {
+    return { message: '手機號或密碼不正確', code }
+  }
+  return { message: '登入失敗，請稍後再試。', code }
 }
 
 export function logout() {

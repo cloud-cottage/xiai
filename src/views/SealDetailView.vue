@@ -10,7 +10,7 @@ import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
 import { seals, corrections, endorsements, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
-import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS } from '../data/seed.js'
+import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
 import { saveLocalBinary } from '../utils/file.js'
@@ -406,16 +406,23 @@ async function onEndorse(face, entry) {
    ============================================================================ */
 const FACE_CONTENT_KEY = 'seal_type' // 【印面内容】＝印面级 `seal_type`
 const FACE_STYLE_KEY = 'face_style' // 【印面风格】＝印面级新键 `face_style`
+/* 【大類】（本单）＝印面级新键 `seal_class`（3 值封闭；无回落）。 */
+const SEAL_CLASS_KEY = 'seal_class'
 
 const FACE_CONTENT_READY = Array.isArray(FACE_CONTENT_OPTIONS) && FACE_CONTENT_OPTIONS.length > 0
 const FACE_STYLE_READY = Array.isArray(FACE_STYLE_OPTIONS) && FACE_STYLE_OPTIONS.length > 0
+const SEAL_CLASS_READY = Array.isArray(SEAL_CLASS_OPTIONS) && SEAL_CLASS_OPTIONS.length > 0
 const FACE_CONTENT_MISSING_MESSAGE =
   '印面內容選項未就緒（真源常量 FACE_CONTENT_OPTIONS 不可用），暫時無法選擇印面內容，請稍後重試。'
 const FACE_STYLE_MISSING_MESSAGE =
   '印面風格選項未就緒（真源常量 FACE_STYLE_OPTIONS 不可用），暫時無法選擇印面風格，請稍後重試。'
+const SEAL_CLASS_MISSING_MESSAGE =
+  '大類選項未就緒（真源常量 SEAL_CLASS_OPTIONS 不可用），暫時無法選擇大類，請稍後重試。'
 
 const faceContentOptions = computed(() => (FACE_CONTENT_READY ? [...FACE_CONTENT_OPTIONS] : []))
 const faceStyleOptions = computed(() => (FACE_STYLE_READY ? [...FACE_STYLE_OPTIONS] : []))
+/* 大類的 3 值**引真源 `SEAL_CLASS_OPTIONS`**（不硬编码副本）。 */
+const sealClassOptions = computed(() => (SEAL_CLASS_READY ? [...SEAL_CLASS_OPTIONS] : []))
 
 /** 勘误登记面：服务层 `MARKABLE_FIELDS` 里是否已登记该键（未登记 ⇒ 服务层会结构化拒）。 */
 function markableRegistered(key) {
@@ -651,11 +658,13 @@ function correctionFieldVisible(item) {
 
 /**
  * 該可標記字段是否為**自由文本**（＝ `v-else` 分支渲染的那幾個）。
- * 三動作轉換按鈕**只給自由文本字段**：封閉選擇框（朝代 / 【印面內容】/【印面風格】）**不加**
+ * 三動作轉換按鈕**只給自由文本字段**：封閉選擇框（朝代 / 【印面內容】/【印面風格】/ 【大類】）**不加**
  * （封閉項的值只能來自真源選項，轉換按鈕對它無意義、且會誘導出值域外的值）。
+ * **本单修正**：【大類】`seal_class` 是**封閉下拉**（3 值）⇒ 不得再當自由文本渲染（也就不得挂
+ * 三動作轉換按鈕）；否则它會以自由文本输入框的形态出现，用户可输入值域外值。
  */
 function correctionFieldIsFreeText(key) {
-  return key !== 'dynasty' && key !== FACE_CONTENT_KEY && key !== FACE_STYLE_KEY
+  return key !== 'dynasty' && key !== FACE_CONTENT_KEY && key !== FACE_STYLE_KEY && key !== SEAL_CLASS_KEY
 }
 
 async function submitCorrection() {
@@ -1672,6 +1681,7 @@ onBeforeUnmount(() => {
              - 朝代 ⇒ 封闭选择框（真源 `DYNASTY_OPTIONS`，14 类）；
              - 【印面内容】⇒ 封闭选择框（真源 `FACE_CONTENT_OPTIONS`，9 值）；
              - 【印面风格】⇒ 封闭选择框（真源 `FACE_STYLE_OPTIONS`，23 值）；
+             - 【大類】（本单）⇒ 封闭选择框（真源 `SEAL_CLASS_OPTIONS`，3 值；**不得**当自由文本 + s2t）；
              - **边款（EDGE）印面不呈现【印面内容】/【印面风格】**（R-37 / R-43）；
                其余可标记字段（印文简体字 / 印文古字 / 作者 / 印文释义）**保持现状**（自由文本）。
              - 留空 ⇒ 该项不提交。 -->
@@ -1701,6 +1711,14 @@ onBeforeUnmount(() => {
               data-face-style-select="correction"
             >
               <option v-for="s in faceStyleOptions" :key="s" :value="s">{{ s }}</option>
+            </select>
+            <select
+              v-else-if="item.key === SEAL_CLASS_KEY"
+              :id="`cr-${item.key}`"
+              v-model="form[item.key]"
+              data-seal-class-select="correction"
+            >
+              <option v-for="k in sealClassOptions" :key="k" :value="k">{{ k }}</option>
             </select>
             <input
               v-else
@@ -1732,6 +1750,10 @@ onBeforeUnmount(() => {
               【印面風格】固定 23 類（本框共 {{ faceStyleOptions.length }} 項），只可選不可填；不填即不提交該項。
               本印面當前展示值：{{ faceMarkableValue(formFace, FACE_STYLE_KEY, formFace && formFace.face_style) || '未著錄' }}。
             </span>
+            <span v-else-if="item.key === SEAL_CLASS_KEY" class="field__hint">
+              【大類】固定 3 類（本框共 {{ sealClassOptions.length }} 項），只可選不可填；不填即不提交該項。
+              本印面當前展示值：{{ faceMarkableValue(formFace, SEAL_CLASS_KEY, formFace && formFace.seal_class) || '未著錄' }}。
+            </span>
             <span v-if="item.key === 'dynasty' && !DYNASTY_READY" class="field__hint" data-dynasty-degraded="correction">
               {{ DYNASTY_MISSING_MESSAGE }}
             </span>
@@ -1740,6 +1762,9 @@ onBeforeUnmount(() => {
             </span>
             <span v-if="item.key === FACE_STYLE_KEY && !FACE_STYLE_READY" class="field__hint" data-face-style-degraded="correction">
               {{ FACE_STYLE_MISSING_MESSAGE }}
+            </span>
+            <span v-if="item.key === SEAL_CLASS_KEY && !SEAL_CLASS_READY" class="field__hint" data-seal-class-degraded="correction">
+              {{ SEAL_CLASS_MISSING_MESSAGE }}
             </span>
           </div>
         </template>

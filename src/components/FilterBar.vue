@@ -1,26 +1,30 @@
 
 <script setup>
 /**
- * 广场筛选条 —— **三维度**（R-30〜R-32 / R-34）：
- *   ① 朝代（`dynasty`）② 印面内容（`seal_type`，显示名【印面内容】）③ 印面风格（`face_style`）。
+ * 广场筛选条 —— **四维度**（R-30〜R-32 / R-34）：
+ *   ① 朝代（`dynasty`）② 印面内容（`seal_type`，显示名【印面内容】）③ 印面风格（`face_style`）
+ *   ④ **大類（`seal_class`，显示名【大類】，与前三者并列）**。
  *
  * 值集口径（与 SquareView 一致；本组件只渲染 + 抛事件，**不自造任何选项值**）：
  *   真源常量（规范顺序，在前）＋ **库内旧值**（去重、追加于后）—— 旧值必须仍可筛到。
  * 维度用 `data-filter-dimension` / 选项用 `data-filter-option` 标注，便于机械取证。
+ * **大類的选项集由 SquareView 传入（引真源 `SEAL_CLASS_OPTIONS`），本组件不硬编码副本。**
  */
 defineProps({
   dynasties: { type: Array, default: () => [] },
   contents: { type: Array, default: () => [] },
   styles: { type: Array, default: () => [] },
+  sealClasses: { type: Array, default: () => [] },
   dynasty: { type: String, default: '' },
   content: { type: String, default: '' },
   style: { type: String, default: '' },
+  sealClass: { type: String, default: '' },
   total: { type: Number, default: 0 },
   /* 真源常量未就绪时的**可读降级提示**（空串 ⇒ 不渲染）。 */
   degraded: { type: String, default: '' }
 })
 
-const emit = defineEmits(['update:dynasty', 'update:content', 'update:style', 'reset'])
+const emit = defineEmits(['update:dynasty', 'update:content', 'update:style', 'update:sealClass', 'reset'])
 </script>
 
 <template>
@@ -99,6 +103,32 @@ const emit = defineEmits(['update:dynasty', 'update:content', 'update:style', 'r
           @click="emit('update:style', style === s ? '' : s)"
         >
           {{ s }}
+        </button>
+      </div>
+    </div>
+
+    <div class="filter-bar__row" data-filter-dimension="sealClass">
+      <span class="filter-bar__label">大類</span>
+      <div class="filter-bar__chips">
+        <button
+          type="button"
+          class="filter-chip"
+          data-filter-option=""
+          :class="{ 'is-active': sealClass === '' }"
+          @click="emit('update:sealClass', '')"
+        >
+          全部
+        </button>
+        <button
+          v-for="k in sealClasses"
+          :key="k"
+          type="button"
+          class="filter-chip"
+          :data-filter-option="k"
+          :class="{ 'is-active': sealClass === k }"
+          @click="emit('update:sealClass', sealClass === k ? '' : k)"
+        >
+          {{ k }}
         </button>
       </div>
     </div>

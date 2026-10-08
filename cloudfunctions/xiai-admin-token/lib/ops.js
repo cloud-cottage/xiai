@@ -56,6 +56,7 @@ const MARKABLE_FIELDS = Object.freeze({
   dynasty: '朝代',
   seal_type: '印面內容',
   face_style: '印面風格',
+  seal_class: '大類',
   author: '作者',
   transcription: '印文釋義'
 })
@@ -121,11 +122,15 @@ const FACE_STYLE_OPTIONS = Object.freeze([
   '來楚生印風'
 ])
 
+/* 【大類】值域真源副本（真源 ＝ `src/data/seed.js::SEAL_CLASS_OPTIONS`；3 值封闭集合）。 */
+const SEAL_CLASS_OPTIONS = Object.freeze(['古璽', '流派印', '雜項'])
+
 /** 需值域门约束的字段 → 冻结真源（逐字段一对一；其余字段不受第二道门约束）。 */
 const VALUE_DOMAINS = Object.freeze({
   dynasty: DYNASTY_OPTIONS,
   seal_type: FACE_CONTENT_OPTIONS,
-  face_style: FACE_STYLE_OPTIONS
+  face_style: FACE_STYLE_OPTIONS,
+  seal_class: SEAL_CLASS_OPTIONS
 })
 
 /** 载荷允许键（**固定属性 / 身份类键都不在其中**）。 */
@@ -471,6 +476,7 @@ module.exports = {
   DYNASTY_OPTIONS,
   FACE_CONTENT_OPTIONS,
   FACE_STYLE_OPTIONS,
+  SEAL_CLASS_OPTIONS,
   VALUE_DOMAINS,
   ALLOWED_KEYS,
   IDENTITY_KEYS,
