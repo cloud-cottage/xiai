@@ -269,6 +269,63 @@ const PUBLIC_SCHEMA = 'xiai-corrections-public-v1'
 const PUBLIC_ID_PREFIX = 'cp-'
 
 /* ---------------------------------------------------------------------------
+   **影像產物登記面（本單新增 op `registerArtifact`）**
+   ---------------------------------------------------------------------------
+   场景：客户端把「存储件字节（单页 8bit Deflate TIFF）」**直传云存储**（内容寻址键），
+   然后调本 op 让**服务端回读该对象、自行重算摘要与字节数**，与客户端声称值**逐字比对**。
+   硬口径（逐条）：
+     · **只验证，不写集合**（本 op 不产出 `plan` ⇒ `index.js` 的落盘分支不会触发）；
+     · **不采信客户端自称**：`sha256` / `bytesLength` 一律以服务端**回读该对象算出的真值**为准，
+       声称值只用于**比对**（不一致 ⇒ 结构化拒绝 ＋ 零写入，且**不报告任何真值**）；
+     · **对象键形态自持**（服务端自己也判一遍）：`xiai/images/<sha 前两位>/<sha>.tiff`，
+       且 `<sha>` 段必须 ≡ 声称的 `sha256` ⇒ 客户端无法用一个路径冒充另一份内容；
+     · **上限与工程同值**（4 MiB ＝ `src/utils/image.js::IMAGE_LIMITS.maxStoredBytes` /
+       规范 §3.29.2 的 `STORED_MAX_BYTES`）—— 先按声称体量挡住超大请求，再回读（读取有界）；
+     · **容器墨数门**：回读字节认不出 TIFF（`II*\0` / `MM\0*`）⇒ 结构化拒绝（本面的产物一律 TIFF）；
+     · 失败形态恒为恰 3 键 `{ok:false, reason, message}`，`reason` ∈ 既有冻结表（**新增字面值 0**）。
+   --------------------------------------------------------------------------- */
+
+/** 登记载荷允许键（**封闭键面**；身份类键一律拒 —— 与其它 op 同口径）。 */
+const ARTIFACT_ALLOWED_KEYS = Object.freeze(['cloudPath', 'sha256', 'bytesLength'])
+
+/** 影像产物对象键形态（与 `src/data/cloudbase.js::IMAGE_OBJECT_KEY_PATTERN` 的「新增产物」面同形；
+ *  既有展示件行是 `…/<sha>.png|webp`，本面新产物一律 `…/<sha>.tiff`）。 */
+const ARTIFACT_OBJECT_KEY_PATTERN = /^xiai\/images\/([0-9a-f]{2})\/([0-9a-f]{64})\.tiff$/
+
+/** 产物容器（存储面容器字面值的**转口副本**；真源仍 ＝ `src/utils/tiff.js::TIFF_MIME`）。 */
+const ARTIFACT_MIME = 'image/tiff'
+
+/** 产物体量上限（与工程产物侧上限 4 MiB 同值；参见 `src/utils/image.js::IMAGE_LIMITS`）。 */
+const ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
+
+/** 摘要形态（64 位小写十六进制；与 `src/services/imageAuthority.js::normalizeDigest` 同口径）。 */
+const ARTIFACT_DIGEST_PATTERN = /^[0-9a-f]{64}$/
+
+/** TIFF 魔数（小端 `II*\0` / 大端 `MM\0*`；与 `src/utils/tiff.js` 同值、只作墨数门）。 */
+const TIFF_MAGIC_LE = Object.freeze([0x49, 0x49, 0x2a, 0x00])
+const TIFF_MAGIC_BE = Object.freeze([0x4d, 0x4d, 0x00, 0x2a])
+
+/** 真字节类 ⇒ `Buffer`（其余 ⇒ `null`；认不出即失败，不静默放大）。 */
+function bufferOf(value) {
+  if (value === null || value === undefined) return null
+  if (Buffer.isBuffer(value)) return value
+  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+  if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+  if (value instanceof ArrayBuffer) return Buffer.from(value)
+  if (typeof value === 'string') return Buffer.from(value, 'binary')
+  return null
+}
+
+/** 按字节墨数判容器（认不出 ⇒ 空串 —— **不采信自称值**）。 */
+function artifactMimeOf(bytes) {
+  const v = bufferOf(bytes)
+  if (!v || v.length < 8) return ''
+  const le = TIFF_MAGIC_LE.every((byte, index) => v[index] === byte)
+  const be = TIFF_MAGIC_BE.every((byte, index) => v[index] === byte)
+  return le || be ? ARTIFACT_MIME : ''
+}
+
+/* ---------------------------------------------------------------------------
    DB 注入缝（**离线自检 / 宿主用**；生产不注入 ⇒ 走真实 `@cloudbase/node-sdk`）
    --------------------------------------------------------------------------- */
 
@@ -285,6 +342,70 @@ function setOpsDbProvider(fn) {
 /** 是否已注入（诊断读数用，**不含任何凭据**）。 */
 function opsDbInjected() {
   return dbProvider !== null
+}
+
+/* ---------------------------------------------------------------------------
+   对象存储读取缝（**离线自检 / 宿主用**；生产不注入 ⇒ 走真实 `@cloudbase/node-sdk`）
+   --------------------------------------------------------------------------- */
+
+let storageProvider = null
+
+/**
+ * 注入对象存储读取实现（**仅供离线自检 / 宿主**）。
+ * 形状：`async (cloudPath) => Buffer|Uint8Array`（对象不存在 ⇒ **抛错**）。
+ * @param {null|function(string):Promise<Buffer|Uint8Array>} fn
+ */
+function setOpsStorageProvider(fn) {
+  storageProvider = typeof fn === 'function' ? fn : null
+}
+
+/** 是否已注入（诊断读数用，**不含任何凭据**）。 */
+function opsStorageInjected() {
+  return storageProvider !== null
+}
+
+/**
+ * 服务端取 **fileID**（`cloud://<envId>.<bucket>/<对象键>`）。
+ *
+ * 为什么不拼字面量：bucket 名**不得在代码里硬编码**（工程纪律；前端唯一默认值的定义点在
+ * `src/data/cloudbase.js::CLOUD_STORAGE_BUCKET_DEFAULT`）。这里让**平台自己**回答：
+ * `app.getUploadMetadata({cloudPath})` 回包里的 `fileId` 就是本环境该对象的完整 fileID。
+ * 取不到 ⇒ 抛错（由 `registerArtifact` 转结构化拒绝，**不猜、不拼**）。
+ * @param {object} app `@cloudbase/node-sdk` 的 app 实例
+ * @param {string} cloudPath 对象键
+ * @returns {Promise<string>} 完整 fileID
+ */
+async function resolveFileId(app, cloudPath) {
+  const meta = await app.getUploadMetadata({ cloudPath })
+  const fileId = meta && meta.fileId
+  if (typeof fileId !== 'string' || fileId.trim() === '') throw new Error('STORAGE_FILEID_UNRESOLVED')
+  return fileId.trim()
+}
+
+/**
+ * **回读对象字节**（服务端；`registerArtifact` 的唯一数据来源）。
+ *
+ * 顺序：① 注入缝（离线自检）→ ② 真实 node-sdk：先解析完整 fileID，再 `downloadFile`。
+ * 任一环失败 ⇒ **抛错**（由调用方转 `STORAGE_UNAVAILABLE` / `INVALID_VALUE`，**不得伪装 FORBIDDEN**）。
+ * @param {string} cloudPath 对象键
+ * @returns {Promise<Buffer>}
+ */
+async function readArtifactBytes(cloudPath) {
+  if (storageProvider) {
+    const injected = await storageProvider(cloudPath)
+    const bytes = bufferOf(injected)
+    if (!bytes) throw new Error('STORAGE_INJECTED_SHAPE_INVALID')
+    return bytes
+  }
+  /* 延迟 require：离线自检（注入存储）时**不需要**装 `@cloudbase/node-sdk`。 */
+  const tcb = require('@cloudbase/node-sdk')
+  const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
+  const app = envId ? tcb.init({ env: envId }) : tcb.init()
+  const fileID = await resolveFileId(app, cloudPath)
+  const reply = await app.downloadFile({ fileID })
+  const bytes = bufferOf(reply && reply.fileContent)
+  if (!bytes) throw new Error('STORAGE_DOWNLOAD_EMPTY')
+  return bytes
 }
 
 /**
@@ -712,6 +833,98 @@ const OPS = Object.freeze({
         ]
       }
     }
+  },
+
+  /**
+   * **影像產物登記（本單新增 op｜`registerArtifact`）**：客户端**直传云存储**之后，由服务端
+   * **回读该对象、自行重算 `sha256` 与字节数**，与客户端声称值**逐字比对**。
+   *
+   * 顺序（**判定全部在回读之前，且本 op 零落盘** —— 不产出 `plan` ⇒ `index.js` 不落任何集合）：
+   *   ① 载荷形态 / 键面（封闭 `ARTIFACT_ALLOWED_KEYS`；身份类键 ⇒ `INVALID_FIELD`）；
+   *   ② 值域门：`sha256` 64 位小写十六进制；`cloudPath` 匹配
+   *      `xiai/images/<摘要前两位>/<摘要>.tiff` **且键内摘要 ≡ 声称摘要**（一路径只能指一份内容）；
+   *      `bytesLength` 正整数且 ≤ 4 MiB（与产物侧上限同值 ⇒ 回读有界）；
+   *   ③ 回读对象（服务端；失败 ⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）；
+   *   ④ 空内容 / 容器墨数不是 TIFF（`II*\0` / `MM\0*`）⇒ `INVALID_VALUE`（**不新增 reason 字面值**）；
+   *   ⑤ **逐字比对**：重算摘要 / 重算字节数与声称值**任一不符** ⇒ `INVALID_VALUE` ＋ 零写入
+   *      （回包**不吐任何真值** —— 不让本 op 变成「按路径查摘要」的探测器）；
+   *   ⑥ 一致 ⇒ 扁平回包 `{ok:true, sha256, bytesLength, mime, storageKey, idempotent}`
+   *      ＋ 同一对象的 `artifact` 分组视图（供信封 / 客户端逐字透传；不改动扁平六键任一）。
+   *
+   * `idempotent`（本 op 语义）＝ **本次调用未产生任何写入**（对象已以该摘要存在且一致）⇒ 恒 `true`。
+   * 客户端对外回包的 `idempotent`（＝「本轮之前对象是否已存在」）由客户端按**同一读面机制**自行判定。
+   * @param {object} payload 载荷（允许键见 `ARTIFACT_ALLOWED_KEYS`）
+   * @returns {Promise<object>} 成功 ⇒ 扁平回包；失败 ⇒ 恰 3 键结构化拒绝
+   */
+  async registerArtifact(payload) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => ARTIFACT_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const cloudPath = text(payload.cloudPath)
+    const digest = text(payload.sha256).toLowerCase()
+    const claimed = payload.bytesLength
+    const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(cloudPath)
+    if (!matched) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff）；本次零寫入。'
+      )
+    }
+    if (!ARTIFACT_DIGEST_PATTERN.test(digest)) {
+      return deny(REASONS.INVALID_VALUE, '摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+    }
+    if (matched[2] !== digest || matched[1] !== digest.slice(0, 2)) {
+      return deny(REASONS.INVALID_VALUE, '影像對象鍵內含的摘要與聲稱的 sha256 不一致；本次零寫入。')
+    }
+    if (!Number.isInteger(claimed) || claimed <= 0 || claimed > ARTIFACT_MAX_BYTES) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `字節數（bytesLength）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+      )
+    }
+    let bytes = null
+    try {
+      bytes = await readArtifactBytes(cloudPath)
+    } catch {
+      /* 「對象不存在」与「存储不可用」在服务端都表现为取不到 ⇒ 一律 `STORAGE_UNAVAILABLE`
+         （**不得伪装 `FORBIDDEN`**；也不吐内部原因）。 */
+      return deny(REASONS.STORAGE_UNAVAILABLE, '雲端對象存儲不可用或該影像對象不存在；本次零寫入。')
+    }
+    if (bytes.length === 0) {
+      return deny(REASONS.INVALID_VALUE, '影像對象為空內容；本次零寫入。')
+    }
+    const mime = artifactMimeOf(bytes)
+    if (!mime) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '該對象不是本面認可的影像容器（存儲件應為單頁 8bit Deflate TIFF）；本次零寫入。'
+      )
+    }
+    const actual = crypto.createHash('sha256').update(bytes).digest('hex')
+    if (actual !== digest || bytes.length !== claimed) {
+      /* **不吐真值**（摘要 / 真体量都不回）—— 不把本 op 变成探测器。 */
+      return deny(REASONS.INVALID_VALUE, '回讀校驗失敗：對象的字節數或摘要與聲稱值不一致；本次零寫入。')
+    }
+    /* 扁平六键（brief 冻结形态）＋ 同一对象的 `artifact` 分组视图（供信封 / 客户端透传）。 */
+    const verified = { sha256: actual, bytesLength: bytes.length, mime, storageKey: cloudPath, idempotent: true }
+    return {
+      ok: true,
+      sha256: verified.sha256,
+      bytesLength: verified.bytesLength,
+      mime: verified.mime,
+      storageKey: verified.storageKey,
+      idempotent: verified.idempotent,
+      artifact: verified
+    }
   }
 })
 
@@ -1013,11 +1226,20 @@ module.exports = {
   IDENTITY_PROJECTION_KEYS,
   PUBLIC_SCHEMA,
   PUBLIC_ID_PREFIX,
+  /* 影像產物登記面（本單新增；供離線自檢直接斷言）。 */
+  ARTIFACT_ALLOWED_KEYS,
+  ARTIFACT_OBJECT_KEY_PATTERN,
+  ARTIFACT_MIME,
+  ARTIFACT_MAX_BYTES,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,
   opsDbInjected,
+  setOpsStorageProvider,
+  opsStorageInjected,
   resolveDb,
+  readArtifactBytes,
+  artifactMimeOf,
   adminWhitelistDenial,
   readCorrectionRow,
   buildProjection,

@@ -2759,7 +2759,11 @@ export async function insertImageRow(actor, payload = {}) {
     /* **K-P5b**：二進制去向如實記 —— `server` ＝ 服務端權威庫（本單新寫入的行，**本機零二進制**）；
        `indexeddb` ＝ 既有本機影像庫（存量 / 非源面容器，路徑一字未改）。 */
     storage: authority ? AUTHORITY_STORAGE_SERVER : 'indexeddb',
-    storage_key: authority ? '' : assetBlobKey(assetId),
+    /* **M-1（2026-10-08）**：`storage_key` 由權威方的回包決定 ——
+       A 路（本機權威庫）⇒ 回包 `storageKey` 為空串 ⇒ 行上仍 `''`（**既有口徑一字未改**）；
+       B 路（客戶端直傳雲存儲）⇒ ＝ 對象鍵 `xiai/images/<sha 前兩位>/<sha>.tiff`
+       （與既有展示件行的 `storage_key` 同族；**讀面仍只走既有那一族機制**）。 */
+    storage_key: authority ? String(authority.storageKey || '') : assetBlobKey(assetId),
     /* **K-P5b**：權威庫的**相對路徑形狀**（`<sha256[:2]>/<sha256>.tiff`；**不含絕對路徑**）。 */
     authority_rel_path: authority ? authority.relPath : '',
     /* **R-87（2026-09-21｜Kong-I1）**：**切片元数据**（`{directions, ratios, cols, rows, cuts}`）

@@ -159,6 +159,22 @@ export function resetCloudFunctionApp() {
   appPromise = null
 }
 
+/**
+ * **取已就绪的 app 实例**（本单新增的**转口**；不改上面任何既有分支）。
+ *
+ * 用途：影像写入面要用的**不是** `callFunction`，而是同一个 SDK app 上的**对象存储能力**
+ * （`app.uploadFile` / `app.getTempFileURL`）⇒ 复用**同一处** app 解析（同一份 SDK 装载缝、
+ * 同一份构建期配置、同一条匿名登录）⇒ **不新造第二套 SDK 装配**。
+ * 判据与 `callCloudFunction` 完全一致：未配置 / SDK 不可用 / 初始化失败 / 登录失败
+ * ⇒ 返回 `null`（调用方必须给**结构化失败**，不得静默回落）。
+ * @returns {Promise<object|null>}
+ */
+export async function cloudBaseApp() {
+  const resolved = await appOrNull()
+  if (!resolved || resolved.ok !== true || !resolved.app) return null
+  return resolved.app
+}
+
 /* ---------------------------------------------------------------------------
    3. 调用
    --------------------------------------------------------------------------- */
