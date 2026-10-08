@@ -15,6 +15,8 @@ import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
 import { saveLocalBinary } from '../utils/file.js'
 import { IMAGE_LIMITS, MIN_CROP_SIDE, describeBytes, exportSquareImage, loadImageFile } from '../utils/image.js'
+/* 剪贴板一键粘贴图片（共用纯函数）：实物照片与替换印面图两处上传面共用判定内核。 */
+import { PASTE_HINT, handleClipboardPaste } from '../utils/clipboardImage.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -702,9 +704,8 @@ async function submitCorrection() {
   if (accepted === filled.length) formOpen.value = false
 }
 
-async function onPickPhoto(event) {
-  const file = event.target.files && event.target.files[0]
-  event.target.value = ''
+/** 选图 / 粘贴**共用处理体**：把一个 File 走完「登录门 → 解码 → 上限校验 → 上传管线 → 入库」。 */
+async function applyPhotoFile(file) {
   if (!canUpload.value) {
     uploadFeedback.value = '登錄後可上傳印章實物照片'
     return
@@ -751,6 +752,22 @@ async function onPickPhoto(event) {
     await loadPhotoImages()
   }
   uploading.value = false
+}
+
+/** 选图入口：取出本机文件 → 交同一「处理体」。 */
+function onPickPhoto(event) {
+  const file = event.target.files && event.target.files[0]
+  event.target.value = ''
+  void applyPhotoFile(file)
+}
+
+/** 一键粘贴入口：`handleClipboardPaste` 判定是否接管；**文本优先不劫持**（含文字则放行默认粘贴）。 */
+function onPastePhoto(event) {
+  const decision = handleClipboardPaste(event, (file) => {
+    void applyPhotoFile(file)
+  })
+  if (decision.handled) event.preventDefault()
+  else if (decision.reason !== 'TEXT_PRIORITY') uploadFeedback.value = decision.message
 }
 /* ============================================================================
    管理员：重新上传印面图（**按印面逐个**）
@@ -895,9 +912,8 @@ function closeFaceImageReplace() {
   replaceFaceId.value = ''
 }
 
-async function onPickReplaceImage(event) {
-  const file = event.target.files && event.target.files[0]
-  event.target.value = ''
+/** 选图 / 粘贴**共用处理体**：把一个 File 走完「解码 → 上限校验 → 取景 → 预导出」。 */
+async function applyReplaceFile(file) {
   if (!file) return
 
   releaseReplaceSource()
@@ -940,6 +956,22 @@ async function onPickReplaceImage(event) {
   }
   replaceCrop.value = centerSquare(loaded.width, loaded.height)
   await runReplaceExport()
+}
+
+/** 选图入口：取出本机文件 → 交同一「处理体」。 */
+function onPickReplaceImage(event) {
+  const file = event.target.files && event.target.files[0]
+  event.target.value = ''
+  void applyReplaceFile(file)
+}
+
+/** 一键粘贴入口：`handleClipboardPaste` 判定是否接管；**文本优先不劫持**（含文字则放行默认粘贴）。 */
+function onPasteReplaceImage(event) {
+  const decision = handleClipboardPaste(event, (file) => {
+    void applyReplaceFile(file)
+  })
+  if (decision.handled) event.preventDefault()
+  else if (decision.reason !== 'TEXT_PRIORITY') replaceFeedback.value = decision.message
 }
 
 function startReplaceDrag(event, mode) {
@@ -1479,12 +1511,14 @@ onBeforeUnmount(() => {
         </div>
         <p v-else class="detail__hint">暫無實物照片。</p>
 
-        <div class="detail__upload">
+        <div class="detail__upload" tabindex="0" data-paste-zone="photo-upload" @paste="onPastePhoto">
           <label v-if="canUpload" class="btn btn--ghost detail__upload-btn">
             <input type="file" accept="image/*" :disabled="uploading" @change="onPickPhoto" />
             {{ uploading ? '正在處理…' : '上傳實物照片' }}
           </label>
           <button v-else class="btn btn--ghost" type="button" @click="goLogin">登錄後上傳實物照片</button>
+          <!-- 剪贴板一键粘贴提示（繁體，可见）：与本区 `@paste` 同源。 -->
+          <span class="detail__hint" data-paste-hint="photo-upload">{{ PASTE_HINT }}</span>
           <span class="detail__hint">
             單張上限 1 MB（按原始文件字節數判定）；瀏覽器端自動裁方形，入庫爲 TIFF 影像（單頁 8bit Deflate）；頁面預覽以 WebP 呈現。
           </span>
@@ -1586,7 +1620,7 @@ onBeforeUnmount(() => {
           處理全部在本機完成：方形取景 → 入庫爲 TIFF 影像（單頁 8bit Deflate）→ 寫入本地影像庫；頁面預覽以 WebP 呈現，不訪問任何外部地址。
         </p>
 
-        <div class="field">
+        <div class="field" tabindex="0" data-paste-zone="replace-face-image" @paste="onPasteReplaceImage">
           <label for="replace-face-image-input">印面圖</label>
           <input
             id="replace-face-image-input"
@@ -1596,6 +1630,8 @@ onBeforeUnmount(() => {
             :disabled="replaceBusy"
             @change="onPickReplaceImage"
           />
+          <!-- 剪贴板一键粘贴提示（繁體，可见）：与本框 `@paste` 同源。 -->
+          <span class="field__hint" data-paste-hint="replace-face-image">{{ PASTE_HINT }}</span>
           <span class="field__hint">
             本機圖片文件（JPG / PNG / WebP），單張不超過 <b>{{ limitLabel }}</b>（{{ IMAGE_LIMITS.maxInputBytes }} 字節，
             按原始文件字節數判定）。選定後在本機取方形，入庫爲 TIFF 影像（單頁 8bit Deflate）；頁面預覽以 WebP 呈現。

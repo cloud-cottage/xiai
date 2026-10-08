@@ -7,6 +7,8 @@ import { seals } from '../services/index.js'
 import { pipelineNotice, runUploadPipeline } from './uploadPipeline.js'
 import { IMAGE_LIMITS, loadImageFile } from '../utils/image.js'
 import { formatBytes } from '../utils/format.js'
+/* 剪贴板一键粘贴图片（共用纯函数）：选图与粘贴共用同一「处理体」`applyFaceFile`。 */
+import { PASTE_HINT, handleClipboardPaste } from '../utils/clipboardImage.js'
 
 const emit = defineEmits(['close', 'uploaded'])
 
@@ -215,9 +217,7 @@ function releaseSource() {
   exportToken += 1
 }
 
-async function onPickFace(event) {
-  const file = event.target.files && event.target.files[0]
-  event.target.value = ''
+async function applyFaceFile(file) {
   if (!file) return
 
   releaseSource()
@@ -260,6 +260,22 @@ async function onPickFace(event) {
   }
   crop.value = centerCrop(loaded.width, loaded.height)
   await runExport()
+}
+
+/** 选图入口：取出本机文件 → 交同一「处理体」。 */
+function onPickFace(event) {
+  const file = event.target.files && event.target.files[0]
+  event.target.value = ''
+  void applyFaceFile(file)
+}
+
+/** 一键粘贴入口：`handleClipboardPaste` 判定是否接管；**文本优先不劫持**（含文字则放行默认粘贴）。 */
+function onPasteFace(event) {
+  const decision = handleClipboardPaste(event, (file) => {
+    void applyFaceFile(file)
+  })
+  if (decision.handled) event.preventDefault()
+  else if (decision.reason !== 'TEXT_PRIORITY') feedback.value = decision.message
 }
 
 function startDrag(event, mode) {
@@ -539,9 +555,11 @@ onBeforeUnmount(() => {
         <TextTransformButtons v-model="form.transcription" field-key="upload:transcription" field-label="印文釋義" />
       </div>
 
-      <div class="field">
+      <div class="field" tabindex="0" data-paste-zone="upload-seal-face" @paste="onPasteFace">
         <label for="upload-seal-face">印面圖（必填）</label>
         <input id="upload-seal-face" type="file" accept="image/*" @change="onPickFace" />
+        <!-- 剪贴板一键粘贴提示（繁體，可见）：与本框 `@paste` 同源。 -->
+        <span class="field__hint" data-paste-hint="upload-seal-face">{{ PASTE_HINT }}</span>
         <span class="field__hint">
           本機圖片文件（JPG / PNG / WebP），單張不超過 <b>{{ limitLabel }}</b>（{{ IMAGE_LIMITS.maxInputBytes }} 字節）。
           選定後在本機取方形，入庫爲 TIFF 影像（單頁 8bit Deflate）；頁面預覽以 WebP 呈現，頁面只保留運行時預覽。
