@@ -2,7 +2,7 @@
 <script setup>
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
-import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS, suggestSealClass } from '../data/seed.js'
+import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS, isKnownSealClass, suggestSealClass } from '../data/seed.js'
 import { seals } from '../services/index.js'
 import { pipelineNotice, runUploadPipeline } from './uploadPipeline.js'
 import { IMAGE_LIMITS, loadImageFile } from '../utils/image.js'
@@ -97,6 +97,22 @@ watch(
 /** 用户在「大類」下拉里手动选择 ⇒ 标记 touched（此后朝代变动不再覆盖）。 */
 function onSealClassChange() {
   sealClassTouched.value = true
+}
+
+/* 【大類】**必填**（人类裁定）：提交前校验 —— 未选（或空串）⇒ 拒；选了但不在真源 3 类内 ⇒ 拒。
+   真源判定走 `isKnownSealClass`（seed.js，唯一真源；逐字相等、不做归一）。
+   返回**可读繁體提示**（空串 ＝ 放行）；**不新增任何 reason 字面值**（本组件只上屏文案）。 */
+function sealClassDenial() {
+  const value = String(form.sealClass || '').trim()
+  if (!value) {
+    return SEAL_CLASS_READY
+      ? `大類爲必填項，請先選擇一項（${SEAL_CLASS_OPTIONS.join('、')}）後再提交。`
+      : SEAL_CLASS_MISSING_MESSAGE
+  }
+  if (!isKnownSealClass(value)) {
+    return `大類「${value}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），請重新選擇後再提交。`
+  }
+  return ''
 }
 
 
@@ -340,6 +356,14 @@ async function submit() {
   submitting.value = true
   feedback.value = ''
   try {
+    /* 【大類】必填（人类裁定）：未选 / 非法值 ⇒ **阻止提交**（不跑影像管线、不调服务层）
+       ＋ 可见繁體提示；本分支只上屏文案，**不新增 reason 字面值**。 */
+    const classDenied = sealClassDenial()
+    if (classDenied) {
+      feedback.value = classDenied
+      return
+    }
+
     if (!PIPELINE_READY && source.value) {
       /* 模块不可用但用户已选图 ⇒ 不提交任何内容（绝不静默用原图冒充）。
          未选图时照旧落到服务层，由它给出「请选择印面图片」的可读拒绝。 */
@@ -389,8 +413,8 @@ onBeforeUnmount(() => {
     <div class="upload-box">
       <h3 class="upload-box__title">上傳印章</h3>
       <p class="upload-box__lede">
-        新增一枚印章並同時新增 1 個印面與 1 張印面圖。朝代、印面內容、印面圖爲必填項；
-        朝代、印面內容、印面風格都是封閉選擇框（只可選不可填），前兩者也是璽印匯類的篩選維度。
+        新增一枚印章並同時新增 1 個印面與 1 張印面圖。朝代、印面內容、大類、印面圖爲必填項；
+        朝代、印面內容、印面風格、大類都是封閉選擇框（只可選不可填），前兩者也是璽印匯類的篩選維度。
         印文可留空（空則顯示「佚名」）。
         形制與材質爲印章級固定屬性（自由文本，選填）。
       </p>
@@ -455,9 +479,10 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="field">
-        <label for="upload-seal-class">大類（選填）</label>
+        <label for="upload-seal-class">大類</label>
         <!-- 【大類】（本单）：封闭选择框，选项只来自真源常量 SEAL_CLASS_OPTIONS（共 3 值，逐字规范顺序）；
-             不追加占位项、无自由文本。**按朝代预填建议**（suggestSealClass），**不锁死**：
+             不追加占位项、无自由文本。**必填**（未选 ⇒ 提交被拒 ＋ 可见繁體提示）。
+             **按朝代预填建议**（suggestSealClass），**不锁死**：
              用户手改（@change）后以用户所选为准，朝代变动不再覆盖。 -->
         <select
           id="upload-seal-class"
@@ -468,7 +493,10 @@ onBeforeUnmount(() => {
           <option v-for="item in sealClassOptions" :key="item" :value="item">{{ item }}</option>
         </select>
         <span class="field__hint">
-          大類固定 3 類（本框共 {{ sealClassOptions.length }} 項），只可選不可填；按朝代自動預填建議，可手動改選（手改後以你的選擇為準）。
+          大類固定 3 類（本框共 {{ sealClassOptions.length }} 項），只可選不可填（必填）；按朝代自動預填建議，可手動改選（手改後以你的選擇為準）。
+        </span>
+        <span v-if="!form.sealClass" class="field__hint" data-seal-class-unselected="upload-seal">
+          尚未選擇大類（必填）。
         </span>
         <span
           v-if="sealClassSuggested && !sealClassTouched"
