@@ -404,8 +404,8 @@ const d1 = await imageAuthority.storeArtifactBytes(TIFF)
 const d1Snapshot = imageAuthority.displayArtifactAttemptSnapshot()
 check('D1', 'B 路成功 ⇒ storeArtifactBytes ok:true', true, d1.ok === true)
 check('D1b', '写入口回包键集合**逐字不变**（既有 8 键）', 'bytesLength,idempotent,message,mime,ok,relPath,sha256,storageKey', shapeOf(d1))
-check('D1c', 'best-effort 快照：outcome ok、op 名逐字、displayKey ＝ 内容寻址展示键（gate 未透傳 display 明細 ⇒ 就地派生）', { op: 'ensureDisplayArtifact', outcome: 'ok', ok: true, displayKey: DISPLAY_KEY }, { op: d1Snapshot.op, outcome: d1Snapshot.outcome, ok: d1Snapshot.ok, displayKey: d1Snapshot.displayKey })
-check('D1d', 'best-effort 快照：尺寸／體量**如實記 0**（gate 白名單未透傳 display，不編造讀數）', { width: 0, height: 0, bytesLength: 0 }, { width: d1Snapshot.width, height: d1Snapshot.height, bytesLength: d1Snapshot.bytesLength })
+check('D1c', 'best-effort 快照：outcome ok、op 名逐字、displayKey ＝ 内容寻址展示键（gate 已透傳 display 明細 ⇒ 快照逐字採納服務端 displayKey）', { op: 'ensureDisplayArtifact', outcome: 'ok', ok: true, displayKey: DISPLAY_KEY }, { op: d1Snapshot.op, outcome: d1Snapshot.outcome, ok: d1Snapshot.ok, displayKey: d1Snapshot.displayKey })
+check('D1d', 'best-effort 快照：尺寸／體量＝**服務端權威真實讀數**（gate 已透傳 display 明細 ⇒ 快照逐字採納，不派生、不記 0）', { width: W, height: H, bytesLength: expectedPng.length }, { width: d1Snapshot.width, height: d1Snapshot.height, bytesLength: d1Snapshot.bytesLength })
 check('D1e', '云函数恰 2 次调用：registerArtifact ＋ ensureDisplayArtifact（载荷封闭键面）', true, fnCalls.length === 2 && fnCalls[0].data.op === 'registerArtifact' && fnCalls[1].data.op === 'ensureDisplayArtifact' && shapeOf(fnCalls[1].data.payload) === 'cloudPath,sha256')
 
 /* D2 失败隔离：display op 被服务端拒 ⇒ 写入口仍成功、只结构化登记 */

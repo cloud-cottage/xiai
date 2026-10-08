@@ -264,10 +264,6 @@ export function createTokenChannel(profile) {
         /* **回讀驗證面（本单）**：`registerArtifact` 的分组回读结果
            （`{sha256,bytesLength,mime,storageKey,idempotent}`）原样上抛（逐字、本文件不改写）。 */
         artifact: result.artifact,
-        /* **展示件轉碼面（本單｜`ensureDisplayArtifact`）**：`{sha256, displayKey, bytesLength,
-           width, height}` 原样叠进回包（键名与云函数 `index.js` 信封的 display 分组逐字同构、
-           本文件不改写）。其余 op ⇒ `undefined`（序列化后不出现该键 ⇒ **既有回包逐字不变**）。 */
-        display: result.display,
         /* **服务端权威行**（只有「经云端落盘」的 op 才有；本地只做镜像）。 */
         row: result.row,
         /* **服务端公开投影行**（`reviewCorrection` 等带公开投影的 op 才有；逐字采用、不在前端重建）。 */
