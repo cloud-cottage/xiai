@@ -597,8 +597,20 @@ check('D5c', '正/负对照取值不同 ⇒ 探针不是恒值（能分「真解
 /* D6 **静态断言**：主读取形态（嵌套）在场 ／ 裸 `meta.fileId` 取值形态已绝迹 ＋ 负对照 */
 const resolveSlice = opsSource.slice(opsSource.indexOf('async function resolveFileId('), opsSource.indexOf('async function readArtifactBytes('))
 check('D6', "静态：`resolveFileId` **代码**含嵌套读取（`typeof meta.data.fileId === 'string'`）", true, resolveSlice.includes("typeof meta.data.fileId === 'string'"))
-check('D6b', '静态：`lib/ops.js` 内**再无裸 `meta.fileId`** 取值形态（计数 0）', 0, (opsSource.match(/\bmeta\s*\.\s*fileId\b/g) || []).length)
-check('D6c', '静态判据负对照：HEAD（修前）版 `ops.js` 含该形态（证探针能区分修前 / 修后）', true, (headTextOf('cloudfunctions/xiai-user-token/lib/ops.js').match(/\bmeta\s*\.\s*fileId\b/g) || []).length > 0)
+const bareMetaFileIdCount = (text) => (text.match(/\bmeta\s*\.\s*fileId\b/g) || []).length
+check('D6b', '静态：`lib/ops.js` 内**再无裸 `meta.fileId`** 取值形态（计数 0）', 0, bareMetaFileIdCount(opsSource))
+/* D6c **自持夹具**（不读 `git` / `HEAD` / 工作区）：内存里构造「修前形态」源码文本作负样本，
+   断言**同一个扫描谓词**判负样本为红（命中 > 0）、判当前真实源码为绿（命中 = 0）。 */
+const PRE_FIX_OPS_FIXTURE = [
+  'async function resolveFileId(meta) {',
+  '  // 修前形态：直接取裸 meta.fileId（SDK v3.18.3 实为嵌套 data.fileId）',
+  '  const fileId = meta && meta.fileId',
+  "  if (typeof fileId !== 'string' || !fileId.trim()) return null",
+  '  return fileId.trim()',
+  '}',
+  ''
+].join('\n')
+check('D6c', '静态判据负对照（内存夹具，不读 git/HEAD/工作区）：同一谓词判「修前形态」负样本为红（[0]=true）、判当前真实源码为绿（[1]=false）', [true, false], [bareMetaFileIdCount(PRE_FIX_OPS_FIXTURE) > 0, bareMetaFileIdCount(opsSource) > 0])
 
 /* 复原 CJS 装载（探针只作用于本段）。 */
 nodeModule._load = originalModuleLoad
