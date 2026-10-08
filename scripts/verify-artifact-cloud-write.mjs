@@ -12,7 +12,9 @@
  *      ② A 路不可达 / 200 HTML（线上 Vercel 实况）⇒ 自动走 B 路（直传 ＋ 注册），成功；
  *      ③ 服务业界拒绝（非回落集）⇒ 原样上抛、**不改走 B 路**（负对照）；
  *      ④ B 路的一切「未取得云端回读覆核」形态 ⇒ 结构化失败（dev 放行 / 回读值被篡改）；
- *      ⑤ 两条路的回包**形状逐字段一致**，且都 ⊇ 旧路冻结形状。
+ *      ⑤ 两条路的回包**形状逐字段一致**，且都 ⊇ 旧路冻结形状；
+ *      ⑥ 【本单】`gate()` 回包白名单透传 `display` 分组（注入式正/负对照：
+ *         服务端带 ⇒ 逐字同构透传；不带 ⇒ `undefined`，不编造、不产生假读数）。
  *   C. **静态扫描**：新增 `reason` 字面值 0；新 op 不产出落盘计划；持久化路径仍恰 1 处。
  *
  * 纪律：**不打印任何密钥 / 令牌原文**（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
@@ -470,6 +472,38 @@ const preexistingEvidence = Object.entries(PREEXISTING_SERVICE_REASONS).map(([li
   return `${literal}@${file.split('（')[0]}:${text.includes(`'${literal}'`) ? 'present' : 'MISSING'}`
 })
 check('B9c', '出处正对照：三个既有服务层字面值在各自文件里确有定义（非本单新造）', true, preexistingEvidence.every((item) => item.endsWith('present')))
+
+/* ---------------------------------------------------------------------------
+   B10（本单）：`gate()` 回包白名单透传 `display` 分组（additive：注入式正/负对照）
+   ---------------------------------------------------------------------------
+   · 正对照：注入的服务端信封带 `display` 分组 ⇒ gate 回包含该分组且**逐字同构**
+     （深等同、键面恰 {sha256,displayKey,bytesLength,width,height}、不重建不改写）；
+   · 负对照：服务端回包**无** `display` ⇒ gate 回包 `display` 为 `undefined`
+     （**不编造**分组、序列化后无任何 `displayKey` / `width` / `height` 假读数）；
+   · additive 证明：除 `display` 外其余字段与正对照逐字相同（白名单加键不改既有字段）。
+   注入走「回放队列」包裹层：队列非空 ⇒ 吐注入回包（本段用）；队列空 ⇒ 与原注入行为
+   逐字一致（打真实函数体）——**不改既有注入行**，本段之后对既有断言零影响。
+   --------------------------------------------------------------------------- */
+let cannedGateReplies = []
+userTokenSvc.setUserTokenTransport(async (name, data) => {
+  fnCalls.push({ name, data })
+  if (cannedGateReplies.length > 0) return { result: cannedGateReplies.shift() }
+  const result = await fn.main(data)
+  return { result: transportMutate ? transportMutate(result) : result }
+})
+/* 展示件分组夹具（形状 ＝ `index.js` 信封透传的 display 分组：{sha256,displayKey,bytesLength,width,height}）。 */
+const DISPLAY_GROUP = Object.freeze({ sha256: TIFF_DIGEST, displayKey: `xiai/images/display/${TIFF_DIGEST.slice(0, 2)}/${TIFF_DIGEST}.webp`, bytesLength: 4096, width: 640, height: 480 })
+cannedGateReplies.push({ ok: true, op: 'ensureDisplayArtifact', value: null, display: DISPLAY_GROUP })
+const gateWithDisplay = await userTokenSvc.userGate('ensureDisplayArtifact', { cloudPath: CLOUD_PATH, sha256: TIFF_DIGEST })
+check('B10', '正对照：gate 回包 ok ＋ 含 `display` 键（白名单透传，而非丢弃）', [true, true], [gateWithDisplay.ok === true, Object.prototype.hasOwnProperty.call(gateWithDisplay, 'display')])
+check('B10b', '正对照：gate 回包的 `display` 与注入的服务端回包**逐字同构**（深等同、不重建）', DISPLAY_GROUP, gateWithDisplay.display)
+check('B10c', '正对照：`display` 键面恰 ＝ {bytesLength,displayKey,height,sha256,width}（与信封同构、无多余键）', 'bytesLength,displayKey,height,sha256,width', shapeOf(gateWithDisplay.display))
+cannedGateReplies.push({ ok: true, op: 'ensureDisplayArtifact', value: null })
+const gateWithoutDisplay = await userTokenSvc.userGate('ensureDisplayArtifact', { cloudPath: CLOUD_PATH, sha256: TIFF_DIGEST })
+check('B10d', '负对照：服务端回包无 `display` ⇒ gate 回包 `display` 为 `undefined`（**不编造**分组）', undefined, gateWithoutDisplay.display)
+check('B10e', '负对照：回包序列化后无任何 `displayKey` / `width` / `height` 假读数（不派生、不占位）', false, /displayKey|"width"|"height"/.test(JSON.stringify(gateWithoutDisplay)))
+check('B10f', 'additive 证明：除 `display` 键外，负对照回包与正对照回包逐字相同（加键不改既有字段）', canonical(gateWithoutDisplay), canonical(Object.assign({}, gateWithDisplay, { display: undefined })))
+cannedGateReplies = []
 
 /* ---------------------------------------------------------------------------
    6. C 段：静态扫描（新增 reason 字面值 0 / op 零落盘 / 持久化路径恰 1 处）

@@ -486,6 +486,31 @@ check('G2', '负对照：纯繁体串不命中', [], simplifiedHits('這裏說�
 }
 
 /* ===========================================================================
+   H 段：gate() 回包白名单透传 `display` 分组（正 / 负对照；注入缝直测本文件 gate）
+   =========================================================================== */
+console.log(JSON.stringify({ section: 'H', title: 'gate 回包白名单：display 分组透传（正 / 负对照）' }))
+/* 与第 3 段同一真实传输缝（H 段结束后原样还原；H 段内用 stub 只替 display 回包形状）。 */
+const realTransport = async (name, data) => ({ result: await fn.main(data) })
+/* H0：前置 —— 内存有登录令牌（cloud 形态 gate 可直测；复用 / 补签同一机制）。 */
+await userTokenSvc.ensureUserWriteSession(USER_CODE, PHONE)
+check('H0', '前置：内存有登录令牌（cloud 形态 gate 可直测）', true, userTokenSvc.userTokenSnapshot().present === true)
+/* H1（正向）：注入**带 display 分组**的服务端回包 ⇒ gate 逐字透传（与注入回包同构）。 */
+const injectedDisplay = { sha256: 'f'.repeat(64), displayKey: 'display/xiai/fx/fx-display.webp', bytesLength: 1234, width: 320, height: 240 }
+const stubServerReply = { ok: true, op: 'ensureDisplayArtifact', serverNow: nowS() }
+userTokenSvc.setUserTokenTransport(async () => ({ result: Object.assign({}, stubServerReply, { display: injectedDisplay }) }))
+const outH1 = await userTokenSvc.userGate('ensureDisplayArtifact', {})
+check('H1', 'gate 回包含 display 分组且与注入的服务端回包逐字同构', injectedDisplay, outH1.display)
+check('H1b', 'display 分组键面 ＝ 服务端五键（sha256/displayKey/bytesLength/width/height）', ['bytesLength', 'displayKey', 'height', 'sha256', 'width'], Object.keys(outH1.display || {}).sort())
+check('H1c', 'gate 未改写注入的服务端对象（权威读数原样，逐字同构旁证）', { sha256: 'f'.repeat(64), displayKey: 'display/xiai/fx/fx-display.webp', bytesLength: 1234, width: 320, height: 240 }, injectedDisplay)
+/* H2（负向）：注入**无 display** 的服务端回包 ⇒ 客户端不编造、不产生假读数。 */
+userTokenSvc.setUserTokenTransport(async () => ({ result: Object.assign({}, stubServerReply) }))
+const outH2 = await userTokenSvc.userGate('ensureDisplayArtifact', {})
+check('H2', '服务端回包无 display ⇒ gate 回包 display ＝ undefined（不编造分组）', undefined, outH2.display)
+check('H2b', '负对照：gate 顶层不产生假读数（无 width/height/bytesLength/displayKey/sha256 扁平键）', [], Object.keys(outH2).filter((k) => ['sha256', 'displayKey', 'bytesLength', 'width', 'height'].indexOf(k) !== -1))
+/* 还原真实传输缝（H 段之后不再发起云端往返；防御性还原）。 */
+userTokenSvc.setUserTokenTransport(realTransport)
+
+/* ===========================================================================
    汇总
    =========================================================================== */
 const total = results.length
