@@ -516,7 +516,95 @@ const readFaceChanged = ['src/data/cloudbase.js'].filter((rel) => {
 check('C5b', '对象键模式行内**不含** tiff（读面口径一字未改）', [], readFaceChanged)
 
 /* ---------------------------------------------------------------------------
-   7. 汇总
+   7. D 段：`@cloudbase/node-sdk` **返回形状**（`resolveFileId` 真因回归探针）
+   ---------------------------------------------------------------------------
+   真因：生产 `registerArtifact` 恒 `STORAGE_UNAVAILABLE` —— `resolveFileId` 按**扁平**
+   `meta.fileId` 取值，而 SDK v3.18.3 的 `IGetUploadMetadataResult` 是**嵌套** `data.fileId`
+   ⇒ 取值恒 `undefined`。本段用**假 SDK**（覆盖 `Module._load`）让 `readArtifactBytes` 的
+   **真实** node-sdk 分支在离线态可跑，逐形状断言（含**负对照**证明探针能区分真假）。
+   --------------------------------------------------------------------------- */
+console.log(JSON.stringify({ section: 'D', title: 'resolveFileId：SDK 返回形状（嵌套 / 扁平 / 空）' }))
+
+const nodeModule = require('node:module')
+const originalModuleLoad = nodeModule._load
+let sdkCalls = []
+let fakeMetaReply = null
+const fakeDownloadBytes = TIFF
+const fakeNodeSdk = {
+  init: () => ({
+    async getUploadMetadata(args) {
+      sdkCalls.push({ fn: 'getUploadMetadata', args })
+      return fakeMetaReply
+    },
+    async downloadFile(args) {
+      sdkCalls.push({ fn: 'downloadFile', args })
+      return { fileContent: fakeDownloadBytes, message: 'ok' }
+    }
+  })
+}
+/* 覆盖 CJS 装载：`require('@cloudbase/node-sdk')` ⇒ 假体（不碰网络、不落盘）。 */
+nodeModule._load = function (request, parent, isMain) {
+  if (request === '@cloudbase/node-sdk') return fakeNodeSdk
+  return originalModuleLoad.call(this, request, parent, isMain)
+}
+/* 撤掉对象存储注入缝 ⇒ `readArtifactBytes` 走**真实** node-sdk 分支（＝线上形态）。 */
+ops.setOpsStorageProvider(null)
+
+const NESTED_FILEID = `cloud://fake-env.fake-bucket/${CLOUD_PATH}`
+const FLAT_FILEID = `cloud://fake-env2.fake-bucket2/${CLOUD_PATH}`
+const sdkPayload = { cloudPath: CLOUD_PATH, sha256: TIFF_DIGEST, bytesLength: TIFF.length }
+/** 同一探针：喂一个 SDK 回包形状 ⇒ 返回 `registerArtifact` 的结构化结果。 */
+async function probeSdkShape(metaReply) {
+  sdkCalls = []
+  fakeMetaReply = metaReply
+  return ops.OPS.registerArtifact(Object.assign({}, sdkPayload))
+}
+const sdkResolves = (metaReply) => probeSdkShape(metaReply).then((r) => r.ok === true)
+const downloadedFileId = () => {
+  const call = sdkCalls.find((item) => item.fn === 'downloadFile')
+  return call && call.args ? call.args.fileID : null
+}
+
+/* D1 嵌套形状（SDK v3.18.3 真实形状）⇒ 解析出 fileID 并**继续走到 downloadFile** */
+const nestedOk = await probeSdkShape({ data: { fileId: NESTED_FILEID, url: 'https://example.invalid/x', token: 't', authorization: 'a' } })
+const nestedDownloadId = downloadedFileId()
+check('D1', '嵌套 `{data:{fileId}}`（SDK v3.18.3 真实形状）⇒ ok:true（解析出并继续回读）', true, nestedOk.ok === true)
+check('D1b', 'getUploadMetadata 收到 `{cloudPath}`（服务端自己解析对象键）', true, sdkCalls.some((c) => c.fn === 'getUploadMetadata' && canonical(c.args) === canonical({ cloudPath: CLOUD_PATH })))
+check('D1c', 'downloadFile 收到的 fileID ≡ 嵌套回包里的（经 `resolveFileId`，未硬编 bucket）', NESTED_FILEID, nestedDownloadId)
+
+/* D2 扁平形状（向前兼容）⇒ 仍解析 */
+const flatOk = await probeSdkShape({ fileId: FLAT_FILEID })
+const flatDownloadId = downloadedFileId()
+check('D2', '扁平 `{fileId}`（无 `data` 中介）⇒ 仍解析 ⇒ ok:true（向前兼容）', true, flatOk.ok === true)
+check('D2b', '扁平形同样走到 downloadFile，fileID ≡ 扁平回包里的', FLAT_FILEID, flatDownloadId)
+
+/* D3 空 / 空白形状 ⇒ 结构化 `STORAGE_UNAVAILABLE`（**不得假绿**） */
+const emptyMeta = await probeSdkShape({})
+check('D3', '`{}` ⇒ 结构化 `STORAGE_UNAVAILABLE`（恰 3 键）', true, isDenial(emptyMeta) && emptyMeta.reason === 'STORAGE_UNAVAILABLE')
+const emptyDataMeta = await probeSdkShape({ data: {} })
+check('D3b', '`{data:{}}` ⇒ 结构化 `STORAGE_UNAVAILABLE`（此前恒 `undefined` 的那一支）', true, isDenial(emptyDataMeta) && emptyDataMeta.reason === 'STORAGE_UNAVAILABLE')
+const blankMeta = await probeSdkShape({ data: { fileId: '   ' } })
+check('D3c', "`{data:{fileId:'   '}}`（空白）⇒ 结构化 `STORAGE_UNAVAILABLE`（trim 后非空才取用）", true, isDenial(blankMeta) && blankMeta.reason === 'STORAGE_UNAVAILABLE')
+check('D3d', '三种空形态 ⇒ downloadFile 一次未调（判定在回读之前）', 0, sdkCalls.filter((item) => item.fn === 'downloadFile').length)
+
+/* D5 **负对照**：同一探针把嵌套值拆成 `{data:{}}` ⇒ 判定必须转红（证探针能区分真假） */
+const nestedVerdict = await sdkResolves({ data: { fileId: NESTED_FILEID } })
+const brokenVerdict = await sdkResolves({ data: {} })
+check('D5', '负对照：同一探针喂 `{data:{}}` ⇒ 判定转红（false）', false, brokenVerdict)
+check('D5b', '正对照：同一探针保留嵌套值 ⇒ 判定为真（true）', true, nestedVerdict)
+check('D5c', '正/负对照取值不同 ⇒ 探针不是恒值（能分「真解析」与「假绿」）', true, nestedVerdict !== brokenVerdict)
+
+/* D6 **静态断言**：主读取形态（嵌套）在场 ／ 裸 `meta.fileId` 取值形态已绝迹 ＋ 负对照 */
+const resolveSlice = opsSource.slice(opsSource.indexOf('async function resolveFileId('), opsSource.indexOf('async function readArtifactBytes('))
+check('D6', "静态：`resolveFileId` **代码**含嵌套读取（`typeof meta.data.fileId === 'string'`）", true, resolveSlice.includes("typeof meta.data.fileId === 'string'"))
+check('D6b', '静态：`lib/ops.js` 内**再无裸 `meta.fileId`** 取值形态（计数 0）', 0, (opsSource.match(/\bmeta\s*\.\s*fileId\b/g) || []).length)
+check('D6c', '静态判据负对照：HEAD（修前）版 `ops.js` 含该形态（证探针能区分修前 / 修后）', true, (headTextOf('cloudfunctions/xiai-user-token/lib/ops.js').match(/\bmeta\s*\.\s*fileId\b/g) || []).length > 0)
+
+/* 复原 CJS 装载（探针只作用于本段）。 */
+nodeModule._load = originalModuleLoad
+
+/* ---------------------------------------------------------------------------
+   8. 汇总
    --------------------------------------------------------------------------- */
 const summary = { total: results.length, passed: results.length - failures, failed: failures }
 console.log(JSON.stringify({ summary, failed_ids: results.filter((item) => !item.pass).map((item) => item.id), wire_calls: fnCalls.length }))

@@ -375,15 +375,23 @@ function opsStorageInjected() {
  *
  * 为什么不拼字面量：bucket 名**不得在代码里硬编码**（工程纪律；前端唯一默认值的定义点在
  * `src/data/cloudbase.js::CLOUD_STORAGE_BUCKET_DEFAULT`）。这里让**平台自己**回答：
- * `app.getUploadMetadata({cloudPath})` 回包里的 `fileId` 就是本环境该对象的完整 fileID。
- * 取不到 ⇒ 抛错（由 `registerArtifact` 转结构化拒绝，**不猜、不拼**）。
+ * `@cloudbase/node-sdk` **v3.18.3** 的 `IGetUploadMetadataResult` 形状是**嵌套**的 ——
+ * 回包的 `data.fileId` 才是本环境该对象的完整 fileID（`{ data: { url, token, authorization,
+ * fileId, cosFileId, download_url } }`）；早前按**扁平**取值恒 `undefined`
+ * ⇒ 生产恒 `STORAGE_UNAVAILABLE`（本单真因）。
+ * 容错：个别回包若为**扁平** `{ fileId }`（无 `data` 中介）⇒ 仍取用（向前兼容）；
+ * **两种形态都拿不到 / 取到空白 ⇒ 抛错**（由 `registerArtifact` 转结构化拒绝，**不猜、不拼**）。
  * @param {object} app `@cloudbase/node-sdk` 的 app 实例
  * @param {string} cloudPath 对象键
  * @returns {Promise<string>} 完整 fileID
  */
 async function resolveFileId(app, cloudPath) {
   const meta = await app.getUploadMetadata({ cloudPath })
-  const fileId = meta && meta.fileId
+  /* 主读取：**嵌套**（SDK v3.18.3 真实形状）；扁平只作向前兼容的转口读取（`readFileId(meta)`）。 */
+  const readFileId = (source) => (source && typeof source.fileId === 'string' ? source.fileId : null)
+  const nested = meta && meta.data && typeof meta.data.fileId === 'string' ? meta.data.fileId : null
+  const flat = readFileId(meta)
+  const fileId = nested !== null ? nested : flat
   if (typeof fileId !== 'string' || fileId.trim() === '') throw new Error('STORAGE_FILEID_UNRESOLVED')
   return fileId.trim()
 }
