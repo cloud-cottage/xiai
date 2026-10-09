@@ -291,6 +291,10 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
           images: listImageRows().filter((img) => img.stamp_id === row.stamp_id),
           /* **作者显示名（单点派生）**：供文本导出等按印章取名（**同一单点**，不另写名表）。 */
           author_display: authorDisplay,
+          /* **作者引用型（person-model §4.1）**：印章行**不落引用副本**（P1-2）⇒ 印章视图模型的
+             `author_person_id` 一律取**主印面的印面级引用**（单点派生，**不是**印章行自带值）——
+             卡片 / 详情经单点取名（`resolveAuthorDisplayName(seal)`）因此不再依赖印章行上的引用。 */
+          author_person_id: (primary && primary.author_person_id) || '',
           ...resolved
         },
         /* 判定用的**印章行原值**（不落进视图模型）：R-34 明文「dynasty 仍按印章行判」。 */

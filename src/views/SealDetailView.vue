@@ -1447,6 +1447,72 @@ onBeforeUnmount(() => {
         <div class="face-block__sub-head">
           <button v-if="canSubmit" class="btn btn--ghost" type="button" @click="openCorrection(face)">勘誤</button>
           <span v-else class="detail__hint">登錄後可提交勘誤，審覈通過後每條獎勵 {{ points.CORRECTION_REWARD }} 金。</span>
+          <!-- **印人提案入口（P1-3）**：**与登录态解耦** —— 一律渲染、可见可达（落点在「可標記屬性」区，
+               **不埋进**登录后才展开的勘誤表单、**不用 CSS 隐藏 / disabled 冒充**）。
+               未登录点击 ⇒ `openPersonProposal` 走**登录引导**（`goLogin`，不静默失败）；
+               登录点击 ⇒ 就地展开下方提案表单。 -->
+          <button
+            class="btn btn--ghost"
+            type="button"
+            data-action="person-proposal-open"
+            data-person-proposal-entry="detail-markable"
+            @click="formFaceId = face.id; openPersonProposal(face)"
+          >
+            提交印人提案
+          </button>
+        </div>
+        <!-- 印人提案内联表单（**唯一实例**：仅目标印面渲染，避免多印面重复；由 `proposalOpen` 控制，
+             与登录态无关 —— 未登录时该表单不展开，但上方入口照常可见）。 -->
+        <div v-if="proposalOpen && formFaceId === face.id" class="proposal-form" data-person-proposal-form>
+          <h4 class="proposal-form__title">提交印人提案</h4>
+          <div class="field">
+            <label for="pp-family">姓</label>
+            <input id="pp-family" v-model="proposal.familyName" type="text" data-person-proposal-family />
+          </div>
+          <div class="field">
+            <label for="pp-given">名</label>
+            <input id="pp-given" v-model="proposal.givenName" type="text" data-person-proposal-given />
+          </div>
+          <div class="field">
+            <label for="pp-courtesy">字（多個以逗號分隔）</label>
+            <input id="pp-courtesy" v-model="proposal.courtesy" type="text" data-person-proposal-courtesy />
+          </div>
+          <div class="field">
+            <label for="pp-art">號（多個以逗號分隔）</label>
+            <input id="pp-art" v-model="proposal.art" type="text" data-person-proposal-art />
+          </div>
+          <div class="field">
+            <label for="pp-alias">別名（多個以逗號分隔）</label>
+            <input id="pp-alias" v-model="proposal.alias" type="text" data-person-proposal-alias />
+          </div>
+          <div class="field">
+            <label for="pp-birth">生年（公元，可空）</label>
+            <input id="pp-birth" v-model="proposal.birthYear" type="text" data-person-proposal-birth />
+          </div>
+          <div class="field">
+            <label for="pp-death">卒年（公元，可空）</label>
+            <input id="pp-death" v-model="proposal.deathYear" type="text" data-person-proposal-death />
+          </div>
+          <div class="field">
+            <label for="pp-cbdb">CBDB id（可空）</label>
+            <input id="pp-cbdb" v-model="proposal.cbdbId" type="text" data-person-proposal-cbdb />
+          </div>
+          <div class="field">
+            <label for="pp-note">依據（選填）</label>
+            <input id="pp-note" v-model="proposal.note" type="text" data-person-proposal-note />
+          </div>
+          <p v-if="proposalFeedback" class="notice" data-person-proposal-feedback>{{ proposalFeedback }}</p>
+          <div class="proposal-form__foot">
+            <button
+              class="btn btn--primary"
+              type="button"
+              data-action="person-proposal-submit"
+              :disabled="proposalBusy"
+              @click="submitPersonProposalForm"
+            >
+              提交提案
+            </button>
+          </div>
         </div>
 
         <!-- 【印面内容】（R-30，9 值）/【印面风格】（R-31，23 值）：**封闭选择框**，每个印面块各一组。
@@ -1879,64 +1945,13 @@ onBeforeUnmount(() => {
                   class="btn btn--ghost"
                   type="button"
                   data-action="person-proposal-open"
-                  @click="openPersonProposal"
+                  @click="openPersonProposal(formFace.value); formOpen = false"
                 >
                   提交印人提案
                 </button>
                 <span class="field__hint">
-                  庫中無此人 ⇒ 可先提交印人提案，經管理員審覈通過後即可在此選中。
+                  庫中無此人 ⇒ 可先提交印人提案（提交面在「可標記屬性」区，本弹窗将关闭），經管理員審覈通過後即可在此選中。
                 </span>
-                <div v-if="proposalOpen" class="proposal-form" data-person-proposal-form>
-                  <h4 class="proposal-form__title">提交印人提案</h4>
-                  <div class="field">
-                    <label for="pp-family">姓</label>
-                    <input id="pp-family" v-model="proposal.familyName" type="text" data-person-proposal-family />
-                  </div>
-                  <div class="field">
-                    <label for="pp-given">名</label>
-                    <input id="pp-given" v-model="proposal.givenName" type="text" data-person-proposal-given />
-                  </div>
-                  <div class="field">
-                    <label for="pp-courtesy">字（多個以逗號分隔）</label>
-                    <input id="pp-courtesy" v-model="proposal.courtesy" type="text" data-person-proposal-courtesy />
-                  </div>
-                  <div class="field">
-                    <label for="pp-art">號（多個以逗號分隔）</label>
-                    <input id="pp-art" v-model="proposal.art" type="text" data-person-proposal-art />
-                  </div>
-                  <div class="field">
-                    <label for="pp-alias">別名（多個以逗號分隔）</label>
-                    <input id="pp-alias" v-model="proposal.alias" type="text" data-person-proposal-alias />
-                  </div>
-                  <div class="field">
-                    <label for="pp-birth">生年（公元，可空）</label>
-                    <input id="pp-birth" v-model="proposal.birthYear" type="text" data-person-proposal-birth />
-                  </div>
-                  <div class="field">
-                    <label for="pp-death">卒年（公元，可空）</label>
-                    <input id="pp-death" v-model="proposal.deathYear" type="text" data-person-proposal-death />
-                  </div>
-                  <div class="field">
-                    <label for="pp-cbdb">CBDB id（可空）</label>
-                    <input id="pp-cbdb" v-model="proposal.cbdbId" type="text" data-person-proposal-cbdb />
-                  </div>
-                  <div class="field">
-                    <label for="pp-note">依據（選填）</label>
-                    <input id="pp-note" v-model="proposal.note" type="text" data-person-proposal-note />
-                  </div>
-                  <p v-if="proposalFeedback" class="notice" data-person-proposal-feedback>{{ proposalFeedback }}</p>
-                  <div class="proposal-form__foot">
-                    <button
-                      class="btn btn--primary"
-                      type="button"
-                      data-action="person-proposal-submit"
-                      :disabled="proposalBusy"
-                      @click="submitPersonProposalForm"
-                    >
-                      提交提案
-                    </button>
-                  </div>
-                </div>
               </template>
             </template>
             <input

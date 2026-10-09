@@ -107,6 +107,11 @@ export function hdManifestText(seal, displayName = '') {
   const face = (seal && seal.faceImage) || {}
   const edges = (seal && seal.edgeImages) || []
   const rawName = displayName || String((seal && seal.seal_name) || '')
+  /* **作者显示名（§3.54.9｜链尾回落，本文件不自推链）**：
+     取上游视图模型已按**单点**（`data/db.js::resolveAuthorName`：「引用命中 → 旧 `author` →「佚名」」）
+     算好的 `author_display`；**上游未给该键（旧调用形态）才回落**裸 `author`。
+     本文件**不自行**推导「引用 → 人名」（那会绕开单点、长出第二套名表，且 `utils/file.js` 不得
+     import 名表模块 —— 层级倒置，见本节头注）；故此处为**链尾兜底**，口径仍归 §3.54.9 单点。 */
   const lines = [
     '璽愛 · 高清印面資料',
     '（本清單爲印面資料與影像摘要；影像原件請於頁面以「下載高清原圖」下載）',
@@ -114,6 +119,7 @@ export function hdManifestText(seal, displayName = '') {
     `印文：${rawName || '佚名'}`,
     `朝代：${seal.dynasty || '—'}`,
     `分類：${seal.seal_type || '—'}`,
+    /* 作者（链尾回落：`author_display` 缺位时才读裸 `author`；见本节头注）。 */
     `作者：${seal.author_display || seal.author || '—'}`,
     `材質：${seal.material || '—'}`,
     `印文釋義：${seal.transcription || '—'}`,
@@ -130,6 +136,7 @@ export function hdManifestText(seal, displayName = '') {
     lines.push(
       `  ${index + 1}. ${item.kind === 'EDGE' ? '邊款' : '印面'} ${item.id}`,
       `     印文：${item.seal_name || '—'}`,
+      /* 作者（同链尾回落：`item.author_display` 缺位时才读裸 `item.author`）。 */
       `     朝代 / 分類 / 作者：${item.dynasty || '—'} / ${item.seal_type || '—'} / ${item.author_display || item.author || '—'}`,
       `     印面圖片：${item.face_image_id || '—'}`
     )

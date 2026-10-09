@@ -369,7 +369,11 @@ function buildPayload(faceBytes) {
     seal_class: form.sealClass.trim(),
     material: form.material.trim(), // 材质（**印章级**固定属性，R-32；写印章行）
     shape: form.shape.trim(), // 形制（印章级固定属性；自由文本，可空）
-    author: form.author.trim(),
+    /* 【作者】＝**引用型**（person-model §4.1）：载荷键是**印面级** `author_person_id`。
+       值 ＝ 所选印人 id（`form.author`）；**不选 ⇒ 空**（合规：不写引用）。
+       ⚠️ **不得**写成旧 `author` 键 —— 那会把 id 灌进「历史自由文本」面
+       （引用门被绕过、上屏裸 id；P1-1 缺陷根因）。旧 `author` 只作历史回落，不得被引用 id 污染。 */
+    author_person_id: form.author.trim(),
     transcription: form.transcription.trim(),
     /* 已处理字节（单页 8bit Deflate TIFF；mime 由数据层按字节魔数如实判定）或 null（缺必填由服务层拒）。 */
     faceImage: faceBytes

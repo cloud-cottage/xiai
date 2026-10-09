@@ -19,7 +19,7 @@
  * **V3（2026-10-04）：撤除「寫入校驗碼」输入位**（管理员写面收敛到「一枚登录令牌 ＋ 手机号白名单」）——
  *   提交钮的落盘路径改为「**登录令牌写面门**（`admin.setInviteReward` 内部经 `userWriteGate`）；
  *   无令牌且有登录会话时**先静默补签**（刷新后令牌即丢的自愈）⇒ 零弹窗、不需要第二个码」；
- *   弹窗内**不再有输入位**；`data-admin-action` 取值集合与实例数一字未动（仍恰 8 值）。
+ *   弹窗内**不再有输入位**；`data-admin-action` 取值集合与实例数一字未动（现为 9 值 / 归并 8 类）。
  */
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'

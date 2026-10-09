@@ -1694,10 +1694,10 @@ export function saveCorrectionSummaryRows(rows) {
    **不开放任何直写入口**（含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
    显示名派生**恰一处**（`personDisplayName`）＋ 作者显示名链**恰一处**（`resolveAuthorName`）
    —— 卡片 / 详情 / 导出 / 文本导出**一律经它**，**零第二套名表**。
-   **本机键登记（如实登记的跨单缺口）**：全工程「存储键登记表」的唯一落点 ＝
-   `data/storage.js::STORAGE_KEYS`，但**本单写集不含该文件** ⇒ 本处用本机键名常量
-   （`persons` / `person-proposals`）经 `readCollection` / `writeCollection` 读写（键仍在
-   `xiai:v1:` 命名空间下）；**补登记进 `STORAGE_KEYS` 由后续单执行**（已登记为待裁点）。
+   **本机键登记（按现态校正）**：全工程「存储键登记表」的唯一落点 ＝ `data/storage.js::STORAGE_KEYS`
+   —— 现态**已登记两枚新键**：`persons` 与 `personProposals`（真实键名 `persons` /
+   `person-proposals`），登记表**共 23 项**（既往 21 ＋ 本模型 2）。本处本机键名常量与
+   `STORAGE_KEYS` 同名同值；读写仍经 `readCollection` / `writeCollection`（键在 `xiai:v1:` 命名空间下）。
    ============================================================================ */
 
 /** 正式印人本机集合键（真实键名 `xiai:v1:persons`；代际登记见本节头注）。 */
@@ -2501,8 +2501,11 @@ const SEAL_INSERT_INPUT_FIELDS = [
   'seal_type',
   'material', // 印章级固定属性（R-32 移入）
   'shape', // 印章级固定属性（R-22）
+  /* ⚠️ **印章实体不接受 `author_person_id`（P1-2）**：引用只活在**印面行** ⇒ 该键属**印面实体**
+     键面（`FACE_INSERT_INPUT_FIELDS`），**不在此清单**（印章行不落引用副本，避免双写漂移；
+     R-49 明文「收下却不写的键不得留在清单里」）。组合入口仍收该键（见 `SEAL_COMPOSITE_INPUT_FIELDS`），
+     由组合写把它派给**印面行**。旧 `author`（自由文本）保留作历史回落、不得被引用 id 污染。 */
   'author',
-  'author_person_id', // **印面「作者」＝ 引用型（person-model §4.1）**：选填、填则必须指向既有印人
   'transcription',
   'seal_style', // 旧键：风格（与印面级 `face_style` 不是同一口径，R-31）
   'style'
@@ -2553,6 +2556,7 @@ const IMAGE_INSERT_INPUT_FIELDS = [
  */
 const SEAL_COMPOSITE_INPUT_FIELDS = [
   ...SEAL_INSERT_INPUT_FIELDS,
+  'author_person_id', // 印面级引用（P1-2）：落**印面行**；印章实体键面已不含它（见 `SEAL_INSERT_INPUT_FIELDS` 注）
   'face_style', // 印面级（落在印面上，R-31）
   'faceStyle',
   'seal_class', // 印面级（落印面，无回落）
@@ -2813,10 +2817,9 @@ export function insertSealRow(actor, payload = {}) {
      （既有行的旧值不受影响，本门只拦新写入）。 */
   const contentDenied = faceContentValueDenial(clean.category)
   if (contentDenied) return contentDenied
-  /* 第二道门（person-model §4.1）：**作者引用值域** —— 非空 `author_person_id` 必须指向
-     既有印人；写之前判定 ⇒ 拒绝即零写入。 */
-  const authorDenied = personReferenceDenial(clean.authorPersonId)
-  if (authorDenied) return authorDenied
+  /* ⚠️ **P1-2**：印章行**不落引用副本** ⇒ 本入口（印章实体）**不判**、不写 `author_person_id`
+     —— 该键已不在 `SEAL_INSERT_INPUT_FIELDS`（传进来会先被键白名单门判 `INVALID_FIELD`）。
+     引用的值域门（`personReferenceDenial`）由**印面级入口 / 组合入口**在写前判。 */
   const rows = listSealRows()
   const stampId = nextSealStampId(rows)
   const at = nowIso()
@@ -2837,8 +2840,8 @@ export function insertSealRow(actor, payload = {}) {
     review_status: 'APPROVED', // 管理员上传即生效（与实物照片同口径，不进审核队列）
     /* R-59：不写【印文简体字】键（逐键输出无该键）。 */
     author: clean.author,
-    /* **作者引用型（person-model §4.1）**：印章行落可空引用（**旧 author 文本一字不改**）。 */
-    author_person_id: clean.authorPersonId,
+    /* ⚠️ **P1-2**：印章行**不落** `author_person_id`（引用只在**印面行**存在，避免双写漂移）；
+       旧 `author`（自由文本）逐字保留作历史回落。 */
     source: MANUAL_SOURCE,
     uploaded_by: actor.id,
     created_at: at,
@@ -3032,12 +3035,17 @@ export async function insertFaceRow(actor, payload = {}) {
      不该给的键」判 `INVALID_FIELD` ＋ **零写入**（见函数首段；R-49 起改为**按键存在**判定）。
 
   /* 印面的可标记属性：显式传入优先，缺则继承所属印章。 */
+  /* **P1-2 修正**：印章行**不落引用副本** ⇒ 引用继承源改为**该印章的主印面**的印面级引用
+     （单点 `primaryFaceIn`），**不再读 `sealRow.author_person_id`**（该键已不存在）。 */
+  const sealPrimaryFace = primaryFaceIn(
+    listFaceRows().filter((row) => (row.sealId || row.stamp_id) === sealId)
+  )
   const inherit = {
     seal_name: sealRow.seal_name, // 印文（可空）
     dynasty: sealRow.dynasty,
     type: sealRow.seal_type,
     author: sealRow.author,
-    author_person_id: sealRow.author_person_id, // 作者引用型（§4.1）：随印章行继承（可空）
+    author_person_id: (sealPrimaryFace && sealPrimaryFace.author_person_id) || '',
     transcription: sealRow.transcription
   }
   const explicit = { ...payload }
