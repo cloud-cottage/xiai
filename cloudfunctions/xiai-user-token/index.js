@@ -44,7 +44,10 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
-const { OPS, ADMIN_OPS, persist } = require('./lib/ops.js')
+const { OPS, ADMIN_OPS, persist, readRoleRow } = require('./lib/ops.js')
+/* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
+   **V6-a 加固**：只读诊断 op `sessionProbe`（无令牌可调、只回形状零值）亦单点自同份文件。 */
+const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
 
 /** 对外文案（**繁體、如实、不泄漏内部标识**；按内部判别码映射，逐条一一对应）。 */
 const DENIAL_MESSAGES = Object.freeze({
@@ -160,29 +163,63 @@ function handleIssue(event, config) {
  *       ⇒ **uid 服务端派生**）→ ④ `op` 值域 / 字段门 → ⑤ 落盘 → ⑥ 滑动续期。
  * 任一环失败 ⇒ **结构化拒绝且零写入**（落盘在最后一步，前面任一步失败都到不了它）。
  */
-async function handleVerify(event, config) {
+async function handleVerify(event, config, callContext) {
   const now = serverNowSeconds()
   const op = typeof event.op === 'string' ? event.op.trim() : ''
-  const checked = verifyToken({
-    token: event.token,
-    secret: config.secret,
-    nowSeconds: now,
-    leewaySeconds: config.leewaySeconds,
-    version: config.version
+  /* **V6-a 加固**：只读诊断 op `sessionProbe` —— **无令牌可调**、**只回形状零值**、**零写入**；
+     **在任何鉴权 / 开关 / 会话 / 令牌判定之前**短路返回。 */
+  if (isSessionProbe(op)) return sessionProbe()
+  /* **V6-a：优先取调用者平台会话身份**（additive）：会话在场 ⇒ 查 `xiai_roles` 判权（fail-closed、
+     零写入；读失败 ⇒ `STORAGE_UNAVAILABLE`，**不伪装 FORBIDDEN**）；拿不到会话 ⇒ **回落既有令牌路**
+     （下面那一段逐字不变）。 */
+  const authority = await resolveSessionAuthority({
+    context: callContext,
+    readRole: readRoleRow,
+    requiredRoles: [ROLE.USER, ROLE.ADMIN]
   })
-  if (!checked.ok) {
-    audit({ action: 'verify', outcome: checked.detail, op, serverNow: now })
-    return denialFor(checked.detail)
+  if (!authority.ok) {
+    audit({ action: 'verify', outcome: authority.reason, op, stage: 'session-authority', serverNow: now })
+    return authority
   }
-  /* ③ 身份面：手机号必须合法，且令牌角色必须是 `user`（管理员令牌由另一把密钥签 ⇒ 到不了这里）。 */
-  const phone = normalizePhone(checked.claims.sub)
-  const role = String(checked.claims.role === undefined || checked.claims.role === null ? '' : checked.claims.role)
-  if (!isPhoneLike(phone) || role !== 'user') {
-    audit({ action: 'verify', outcome: 'SUBJECT_NOT_ALLOWED', op, role, serverNow: now })
-    return denialFor('SUBJECT_NOT_ALLOWED')
+  let identity = null
+  let subject = ''
+  let checked = null
+  if (authority.obtained) {
+    /* 会话路：身份 ＝ 平台会话 uid ＋ `xiai_roles` 角色（手机号不参与判定）。 */
+    identity = Object.freeze({
+      uid: authority.uid,
+      phone: '',
+      role: authority.role,
+      identity_source: IDENTITY_SOURCES.SESSION
+    })
+  } else {
+    checked = verifyToken({
+      token: event.token,
+      secret: config.secret,
+      nowSeconds: now,
+      leewaySeconds: config.leewaySeconds,
+      version: config.version
+    })
+    if (!checked.ok) {
+      audit({ action: 'verify', outcome: checked.detail, op, serverNow: now })
+      return denialFor(checked.detail)
+    }
+    /* ③ 身份面：手机号必须合法，且令牌角色必须是 `user`（管理员令牌由另一把密钥签 ⇒ 到不了这里）。 */
+    const phone = normalizePhone(checked.claims.sub)
+    const role = String(checked.claims.role === undefined || checked.claims.role === null ? '' : checked.claims.role)
+    if (!isPhoneLike(phone) || role !== 'user') {
+      audit({ action: 'verify', outcome: 'SUBJECT_NOT_ALLOWED', op, role, serverNow: now })
+      return denialFor('SUBJECT_NOT_ALLOWED')
+    }
+    subject = phone
+    /* **身份的唯一来源**：服务端从令牌声明派生（载荷里的身份类键在 op 门里被拒）。 */
+    identity = Object.freeze({
+      uid: uidOf(phone),
+      phone,
+      role: 'user',
+      identity_source: IDENTITY_SOURCES.SERVER_TOKEN
+    })
   }
-  /* **身份的唯一来源**：服务端从令牌声明派生（载荷里的身份类键在 op 门里被拒）。 */
-  const identity = Object.freeze({ uid: uidOf(phone), phone })
   /* ④ op 面：两个注册面（**都不静默放行**）——
      · `OPS`（用户写面：`submitCorrection` / `endorseCorrection` / **`registerArtifact`**
        （**只回读验证、零落盘** —— 客户端直传云存储后的服务端摘要／体量复核）/
@@ -246,28 +283,31 @@ async function handleVerify(event, config) {
       return deny(REASONS.STORAGE_UNAVAILABLE, '權威存儲未回傳文檔標識，無法確認寫入；本次零寫入。')
     }
   }
-  /* ⑥ 滑动续期：**只续期、不续权** —— 续期仍走完上面全部判定（本节即在其后）。 */
-  const renewed = issueToken({
-    sub: phone,
-    secret: config.secret,
-    nowSeconds: now,
-    ttlSeconds: config.ttlSeconds,
-    version: config.version,
-    role: 'user'
-  })
-  if (!renewed.ok) return denialFor(renewed.detail)
+  /* ⑥ 滑动续期：**只续期、不续权**（**仅令牌路** —— 会话路无令牌可续）；续期仍走完上面全部判定。 */
+  const renewed = checked
+    ? issueToken({
+        sub: subject,
+        secret: config.secret,
+        nowSeconds: now,
+        ttlSeconds: config.ttlSeconds,
+        version: config.version,
+        role: 'user'
+      })
+    : null
+  if (renewed && !renewed.ok) return denialFor(renewed.detail)
   audit({
     action: 'verify',
     outcome: 'ok',
     op,
     uid: identity.uid,
+    identitySource: identity.identity_source,
     docId,
-    jti: renewed.claims.jti,
-    exp: renewed.claims.exp,
-    ver: renewed.claims.ver,
+    jti: renewed ? renewed.claims.jti : '-',
+    exp: renewed ? renewed.claims.exp : 0,
+    ver: renewed ? renewed.claims.ver : config.version,
     serverNow: now
   })
-  return {
+  const response = {
     ok: true,
     op,
     /** **服务端权威行**（前端拿到的就是它 ⇒ 本地只做镜像，不自建行）。 */
@@ -300,18 +340,24 @@ async function handleVerify(event, config) {
     display: opResult.display,
     docId,
     authority: 'SERVER',
+    /* **身份来源标记（additive）**：`SESSION`（平台会话路）/ `SERVER_TOKEN`（既有令牌路）。 */
+    identity_source: identity.identity_source,
     identity: {
       uid: identity.uid,
-      phone: maskedPhone(phone),
-      phoneFingerprint: fingerprint(phone)
+      phone: identity.phone ? maskedPhone(identity.phone) : '',
+      phoneFingerprint: identity.phone ? fingerprint(identity.phone) : '',
+      identity_source: identity.identity_source
     },
     serverNow: now,
-    /* **滑动续期**：客户端应以此覆盖缓存中的令牌（只延长时效，不改变权限面）。 */
-    renewedToken: renewed.token,
-    renewedExpiresAt: renewed.claims.exp,
-    renewedTtlSeconds: config.ttlSeconds,
-    ver: renewed.claims.ver
+    ver: renewed ? renewed.claims.ver : config.version
   }
+  /* **滑动续期**（仅令牌路）：客户端应以此覆盖缓存中的令牌（只延长时效，不改变权限面）。 */
+  if (renewed) {
+    response.renewedToken = renewed.token
+    response.renewedExpiresAt = renewed.claims.exp
+    response.renewedTtlSeconds = config.ttlSeconds
+  }
+  return response
 }
 
 /**
@@ -319,7 +365,7 @@ async function handleVerify(event, config) {
  * **任何未预期异常一律转成结构化拒绝**（`STORAGE_UNAVAILABLE`）—— 不得抛未捕获异常、不得伪装 `FORBIDDEN`。
  * @param {object} event `{action:'issue'|'verify', ...}`
  */
-exports.main = async function main(event) {
+exports.main = async function main(event, context) {
   const input = event && typeof event === 'object' ? event : {}
   const action = typeof input.action === 'string' ? input.action.trim() : ''
   let config = null
@@ -334,7 +380,7 @@ exports.main = async function main(event) {
   }
   try {
     if (action === 'issue') return handleIssue(input, config)
-    if (action === 'verify') return await handleVerify(input, config)
+    if (action === 'verify') return await handleVerify(input, config, context)
     return deny(REASONS.FORBIDDEN, `未知的操作（action）：${action || '（空）'}；本次零寫入。`)
   } catch {
     audit({ action: action || '（空）', outcome: REASONS.STORAGE_UNAVAILABLE, serverNow: serverNowSeconds() })

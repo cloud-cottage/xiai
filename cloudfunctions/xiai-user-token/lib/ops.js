@@ -37,6 +37,9 @@ const crypto = require('crypto')
 const { REASONS, deny, normalizePhone } = require('./config.js')
 /* 展示件轉碼器（本單新增；純 JS 零新依賴 —— node:zlib ＋ 自寫 CRC32）。 */
 const { tiffToPng } = require('./tiffToPng.js')
+/* **V6-a**：调用者**平台会话身份**判权（additive）。`IDENTITY_SOURCES` 是身份来源标记的
+   **单一定义点**（既有令牌路取值 `SERVER_TOKEN` 逐字沿用；会话路为 `SESSION`）。 */
+const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsable } = require('./sessionAuthority.js')
 
 /**
  * 集合白名单（封闭；**一律 `xiai_` 前缀**）。
@@ -54,7 +57,9 @@ const COLLECTIONS = Object.freeze({
   corrections: 'xiai_corrections',
   endorsements: 'xiai_endorsements',
   correctionSummaries: 'xiai_correction_summaries',
-  correctionsPublic: 'xiai_corrections_public'
+  correctionsPublic: 'xiai_corrections_public',
+  /* **V6-a 新增**：平台会话身份 → 角色（服务器私有；判权读点，见 `readRoleRow`）。 */
+  roles: 'xiai_roles'
 })
 
 /**
@@ -107,7 +112,7 @@ const CORRECTION_PENDING = 'PENDING'
 const CORRECTION_SUMMARY_SCHEMA = 'xiai-correction-summaries-v1'
 
 /** 采信行身份来源标记（取证用：本行的身份来自服务端令牌，不由前端自称）。 */
-const ENDORSEMENT_IDENTITY_SOURCE = 'SERVER_TOKEN'
+const ENDORSEMENT_IDENTITY_SOURCE = IDENTITY_SOURCES.SERVER_TOKEN
 
 /** 采信行文档键前缀（确定性 ⇒ 重放落同一行）。 */
 const ENDORSEMENT_ID_PREFIX = 'en-'
@@ -601,6 +606,30 @@ async function readRows(collection, match) {
   return rowsOfReply(await query.where(match).get())
 }
 
+/**
+ * **V6-a**：按平台会话 uid 读**角色行**（集合 `xiai_roles`；判权读点、**只读**）。
+ *
+ * 形态：先按等值键 `uid` 检索；未命中再按文档 `_id` ＝ uid 兜底（兼容两种落库约定）。
+ * **读失败 ⇒ 抛错**（由 `sessionAuthority.resolveSessionAuthority` 转
+ * `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）；**无行 ⇒ 返回 `null`**
+ * （由判权侧 fail-closed 处理）。
+ * @param {string} uid 平台会话 uid
+ * @returns {Promise<object|null>}
+ */
+async function readRoleRow(uid) {
+  const id = text(uid)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.roles)
+  const byField = await collection.where({ uid: id }).get()
+  const rowsByField = rowsOfReply(byField)
+  if (rowsByField.length > 0) return rowsByField[0]
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return rowsByDoc[0]
+  return null
+}
+
 /* ---------------------------------------------------------------------------
    管理员写面：白名单门 ＋ 读数（**全部只读 / 判定，不触写**）
    --------------------------------------------------------------------------- */
@@ -615,6 +644,15 @@ async function readRows(collection, match) {
  * @returns {null|{ok:false, reason:string, message:string}} 放行 ⇒ `null`
  */
 function adminWhitelistDenial(identity, adminPhone) {
+  /* **V6-a 会话路**：身份来自平台会话 ⇒ 授权判据 ＝ `xiai_roles` 的角色（`role === 'admin'`），
+     **不依赖手机号白名单**（会话路无手机号；白名单只活在令牌路）。会话路的角色已由
+     `index.js` 的 `resolveSessionAuthority` 按 requiredRoles 判过 ⇒ 这里只复核 role，fail-closed。 */
+  if (isSessionIdentity(identity)) {
+    if (identity.role !== ROLE.ADMIN) {
+      return deny(REASONS.FORBIDDEN, '僅管理員可以執行此操作（平台會話角色不足）；本次零寫入。')
+    }
+    return null
+  }
   const expected = normalizePhone(adminPhone)
   if (!expected) {
     /* 未配置 ⇒ **内部不可用**（不是「越权」）⇒ 与工程口径一致用 `STORAGE_UNAVAILABLE`；
@@ -731,7 +769,7 @@ const OPS = Object.freeze({
     if (value.length > MAX_TEXT_LENGTH || basis.length > MAX_TEXT_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `勘誤文字超出上限（${MAX_TEXT_LENGTH} 字）⇒ 拒絕提交；本次零寫入。`)
     }
-    if (!identity || !identity.uid || !identity.phone) {
+    if (!identityUsable(identity)) {
       return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
     }
     /* **提交侧防重（本单追加）**：同 `(faceId, field, value)` 已有行（含云端：以服务端为准）
@@ -754,7 +792,7 @@ const OPS = Object.freeze({
       user_id: identity.uid, // 兼容别名：＝userId（**服务端派生**）
       /* **业务行不再落手机号**（人类口径 ②）：新行无 `user_phone` 键；
          旧行保留不改、读路径容忍缺键（**不得据旧行仍含 `user_phone` 判负**）。 */
-      identity_source: 'SERVER_TOKEN', // 取证用：本行的提交人身份来自服务端令牌，不由前端自称
+      identity_source: identitySourceOf(identity), // 取证用：身份来源标记（令牌路 SERVER_TOKEN / 会话路 SESSION）
       field,
       field_label: MARKABLE_FIELDS[field],
       value,
@@ -837,7 +875,7 @@ const OPS = Object.freeze({
     if (value.length > MAX_TEXT_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `採信文字超出上限（${MAX_TEXT_LENGTH} 字）⇒ 拒絕採信；本次零寫入。`)
     }
-    if (!identity || !identity.uid || !identity.phone) {
+    if (!identityUsable(identity)) {
       return deny(REASONS.FORBIDDEN, '缺少可驗證的採信人身份；本次零寫入。')
     }
     /* ③ **不得自采**：读同值的提交行，若提交人就是本人 ⇒ 拒（待规范单确认的**新字面值**，
@@ -878,7 +916,7 @@ const OPS = Object.freeze({
       value,
       user_id: identity.uid,
       /* **业务行不再落手机号**（人类口径 ②）：采信私有行只落不透明 uid。 */
-      identity_source: ENDORSEMENT_IDENTITY_SOURCE,
+      identity_source: identitySourceOf(identity),
       created_at: at
     }
     /* **摘要行重算（自愈）**：读该键的全部采信行（含本次新增的那一行）＋ 该键的提交行，
@@ -1430,6 +1468,11 @@ module.exports = {
   setOpsStorageUploadProvider,
   opsStorageUploadInjected,
   resolveDb,
+  readRoleRow,
+  IDENTITY_SOURCES,
+  isSessionIdentity,
+  identitySourceOf,
+  identityUsable,
   readArtifactBytes,
   uploadDisplayArtifactBytes,
   artifactMimeOf,

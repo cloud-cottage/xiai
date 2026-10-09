@@ -38,7 +38,10 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
-const { OPS: ADMIN_OPS, persist } = require('./lib/ops.js')
+const { OPS: ADMIN_OPS, persist, readRoleRow } = require('./lib/ops.js')
+/* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
+   **V6-a 加固**：只读诊断 op `sessionProbe`（无令牌可调、只回形状零值）亦单点自同份文件。 */
+const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
 
 /** 对外文案（**繁體、如实、不泄漏内部标识**；按内部判别码映射，逐条一一对应）。 */
 const DENIAL_MESSAGES = Object.freeze({
@@ -173,31 +176,65 @@ function handleIssue(event, config) {
  * **任一环失败 ⇒ 结构化拒绝且零写入**；落盘失败 ⇒ `STORAGE_UNAVAILABLE`（**绝不伪装 `FORBIDDEN`**）；
  * 成功 ⇒ **滑动续期**（回吐新令牌，`exp = now + ttl`）。
  */
-async function handleVerify(event, config) {
+async function handleVerify(event, config, callContext) {
   const now = serverNowSeconds()
   const op = typeof event.op === 'string' ? event.op.trim() : ''
-  const checked = verifyToken({
-    token: event.token,
-    secret: config.secret,
-    nowSeconds: now,
-    leewaySeconds: config.leewaySeconds,
-    version: config.version
+  /* **V6-a 加固**：只读诊断 op `sessionProbe` —— **无令牌可调**、**只回形状零值**、**零写入**；
+     **在任何鉴权 / 开关 / 会话 / 令牌判定之前**短路返回。 */
+  if (isSessionProbe(op)) return sessionProbe()
+  /* **V6-a：优先取调用者平台会话身份**（additive）：会话在场 ⇒ 查 `xiai_roles`（**要求 admin 角色**）
+     判权（fail-closed、零写入；读失败 ⇒ `STORAGE_UNAVAILABLE`，**不伪装 FORBIDDEN**）；拿不到会话 ⇒
+     **回落既有令牌路**（下面那一段逐字不变）。 */
+  const authority = await resolveSessionAuthority({
+    context: callContext,
+    readRole: readRoleRow,
+    requiredRoles: [ROLE.ADMIN]
   })
-  if (!checked.ok) {
-    audit({ action: 'verify', outcome: checked.detail, op, serverNow: now })
-    return denialFor(checked.detail)
+  if (!authority.ok) {
+    audit({ action: 'verify', outcome: authority.reason, op, stage: 'session-authority', serverNow: now })
+    return authority
   }
-  /* ③ 白名单（**服务端是唯一判据**；令牌里的 `sub` 必须逐字等于注入的白名单手机号）。 */
-  const subject = normalizePhone(checked.claims.sub)
-  if (subject === '' || subject !== config.phone) {
-    audit({
-      action: 'verify',
-      outcome: 'SUBJECT_NOT_ALLOWED',
-      op,
-      subFingerprint: fingerprint(subject),
-      serverNow: now
+  let identity = null
+  let subject = ''
+  let checked = null
+  if (authority.obtained) {
+    /* 会话路：身份 ＝ 平台会话 uid ＋ `xiai_roles` 角色（要求 admin；手机号不参与判定）。 */
+    identity = Object.freeze({
+      uid: authority.uid,
+      phone: '',
+      role: authority.role,
+      identity_source: IDENTITY_SOURCES.SESSION
     })
-    return deny(REASONS.FORBIDDEN, '僅管理員可以執行此操作（手機號不在白名單）；本次零寫入。')
+  } else {
+    checked = verifyToken({
+      token: event.token,
+      secret: config.secret,
+      nowSeconds: now,
+      leewaySeconds: config.leewaySeconds,
+      version: config.version
+    })
+    if (!checked.ok) {
+      audit({ action: 'verify', outcome: checked.detail, op, serverNow: now })
+      return denialFor(checked.detail)
+    }
+    /* ③ 白名单（**服务端是唯一判据**；令牌里的 `sub` 必须逐字等于注入的白名单手机号）。 */
+    subject = normalizePhone(checked.claims.sub)
+    if (subject === '' || subject !== config.phone) {
+      audit({
+        action: 'verify',
+        outcome: 'SUBJECT_NOT_ALLOWED',
+        op,
+        subFingerprint: fingerprint(subject),
+        serverNow: now
+      })
+      return deny(REASONS.FORBIDDEN, '僅管理員可以執行此操作（手機號不在白名單）；本次零寫入。')
+    }
+    identity = Object.freeze({
+      uid: uidOf(subject),
+      phone: subject,
+      role: 'admin',
+      identity_source: IDENTITY_SOURCES.SERVER_TOKEN
+    })
   }
   /* ④ op 面：未知 op ⇒ `INVALID_FIELD`（**不静默放行**）。两个注册面：
      · `OPS`（Phase 1 遗留，`setInviteReward`；**不产落盘计划** ⇒ 行为逐字不变）；
@@ -209,8 +246,8 @@ async function handleVerify(event, config) {
     return deny(REASONS.INVALID_FIELD, `未知的寫入操作（op）：${op || '（空）'}；本次零寫入。`)
   }
   /* ⑤ **动笔之前的全部判定**：op 值域 / 字段门（legacy）或「读私有行 → 状态门 → 值域门」（persistent）。
-     身份＝服务端从**已验签令牌声明**派生（载荷里的身份类键在 op 门里被拒）。 */
-  const identity = Object.freeze({ uid: uidOf(subject), phone: subject })
+     身份已在上面定妥（令牌路＝服务端从**已验签令牌声明**派生；会话路＝平台注入 uid ＋ `xiai_roles`；
+     载荷里的身份类键在 op 门里被拒）。 */
   let opResult = null
   try {
     opResult = legacyValidator ? legacyValidator(event.payload) : await persistentValidator(event.payload, identity, now)
@@ -247,37 +284,44 @@ async function handleVerify(event, config) {
       return deny(REASONS.STORAGE_UNAVAILABLE, '管理員寫入服務的權威存儲不可用；本次零寫入。')
     }
   }
-  /* ⑦ 滑动续期：**只续期、不续权** —— 续期仍走完上面全部判定（本节即在其后）。 */
-  const renewed = issueToken({
-    sub: config.phone,
-    secret: config.secret,
-    nowSeconds: now,
-    ttlSeconds: config.ttlSeconds,
-    version: config.version,
-    role: 'admin'
-  })
-  if (!renewed.ok) return denialFor(renewed.detail)
+  /* ⑦ 滑动续期：**只续期、不续权**（**仅令牌路** —— 会话路无令牌可续）；续期仍走完上面全部判定。 */
+  const renewed = checked
+    ? issueToken({
+        sub: config.phone,
+        secret: config.secret,
+        nowSeconds: now,
+        ttlSeconds: config.ttlSeconds,
+        version: config.version,
+        role: 'admin'
+      })
+    : null
+  if (renewed && !renewed.ok) return denialFor(renewed.detail)
   audit({
     action: 'verify',
     outcome: 'ok',
     op,
+    identitySource: identity.identity_source,
     subFingerprint: fingerprint(subject),
-    jti: renewed.claims.jti,
-    exp: renewed.claims.exp,
-    ver: renewed.claims.ver,
+    jti: renewed ? renewed.claims.jti : '-',
+    exp: renewed ? renewed.claims.exp : 0,
+    ver: renewed ? renewed.claims.ver : config.version,
     serverNow: now
   })
   const response = {
     ok: true,
     op,
-    sub: maskedPhone(config.phone),
-    subFingerprint: fingerprint(config.phone),
+    sub: checked ? maskedPhone(config.phone) : '',
+    subFingerprint: checked ? fingerprint(config.phone) : '',
+    /* **身份来源标记（additive）**：`SESSION`（平台会话路）/ `SERVER_TOKEN`（既有令牌路）。 */
+    identity_source: identity.identity_source,
     serverNow: now,
-    /* **滑动续期**：客户端应以此覆盖缓存中的令牌（只延长时效，不改变权限面）。 */
-    renewedToken: renewed.token,
-    renewedExpiresAt: renewed.claims.exp,
-    renewedTtlSeconds: config.ttlSeconds,
-    ver: renewed.claims.ver
+    ver: renewed ? renewed.claims.ver : config.version
+  }
+  /* **滑动续期**（仅令牌路）：客户端应以此覆盖缓存中的令牌（只延长时效，不改变权限面）。 */
+  if (renewed) {
+    response.renewedToken = renewed.token
+    response.renewedExpiresAt = renewed.claims.exp
+    response.renewedTtlSeconds = config.ttlSeconds
   }
   /* `setInviteReward`（Phase 1，无持久化）：保持原成功态自述（回吐 `value`，字段面不变）。 */
   if (opResult.value !== undefined) response.value = opResult.value
@@ -289,8 +333,9 @@ async function handleVerify(event, config) {
     response.wrote = opResult.wrote
     response.identity = {
       uid: identity.uid,
-      phone: maskedPhone(subject),
-      phoneFingerprint: fingerprint(subject)
+      phone: identity.phone ? maskedPhone(identity.phone) : '',
+      phoneFingerprint: identity.phone ? fingerprint(identity.phone) : '',
+      identity_source: identity.identity_source
     }
   }
   return response
@@ -301,7 +346,7 @@ async function handleVerify(event, config) {
  * **任何未预期异常一律转成结构化拒绝**（`STORAGE_UNAVAILABLE`）—— 不得抛未捕获异常、不得伪装 `FORBIDDEN`。
  * @param {object} event `{action:'issue'|'verify', ...}`
  */
-exports.main = async function main(event) {
+exports.main = async function main(event, context) {
   const input = event && typeof event === 'object' ? event : {}
   const action = typeof input.action === 'string' ? input.action.trim() : ''
   let config = null
@@ -316,7 +361,7 @@ exports.main = async function main(event) {
   }
   try {
     if (action === 'issue') return handleIssue(input, config)
-    if (action === 'verify') return await handleVerify(input, config)
+    if (action === 'verify') return await handleVerify(input, config, context)
     return deny(REASONS.FORBIDDEN, `未知的操作（action）：${action || '（空）'}；本次零寫入。`)
   } catch {
     /* 内部异常 ⇒ **不得伪装 FORBIDDEN**（R-WF2）；如实报 `STORAGE_UNAVAILABLE`。 */

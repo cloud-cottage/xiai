@@ -20,6 +20,8 @@
  */
 
 const { REASONS, deny, normalizePhone } = require('./config.js')
+/* **V6-a**：调用者平台会话身份判权（additive）；标记 / 可用判据单点自 `sessionAuthority.js`。 */
+const { IDENTITY_SOURCES, isSessionIdentity, identitySourceOf, identityUsable } = require('./sessionAuthority.js')
 
 /**
  * 集合白名单（封闭；**一律 `xiai_` 前缀**）。
@@ -28,7 +30,9 @@ const { REASONS, deny, normalizePhone } = require('./config.js')
  */
 const COLLECTIONS = Object.freeze({
   corrections: 'xiai_corrections',
-  correctionsPublic: 'xiai_corrections_public'
+  correctionsPublic: 'xiai_corrections_public',
+  /* **V6-a 新增**：平台会话身份 → 角色（服务器私有；判权读点，见 `readRoleRow`）。 */
+  roles: 'xiai_roles'
 })
 
 /** 勘误三态（与 `src/services/corrections.js::CORRECTION_STATUS` **逐字同值**）。 */
@@ -283,6 +287,28 @@ async function readCorrectionRow(correctionId) {
   return null
 }
 
+/**
+ * **V6-a**：按平台会话 uid 读**角色行**（集合 `xiai_roles`；判权读点、**只读**）。
+ * 先按等值键 `uid` 检索；未命中再按文档 `_id` ＝ uid 兜底。**读失败 ⇒ 抛错**（由
+ * `sessionAuthority.resolveSessionAuthority` 转 `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）；
+ * **无行 ⇒ 返回 `null`**（由判权侧 fail-closed 处理）。
+ * @param {string} uid 平台会话 uid
+ * @returns {Promise<object|null>}
+ */
+async function readRoleRow(uid) {
+  const id = text(uid)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.roles)
+  const byField = await collection.where({ uid: id }).get()
+  const rowsByField = rowsOf(byField)
+  if (rowsByField.length > 0) return rowsByField[0]
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return rowsByDoc[0]
+  return null
+}
+
 /* ---------------------------------------------------------------------------
    公开投影（**脱敏**：从源行的白名单字段重建，绝不透传整行）
    --------------------------------------------------------------------------- */
@@ -361,7 +387,7 @@ const OPS = Object.freeze({
     if (noteText.length > MAX_NOTE_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
     }
-    if (!identity || !identity.uid || !identity.phone) {
+    if (!identityUsable(identity)) {
       return deny(REASONS.FORBIDDEN, '缺少可驗證的審核人身份；本次零寫入。')
     }
 
@@ -491,6 +517,11 @@ module.exports = {
   opsDbInjected,
   resolveDb,
   readCorrectionRow,
+  readRoleRow,
+  IDENTITY_SOURCES,
+  isSessionIdentity,
+  identitySourceOf,
+  identityUsable,
   buildProjection,
   persist,
   normalizePhone
