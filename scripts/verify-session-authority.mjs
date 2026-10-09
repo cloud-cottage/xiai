@@ -26,6 +26,21 @@
  *      （契约 ⑨）。检查条目只增不减，新增 A19–A32、B10–B11、C8–C9、D4–D6。
  *   **本单修正**：通道读取器（延迟 require `@cloudbase/node-sdk`）**落点在两 `lib/ops.js`**（两 `index.js`
  *      保持零 SDK 字面）——D4 / D5 / D6 据此指向 `lib/ops.js`（恢复 C3 / C6 / A15 三条静态门；探针语义不变）。
+ *   **本单追加②**：`sessionProbe` 再扩**四个诊断位**——两个**零值回显**预留键 `loginTypeValue` /
+ *      `eventUidKind`；`callerUidViaAuthApi` 由布尔**改封闭枚举**（`string` / `non-string` / `absent` /
+ *      `throw` / `timeout`，只报类型不报值）；**★ 冒充判别** `eventUidMatchesAuthApi`
+ *      （`match` / `mismatch` / `unknown`，事件自称 uid ⨯ 通道权威 uid，只报关系不报值）。
+ *      A33–A42、B10d、C8b 为新增断言。
+ *   **本单追加③（V6-a² 瘦身）**：探针**去掉三个死位**——`uidKind`（uid 键形）／`loginTypeValue`
+ *      （登录类型）／`eventUidKind`（事件 uid 键形）三个**恒零值占位**一律删除（键不存在，非「回零值」）；
+ *      保留 `mode`（开关态零值回显）。⇒ 探针回包由 12 键收缩为**恰 9 键**（键形冻结 A18f / B10d / A43）。
+ *      A18e / A33 / C8b 的期望值随新契约更新为「断言该死位**键不存在**」；**检查条目只增不减**
+ *      （新增 A43「恰 9 键、零死位」）。
+ *   **本单追加④（V6-a³：带上层裁定）**：**授权身份源改为 auth API 通道**（无注入时；`context` /
+ *      `event` 自填 uid **不再**作判权源）；判权改**三重分支**（有行且角色足 ⇒ SESSION／有行但角色
+ *      不足 ⇒ 拒／无行 · 匿名 · 取数错 ⇒ **兜底回落令牌路**）；旧注释保留 ＋ **取代注**；探针**收尾到
+ *      恰 8 键**（删除恒零值死位 `mode`）；**新增冒充模拟**（伪造 `context` / `event` uid ⇒ 必须
+ *      仍被拒）＋ 三重分支断言（A44–A52、B2d、B4d、B12、C10）。检查条目只增不减。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  */
@@ -192,8 +207,11 @@ const authThree = (probe) => ({
   callerUidViaAuthApi: probe.callerUidViaAuthApi,
   eventIdentityKeyNames: probe.eventIdentityKeyNames
 })
-const ZERO_AUTH3 = { authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }
-const PRESENT_NO_UID_AUTH3 = { authApiPresent: true, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }
+const AUTH3_ABSENT = { authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [] }
+const AUTH3_PRESENT_ABSENT = { authApiPresent: true, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [] }
+const AUTH3_PRESENT_NONSTRING = { authApiPresent: true, callerUidViaAuthApi: 'non-string', eventIdentityKeyNames: [] }
+const AUTH3_PRESENT_THROW = { authApiPresent: true, callerUidViaAuthApi: 'throw', eventIdentityKeyNames: [] }
+const AUTH3_PRESENT_TIMEOUT = { authApiPresent: true, callerUidViaAuthApi: 'timeout', eventIdentityKeyNames: [] }
 
 /* 角色行种子：会话 uid → 角色（`_id` ＝ uid；另有 `uid` 字段供等值检索）。 */
 const ADMIN_UID = 'plat-admin-uid'
@@ -256,13 +274,14 @@ check('A14', '标记取值回落：认不出 ⇒ 既有令牌值', 'SERVER_TOKEN
 check('A15', '身份可用判据：令牌路需手机号、会话路可缺', [true, false, true], [userSa.identityUsable({ uid: 'u', phone: '16600' }), userSa.identityUsable({ uid: 'u' }), userSa.identityUsable({ uid: 'u', identity_source: 'SESSION' })])
 check('A16', '注入缝可见性', true, userSa.sessionIdentityInjected() && adminSa.sessionIdentityInjected())
 check('A17', '诊断 op 名 ＋ 判定（去空白后逐字比对、大小写敏感）', ['sessionProbe', true, true, false], [userSa.SESSION_PROBE_OP, userSa.isSessionProbe('sessionProbe'), userSa.isSessionProbe(' sessionProbe '), userSa.isSessionProbe('verify')])
-check('A18', '诊断探针 `sessionProbe`：**context 形状诊断**（无 context ⇒ **全零回显**）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: false }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, await userSa.sessionProbe())
+check('A18', '诊断探针 `sessionProbe`：**context 形状诊断**（无 context ⇒ **全零回显**）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: false }, uidPresent: false, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, await userSa.sessionProbe())
 check('A18b', '诊断探针：两副本同一 context ⇒ 回包**逐键恒等**', await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }), await adminSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
-check('A18c', '诊断探针：候选容器存在性 ＋ `UID` 键形 ⇒ uidPresent（**如实布尔**）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
+check('A18c', '诊断探针：候选容器存在性 ＋ `UID` 键形 ⇒ uidPresent（**如实布尔**）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
 check('A18d', '诊断探针：匿名标记**在场即真**（不看取值；承载 uid 的容器）／无标记 ⇒ false', [true, false], [(await userSa.sessionProbe({ userInfo: { uid: 'probe-uid', isAnonymous: false } })).anonymousMarker, (await userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } })).anonymousMarker])
-check('A18e', '诊断探针：`uidKind` / `mode` **恒零值回显**（真实 uid 键形 / 开关态不回吐）', ['', ''], [(await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })).uidKind, (await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })).mode])
+const a18eProbe = await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })
+check('A18e', '探针收尾：`uidKind` / `mode` **死位皆已删**（无该键）', [false, false], ['uidKind' in a18eProbe, 'mode' in a18eProbe])
 const a18fProbe = await userSa.sessionProbe({ userInfo: { uid: 'probe-secret-uid' } })
-check('A18f', '诊断探针：**布尔-only** —— 键形状冻结 ＋ 回包不含任何 uid 值', true, !JSON.stringify(a18fProbe).includes('probe-secret-uid') && shapeOf(a18fProbe) === 'anonymousMarker,authApiPresent,callerUidViaAuthApi,candidates,eventIdentityKeyNames,mode,ok,uidKind,uidPresent' && shapeOf(a18fProbe.candidates) === 'auth,context,user,userInfo')
+check('A18f', '诊断探针：**布尔-only** —— 键形状冻结 ＋ 回包不含任何 uid 值', true, !JSON.stringify(a18fProbe).includes('probe-secret-uid') && shapeOf(a18fProbe) === 'anonymousMarker,authApiPresent,callerUidViaAuthApi,candidates,eventIdentityKeyNames,eventUidMatchesAuthApi,ok,uidPresent' && shapeOf(a18fProbe.candidates) === 'auth,context,user,userInfo')
 const a18gBase = JSON.stringify(await userSa.sessionProbe())
 check('A18g', '诊断探针：context 缺省 / null / 非对象 ⇒ **同一全零回显**（不炸）', [true, true], [a18gBase === JSON.stringify(await userSa.sessionProbe(null)), a18gBase === JSON.stringify(await userSa.sessionProbe('非对象'))])
 
@@ -270,24 +289,24 @@ check('A18g', '诊断探针：context 缺省 / null / 非对象 ⇒ **同一全�
 check('A19', '通道超时护栏常量 ＝ 3000ms（两副本同值）', [3000, 3000], [userSa.AUTH_API_PROBE_TIMEOUT_MS, adminSa.AUTH_API_PROBE_TIMEOUT_MS])
 check('A20', '通道注入缝完整 ＋ `lib/ops.js` 加载后已注入（set / injected / clear 皆为函数）', ['function', 'function', 'function', true], [typeof userSa.setAuthApiChannelProvider, typeof userSa.authApiChannelInjected, typeof userSa.clearAuthApiChannelProvider, userSa.authApiChannelInjected()])
 setAuthChannel(null)
-check('A21', '通道缺席（未注入）⇒ 三读数全零（false / false / []）', ZERO_AUTH3, authThree(await userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } })))
+check('A21', '通道缺席（未注入）⇒ 三读数零值（present:false / absent / []）', AUTH3_ABSENT, authThree(await userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } })))
 setAuthChannel(() => ({ getAuthContext: async () => ({ uid: 'auth-api-uid', loginType: 'PASSWORD', appId: 'wx-app' }) }))
-check('A22', '通道在场 ＋ 结果含非空 uid ⇒ present:true / callerUid:true / 键名升序回显', { authApiPresent: true, callerUidViaAuthApi: true, eventIdentityKeyNames: ['appId', 'loginType', 'uid'] }, authThree(await userSa.sessionProbe()))
+check('A22', '通道在场 ＋ 结果含非空 uid ⇒ present:true / callerUidViaAuthApi:string / 键名升序回显', { authApiPresent: true, callerUidViaAuthApi: 'string', eventIdentityKeyNames: ['appId', 'loginType', 'uid'] }, authThree(await userSa.sessionProbe()))
 setAuthChannel(() => ({ getAuthContext: async () => ({ loginType: 'ANONYMOUS' }) }))
-check('A23', '通道在场但结果无 uid ⇒ present:true / callerUid:false / 键名回显', { authApiPresent: true, callerUidViaAuthApi: false, eventIdentityKeyNames: ['loginType'] }, authThree(await userSa.sessionProbe()))
+check('A23', '通道在场但结果无 uid ⇒ present:true / callerUidViaAuthApi:absent / 键名回显', { authApiPresent: true, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: ['loginType'] }, authThree(await userSa.sessionProbe()))
 setAuthChannel(() => ({ getAuthContext: async () => 'not-an-object' }))
 const a24String = authThree(await userSa.sessionProbe())
 setAuthChannel(() => ({ getAuthContext: async () => null }))
 const a24Null = authThree(await userSa.sessionProbe())
-check('A24', '通道在场但结果非对象（字符串 / null）⇒ present:true / false / []', [PRESENT_NO_UID_AUTH3, PRESENT_NO_UID_AUTH3], [a24String, a24Null])
+check('A24', '通道在场但结果非对象（字符串 / null）⇒ present:true / non-string / []', [AUTH3_PRESENT_NONSTRING, AUTH3_PRESENT_NONSTRING], [a24String, a24Null])
 setAuthChannel(() => ({ getAuthContext: () => { throw new Error('injected-auth-api-failure') } }))
-check('A25', '通道 getAuthContext 抛错 ⇒ present:true / false / []（零值回显、不炸）', PRESENT_NO_UID_AUTH3, authThree(await userSa.sessionProbe()))
+check('A25', '通道 getAuthContext 抛错 ⇒ present:true / throw / []（只报失败类型、不炸）', AUTH3_PRESENT_THROW, authThree(await userSa.sessionProbe()))
 setAuthChannel(() => { throw new Error('injected-auth-channel-provider-failure') })
-check('A26', '通道读取器抛错 ⇒ 三读数全零（present:false / false / []）', ZERO_AUTH3, authThree(await userSa.sessionProbe()))
+check('A26', '通道读取器抛错 ⇒ 三读数零值（present:false / absent / []）', AUTH3_ABSENT, authThree(await userSa.sessionProbe()))
 setAuthChannel(() => ({}))
-check('A27', '通道形状不合（对象无 `getAuthContext`）⇒ 三读数全零', ZERO_AUTH3, authThree(await userSa.sessionProbe()))
+check('A27', '通道形状不合（对象无 `getAuthContext`）⇒ 三读数零值（absent）', AUTH3_ABSENT, authThree(await userSa.sessionProbe()))
 setAuthChannel(() => 'not-a-channel')
-check('A28', '通道读取器返回非对象 ⇒ 三读数全零', ZERO_AUTH3, authThree(await userSa.sessionProbe()))
+check('A28', '通道读取器返回非对象 ⇒ 三读数零值（absent）', AUTH3_ABSENT, authThree(await userSa.sessionProbe()))
 setAuthChannel(() => ({ getAuthContext: async () => ({ zeta: 1, alpha: 'SECRET-AUTH-VALUE', uid: 'auth-api-uid' }) }))
 const a29 = await userSa.sessionProbe()
 check('A29', '通道结果键名回显：升序回显 ＋ 绝不回吐任何值（**零值泄漏**）', true, !JSON.stringify(a29).includes('SECRET-AUTH-VALUE') && JSON.stringify(a29.eventIdentityKeyNames) === JSON.stringify(['alpha', 'uid', 'zeta']))
@@ -299,14 +318,77 @@ setAuthChannel(() => ({ getAuthContext: () => new Promise(() => {}) }))
 const a31Start = Date.now()
 const a31 = await userSa.sessionProbe()
 const a31Elapsed = Date.now() - a31Start
-check('A31', '通道 getAuthContext 永不 resolve ⇒ 3s 超时护栏落到零值（present:true / false / []）', PRESENT_NO_UID_AUTH3, authThree(a31))
+check('A31', '通道 getAuthContext 永不 resolve ⇒ 3s 超时护栏落到 timeout（present:true / timeout / []）', AUTH3_PRESENT_TIMEOUT, authThree(a31))
 check('A31b', '超时护栏实测耗时 ∈ [2900ms, 6000ms]', true, a31Elapsed >= 2900 && a31Elapsed <= 6000)
 let authApiCalls = 0
 currentSession = { uid: ADMIN_UID }
 setAuthChannel(() => ({ getAuthContext: async () => { authApiCalls += 1; return { uid: 'should-not-be-read' } } }))
 const a32 = await userSa.resolveSessionAuthority({ context: { userInfo: { uid: ADMIN_UID } }, readRole: async () => ({ role: 'admin' }), requiredRoles: ['admin'], env: { XIAI_SESSION_AUTHORITY: 'prefer' } })
-check('A32', '通道只进探针：判权路径（resolveSessionAuthority）不消费通道（调用次数 0）', [true, true, 0], [a32.ok === true, a32.obtained === true, authApiCalls])
+check('A32', '注入缝在场 ⇒ 判权走注入缝、**不消费通道**（生产无注入时才走通道）；调用次数 0', [true, true, 0], [a32.ok === true, a32.obtained === true, authApiCalls])
 currentSession = null
+
+/* ---- **本单追加②**：两个预留零值键 ＋ `callerUidViaAuthApi` 封闭枚举 ＋ **★ 冒充判别** ---- */
+const a33Probe = await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })
+check('A33', '探针收尾：四个死位 `uidKind` / `loginTypeValue` / `eventUidKind` / `mode` **已删**（无该键）', [false, false, false, false], ['uidKind' in a33Probe, 'loginTypeValue' in a33Probe, 'eventUidKind' in a33Probe, 'mode' in a33Probe])
+const a43Keys = Object.keys(await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })).sort().join(',')
+check('A43', '探针收尾冻结键形（恰 8 键、零死位；键集合逐字冻结）', 'anonymousMarker,authApiPresent,callerUidViaAuthApi,candidates,eventIdentityKeyNames,eventUidMatchesAuthApi,ok,uidPresent', a43Keys)
+check('A34', '`callerUidViaAuthApi` 封闭枚举面（五值冻结、两副本同值）', ['absent', 'non-string', 'string', 'throw', 'timeout'], Object.values(userSa.CALLER_UID_VIA_AUTH_API).slice().sort())
+check('A35', '`EVENT_UID_MATCH` 封闭枚举面（三值冻结、两副本同值）', ['match', 'mismatch', 'unknown'], Object.values(userSa.EVENT_UID_MATCH).slice().sort())
+setAuthChannel(() => ({ getAuthContext: async () => ({ uid: 'auth-uid-x' }) }))
+check('A36', '★ 冒充判别：事件自称 uid ＝ 通道权威 uid ⇒ match', 'match', (await userSa.sessionProbe({ userInfo: { uid: 'auth-uid-x' } })).eventUidMatchesAuthApi)
+check('A37', '★ 冒充判别：事件自称 uid ≠ 通道权威 uid ⇒ mismatch（**冒充嫌疑**）', 'mismatch', (await userSa.sessionProbe({ userInfo: { uid: 'forged-uid' } })).eventUidMatchesAuthApi)
+check('A38', '★ 冒充判别：事件侧无可用 uid（通道在场）⇒ unknown（零值回显，绝不据缺失判不等）', ['unknown', 'unknown'], [(await userSa.sessionProbe()).eventUidMatchesAuthApi, (await userSa.sessionProbe({ userInfo: { uid: '' } })).eventUidMatchesAuthApi])
+setAuthChannel(NULL_CHANNEL_PROVIDER)
+check('A39', '★ 冒充判别：通道缺席（事件侧有 uid）⇒ unknown（零值回显）', 'unknown', (await userSa.sessionProbe({ userInfo: { uid: 'auth-uid-x' } })).eventUidMatchesAuthApi)
+setAuthChannel(() => ({ getAuthContext: async () => { throw new Error('injected-match-probe-failure') } }))
+check('A40', '★ 冒充判别：通道抛错 ⇒ unknown（读不到权威 uid 不判冒充）', 'unknown', (await userSa.sessionProbe({ userInfo: { uid: 'auth-uid-x' } })).eventUidMatchesAuthApi)
+setAuthChannel(() => ({ getAuthContext: async () => ({ uid: 'SECRET-AUTHORITY-UID', loginType: 'PASSWORD' }) }))
+const a41 = await userSa.sessionProbe({ userInfo: { uid: 'SECRET-EVENT-UID' } })
+check('A41', '★ 冒充判别 ＋ 通道读数**零泄漏**（事件 uid / 权威 uid / 登录类型值皆不回吐）', true, !JSON.stringify(a41).includes('SECRET-AUTHORITY-UID') && !JSON.stringify(a41).includes('SECRET-EVENT-UID') && !JSON.stringify(a41).includes('PASSWORD'))
+check('A42', '★ 冒充判别 × 通道读数联动：事件 uid ≠ 权威 uid ⇒ mismatch ＋ 通道 kind=string ＋ 键名回显', { eventUidMatchesAuthApi: 'mismatch', callerUidViaAuthApi: 'string', authApiPresent: true, eventIdentityKeyNames: ['loginType', 'uid'] }, { eventUidMatchesAuthApi: a41.eventUidMatchesAuthApi, callerUidViaAuthApi: a41.callerUidViaAuthApi, authApiPresent: a41.authApiPresent, eventIdentityKeyNames: a41.eventIdentityKeyNames })
+/* ---- **本单追加④（V6-a³）**：**授权身份源 ＝ auth API** ＋ **三重分支** ＋ **冒充模拟** ---- */
+const RB = async (uid) => (uid === 'impl-admin' ? { role: 'admin' } : uid === 'impl-user' ? { role: 'user' } : null)
+const RB_ENV = { XIAI_SESSION_AUTHORITY: 'prefer' }
+setAuthChannel(NULL_CHANNEL_PROVIDER)
+
+/* A44–A47：**三重分支**（身份经**注入缝**喂入；判权内核直调）。 */
+currentSession = { uid: 'impl-admin' }
+const a44 = await userSa.resolveSessionAuthority({ context: {}, readRole: RB, requiredRoles: ['admin'], env: RB_ENV })
+check('A44', '三重分支：**有行且角色足 ⇒ 认**（obtained / SESSION）', { ok: true, obtained: true, source: 'SESSION', uid: 'impl-admin', role: 'admin' }, { ok: a44.ok, obtained: a44.obtained, source: a44.source, uid: a44.uid, role: a44.role })
+currentSession = { uid: 'impl-user' }
+const a45 = await userSa.resolveSessionAuthority({ context: {}, readRole: RB, requiredRoles: ['admin'], env: RB_ENV })
+check('A45', '三重分支：**有行但角色不足 ⇒ 拒**（FORBIDDEN，fail-closed、不回落）', { ok: false, reason: 'FORBIDDEN' }, { ok: a45.ok, reason: a45.reason })
+currentSession = { uid: 'impl-orphan' }
+const a46 = await userSa.resolveSessionAuthority({ context: {}, readRole: RB, requiredRoles: ['admin'], env: RB_ENV })
+check('A46', '三重分支：**无行 ⇒ 兜底**（obtained:false / SERVER_TOKEN；**取代旧 FORBIDDEN**）', { ok: true, obtained: false, source: 'SERVER_TOKEN' }, { ok: a46.ok, obtained: a46.obtained, source: a46.source })
+currentSession = { uid: 'impl-admin' }
+const a47 = await userSa.resolveSessionAuthority({ context: {}, readRole: async () => { throw new Error('injected-role-read-failure') }, requiredRoles: ['admin'], env: RB_ENV })
+check('A47', '三重分支：**取数错 ⇒ 兜底**（obtained:false；**取代旧 STORAGE_UNAVAILABLE**）', { ok: true, obtained: false, source: 'SERVER_TOKEN' }, { ok: a47.ok, obtained: a47.obtained, source: a47.source })
+
+/* A48–A52：**身份源 ＝ auth API 通道**（清注入缝，只喂通道）＋ **冒充模拟**。 */
+currentSession = null
+userSa.clearSessionIdentityProvider()
+setAuthChannel(() => ({ getAuthContext: async () => ({ uid: 'impl-admin' }) }))
+const a48 = await userSa.resolveSessionAuthority({ context: {}, readRole: RB, requiredRoles: ['admin'], env: RB_ENV })
+check('A48', '★ 身份源＝auth API：清注入缝、通道给 uid ⇒ 判权走通道（SESSION）', { ok: true, obtained: true, source: 'SESSION', uid: 'impl-admin', role: 'admin' }, { ok: a48.ok, obtained: a48.obtained, source: a48.source, uid: a48.uid, role: a48.role })
+let a49SawUid = ''
+setAuthChannel(() => ({ getAuthContext: async () => ({ uid: 'impl-user' }) }))
+const a49 = await userSa.resolveSessionAuthority({ context: { userInfo: { uid: 'impl-admin' } }, readRole: async (uid) => { a49SawUid = uid; return RB(uid) }, requiredRoles: ['admin'], env: RB_ENV })
+check('A49', '★ 冒充模拟：context 自填 admin 但通道权威 uid ＝ user ⇒ 按通道判权 ⇒ FORBIDDEN', 'FORBIDDEN', a49.reason)
+check('A49b', '★ 冒充模拟：readRole 收到的是**通道权威 uid**（非 context 自填 uid）', 'impl-user', a49SawUid)
+setAuthChannel(() => ({ getAuthContext: async () => ({}) }))
+const a50 = await userSa.resolveSessionAuthority({ context: { userInfo: { uid: 'impl-admin' } }, readRole: RB, requiredRoles: ['admin'], env: RB_ENV })
+check('A50', '通道无 uid（匿名形态）⇒ 兜底（不据 context 自称）', { ok: true, obtained: false, source: 'SERVER_TOKEN' }, { ok: a50.ok, obtained: a50.obtained, source: a50.source })
+setAuthChannel(() => ({ getAuthContext: async () => { throw new Error('injected-auth-api-failure') } }))
+const a51 = await userSa.resolveSessionAuthority({ context: { userInfo: { uid: 'impl-admin' } }, readRole: RB, requiredRoles: ['admin'], env: RB_ENV })
+check('A51', '通道抛错（异常）⇒ 兜底', { ok: true, obtained: false, source: 'SERVER_TOKEN' }, { ok: a51.ok, obtained: a51.obtained, source: a51.source })
+setAuthChannel(NULL_CHANNEL_PROVIDER)
+const a52 = await userSa.resolveSessionAuthority({ context: { userInfo: { uid: 'impl-admin' } }, readRole: RB, requiredRoles: ['admin'], env: { XIAI_SESSION_AUTHORITY: 'off' } })
+check('A52', '开关 off ⇒ 兜底（不查身份、不消费通道）', { ok: true, obtained: false, source: 'SERVER_TOKEN' }, { ok: a52.ok, obtained: a52.obtained, source: a52.source })
+userSa.setSessionIdentityProvider(sessionProvider)
+currentSession = null
+
+setAuthChannel(NULL_CHANNEL_PROVIDER)
 /* 恢复「无通道」形态（＝生产离线：`index.js` 懒解析得 null）留给 B / C 段。 */
 setAuthChannel(NULL_CHANNEL_PROVIDER)
 
@@ -334,14 +416,19 @@ check('B1e', '会话路回包**不含**令牌续期（会话路无令牌可续�
 check('B1f', '私有行 reviewer_id ＝ 平台会话 uid（服务端落盘）', ADMIN_UID, mapOf('xiai_corrections').get('doc-pend').reviewer_id)
 check('B1g', '归一化：会话路确有两处写（公开投影 ＋ 私有状态）', 2, store.writes.length - beforeB1)
 
-/* B2：fail-closed —— 会话在场但**角色表无行** ⇒ FORBIDDEN ＋ 零写入（**不回落令牌**） */
+/* B2：**V6-a³ 取代旧「无行 ⇒ fail-closed 直接拒」** —— 无行 ⇒ **兜底回落令牌路**。此处无令牌 ⇒
+   令牌路拒（结果仍 FORBIDDEN，但**路径已变**）；带令牌的对照见 B2d。 */
 resetWorld()
 currentSession = { uid: ORPHAN_UID }
 const beforeB2 = store.writes.length
 const b2 = await adminFn.main({ action: 'verify', op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, {})
-check('B2', '会话无角色行 ⇒ FORBIDDEN（fail-closed）', 'FORBIDDEN', b2.reason)
+check('B2', '会话无角色行 ⇒ **兜底** ⇒ 无令牌 ⇒ FORBIDDEN（**取代旧 fail-closed 直接拒**）', 'FORBIDDEN', b2.reason)
 check('B2b', '拒绝形状恰 3 键 ∈ 冻结表', true, isDenial(b2))
 check('B2c', '零写入', beforeB2, store.writes.length)
+resetWorld()
+currentSession = { uid: ORPHAN_UID }
+const b2d = await adminFn.main({ action: 'verify', token: adminToken, op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, {})
+check('B2d', '无行 ＋ 有效令牌 ⇒ 兜底令牌路**放行**（identity_source:SERVER_TOKEN；证「无行 ⇒ 兜底」）', ['SERVER_TOKEN', true], [b2d.identity_source, b2d.ok === true])
 
 /* B3：fail-closed —— 会话角色 ≠ admin ⇒ FORBIDDEN（管理员函数要求 admin） */
 resetWorld()
@@ -351,16 +438,22 @@ const b3 = await adminFn.main({ action: 'verify', op: 'reviewCorrection', payloa
 check('B3', '会话角色 user 调管理员函数 ⇒ FORBIDDEN', 'FORBIDDEN', b3.reason)
 check('B3b', '零写入', beforeB3, store.writes.length)
 
-/* B4：fail-closed —— 角色读失败 ⇒ STORAGE_UNAVAILABLE（**不伪装 FORBIDDEN**）＋ 零写入 */
+/* B4：**V6-a³ 取代旧「取数错 ⇒ STORAGE_UNAVAILABLE」** —— 角色读失败（取数错）⇒ **兜底回落令牌路**。
+   两臂各取一次读数：① 无令牌 ⇒ 令牌路拒（FORBIDDEN）；② 带有效令牌 ⇒ 令牌路放行（SERVER_TOKEN）。 */
 resetWorld()
 currentSession = { uid: ADMIN_UID }
 store.failRoleRead = true
 const beforeB4 = store.writes.length
 const b4 = await adminFn.main({ action: 'verify', op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, {})
-store.failRoleRead = false
-check('B4', '角色存储不可用 ⇒ STORAGE_UNAVAILABLE（≠ FORBIDDEN）', 'STORAGE_UNAVAILABLE', b4.reason)
+check('B4', '取数错 ⇒ **兜底**（无令牌 ⇒ FORBIDDEN；**不再 STORAGE_UNAVAILABLE**）', 'FORBIDDEN', b4.reason)
 check('B4b', '拒绝形状恰 3 键 ∈ 冻结表', true, isDenial(b4))
 check('B4c', '零写入', beforeB4, store.writes.length)
+resetWorld()
+currentSession = { uid: ADMIN_UID }
+store.failRoleRead = true
+const b4d = await adminFn.main({ action: 'verify', token: adminToken, op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, {})
+store.failRoleRead = false
+check('B4d', '取数错 ＋ 有效令牌 ⇒ 兜底令牌路放行（identity_source:SERVER_TOKEN）', ['SERVER_TOKEN', true], [b4d.identity_source, b4d.ok === true])
 
 /* B5：拿不到会话（provider 返回匿名）⇒ 回落令牌路（令牌仍有效 ⇒ 成功） */
 resetWorld()
@@ -395,24 +488,24 @@ process.env.XIAI_SESSION_AUTHORITY = 'prefer'
 resetWorld()
 const beforeB9 = store.writes.length
 const b9 = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9', 'sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context：根容器在场、其余全零）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9)
+check('B9', 'sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context：根容器在场、其余全零）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, b9)
 check('B9b', 'sessionProbe 零写入', beforeB9, store.writes.length)
 /* B9c：`sessionProbe` **与开关解耦**（缺省 off 亦可调、回包形状不变）。 */
 resetWorld()
 delete process.env.XIAI_SESSION_AUTHORITY
 const b9c = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9c', '缺省 off 下 sessionProbe 仍可调（诊断与开关解耦；形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9c)
+check('B9c', '缺省 off 下 sessionProbe 仍可调（诊断与开关解耦；形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, b9c)
 process.env.XIAI_SESSION_AUTHORITY = 'prefer'
 /* B9d：**注入缝不参与诊断** —— 会话在场 ⇒ 探针仍只诊断 context 形状、不消费 provider。 */
 resetWorld()
 currentSession = { uid: ADMIN_UID }
 const b9d = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9d', '会话在场 ⇒ sessionProbe 仍只回 context 形状（不消费注入缝、形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9d)
+check('B9d', '会话在场 ⇒ sessionProbe 仍只回 context 形状（不消费注入缝、形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, b9d)
 check('B9e', 'sessionProbe 回包不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(b9d).includes(ADMIN_UID))
 /* B9f：context 形状被**如实诊断**（`user` 容器 ＋ `UID` 键形）且 uid 值不回吐。 */
 resetWorld()
 const b9f = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, { user: { UID: ADMIN_UID } })
-check('B9f', 'context 带 `user.UID` ⇒ candidates.user ＋ uidPresent 如实为真（uidKind / mode 仍零值）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9f)
+check('B9f', 'context 带 `user.UID` ⇒ candidates.user ＋ uidPresent 如实为真（`mode` 仍零值；`uidKind` 死位已删）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, b9f)
 check('B9g', 'context 形状诊断不回吐 uid 值（**零泄漏**）', true, !JSON.stringify(b9f).includes(ADMIN_UID))
 
 /* B10：通道经**函数回包**（`index.js` 把函数第二参 `callContext` 递入探针）。 */
@@ -428,16 +521,28 @@ adminSa.setAuthApiChannelProvider(() => ({
 }))
 const b10Ctx = { user: { UID: ADMIN_UID } }
 const b10 = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, b10Ctx)
-check('B10', 'admin 函数 sessionProbe 经注入通道回三读数（present / callerUid / 键名升序）', { authApiPresent: true, callerUidViaAuthApi: true, eventIdentityKeyNames: ['loginType', 'uid'] }, { authApiPresent: b10.authApiPresent, callerUidViaAuthApi: b10.callerUidViaAuthApi, eventIdentityKeyNames: b10.eventIdentityKeyNames })
+check('B10', 'admin 函数 sessionProbe 经注入通道回通道读数 ＋ **★ 冒充判别**（present / kind:string / 键名升序 / 事件 ADMIN_UID ≠ 权威 uid ⇒ mismatch）', { authApiPresent: true, callerUidViaAuthApi: 'string', eventIdentityKeyNames: ['loginType', 'uid'], eventUidMatchesAuthApi: 'mismatch' }, { authApiPresent: b10.authApiPresent, callerUidViaAuthApi: b10.callerUidViaAuthApi, eventIdentityKeyNames: b10.eventIdentityKeyNames, eventUidMatchesAuthApi: b10.eventUidMatchesAuthApi })
 check('B10b', '通道 getAuthContext 收到函数第二参 callContext（同对象）＋ 恰调一次', [true, 1], [b10Seen === b10Ctx, b10Calls])
 check('B10c', 'sessionProbe 回包仍不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(b10).includes(ADMIN_UID) && !JSON.stringify(b10).includes('adm-auth-api-uid'))
+check('B10d', '探针回包键形冻结（**恰 9 键**：含 callerUidViaAuthApi / eventUidMatchesAuthApi；三个死位已删）', 'anonymousMarker,authApiPresent,callerUidViaAuthApi,candidates,eventIdentityKeyNames,eventUidMatchesAuthApi,ok,uidPresent', shapeOf(b10))
 /* B11：通道只进探针 —— 会话路判权（`reviewCorrection`）不消费通道。 */
 resetWorld()
 currentSession = { uid: ADMIN_UID }
 const beforeB11 = b10Calls
 const b11 = await adminFn.main({ action: 'verify', op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, {})
 check('B11', '会话路判权（reviewCorrection）成功', true, b11.ok === true)
-check('B11b', '通道只进探针：会话路判权不消费通道（调用次数不增）', beforeB11, b10Calls)
+check('B11b', '注入缝在场 ⇒ 会话路判权不消费通道（次数不增；生产无注入时才走通道）', beforeB11, b10Calls)
+/* B12：★ **冒充模拟（函数级）** —— 通道权威 uid ＝ user，但 `context` 自称 admin ⇒ 判权按通道 ⇒ 拒。 */
+resetWorld()
+currentSession = null
+adminSa.clearSessionIdentityProvider()
+adminSa.setAuthApiChannelProvider(() => ({ getAuthContext: async () => ({ uid: USER_UID }) }))
+const beforeB12 = store.writes.length
+const b12 = await adminFn.main({ action: 'verify', op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, { userInfo: { uid: ADMIN_UID } })
+adminSa.setAuthApiChannelProvider(NULL_CHANNEL_PROVIDER)
+adminSa.setSessionIdentityProvider(sessionProvider)
+check('B12', '★ 冒充模拟（管理员函数）：通道权威 uid ＝ user ＋ context 自称 admin ⇒ FORBIDDEN', 'FORBIDDEN', b12.reason)
+check('B12b', '冒充拒 ＋ 零写入', [true, beforeB12], [isDenial(b12), store.writes.length])
 /* 恢复「无通道」离线形态。 */
 adminSa.setAuthApiChannelProvider(NULL_CHANNEL_PROVIDER)
 
@@ -485,12 +590,14 @@ check('C4', '无会话 ⇒ 回落令牌路提交成功', true, c4.ok === true)
 check('C4b', '回落令牌路身份来源标记 ＝ SERVER_TOKEN', 'SERVER_TOKEN', c4.identity_source)
 check('C4c', '回落令牌路落盘行标记仍＝ SERVER_TOKEN（既有断言不破）', 'SERVER_TOKEN', c4.row && c4.row.identity_source)
 
-/* C5：默认平台 context 读法（清注入缝，直接喂 `context.userInfo`） */
+/* C5：**V6-a³ 取代旧「默认 context 读法」** —— 清注入缝后，判权身份源改走 **auth API 通道**（此处
+   通道为 null ⇒ 拿不到可用身份）；喂 `context.userInfo.uid`（**可伪造自称**）**不再**作判权源 ⇒
+   **兜底** ⇒ 无令牌 ⇒ 令牌路拒。**冒充模拟（身份级）**：context 自填身份不产生任何授权。 */
 resetWorld()
 userSa.clearSessionIdentityProvider()
 const c5 = await userFn.main({ action: 'verify', op: 'submitCorrection', payload: VALID_SUBMIT }, { userInfo: { uid: USER_UID } })
-check('C5', '默认读法：`context.userInfo.uid` ⇒ 会话路（ok:true）', true, c5.ok === true)
-check('C5b', '默认读法身份来源标记 ＝ SESSION', 'SESSION', c5.identity_source)
+check('C5', '★ 冒充模拟：`context.userInfo.uid`（可伪造自称）**不再**作判权源 ⇒ 兜底 ⇒ 无令牌 ⇒ FORBIDDEN', 'FORBIDDEN', c5.reason)
+check('C5b', '冒充拒形状恰 3 键 ∈ 冻结表 ＋ 零写入', [true, 0], [isDenial(c5), store.writes.length])
 userSa.setSessionIdentityProvider(sessionProvider)
 
 /* C6：会话注入抛错 ⇒ 视为「拿不到会话」⇒ 回落令牌路（不炸） */
@@ -506,12 +613,12 @@ check('C6', '会话注入抛错 ⇒ 回落令牌路（不抛异常、不炸）',
 resetWorld()
 const beforeC7 = store.writes.length
 const c7 = await userFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('C7', '用户函数 sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, c7)
+check('C7', '用户函数 sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, anonymousMarker: false, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, c7)
 check('C7b', 'sessionProbe 零写入', beforeC7, store.writes.length)
 /* C7c：context.userInfo 携带 uid ＋ 匿名标记 ⇒ 探针如实报告形状（布尔-only、零值回显、不回吐 uid）。 */
 resetWorld()
 const c7c = await userFn.main({ action: 'verify', op: 'sessionProbe' }, { userInfo: { uid: USER_UID, isAnonymous: true } })
-check('C7c', 'context.userInfo 在场 ⇒ candidates.userInfo ＋ uidPresent ＋ anonymousMarker 如实为真', { ok: true, candidates: { userInfo: true, user: false, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: true, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, c7c)
+check('C7c', 'context.userInfo 在场 ⇒ candidates.userInfo ＋ uidPresent ＋ anonymousMarker 如实为真', { ok: true, candidates: { userInfo: true, user: false, auth: false, context: true }, uidPresent: true, anonymousMarker: true, authApiPresent: false, callerUidViaAuthApi: 'absent', eventIdentityKeyNames: [], eventUidMatchesAuthApi: 'unknown' }, c7c)
 check('C7d', 'sessionProbe 回包不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(c7c).includes(USER_UID))
 
 /* C8：通道经用户函数回包（`index.js` 递入 `callContext`）。 */
@@ -524,14 +631,26 @@ userSa.setAuthApiChannelProvider(() => ({
   }
 }))
 const c8 = await userFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('C8', 'user 函数 sessionProbe 经注入通道回三读数（present / callerUid / 键名升序）', { authApiPresent: true, callerUidViaAuthApi: true, eventIdentityKeyNames: ['type', 'uid'] }, { authApiPresent: c8.authApiPresent, callerUidViaAuthApi: c8.callerUidViaAuthApi, eventIdentityKeyNames: c8.eventIdentityKeyNames })
+check('C8', 'user 函数 sessionProbe 经注入通道回通道读数（present / kind:string / 键名升序 / 事件侧无 uid ⇒ unknown）', { authApiPresent: true, callerUidViaAuthApi: 'string', eventIdentityKeyNames: ['type', 'uid'], eventUidMatchesAuthApi: 'unknown' }, { authApiPresent: c8.authApiPresent, callerUidViaAuthApi: c8.callerUidViaAuthApi, eventIdentityKeyNames: c8.eventIdentityKeyNames, eventUidMatchesAuthApi: c8.eventUidMatchesAuthApi })
+check('C8b', 'user 函数 sessionProbe 回包含新诊断位（死位 `loginTypeValue` / `eventUidKind` 已删 / 封闭枚举 / ★ 冒充判别）', { deadAbsent: [false, false], callerUidViaAuthApi: 'string', eventUidMatchesAuthApi: 'unknown' }, { deadAbsent: ['loginTypeValue' in c8, 'eventUidKind' in c8], callerUidViaAuthApi: c8.callerUidViaAuthApi, eventUidMatchesAuthApi: c8.eventUidMatchesAuthApi })
 /* C9：通道只进探针 —— 用户会话路提交不消费通道。 */
 resetWorld()
 currentSession = { uid: USER_UID }
 const beforeC9 = c8Calls
 const c9 = await userFn.main({ action: 'verify', op: 'submitCorrection', payload: VALID_SUBMIT }, {})
 check('C9', '用户会话路提交成功', true, c9.ok === true)
-check('C9b', '通道只进探针：用户写路不消费通道（调用次数不增）', beforeC9, c8Calls)
+check('C9b', '注入缝在场 ⇒ 用户写路不消费通道（次数不增；生产无注入时才走通道）', beforeC9, c8Calls)
+/* C10：★ **冒充模拟（用户函数）** —— 通道权威 uid ＝ user，`context` 自称 admin（想提权调 admin op）⇒ 仍拒。 */
+resetWorld()
+currentSession = null
+userSa.clearSessionIdentityProvider()
+userSa.setAuthApiChannelProvider(() => ({ getAuthContext: async () => ({ uid: USER_UID }) }))
+const beforeC10 = store.writes.length
+const c10 = await userFn.main({ action: 'verify', op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, { userInfo: { uid: ADMIN_UID } })
+userSa.setAuthApiChannelProvider(NULL_CHANNEL_PROVIDER)
+userSa.setSessionIdentityProvider(sessionProvider)
+check('C10', '★ 冒充模拟（用户函数）：通道权威 uid ＝ user ＋ context 自称 admin ⇒ admin op 仍 FORBIDDEN', 'FORBIDDEN', c10.reason)
+check('C10b', '冒充拒 ＋ 零写入', [true, beforeC10], [isDenial(c10), store.writes.length])
 /* 恢复「无通道」离线形态。 */
 userSa.setAuthApiChannelProvider(NULL_CHANNEL_PROVIDER)
 

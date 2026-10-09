@@ -169,14 +169,15 @@ async function handleVerify(event, config, callContext) {
   const now = serverNowSeconds()
   const op = typeof event.op === 'string' ? event.op.trim() : ''
   /* **V6-a 加固（修订）**：只读诊断 op `sessionProbe` —— **无令牌可调**、**context 形状诊断**
-     （布尔-only ＋ 零值回显：候选容器存在性 / uidPresent / uidKind / anonymousMarker / mode、
+     （布尔-only ＋ 零值回显：候选容器存在性 / uidPresent / anonymousMarker〔**V6-a³ 收尾**：死位 `mode` 已删〕、
      auth API 通道三读数 authApiPresent / callerUidViaAuthApi（3s 超时护栏）/ eventIdentityKeyNames
      —— 通道读取器在 `lib/ops.js`）、**零写入**；**在任何鉴权 / 开关 / 会话 / 令牌判定之前**短路返回
      （递入 `context` 供形状诊断）。 */
   if (isSessionProbe(op)) return await sessionProbe(callContext)
   /* **V6-a：优先取调用者平台会话身份**（additive）：会话在场 ⇒ 查 `xiai_roles` 判权（fail-closed、
      零写入；读失败 ⇒ `STORAGE_UNAVAILABLE`，**不伪装 FORBIDDEN**）；拿不到会话 ⇒ **回落既有令牌路**
-     （下面那一段逐字不变）。 */
+     （下面那一段逐字不变）。
+     【**V6-a³ 取代注**（2026-10-09 上层裁定）】**身份源改为 auth API 通道**（调用方不可伪造；不再据 `context` / `event` 自填 uid）；判权 = **三重分支**：有行且角色足 ⇒ 认（SESSION）／有行但角色不足 ⇒ 拒（FORBIDDEN，不回落）／**无行 · 匿名 · 取数错 ⇒ 兜底回落令牌路**（旧「无行 / 读错 ⇒ 拒绝」被取代）。见 `lib/sessionAuthority.js` 文件头 ⑪。 */
   const authority = await resolveSessionAuthority({
     context: callContext,
     readRole: readRoleRow,
