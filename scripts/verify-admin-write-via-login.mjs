@@ -121,7 +121,10 @@ function createStore(seed) {
   const stats = { writes: [], reads: 0 }
   const load = (rows) => {
     Object.keys(collections).forEach((name) => collections[name].clear())
-    ;(rows || []).forEach((row) => collections[row.__collection || 'xiai_corrections'].set(row._id, Object.assign({}, row)))
+    ;(rows || []).forEach((row) => {
+      const name = row.__collection || 'xiai_corrections'
+      ;(collections[name] = collections[name] || new Map()).set(row._id, Object.assign({}, row))
+    })
     stats.writes.length = 0
     stats.reads = 0
   }
@@ -189,7 +192,11 @@ const CLOUD_SEED = [
     basis: '印譜對勘',
     status: 'PENDING',
     created_at: '2026-10-01T00:00:00.000Z'
-  }
+  },
+  /* **本单修正（person-model §4.1 / §4.2）**：`author` 引用型 ⇒ 既有 author 用例载荷值须指向既有印人；
+     按 `id` 补种印人行（仅新增种子，未改既有断言）。 */
+  { __collection: 'xiai_persons', _id: 'p-env', id: '缺 env 仍可提交', code: 'PR000000001', display_name: '印人缺env' },
+  { __collection: 'xiai_persons', _id: 'p-jia', id: '甲值', code: 'PR000000002', display_name: '印人甲' }
 ]
 const store = createStore(CLOUD_SEED)
 ops.setOpsDbProvider(store.provider)
@@ -229,7 +236,7 @@ session.setUser({ id: uidOfPhone(PHONE), phone: PHONE, role: 'admin', nickname: 
    A 段：口径副本对账 ＋ op 注册面
    =========================================================================== */
 console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 ＋ op 注册面' }))
-check('A1', '`ADMIN_OPS` 恰含 {reviewCorrection, setInviteReward}', ['reviewCorrection', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
+check('A1', '`ADMIN_OPS` 恰含 {reviewCorrection, reviewPersonProposal, setInviteReward}（本单新增印人提案审核 op）', ['reviewCorrection', 'reviewPersonProposal', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
 check('A2', '审核载荷键面逐字 ＝ 管理员函数 `ALLOWED_KEYS`', sorted(adminOps.ALLOWED_KEYS), sorted(ops.REVIEW_ALLOWED_KEYS))
 check('A3', '邀请奖励键面 ＝ [value]', ['value'], ops.REWARD_ALLOWED_KEYS.slice())

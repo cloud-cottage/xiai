@@ -243,7 +243,15 @@ const CLOUD_SEED = [
     field_label: '印文釋義',
     value: VALUE_OTHER_PENDING,
     status: 'PENDING'
-  }
+  },
+  /* **本单修正（person-model §4.1 / §4.2）**：`author` 自本模型起为**引用型**（值 ＝
+     `author_person_id`）⇒ 既有 author 用例的载荷值须指向**既有印人**。按 `id` 补种印人行，
+     使其成为**合法引用**（`readPersonRow` 按 `id` 命中）；仅新增种子，未改任何既有断言。 */
+  { __collection: 'xiai_persons', _id: 'p-1', id: VALUE_OTHER_PENDING, code: 'PR000000001', display_name: '印人甲' },
+  { __collection: 'xiai_persons', _id: 'p-2', id: VALUE_MINE_PENDING, code: 'PR000000002', display_name: '印人乙' },
+  { __collection: 'xiai_persons', _id: 'p-3', id: VALUE_OTHER_ACCEPTED, code: 'PR000000003', display_name: '印人丙' },
+  { __collection: 'xiai_persons', _id: 'p-4', id: VALUE_OTHER_PENDING_ALT, code: 'PR000000004', display_name: '印人丁' },
+  { __collection: 'xiai_persons', _id: 'p-5', id: '戊值', code: 'PR000000005', display_name: '印人戊' }
 ]
 const store = createStore(CLOUD_SEED)
 ops.setOpsDbProvider(store.provider)
@@ -640,8 +648,12 @@ check('D2n', '繁體判据**负向对照**（繁體「誤」⇒ 不命中）', f
     endorsements: storage.STORAGE_KEYS.endorsements,
     correctionSummaries: storage.STORAGE_KEYS.correctionSummaries
   })
-  check('D3c', '键总数 ＝ 21（19 ＋ 2）', 21, Object.keys(storage.STORAGE_KEYS).length)
+  check('D3c', '键总数 ＝ 23（21 ＋ 2：v1.53 新增 persons / person-proposals）', 23, Object.keys(storage.STORAGE_KEYS).length)
   check('D3d', '旧键 `endorsementCounts` 已收拢（`STORAGE_KEYS.endorsementCounts` 不再存在）', 'undefined', typeof storage.STORAGE_KEYS.endorsementCounts)
+  check('D3e', '恰新增两个印人键（persons / personProposals）', { persons: 'persons', personProposals: 'person-proposals' }, {
+    persons: storage.STORAGE_KEYS.persons,
+    personProposals: storage.STORAGE_KEYS.personProposals
+  })
 }
 
 /* D4：静态唯一性（云函数持久化路径仍在 ops.js；集合名 ^xiai_）。 */
@@ -649,12 +661,21 @@ check('D2n', '繁體判据**负向对照**（繁體「誤」⇒ 不命中）', f
   const files = walkFiles(FUNCTION_DIR)
   const withCollection = files.filter((file) => /collection\s*\(/.test(readFileSync(file, 'utf8'))).map((f) => path.relative(ROOT, f))
   check('D4', '**唯一持久化路径**：`collection(` 只出现在 lib/ops.js', ['cloudfunctions/xiai-user-token/lib/ops.js'], withCollection)
-  const literals = files.map((f) => readFileSync(f, 'utf8')).join('\n').match(/'([A-Za-z0-9_]+)'/g) || []
-  const suspect = literals
-    .map((item) => item.replace(/'/g, ''))
-    .filter((name) => /^[a-z][a-z0-9_]*s$/.test(name) && name.indexOf('xiai_') !== 0 && name !== 'dependencies')
-    .filter((name) => name.indexOf('_') !== -1 || name.endsWith('users'))
-  check('D4b', '无 xiai_ 前缀以外的集合式字面值', [], suspect)
+  /* **本单收紧（原尺过宽）**：原实现扫全文件的「集合式字面值」，把 `courtesy_names` /
+     `art_names` / `alias_names` 这三个**字段名**误判为集合字面值 ⇒ 误报。改为止锚
+     **`collection(...)` 的实参来源 —— `COLLECTIONS` 集合登记表的值**（集合名只在此登记；
+     调用点 `db.collection(COLLECTIONS.x)` 的实参即来自此表）⇒ 逐值断言 `xiai_` 前缀。 */
+  const opsFile = files.find((f) => /lib[\\/]ops\.js$/.test(f))
+  const opsSrc = readFileSync(opsFile, 'utf8')
+  const registryStart = opsSrc.indexOf('const COLLECTIONS')
+  const registry = opsSrc.slice(registryStart, opsSrc.indexOf('})', registryStart))
+  const names = [...registry.matchAll(/:\s*'([A-Za-z0-9_]+)'/g)].map((m) => m[1])
+  const suspect = names.filter((name) => name.indexOf('xiai_') !== 0)
+  check('D4b', '**集合名一律 `xiai_` 前缀**（本单收紧：止锚 `COLLECTIONS` 登记表值 —— 不再把字段名误判为集合）', [], suspect)
+  /* 正对照（本单新增）：注入一个**真的**非 `xiai_` 前缀集合字面值 ⇒ 该门**必红**（证明探测器非恒绿）。 */
+  const injected = `${registry}\n  injectedProbe: 'persons',\n})`
+  const injectedSuspect = [...injected.matchAll(/:\s*'([A-Za-z0-9_]+)'/g)].map((m) => m[1]).filter((name) => name.indexOf('xiai_') !== 0)
+  check('D4bX', '正对照：注入非 `xiai_` 前缀集合字面值 ⇒ 探测器必报红', ['persons'], injectedSuspect)
 }
 
 /* ===========================================================================
@@ -679,6 +700,16 @@ store.load(CLOUD_SEED)
   const dupSubmit = await fn.main({ action: 'verify', token: TOKEN_OTHER, op: 'submitCorrection', payload: { faceId: FACE_ID, sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: VALUE_MINE_PENDING, basis: '' } })
   check('E1g', 'submitCorrection 幂等：同值第二人提交 ⇒ DUPLICATE_VALUE ＋ 零写入', true, isDenial(dupSubmit) && dupSubmit.reason === 'DUPLICATE_VALUE' && store.stats.writes.length === w1)
   check('E1h', '重放后摘要行 submits 仍 1（不涨）', 1, countRowFor('xiai_correction_summaries', FACE_ID, 'author', VALUE_MINE_PENDING).submits)
+}
+
+/* E1n（本单新增，person-model §4.2）：**作者引用型负例** —— 引用**不存在**的印人
+   ⇒ `INVALID_VALUE` ＋ **零写入**（正例 ＝ E1 引用既有印人 ⇒ 成功）。 */
+store.load(CLOUD_SEED)
+{
+  const wNeg = store.stats.writes.length
+  const neg = await fn.main({ action: 'verify', token: TOKEN_ME, op: 'submitCorrection', payload: { faceId: FACE_ID, sealId: SEAL_ID, stampId: SEAL_ID, field: 'author', value: 'PR999999999', basis: '' } })
+  check('E1n', '**作者引用型负例**：引用不存在的印人 ⇒ INVALID_VALUE', 'INVALID_VALUE', neg.reason)
+  check('E1n2', '作者引用型负例 ⇒ 零写入', wNeg, store.stats.writes.length)
 }
 
 /* E2：`buildCorrectionSummary` 纯函数 —— `submitter_uids` 去重正确（同 uid 计一次、REJECTED 不计）。 */

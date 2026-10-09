@@ -23,8 +23,11 @@ import * as drive from './drive.js'
 /* **读取面客户端（直出三面 ＋ 块面）**：下載面（原字節直出）/ 縮略面（256 單件）/ 塊面
    （逐塊，幾何只消費響應）。页面与组件仍**只**经本门面访问 —— 不得直接调 `fetch('/api/image/*')`。 */
 import * as imageFaces from './imageFaces.js'
+/* **印人（person）门面（v1.53 新增｜person-model §6）**：正式印人查询 / 选人搜索 ＋ 提案的
+   提交 / 采纳 / 驳回（管理员）。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
+import * as persons from './persons.js'
 
-export const services = { auth, seals, corrections, endorsements, photos, points, admin, drive, imageFaces, sealExport }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport }
 
-export { auth, seals, corrections, endorsements, photos, points, admin, drive, imageFaces, sealExport }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport }
 export default services

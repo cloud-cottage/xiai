@@ -61,7 +61,10 @@ const COLLECTIONS = Object.freeze({
   corrections: 'xiai_corrections',
   correctionsPublic: 'xiai_corrections_public',
   /* **V6-a 新增**：平台会话身份 → 角色（服务器私有；判权读点，见 `readRoleRow`）。 */
-  roles: 'xiai_roles'
+  roles: 'xiai_roles',
+  /* **印人（person-model §2 / §3）**：正式印人（canonical；**只经采纳路径写**）＋ 提案 / 审核行。 */
+  persons: 'xiai_persons',
+  personProposals: 'xiai_person_proposals'
 })
 
 /** 勘误三态（与 `src/services/corrections.js::CORRECTION_STATUS` **逐字同值**）。 */
@@ -76,6 +79,19 @@ const LEGACY_DECISION = Object.freeze({ APPROVED: 'ACCEPTED' })
 
 /** 允许的两种终端决定（可迁移值；此外一律 `INVALID_VALUE` ＋ 零写入）。 */
 const DECISIONS = Object.freeze(['ACCEPTED', 'REJECTED'])
+
+/** 印人提案三态（与 `src/services/persons.js::PERSON_STATUS` 逐字同值）。 */
+const PERSON_PROPOSAL_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+})
+
+/** 印人提案审核载荷允许键（**封闭键面**：单号 / 决定 / 理由）。 */
+const PERSON_REVIEW_ALLOWED_KEYS = Object.freeze(['proposal_id', 'decision', 'note'])
+
+/** 印人编号前缀（与 `src/data/seed.js::PERSON_CODE_PREFIX` 逐字同值）。 */
+const PERSON_CODE_PREFIX = 'PR'
 
 /**
  * 可勘误字段表（键 → 上屏顯示名）。
@@ -338,6 +354,47 @@ async function readRoleRow(uid) {
   return null
 }
 
+/**
+ * **印人读点（person-model §4.1 / §4.2；只读）**：按 `id` / `code` / 文档 `_id` 兜底读正式印人行。
+ * @param {string} ref 引用（`author_person_id` 或印人 id / code）
+ * @returns {Promise<object|null>}
+ */
+async function readPersonRow(ref) {
+  const id = text(ref)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.persons)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return rowsById[0]
+  const byCode = await collection.where({ code: id }).get()
+  const rowsByCode = rowsOf(byCode)
+  if (rowsByCode.length > 0) return rowsByCode[0]
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return rowsByDoc[0]
+  return null
+}
+
+/**
+ * **印人提案读点（§3；只读）**：按业务键 `id` / 文档 `_id` 兜底读提案行。
+ * @param {string} proposalId
+ * @returns {Promise<{row:object, match:object}|null>}
+ */
+async function readPersonProposalRow(proposalId) {
+  const id = text(proposalId)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.personProposals)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
+  return null
+}
+
 /* ---------------------------------------------------------------------------
    公开投影（**脱敏**：从源行的白名单字段重建，绝不透传整行）
    --------------------------------------------------------------------------- */
@@ -484,6 +541,124 @@ const OPS = Object.freeze({
           }
         ]
       }
+    }
+  },
+
+  /**
+   * **审核印人提案（管理员；person-model §3）**：① 载荷键面 → ② 单号 / 决定值域 / 理由长度 →
+   * ③ 审核人身份（服务端派生）→ ④ 读提案行 → ⑤ 状态门（仅 `PENDING` 可审）→
+   * ⑥ 采纳 ⇒ **幂等**生成 `xiai_persons` 行（`proposal_id` 溯源；重复采纳不新增 / 不改写）；
+   * 驳回 ⇒ **零写入**（仅提案行状态）。reason 一律沿用既有冻结字面值（**不新增**）。
+   * @param {object} payload 载荷（允许键见 `PERSON_REVIEW_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份（唯一来源）
+   * @param {number} nowSeconds 服务端时钟（秒；本函数唯一时源）
+   * @returns {Promise<{ok:true, op:string, row:object, person:object|null,
+   *          plan:{op:string, writes:Array<object>}}|{ok:false, reason:string, message:string}>}
+   */
+  async reviewPersonProposal(payload, identity, nowSeconds) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => PERSON_REVIEW_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const proposalId = text(payload.proposal_id)
+    if (!proposalId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少印人提案單號（proposal_id）⇒ 拒絕審覈；本次零寫入。')
+    }
+    if (proposalId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `印人提案單號超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕審覈；本次零寫入。`)
+    }
+    const rawDecision = text(payload.decision)
+    const decision = LEGACY_DECISION[rawDecision] || rawDecision
+    if (DECISIONS.indexOf(decision) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `審覈決定「${rawDecision || '（空）'}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回）⇒ 拒絕寫入；本次零寫入。`
+      )
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '駁回理由必須是文字 ⇒ 拒絕審覈；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
+    }
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的審核人身份；本次零寫入。')
+    }
+    const found = await readPersonProposalRow(proposalId)
+    if (!found) {
+      return deny(REASONS.NOT_FOUND, `未找到該印人提案（proposal_id）：${proposalId}；本次零寫入。`)
+    }
+    const row = found.row
+    if (text(row.status) !== PERSON_PROPOSAL_STATUS.PENDING) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `該印人提案已審覈（當前狀態：${text(row.status) || '（空）'}）⇒ 不可重複處理（終態不回退）；本次零寫入。`
+      )
+    }
+    const accepted = decision === PERSON_PROPOSAL_STATUS.ACCEPTED
+    const at = new Date(Math.floor(Number(nowSeconds)) * 1000).toISOString()
+    const privatePatch = { status: decision, reviewed_at: at, reviewer_id: identity.uid }
+    if (!accepted && noteText !== '') privatePatch.review_note = noteText
+    const writes = [
+      { collection: COLLECTIONS.personProposals, action: 'update', match: found.match, doc: privatePatch, expectAtLeast: 1 }
+    ]
+    let person = null
+    if (accepted && !row.target_person_id) {
+      const persons = rowsOf(await resolveDb().collection(COLLECTIONS.persons).get())
+      const existing = persons.find((item) => text(item && item.proposal_id) === proposalId)
+      if (existing) {
+        person = existing
+      } else {
+        let max = 0
+        persons.forEach((item) => {
+          const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
+          if (matched) max = Math.max(max, Number(matched[1]))
+        })
+        const taken = new Set(persons.map((item) => text(item && item.code)))
+        let index = max + 1
+        while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
+        const code = `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
+        person = {
+          id: code,
+          code,
+          family_name: text(row.family_name),
+          given_name: text(row.given_name),
+          courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
+          art_names: Array.isArray(row.art_names) ? row.art_names : [],
+          alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
+          birth_year: row.birth_year === undefined ? null : row.birth_year,
+          death_year: row.death_year === undefined ? null : row.death_year,
+          years_lived: null,
+          birth_era_text: '',
+          death_era_text: '',
+          dynasty: '',
+          gender: '',
+          cbdb_id: text(row.cbdb_id),
+          card_id: text(row.card_id),
+          proposal_id: proposalId,
+          created_by: identity.uid,
+          created_at: at,
+          updated_at: at
+        }
+        writes.push({ collection: COLLECTIONS.persons, action: 'set', id: code, doc: person })
+      }
+    }
+    return {
+      ok: true,
+      op: 'reviewPersonProposal',
+      row: Object.assign({}, row, privatePatch),
+      person,
+      plan: { op: 'reviewPersonProposal', writes }
     }
   }
 })

@@ -49,7 +49,14 @@ export const CLOUD_COLLECTIONS = Object.freeze({
      uid 去重列表）；**零手机号**、uid 允许。它让「未采纳提交的公开摘要面」跨浏览器可见（他人在另一
      浏览器提交的 `PENDING` 值也能被列出并【採信】）；本机镜像键见 `storage.js` 的 `correctionSummaries`。
      取代此前尚未上线的 `xiai_endorsement_counts`（**不留两套公开面**）。 */
-  correctionSummaries: 'xiai_correction_summaries'
+  correctionSummaries: 'xiai_correction_summaries',
+  /* **印人（person-model-draft-v0.1 §2 / §3）**：正式印人集合（canonical 唯一真源）。
+     读面接线在此 —— 印面「作者」选人控件（§4.3）跨浏览器取用；写面由云函数落盘
+     （`xiai_persons` 只经采纳路径产生）。本机镜像键见 `data/db.js` 的 `persons`。 */
+  persons: 'xiai_persons',
+  /* 印人提案 / 审核行集合（提交＝登录用户、采纳 / 驳回＝管理员）。本机镜像键见
+     `data/db.js` 的 `person-proposals`。 */
+  personProposals: 'xiai_person_proposals'
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */
@@ -423,8 +430,18 @@ export const CLOUD_EMPTY_SUSPECT = 'CLOUD_EMPTY_SUSPECT'
  * 是**合法空态**（还没有任何采纳，或投影集合尚未建立）⇒ 若按同一判据判可疑，会把
  * 「本机缓存有一行、云端还没同步」误判成权限事故、进而**让整站回落本地种子**（把三个
  * 本体集合一起拖下水）。故本集合**恒走诚实空态**（不回落、不冒充）。
+ *
+ * **印人集合同此豁免（person-model）**：`persons` / `personProposals` 是**待人工新建**的
+ * 新集合（云控制台动作）——集合尚未建立时云端恒 0 行，而本机镜像可能已有采纳 / 提案行；
+ * 若判可疑会让**整站**回落本地种子 ⇒ 一律**恒走诚实空态**（印人选人控件退化为空集，
+ * 不影响藏品本体展示）。
  */
-export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze(['correctionsPublic', 'correctionSummaries'])
+export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze([
+  'correctionsPublic',
+  'correctionSummaries',
+  'persons',
+  'personProposals'
+])
 
 /**
  * 本地同集合的**现有行数**（**只读**：不灌种子、不写存储、不碰其它集合）。
@@ -659,12 +676,90 @@ export function normalizeCorrectionSummaryRow(doc, options = {}) {
   }
 }
 
+/**
+ * **正式印人行**（`xiai_persons` → 本机 `persons` 行形状；person-model §2）。
+ *
+ * 归一（只做空值与数组 / 整数归一，**不做业务值改写**）：
+ *   · `id` / `code` / `proposal_id` / `created_by` / 时间戳 ⇒ 文本；
+ *   · 姓 / 名 / 预留文本键 ⇒ 文本（NULL ⇒ `''`）；
+ *   · `字` / `号` / `别名` ⇒ **字符串数组**（缺键 / 非数组 ⇒ `[]`）；
+ *   · 生卒 / 享年 ⇒ 整数或 `null`（「不详」＝`null`，**不设特值**）；
+ *   · `cbdb_id` / `card_id` ⇒ 文本（**本期不接线、零形态校验**）。
+ * **`display_name` 不落盘、不在此产出**（派生单点 ＝ `data/db.js::personDisplayName`）。
+ */
+export function normalizePersonRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const id = text(firstOf(row.id, row._id))
+  const asArray = (value) => (Array.isArray(value) ? value.map((item) => text(item)).filter((item) => item !== '') : [])
+  return {
+    ...row,
+    _id: text(row._id),
+    id,
+    code: text(row.code),
+    family_name: text(row.family_name),
+    given_name: text(row.given_name),
+    courtesy_names: asArray(row.courtesy_names),
+    art_names: asArray(row.art_names),
+    alias_names: asArray(row.alias_names),
+    birth_year: intOrNull(row.birth_year),
+    death_year: intOrNull(row.death_year),
+    years_lived: intOrNull(row.years_lived),
+    birth_era_text: text(row.birth_era_text),
+    death_era_text: text(row.death_era_text),
+    dynasty: text(row.dynasty),
+    gender: text(row.gender),
+    cbdb_id: text(row.cbdb_id),
+    card_id: text(row.card_id),
+    proposal_id: text(row.proposal_id),
+    created_by: text(row.created_by),
+    created_at: text(row.created_at),
+    updated_at: text(firstOf(row.updated_at, row.created_at))
+  }
+}
+
+/**
+ * **印人提案 / 审核行**（`xiai_person_proposals` → 本机 `person-proposals` 行形状；§3）。
+ * 归一：载荷字段同 §2 提交面；`status` 缺键 ⇒ `PENDING`；`target_person_id` 可空。
+ * **`submitted_by` 是不透明 uid、`reviewer_id` 亦同**（**零手机号**）。
+ */
+export function normalizePersonProposalRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const id = text(firstOf(row.id, row._id))
+  const asArray = (value) => (Array.isArray(value) ? value.map((item) => text(item)).filter((item) => item !== '') : [])
+  return {
+    ...row,
+    _id: text(row._id),
+    id,
+    batch_id: text(row.batch_id),
+    target_person_id: row.target_person_id === null || row.target_person_id === undefined ? null : text(row.target_person_id),
+    status: text(firstOf(row.status, 'PENDING')),
+    family_name: text(row.family_name),
+    given_name: text(row.given_name),
+    courtesy_names: asArray(row.courtesy_names),
+    art_names: asArray(row.art_names),
+    alias_names: asArray(row.alias_names),
+    birth_year: intOrNull(row.birth_year),
+    death_year: intOrNull(row.death_year),
+    cbdb_id: text(row.cbdb_id),
+    card_id: text(row.card_id),
+    note: text(row.note),
+    submitted_by: text(row.submitted_by),
+    submitted_at: text(row.submitted_at),
+    reviewed_at: text(row.reviewed_at),
+    reviewer_id: text(row.reviewer_id),
+    review_note: text(row.review_note),
+    dedupe_key: text(row.dedupe_key)
+  }
+}
+
 const NORMALIZERS = Object.freeze({
   seals: normalizeSealRow,
   faces: normalizeFaceRow,
   images: normalizeImageRow,
   correctionsPublic: normalizePublicCorrectionRow,
-  correctionSummaries: normalizeCorrectionSummaryRow
+  correctionSummaries: normalizeCorrectionSummaryRow,
+  persons: normalizePersonRow,
+  personProposals: normalizePersonProposalRow
 })
 
 /* ---------------------------------------------------------------------------

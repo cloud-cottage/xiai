@@ -121,9 +121,11 @@ function createStore(seed) {
   const collections = { xiai_corrections: new Map(), xiai_corrections_public: new Map() }
   const stats = { writes: [], reads: 0 }
   const load = (rows) => {
-    collections.xiai_corrections.clear()
-    collections.xiai_corrections_public.clear()
-    ;(rows || []).forEach((row) => collections.xiai_corrections.set(row._id, Object.assign({}, row)))
+    Object.keys(collections).forEach((name) => collections[name].clear())
+    ;(rows || []).forEach((row) => {
+      const name = row.__collection || 'xiai_corrections'
+      ;(collections[name] = collections[name] || new Map()).set(row._id, Object.assign({}, row))
+    })
     stats.writes.length = 0
     stats.reads = 0
   }
@@ -190,7 +192,11 @@ const CLOUD_SEED = [
     basis: '印譜對勘',
     status: 'PENDING',
     created_at: '2026-10-01T00:00:00.000Z'
-  }
+  },
+  /* **本单修正（person-model §4.1 / §4.2）**：`author` 引用型 ⇒ 既有 author 用例载荷值须指向既有印人；
+     按 `id` 补种印人行（仅新增种子，未改既有断言）。 */
+  { __collection: 'xiai_persons', _id: 'p-env', id: '缺 env 仍可提交', code: 'PR000000001', display_name: '印人缺env' },
+  { __collection: 'xiai_persons', _id: 'p-jia', id: '甲值', code: 'PR000000002', display_name: '印人甲' }
 ]
 const store = createStore(CLOUD_SEED)
 ops.setOpsDbProvider(store.provider)

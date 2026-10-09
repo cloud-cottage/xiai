@@ -684,3 +684,81 @@ export const SEED_FACES = [
     source: null
   })
 ]
+
+/* ============================================================================
+   **印人（person）真源（person-model-draft-v0.1 §2 / §3）**
+   ----------------------------------------------------------------------------
+   归属 ＝ **玺爱 canonical 唯一真源**：正式印人（历史作者，A 支）落新集合 `xiai_persons`；
+   提案 / 审核行落 `xiai_person_proposals`；平台用户（B 支）**并入既有 `xiai_users`**、
+   **不另建集合、不建 person 行**。
+   本常量区**只落「新集合名 / 编号前缀与形态 / 值的默认」**；读写、值域门、显示名派生在
+   `data/db.js`。**绝不碰 `liwu` 命名面**（一律 `xiai_` 前缀）。
+   ============================================================================ */
+
+/** 正式印人集合名（`xiai_` 前缀；与云控制台新建的集合逐字一致）。 */
+export const XIAI_PERSONS_COLLECTION = 'xiai_persons'
+
+/** 印人提案 / 审核行集合名（`xiai_` 前缀）。 */
+export const XIAI_PERSON_PROPOSALS_COLLECTION = 'xiai_person_proposals'
+
+/** 印人编号前缀（Kevin 亲选：与印章 `XA`、资料夹 `SL` 同型 ⇒ `PR`）。 */
+export const PERSON_CODE_PREFIX = 'PR'
+
+/** 印人编号形态（`PR` 大写 ASCII ＋ 恰 9 位零填充；与 `^XA\d{9}$` 同型）。 */
+export const PERSON_CODE_PATTERN = /^PR\d{9}$/
+
+/** 序号 → 印人编号：`PR` ＋ 9 位零填充。 */
+export function formatPersonCode(serial) {
+  return `${PERSON_CODE_PREFIX}${String(serial).padStart(9, '0')}`
+}
+
+/**
+ * 印人属性字段清单（`xiai_persons` 行；＝**提交面**同形）。
+ *   - 姓 / 名：字符串，可空；
+ *   - `字` / `号` / `别名`：**一律数组**（CBDB 别名本就是数组，**不猜分类**）；
+ *   - 生卒：只存**公元整数**；「不详」＝`null`（**不设特值、不设区间字符串**）；
+ *   - `cbdb_id` / `card_id`：**本期不接线，只落两个可空字段**（零读取、零形态校验）；
+ *   - 预留字段位（本期不接线）：`years_lived` / `birth_era_text` / `death_era_text` /
+ *     `dynasty` / `gender`。
+ * `display_name` **不在此列**（派生、**不落盘**，见 `db.js::personDisplayName`）。
+ */
+export const PERSON_FIELDS = [
+  'family_name',
+  'given_name',
+  'courtesy_names',
+  'art_names',
+  'alias_names',
+  'birth_year',
+  'death_year',
+  'years_lived',
+  'birth_era_text',
+  'death_era_text',
+  'dynasty',
+  'gender',
+  'cbdb_id',
+  'card_id'
+]
+
+/**
+ * 印人一行「值的默认」（**新增提案 / 采纳后生成**都以本形态起手，缺省一律空、不设特值）。
+ * 数组键 ⇒ `[]`；标量键 ⇒ `''`；生卒 ⇒ `null`（「不详」＝空）。
+ * @returns {object} 空印人字段面（**不含 `id` / `code` / 溯源 / 时间戳** —— 那些由采纳路径系统写）
+ */
+export function emptyPersonFields() {
+  const out = {}
+  const arrayKeys = ['courtesy_names', 'art_names', 'alias_names']
+  const nullKeys = ['birth_year', 'death_year', 'years_lived']
+  PERSON_FIELDS.forEach((key) => {
+    if (arrayKeys.includes(key)) out[key] = []
+    else if (nullKeys.includes(key)) out[key] = null
+    else out[key] = ''
+  })
+  return out
+}
+
+/** 印人提案三态（与勘误三态同形：单向、**终态不回退**）。 */
+export const PERSON_PROPOSAL_STATUS = {
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+}

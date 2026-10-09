@@ -172,7 +172,29 @@ export const STORAGE_KEYS = {
    * 取代此前尚未上线的 `endorsement-counts` 键（**不留两套**）。
    * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
    */
-  correctionSummaries: 'correction-summaries'
+  correctionSummaries: 'correction-summaries',
+  /**
+   * **用途：正式印人（A 支 歷史作者）的本機鏡像**（person-model §2｜v1.53 新增；
+   * 写方 ＝ `db.js` 的 `savePersonRows`（**仅采纳路径调用**），读方 ＝ `listPersonRows` /
+   * `personById` / `personExistsById` / `resolveAuthorName`）。
+   * 真实键名 `xiai:v1:persons`。行 ＝ `{id, code, family_name, given_name, courtesy_names[],
+   * art_names[], alias_names[], birth_year, death_year, cbdb_id, card_id, proposal_id,
+   * created_by, created_at, updated_at}`；`display_name` **派生不落盘**（§2「派生不落盘」）。
+   * 它是云端 `xiai_persons` 集合的本机镜像 / 展示缓存；**不得**承载平台用户（B 支并在 `users`）。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  persons: 'persons',
+  /**
+   * **用途：印人提案 / 审核行**（person-model §3｜v1.53 新增；写方 ＝ `services/persons.js`，
+   * 读方 ＝ `db.js` 的 `listPersonProposalRows`）。
+   * 真实键名 `xiai:v1:person-proposals`。行 ＝ `{id, batch_id, target_person_id, status,
+   * family_name, given_name, courtesy_names[], art_names[], alias_names[], birth_year, death_year,
+   * cbdb_id, card_id, note, submitted_by, submitted_at, reviewed_at, reviewer_id, review_note,
+   * dedupe_key}`；`status` 三态单向终态不回退（§3 / §3.47）。
+   * 它是云端 `xiai_person_proposals` 集合的本机镜像；**正式印人只经采纳路径产生**（§2 单写者）。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  personProposals: 'person-proposals'
 }
 
 /* ============================================================================

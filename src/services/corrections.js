@@ -21,6 +21,10 @@ import {
   /* r2 读面接线：**公开只读投影集合**（`xiai_corrections_public`）的读 / 镜像写，与
      **显示名单点** `sealDisplayName`（链：采纳值 → 原始 seal_name → 佚名）。 */
   sealDisplayName,
+  /* **印人（person-model §4.1）**：作者显示名解析单点（`resolveAuthorName`）＋ 引用值域门
+     所用的存在性判定（`personExistsById`）。**不在此另立第二套名表**。 */
+  resolveAuthorName,
+  personExistsById,
   listPublicCorrectionRows,
   listPublicCorrectionMirrorRows,
   savePublicCorrectionRows,
@@ -321,6 +325,15 @@ const FIELD_VALUE_DOMAINS = {
     denyMessage: (label, text) =>
       `${label}「${text}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕提交；` +
       '請從給定選項中選擇。'
+  },
+  /* 【作者】（**person-model §4.2：自本模型起为引用型**）：载荷值是 `author_person_id`，
+     值域门判**引用合法性**（指向的印人存在）；库中无此人 ⇒ 结构化拒绝（沿用既有字面值
+     `INVALID_VALUE`；**不新增 reason**），并引导去提交印人提案。 */
+  author: {
+    accepts: (text) => personExistsById(text),
+    denyMessage: (label, text) =>
+      `${label}「${text}」在庫中沒有對應的印人 ⇒ 已拒絕提交；` +
+      '請改選既有印人，或先提交印人提案、經管理員審覈通過後再選（不報錯即放行的自由文本已不再接受）。'
   }
 }
 
@@ -669,6 +682,28 @@ export function resolveSealDisplayName(row) {
     if (item && item.source === 'CORRECTION') accepted = item.display
   }
   return sealDisplayName(row, accepted)
+}
+
+/**
+ * **作者显示名（单点转发；person-model §4.1）**：卡片 / 详情 / 导出 / 文本导出**一律**经本函数。
+ *
+ * 链（真源仍是**数据层单点** `data/db.js::resolveAuthorName`，本函数**只转发、不另立第二套名表**）：
+ *   `author_person_id` → **命中** ⇒ 印人 `display_name` → **未命中** ⇒ 旧 `author` 自由文本 →
+ *   皆空 ⇒「佚名」。
+ * **采纳值（若存在）按引用型解**：已采纳的 `author` 勘误值本身是一个 `author_person_id`
+ * （§4.2），先并入再解链 ⇒ 采纳后的作者显示名与全站一致。
+ * @param {object|null} row 印面 / 印章行（视图模型）
+ * @returns {string} 作者显示名
+ */
+export function resolveAuthorDisplayName(row) {
+  const face = faceTargetOf(row)
+  let acceptedRef = ''
+  if (face) {
+    const item = resolveMarkable(face).find((meta) => meta.key === 'author')
+    if (item && item.source === 'CORRECTION') acceptedRef = String(item.display || '').trim()
+  }
+  const merged = acceptedRef ? { ...(row || {}), author_person_id: acceptedRef } : row
+  return resolveAuthorName(merged)
 }
 
 /** 由任意行形态推断「用于汇总的印面」（只读；认不出 ⇒ `null`）。 */

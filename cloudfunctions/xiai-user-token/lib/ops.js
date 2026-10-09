@@ -88,7 +88,10 @@ const COLLECTIONS = Object.freeze({
   correctionSummaries: 'xiai_correction_summaries',
   correctionsPublic: 'xiai_corrections_public',
   /* **V6-a 新增**：平台会话身份 → 角色（服务器私有；判权读点，见 `readRoleRow`）。 */
-  roles: 'xiai_roles'
+  roles: 'xiai_roles',
+  /* **印人（person-model §2 / §3）**：正式印人（canonical；**只经采纳路径写**）＋ 提案 / 审核行。 */
+  persons: 'xiai_persons',
+  personProposals: 'xiai_person_proposals'
 })
 
 /**
@@ -113,6 +116,38 @@ const ALLOWED_KEYS = Object.freeze(['faceId', 'sealId', 'stampId', 'field', 'val
 
 /** 采信载荷允许键（**封闭键面**：`['faceId','sealId','stampId','field','value']`；身份类键一律拒）。 */
 const ENDORSE_ALLOWED_KEYS = Object.freeze(['faceId', 'sealId', 'stampId', 'field', 'value'])
+
+/** 印人提案载荷允许键（**封闭键面**；身份类键一律拒 —— 提交人由服务端派生）。 */
+const PERSON_PROPOSAL_ALLOWED_KEYS = Object.freeze([
+  'batch_id',
+  'target_person_id',
+  'family_name',
+  'given_name',
+  'courtesy_names',
+  'art_names',
+  'alias_names',
+  'birth_year',
+  'death_year',
+  'cbdb_id',
+  'card_id',
+  'note'
+])
+
+/** 印人提案审核载荷允许键（**封闭键面**：单号 / 决定 / 理由）。 */
+const PERSON_REVIEW_ALLOWED_KEYS = Object.freeze(['proposal_id', 'decision', 'note'])
+
+/** 印人提案三态（与 `src/services/persons.js::PERSON_STATUS` 逐字同值）。 */
+const PERSON_PROPOSAL_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+})
+
+/** 印人提案文档键前缀（确定性 / 可读；与前端 `pp-` 同族）。 */
+const PERSON_PROPOSAL_ID_PREFIX = 'pp-'
+
+/** 印人编号前缀（与 `src/data/seed.js::PERSON_CODE_PREFIX` 逐字同值）。 */
+const PERSON_CODE_PREFIX = 'PR'
 
 /**
  * 明令不可由载荷提供的业务键（防御性登记 ⇒ 报告里可逐字列出；不在 `ALLOWED_KEYS` 里即已拒绝，
@@ -659,6 +694,47 @@ async function readRoleRow(uid) {
   return null
 }
 
+/**
+ * **印人读点（person-model §4.1 / §4.2；只读）**：按 `id` / `code` / 文档 `_id` 兜底读正式印人行。
+ * @param {string} ref 引用（`author_person_id` 或印人 id / code）
+ * @returns {Promise<object|null>}
+ */
+async function readPersonRow(ref) {
+  const id = text(ref)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.persons)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return rowsById[0]
+  const byCode = await collection.where({ code: id }).get()
+  const rowsByCode = rowsOf(byCode)
+  if (rowsByCode.length > 0) return rowsByCode[0]
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return rowsByDoc[0]
+  return null
+}
+
+/**
+ * **印人提案读点（§3；只读）**：按业务键 `id` / 文档 `_id` 兜底读提案行。
+ * @param {string} proposalId
+ * @returns {Promise<{row:object, match:object}|null>}
+ */
+async function readPersonProposalRow(proposalId) {
+  const id = text(proposalId)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.personProposals)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
+  return null
+}
+
 /* ---------------------------------------------------------------------------
    管理员写面：白名单门 ＋ 读数（**全部只读 / 判定，不触写**）
    --------------------------------------------------------------------------- */
@@ -797,6 +873,19 @@ const OPS = Object.freeze({
     if (!value) return deny(REASONS.MISSING_REQUIRED, '缺少勘誤值（value）⇒ 拒絕提交；本次零寫入。')
     if (value.length > MAX_TEXT_LENGTH || basis.length > MAX_TEXT_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `勘誤文字超出上限（${MAX_TEXT_LENGTH} 字）⇒ 拒絕提交；本次零寫入。`)
+    }
+    /* **作者引用型判定（person-model §4.2）**：`author` 的载荷值是 `author_person_id` ⇒
+       必须指向**既有印人**（服务端权威判据，**写之前**）；库中无此人 ⇒ 结构化拒绝
+       （沿用既有字面值 `INVALID_VALUE`；**不新增 reason**）＋ 零写入。 */
+    if (field === 'author') {
+      const person = await readPersonRow(value)
+      if (!person) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `該印面「作者」引用的印人（${value || '（空）'}）在庫中不存在 ⇒ 拒絕提交；` +
+            '請先提交印人提案、經管理員審覈通過後再選；本次零寫入。'
+        )
+      }
     }
     if (!identityUsable(identity)) {
       return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
@@ -1179,6 +1268,89 @@ const OPS = Object.freeze({
       height: display.height,
       display
     }
+  },
+
+  /**
+   * **提交印人提案（§3；任何登录用户）**：封闭键面 → 至少一处姓名 / 字 / 号 / 别名 →
+   * 引用型目标（修改既有）存在性 → **防重键**（同 `(target_person_id, 姓名, 生卒, cbdb_id)`
+   * 已有未驳回提案 ⇒ `DUPLICATE_VALUE` ＋ 零写入）→ 落 `xiai_person_proposals`
+   * （**提交人 uid 由服务端派生、零手机号**）。
+   * @param {object} payload 载荷（允许键见 `PERSON_PROPOSAL_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @returns {Promise<{ok:true, op:string, row:object, plan:object}|{ok:false, reason:string, message:string}>}
+   */
+  async submitPersonProposal(payload, identity) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => PERSON_PROPOSAL_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const family = text(payload.family_name)
+    const given = text(payload.given_name)
+    const asArray = (value) => (Array.isArray(value) ? value.map((item) => text(item)).filter((item) => item !== '') : [])
+    const courtesy = asArray(payload.courtesy_names)
+    const art = asArray(payload.art_names)
+    const alias = asArray(payload.alias_names)
+    if (!family && !given && courtesy.length === 0 && art.length === 0 && alias.length === 0) {
+      return deny(REASONS.MISSING_REQUIRED, '請至少填寫姓名 / 字 / 號 / 別名之一 ⇒ 拒絕提交；本次零寫入。')
+    }
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
+    }
+    const target = text(payload.target_person_id)
+    if (target) {
+      const person = await readPersonRow(target)
+      if (!person) return deny(REASONS.NOT_FOUND, `要修改的印人（${target}）不存在 ⇒ 拒絕提交；本次零寫入。`)
+    }
+    const toInt = (value) => {
+      if (value === null || value === undefined || value === '') return null
+      const num = Number(value)
+      return Number.isFinite(num) ? Math.round(num) : null
+    }
+    const birth = toInt(payload.birth_year)
+    const death = toInt(payload.death_year)
+    const cbdb = text(payload.cbdb_id)
+    const dedupe = [target, `${family}${given}`, birth === null ? '' : String(birth), death === null ? '' : String(death), cbdb].join('|')
+    const duplicates = await readRows(COLLECTIONS.personProposals, { dedupe_key: dedupe })
+    if (duplicates.some((row) => text(row && row.status) !== CORRECTION_STATUS.REJECTED)) {
+      return deny(REASONS.DUPLICATE_VALUE, '同一印人（姓名 ＋ 生卒 ＋ cbdb_id）已有待審提案 ⇒ 只允許一人提交；本次零寫入。')
+    }
+    const at = new Date().toISOString()
+    const row = {
+      id: `${PERSON_PROPOSAL_ID_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      batch_id: text(payload.batch_id),
+      target_person_id: target || null,
+      status: PERSON_PROPOSAL_STATUS.PENDING,
+      family_name: family,
+      given_name: given,
+      courtesy_names: courtesy,
+      art_names: art,
+      alias_names: alias,
+      birth_year: birth,
+      death_year: death,
+      cbdb_id: cbdb,
+      card_id: text(payload.card_id),
+      note: text(payload.note),
+      submitted_by: identity.uid,
+      submitted_at: at,
+      reviewed_at: null,
+      reviewer_id: null,
+      review_note: '',
+      dedupe_key: dedupe
+    }
+    return {
+      ok: true,
+      op: 'submitPersonProposal',
+      row,
+      plan: { writes: [{ kind: 'add', collection: COLLECTIONS.personProposals, doc: row }] }
+    }
   }
 })
 
@@ -1394,6 +1566,124 @@ const ADMIN_OPS = Object.freeze({
       )
     }
     return { ok: true, op: 'setInviteReward', value }
+  },
+
+  /**
+   * **审核印人提案（管理员；person-model §3）**：① 管理员白名单门 → ② 载荷键面 →
+   * ③ 单号 / 决定值域 / 理由长度 → ④ 读提案行 → ⑤ 状态门（仅 `PENDING` 可审）→
+   * ⑥ 采纳 ⇒ **幂等**生成 `xiai_persons` 行（`proposal_id` 溯源；重复采纳不新增 / 不改写）；
+   * 驳回 ⇒ **零写入**（仅提案行状态）。reason 一律沿用既有冻结字面值。
+   * @param {object} payload 载荷（允许键见 `PERSON_REVIEW_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async reviewPersonProposal(payload, identity, context) {
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => PERSON_REVIEW_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => REVIEW_IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const proposalId = text(payload.proposal_id)
+    if (!proposalId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少印人提案單號（proposal_id）⇒ 拒絕審覈；本次零寫入。')
+    }
+    if (proposalId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `印人提案單號超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕審覈；本次零寫入。`)
+    }
+    const rawDecision = text(payload.decision)
+    const decision = LEGACY_DECISION[rawDecision] || rawDecision
+    if (DECISIONS.indexOf(decision) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `審覈決定「${rawDecision || '（空）'}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回）⇒ 拒絕寫入；本次零寫入。`
+      )
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '駁回理由必須是文字 ⇒ 拒絕審覈；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
+    }
+    const found = await readPersonProposalRow(proposalId)
+    if (!found) {
+      return deny(REASONS.NOT_FOUND, `未找到該印人提案（proposal_id）：${proposalId}；本次零寫入。`)
+    }
+    const row = found.row
+    if (text(row.status) !== PERSON_PROPOSAL_STATUS.PENDING) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `該印人提案已審覈（當前狀態：${text(row.status) || '（空）'}）⇒ 不可重複處理（終態不回退）；本次零寫入。`
+      )
+    }
+    const accepted = decision === PERSON_PROPOSAL_STATUS.ACCEPTED
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const privatePatch = { status: decision, reviewed_at: at, reviewer_id: identity.uid }
+    if (!accepted && noteText !== '') privatePatch.review_note = noteText
+    const writes = [
+      { kind: 'update', collection: COLLECTIONS.personProposals, match: found.match, doc: privatePatch, expectAtLeast: 1 }
+    ]
+    let person = null
+    if (accepted && !row.target_person_id) {
+      const persons = rowsOfReply(await resolveDb().collection(COLLECTIONS.persons).get())
+      const existing = persons.find((item) => text(item && item.proposal_id) === proposalId)
+      if (existing) {
+        person = existing
+      } else {
+        let max = 0
+        persons.forEach((item) => {
+          const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
+          if (matched) max = Math.max(max, Number(matched[1]))
+        })
+        const taken = new Set(persons.map((item) => text(item && item.code)))
+        let index = max + 1
+        while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
+        const code = `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
+        person = {
+          id: code,
+          code,
+          family_name: text(row.family_name),
+          given_name: text(row.given_name),
+          courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
+          art_names: Array.isArray(row.art_names) ? row.art_names : [],
+          alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
+          birth_year: row.birth_year === undefined ? null : row.birth_year,
+          death_year: row.death_year === undefined ? null : row.death_year,
+          years_lived: null,
+          birth_era_text: '',
+          death_era_text: '',
+          dynasty: '',
+          gender: '',
+          cbdb_id: text(row.cbdb_id),
+          card_id: text(row.card_id),
+          proposal_id: proposalId,
+          created_by: identity.uid,
+          created_at: at,
+          updated_at: at
+        }
+        writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })
+      }
+    }
+    return {
+      ok: true,
+      op: 'reviewPersonProposal',
+      row: Object.assign({}, row, privatePatch),
+      person,
+      plan: { op: 'reviewPersonProposal', writes }
+    }
   }
 })
 
@@ -1488,6 +1778,12 @@ module.exports = {
   ARTIFACT_MAX_BYTES,
   /* 展示件轉碼面（本單新增 `ensureDisplayArtifact`；供離線自檢直接斷言）。 */
   DISPLAY_ALLOWED_KEYS,
+  /* 印人提案面（person-model §2 / §3；供离线自检直接断言）。 */
+  PERSON_PROPOSAL_ALLOWED_KEYS,
+  PERSON_REVIEW_ALLOWED_KEYS,
+  PERSON_PROPOSAL_STATUS,
+  PERSON_PROPOSAL_ID_PREFIX,
+  PERSON_CODE_PREFIX,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,
@@ -1498,6 +1794,8 @@ module.exports = {
   opsStorageUploadInjected,
   resolveDb,
   readRoleRow,
+  readPersonRow,
+  readPersonProposalRow,
   IDENTITY_SOURCES,
   isSessionIdentity,
   identitySourceOf,

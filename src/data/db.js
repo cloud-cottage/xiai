@@ -70,7 +70,8 @@ import {
   isKnownDynasty,
   isKnownFaceContent,
   isKnownFaceStyle,
-  isKnownSealClass
+  isKnownSealClass,
+  formatPersonCode
 } from './seed.js'
 
 /**
@@ -1685,6 +1686,143 @@ export function saveCorrectionSummaryRows(rows) {
   return writeCollection(STORAGE_KEYS.correctionSummaries, rows)
 }
 
+/* ============================================================================
+   **印人（person）集合读写（person-model-draft-v0.1 §2 / §3）**
+   ----------------------------------------------------------------------------
+   新增两集合：`xiai_persons`（正式印人 / A 支）与 `xiai_person_proposals`（提案 / 审核行）。
+   **单写者（冻结）**：`xiai_persons` **只经采纳路径**产生（`services/persons.js` 的采纳分支）；
+   **不开放任何直写入口**（含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
+   显示名派生**恰一处**（`personDisplayName`）＋ 作者显示名链**恰一处**（`resolveAuthorName`）
+   —— 卡片 / 详情 / 导出 / 文本导出**一律经它**，**零第二套名表**。
+   **本机键登记（如实登记的跨单缺口）**：全工程「存储键登记表」的唯一落点 ＝
+   `data/storage.js::STORAGE_KEYS`，但**本单写集不含该文件** ⇒ 本处用本机键名常量
+   （`persons` / `person-proposals`）经 `readCollection` / `writeCollection` 读写（键仍在
+   `xiai:v1:` 命名空间下）；**补登记进 `STORAGE_KEYS` 由后续单执行**（已登记为待裁点）。
+   ============================================================================ */
+
+/** 正式印人本机集合键（真实键名 `xiai:v1:persons`；代际登记见本节头注）。 */
+const PERSON_COLLECTION_KEY = 'persons'
+
+/** 印人提案 / 审核行本机集合键（真实键名 `xiai:v1:person-proposals`）。 */
+const PERSON_PROPOSAL_COLLECTION_KEY = 'person-proposals'
+
+/** 读正式印人行（云模式 ⇒ 云端快照；否则本机）。 */
+export function listPersonRows() {
+  return readCollection(PERSON_COLLECTION_KEY, [])
+}
+
+/** 写正式印人行（**仅采纳路径调用**；低层无直写入口）。 */
+export function savePersonRows(rows) {
+  return writeCollection(PERSON_COLLECTION_KEY, rows)
+}
+
+/** 读印人提案行。 */
+export function listPersonProposalRows() {
+  return readCollection(PERSON_PROPOSAL_COLLECTION_KEY, [])
+}
+
+/** 写印人提案行。 */
+export function savePersonProposalRows(rows) {
+  return writeCollection(PERSON_PROPOSAL_COLLECTION_KEY, rows)
+}
+
+/** 取数组首非空文本（`字` / `号` 等数组的取首值口径）。 */
+function firstTextOf(list) {
+  if (!Array.isArray(list)) return ''
+  const hit = list.find((item) => hasText(item))
+  return hit ? String(hit) : ''
+}
+
+/**
+ * **印人显示名派生（单点，冻结；§2「派生不落盘」）**：
+ *   `family_name + given_name` → 缺则 `courtesy_names[0]`（字）→ 缺则 `art_names[0]`（号）→
+ *   皆空 ⇒ `''`（上屏一律回「佚名」）。
+ * **落第二份显示名 ⇒ 判负**：本函数是**唯一**派生点，**不得**在 persons 行或印章行落
+ * 第二份显示名 / 引用副本。
+ * @param {object|null} row 印人行
+ * @returns {string} 派生显示名（皆空 ⇒ `''`）
+ */
+export function personDisplayName(row) {
+  if (!row || typeof row !== 'object') return ''
+  const family = hasText(row.family_name) ? String(row.family_name) : ''
+  const given = hasText(row.given_name) ? String(row.given_name) : ''
+  const full = `${family}${given}`
+  if (full) return full
+  const courtesy = firstTextOf(row.courtesy_names)
+  if (courtesy) return courtesy
+  return firstTextOf(row.art_names)
+}
+
+/** 按 `id`（或 `code`）取正式印人行（未命中 ⇒ `null`）。 */
+export function personById(personId) {
+  const id = personId === null || personId === undefined ? '' : String(personId).trim()
+  if (!id) return null
+  return (
+    listPersonRows().find(
+      (row) => row && (String(row.id || '') === id || String(row.code || '') === id)
+    ) || null
+  )
+}
+
+/** 该 id 是否指向库中既有正式印人（**引用值域门**用；纯读）。 */
+export function personExistsById(personId) {
+  return personById(personId) !== null
+}
+
+/**
+ * **作者引用值域门（§4.1｜写前判定 ＋ 零写入）**：非空引用必须指向库中**既有**正式印人。
+ * 空值 ⇒ 合法（作者**选填**）。reason 取**既有冻结字面值**（`NOT_FOUND`）——**不新增任何
+ * reason 字面值**（沿 §3.12.10 / §3.25.10 冻结表）。
+ * @returns {null|{ok:false, reason:'NOT_FOUND', message:string}} 放行 ⇒ `null`
+ */
+export function personReferenceDenial(personId) {
+  const id = personId === null || personId === undefined ? '' : String(personId).trim()
+  if (!id) return null
+  if (personExistsById(id)) return null
+  return {
+    ok: false,
+    reason: 'NOT_FOUND',
+    message:
+      `作者所引用的印人（${id}）在庫中不存在 ⇒ 已拒絕寫入；` +
+      '請改選既有印人，或先提交印人提案、經管理員審覈通過後再選。'
+  }
+}
+
+/**
+ * **作者显示名解析（§4.1｜单点，冻结）**：
+ *   `author_person_id` → **命中**（印人存在且有派生显示名）⇒ `xiai_persons.display_name` →
+ *   **未命中** ⇒ 旧 `author` 自由文本 → 皆空 ⇒「佚名」。
+ * **解析恰一处、零第二套名表**；卡片 / 详情 / 导出（`sealExport.js`）/ 文本导出（`utils/file.js`）
+ * **一律经本函数**取名，**不得各自再实现一套**。
+ * @param {object|null} row 印面行 / 印章行（带可空 `author_person_id` 与历史 `author` 文本）
+ * @returns {string} 印人显示名 / 旧作者文本 /「佚名」
+ */
+export function resolveAuthorName(row) {
+  const pid = row ? row.author_person_id : ''
+  const id = pid === null || pid === undefined ? '' : String(pid).trim()
+  if (id) {
+    const person = personById(id)
+    const derived = person ? personDisplayName(person) : ''
+    if (derived) return derived
+  }
+  const legacy = row ? row.author : ''
+  return hasText(legacy) ? String(legacy) : '佚名'
+}
+
+/** 由既有印人行派生**下一个印人编号**：`PR` ＋ 9 位零填充（跳过已占用；只认 `^PR\d{9}$`）。 */
+export function nextPersonCode(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  let max = 0
+  list.forEach((row) => {
+    const matched = /^PR(\d{9})$/.exec(String((row && row.code) || ''))
+    if (matched) max = Math.max(max, Number(matched[1]))
+  })
+  const taken = new Set(list.map((row) => String((row && row.code) || '')))
+  let index = max + 1
+  while (taken.has(formatPersonCode(index))) index += 1
+  return formatPersonCode(index)
+}
+
 export function listPhotoRows() {
   return readCollection(STORAGE_KEYS.photos, [])
 }
@@ -2364,6 +2502,7 @@ const SEAL_INSERT_INPUT_FIELDS = [
   'material', // 印章级固定属性（R-32 移入）
   'shape', // 印章级固定属性（R-22）
   'author',
+  'author_person_id', // **印面「作者」＝ 引用型（person-model §4.1）**：选填、填则必须指向既有印人
   'transcription',
   'seal_style', // 旧键：风格（与印面级 `face_style` 不是同一口径，R-31）
   'style'
@@ -2393,6 +2532,7 @@ const FACE_INSERT_INPUT_FIELDS = [
   'seal_class', // 【大類】（**印面级**新键，别名为 sealClass）
   'sealClass',
   'author',
+  'author_person_id', // **印面「作者」＝ 引用型（person-model §4.1）**：选填、填则必须指向既有印人
   'transcription'
 ]
 
@@ -2483,6 +2623,9 @@ function normalizeSealPayload(payload = {}) {
     /* 形制（R-22）：**印章级固定属性、自由文本**（与「材质」同待遇；可空）。 */
     shape: pickText(payload, ['shape']),
     author: pickText(payload, ['author']),
+    /* **作者引用型（person-model §4.1）**：新键 `author_person_id`（印面级；选填）。
+       值域门由各入口在写之前判（`personReferenceDenial`），此处只归一取值。 */
+    authorPersonId: pickText(payload, ['author_person_id']),
     /* R-59：【印文简体字】已退役，本归一器不再产出该字段（入口键面里也已无该键
        ⇒ 调用方仍传会被 `assertKnownKeys` 判 `INVALID_FIELD`，不静默丢弃）。 */
     transcription: pickText(payload, ['transcription']),
@@ -2670,6 +2813,10 @@ export function insertSealRow(actor, payload = {}) {
      （既有行的旧值不受影响，本门只拦新写入）。 */
   const contentDenied = faceContentValueDenial(clean.category)
   if (contentDenied) return contentDenied
+  /* 第二道门（person-model §4.1）：**作者引用值域** —— 非空 `author_person_id` 必须指向
+     既有印人；写之前判定 ⇒ 拒绝即零写入。 */
+  const authorDenied = personReferenceDenial(clean.authorPersonId)
+  if (authorDenied) return authorDenied
   const rows = listSealRows()
   const stampId = nextSealStampId(rows)
   const at = nowIso()
@@ -2690,6 +2837,8 @@ export function insertSealRow(actor, payload = {}) {
     review_status: 'APPROVED', // 管理员上传即生效（与实物照片同口径，不进审核队列）
     /* R-59：不写【印文简体字】键（逐键输出无该键）。 */
     author: clean.author,
+    /* **作者引用型（person-model §4.1）**：印章行落可空引用（**旧 author 文本一字不改**）。 */
+    author_person_id: clean.authorPersonId,
     source: MANUAL_SOURCE,
     uploaded_by: actor.id,
     created_at: at,
@@ -2888,12 +3037,17 @@ export async function insertFaceRow(actor, payload = {}) {
     dynasty: sealRow.dynasty,
     type: sealRow.seal_type,
     author: sealRow.author,
+    author_person_id: sealRow.author_person_id, // 作者引用型（§4.1）：随印章行继承（可空）
     transcription: sealRow.transcription
   }
   const explicit = { ...payload }
   /* 旧键 `name` 仅作兼容别名：显式给了就按印文等同处理，且**优先于继承值**。 */
   if (explicit.seal_name === undefined && explicit.name !== undefined) explicit.seal_name = explicit.name
   const clean = normalizeSealPayload({ ...inherit, ...explicit })
+  /* 第二道门（person-model §4.1）：**作者引用值域**（显式传入优先、缺则继承）——
+     非空引用必须指向既有印人；写之前判定 ⇒ 拒绝即零写入。 */
+  const personDenied = personReferenceDenial(clean.authorPersonId)
+  if (personDenied) return personDenied
   const missing = missingSealFields(clean)
   if (missing.length > 0) {
     return { ok: false, reason: 'MISSING_REQUIRED', missing, message: `請補全必填項：${missing.join('、')}` }
@@ -2955,6 +3109,8 @@ export async function insertFaceRow(actor, payload = {}) {
     face_style: clean.faceStyle, // 印面风格（R-31：新键，印面级）
     seal_class: clean.sealClass, // 印章大類（**印面级**新键；**无回落**，空值即落空串）
     author: clean.author,
+    /* **作者引用型（person-model §4.1）**：印面行落可空引用（**旧 author 文本一字不改**）。 */
+    author_person_id: clean.authorPersonId,
     transcription: clean.transcription,
     source: MANUAL_SOURCE,
     uploaded_by: actor.id,
@@ -3156,6 +3312,10 @@ export async function createSealWithFaceRows(actor, payload = {}) {
     const classDenied = sealClassValueDenial(clean.sealClass)
     if (classDenied) return classDenied
   }
+  /* 第二道门（person-model §4.1）：**作者引用值域** —— 非空 `author_person_id` 必须指向
+     既有印人；在任何副作用（影像解析 / 落盘）之前判定 ⇒ 拒绝即零写入。 */
+  const authorRefDenied = personReferenceDenial(clean.authorPersonId)
+  if (authorRefDenied) return authorRefDenied
   const faceInput = payload.faceImage !== undefined ? payload.faceImage : payload.image
   if (faceInput === undefined || faceInput === null || faceInput === '') {
     return { ok: false, reason: 'MISSING_REQUIRED', missing: ['印面圖'], message: '請補全必填項：印面圖' }
@@ -3225,6 +3385,8 @@ export async function createSealWithFaceRows(actor, payload = {}) {
       face_style: clean.faceStyle, // 印面风格（R-31）：新键，印面级
       seal_class: clean.sealClass, // 印章大類（**印面级**新键；**无回落**）
       author: clean.author,
+      /* **作者引用型（person-model §4.1）**：新建印面落可空引用。 */
+      author_person_id: clean.authorPersonId,
       transcription: clean.transcription,
       source: MANUAL_SOURCE,
       uploaded_by: actor.id,

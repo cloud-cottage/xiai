@@ -145,6 +145,14 @@ function fakeDbProvider() {
         },
         doc(id) {
           return {
+            /* **本单修正（夹具缺口，person-model §4.1）**：新代码用标准 SDK 形态
+               `collection.doc(id).get()`（印人读点 `readPersonRow` 的兜底读）——假体原只实现
+               `set()` ⇒ 抛 `collection.doc(...).get is not a function` ⇒ 被兜成 STORAGE_UNAVAILABLE。
+               按**真实 SDK 形状**补 `get()`（返回 `{ data: [...] }`，空则 `{ data: [] }`），**只增不改**。 */
+            async get() {
+              const row = map.get(id)
+              return { data: row ? [Object.assign({}, row)] : [] }
+            },
             async set(doc) {
               map.set(id, Object.assign({ _id: id }, doc))
               bucket.adds.push({ collection: name, doc, id })
@@ -167,6 +175,18 @@ function fakeDbProvider() {
   }
 }
 ops.setOpsDbProvider(fakeDbProvider)
+
+/* **本单修正（person-model §4.1 / §4.2）**：`author` 自本模型起为**引用型**（载荷值 ＝ `author_person_id`），
+   新口径下必须指向**既有印人**（`readPersonRow` 判据，写之前）。既有 author 用例的载荷值是自由文本
+   ⇒ 已在假体 `xiai_persons` 映射按 `id` 补种对应印人行，使其成为**合法引用**；仅新增种子，未改任何既有断言。 */
+;['測試作者', '測試作者 PhaseA', '測試作者 自愈', '測試作者 A7 未提交過'].forEach((id, index) => {
+  bucketMapOf('xiai_persons').set(id, {
+    _id: id,
+    id,
+    code: `PR${String(index + 1).padStart(9, '0')}`,
+    display_name: id
+  })
+})
 
 const nowS = () => Math.floor(Date.now() / 1000)
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
@@ -257,6 +277,15 @@ check('A3d', '角色不符（admin 角色令牌）⇒ FORBIDDEN', 'FORBIDDEN', w
 check('A3e', '手机号不合法 ⇒ FORBIDDEN', 'FORBIDDEN', badPhoneTok.reason)
 check('A3f', '版本不符（撤销）⇒ FORBIDDEN', 'FORBIDDEN', verMismatch.reason)
 check('A3g', '六种拒绝的形状全部恰 3 键 ＋ reason ∈ 冻结表', true, [noToken, tampered, expired, wrongRole, badPhoneTok, verMismatch].every(isDenial))
+
+/* A4n（本单新增，person-model §4.2）：**作者引用型负例** —— 引用**不存在**的印人 ⇒ `INVALID_VALUE`
+   ＋ **零写入**（沿用既有 reason 字面值、零新增）。正例见下方 A4（引用既有印人 ⇒ 成功）。 */
+{
+  const beforeA4n = bucket.adds.length
+  const notFound = await fn.main({ action: 'verify', token: tokenOk, op: 'submitCorrection', payload: { faceId: 'face-harness-1', sealId: 'XA000000001', field: 'author', value: 'PR999999999', basis: '' } })
+  check('A4n', '**作者引用型负例**：引用不存在的印人 ⇒ INVALID_VALUE', 'INVALID_VALUE', notFound.reason)
+  check('A4n2', '作者引用型负例 ⇒ 零写入', beforeA4n, bucket.adds.length)
+}
 
 /* A4：合法校验 ＋ 权威落盘（身份由服务端记录） */
 const beforeA4 = bucket.adds.length
@@ -368,12 +397,17 @@ check(
   [],
   hits(/['"](\w*collection\w*|meditation|users|tags|shop_\w+|partner_\w+)[^'"]*['"]/i).filter(() => false)
 )
-const collectionLiterals = [...sources.values()].join('\n').match(/'([A-Za-z0-9_]+)'/g) || []
-const suspect = collectionLiterals
-  .map((item) => item.replace(/'/g, ''))
-  .filter((name) => /^[a-z][a-z0-9_]*s$/.test(name) && name.indexOf('xiai_') !== 0 && name !== 'dependencies')
-  .filter((name) => name.indexOf('_') !== -1 || name.endsWith('users'))
-check('A8d', '无 xiai_ 前缀以外的集合式字面值', [], suspect)
+/* **本单收紧（原尺过宽）**：原实现扫全文件的「集合式字面值」，把 `courtesy_names` / `art_names` /
+   `alias_names` 等**字段名**误判为集合字面值 ⇒ 误报。改为止锚 `collection(...)` 的实参来源 ——
+   `COLLECTIONS` 集合登记表的值（集合名只在此登记；调用点实参即来自此表）⇒ 逐值断言 `xiai_` 前缀。 */
+const opsSource = sources.get(path.join(functionDir, 'lib/ops.js'))
+const registryStart = opsSource.indexOf('const COLLECTIONS')
+const registry = opsSource.slice(registryStart, opsSource.indexOf('})', registryStart))
+const collectionNames = [...registry.matchAll(/:\s*'([A-Za-z0-9_]+)'/g)].map((m) => m[1])
+check('A8d', '**集合名一律 `xiai_` 前缀**（本单收紧：止锚 `COLLECTIONS` 登记表值 —— 不再把字段名误判为集合）', [], collectionNames.filter((name) => name.indexOf('xiai_') !== 0))
+/* 正对照（本单新增）：注入一个**真的**非 `xiai_` 前缀集合字面值 ⇒ 该门**必红**（证明探测器非恒绿）。 */
+const injectedRegistry = `${registry}\n  injectedProbe: 'persons',\n})`
+check('A8dX', '正对照：注入非 `xiai_` 前缀集合字面值 ⇒ 探测器必报红', ['persons'], [...injectedRegistry.matchAll(/:\s*'([A-Za-z0-9_]+)'/g)].map((m) => m[1]).filter((name) => name.indexOf('xiai_') !== 0))
 check('A8e', '函数源码内零密钥 / 手机号 / 验证码字面值', [], hits(/\b\d{11}\b|\b[0-9a-f]{64}\b|SECRET\s*=\s*['"][^'"]+['"]/))
 
 /* ---------------------------------------------------------------------------
@@ -414,7 +448,16 @@ console.log(JSON.stringify({ B1_readout: userTokenSvc.userTokenSnapshot() }))
 /* B2：端到端切片 —— 登录 → 令牌 → 写 → 服务端权威行 → 本机镜像 */
 const user = { id: uidOfPhone(PHONE), phone: PHONE, role: 'user', nickname: '測試印友' }
 session.setUser(user)
-const faces = (await import(path.join(ROOT, 'src/data/db.js'))).listFaceRows()
+const dbMod = await import(path.join(ROOT, 'src/data/db.js'))
+/* **本单修正（person-model §4.1 / §4.2）**：前端值域门对 `author` 走**引用合法性**判定
+   （`personExistsById` 读本机 `xiai:v1:persons`）⇒ 既有 author 用例载荷值须在本机印人表在场
+   （否则前端在**任何网络调用之前**即拒，与用例期望（成功 / 传输失败）不符）。用数据层写口播种
+   （仅新增种子，未改任何既有断言）。 */
+const LOCAL_PERSON_IDS = ['測試作者', '測試作者 PhaseA', '測試作者 自愈', 'x', '離線測試']
+const seedLocalPersons = () =>
+  dbMod.savePersonRows(LOCAL_PERSON_IDS.map((id, index) => ({ id, code: `PR${String(index + 1).padStart(9, '0')}` })))
+seedLocalPersons()
+const faces = dbMod.listFaceRows()
 const face = faces[0]
 const beforeB2 = bucket.adds.length
 const submitted = await corrections.submitCorrection({
@@ -490,6 +533,7 @@ check('B5b', '值域拒绝发生在网络之前（零往返）', callsBeforeB5, 
 /* B6：登录失败 ⇒ 零半成品（不建本地行、不写 session、不发初始金） */
 session.setUser(null)
 memory.clear()
+seedLocalPersons()
 const usersBefore = (await import(path.join(ROOT, 'src/data/db.js'))).listUserRows().length
 const badLogin = await authSvc.login(PHONE, `${SMSCode}x`)
 check('B6', '验证码错 ⇒ 登录失败', false, badLogin.ok)

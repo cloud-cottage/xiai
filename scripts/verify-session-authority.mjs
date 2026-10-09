@@ -236,6 +236,11 @@ function seedCorrection() {
     value: '測試作者',
     status: 'PENDING'
   })
+  /* **本单修正（person-model §4.1 / §4.2）**：`author` 自本模型起为**引用型**（载荷值 ＝
+     `author_person_id`）⇒ 既有 author 用例的载荷值须指向**既有印人**。按 `id` 补种印人行，
+     使其成为**合法引用**（`readPersonRow` 按 `id` 命中）；仅新增种子，未改任何既有断言。 */
+  const persons = mapOf('xiai_persons')
+  persons.set('會話路作者', { _id: '會話路作者', id: '會話路作者', code: 'PR000000001', display_name: '會話路作者' })
 }
 function resetWorld() {
   store.writes = []
@@ -566,6 +571,17 @@ check('C1b', '回包身份来源标记 ＝ SESSION', 'SESSION', c1.identity_sour
 check('C1c', '落盘行身份来源标记 ＝ SESSION（additive 新取值）', 'SESSION', c1.row && c1.row.identity_source)
 check('C1d', '落盘行 userId ＝ 平台会话 uid', USER_UID, c1.row && c1.row.user_id)
 check('C1e', '会话路回包不含令牌续期', true, !('renewedToken' in c1))
+
+/* C1n（本单新增，person-model §4.2）：**作者引用型负例** —— 会话路提交引用**不存在**的印人
+   ⇒ `INVALID_VALUE` ＋ **零写入**（正例 ＝ C1 引用既有印人 ⇒ 成功）。 */
+resetWorld()
+currentSession = { uid: USER_UID }
+{
+  const beforeC1n = store.writes.length
+  const c1n = await userFn.main({ action: 'verify', op: 'submitCorrection', payload: { ...VALID_SUBMIT, value: 'PR999999999' } }, {})
+  check('C1n', '**作者引用型负例**：引用不存在的印人 ⇒ INVALID_VALUE', 'INVALID_VALUE', c1n.reason)
+  check('C1n2', '作者引用型负例 ⇒ 零写入', beforeC1n, store.writes.length)
+}
 
 /* C2：会话（user）× admin op ⇒ 角色不足 ⇒ FORBIDDEN ＋ 零写入 */
 resetWorld()

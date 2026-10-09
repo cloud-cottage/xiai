@@ -441,7 +441,10 @@ check('E1', 'REASONS ⊆ 既有冻结表（**新增 reason 字面值 0**）', []
 
 const opsSource = readFileSync(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/ops.js'), 'utf8')
 const opStart = opsSource.indexOf('async ensureDisplayArtifact(')
-const opBody = opStart >= 0 ? opsSource.slice(opStart, opsSource.indexOf('\n  }\n})', opStart)) : ''
+/* **本单修正（切片终点过松）**：新 op 追加在 `ensureDisplayArtifact` 之后 ⇒ 原「到 `\n  }\n})`」的
+   终点会把后续 op 一并纳入（其中含 `plan:`）⇒ 误报。改为取该 op **自身**的闭合边界（优先 `\n  },`）。 */
+const opEndCandidates = [opsSource.indexOf('\n  },\n', opStart), opsSource.indexOf('\n  }\n})', opStart)].filter((i) => i > opStart)
+const opBody = opStart >= 0 ? opsSource.slice(opStart, opEndCandidates.length ? Math.min(...opEndCandidates) : undefined) : ''
 check('E2', 'op 本体：无落盘计划（`plan:` 0）＆ 走 readArtifactBytes ＋ tiffToPng ＋ uploadDisplayArtifactBytes', [false, true, true, true], [opBody.includes('plan:'), opBody.includes('readArtifactBytes'), opBody.includes('tiffToPng'), opBody.includes('uploadDisplayArtifactBytes')])
 
 const cbSource = readFileSync(path.join(ROOT, 'src/data/cloudbase.js'), 'utf8')
