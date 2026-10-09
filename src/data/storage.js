@@ -194,7 +194,22 @@ export const STORAGE_KEYS = {
    * 它是云端 `xiai_person_proposals` 集合的本机镜像；**正式印人只经采纳路径产生**（§2 单写者）。
    * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
    */
-  personProposals: 'person-proposals'
+  personProposals: 'person-proposals',
+  /**
+   * **用途：外部批量導入行（暫存 / PENDING）的本機鏡像**（批 2 前置｜v1.54｜§3.54.14 / §4.1.16 新增；
+   * 写方 ＝ `db.js::savePersonImportRows`（**仅外部导入通道与采纳路径调用**），读方 ＝
+   * `listPersonImportRows` / `personImportBySourceId`）。
+   * 真实键名 `xiai:v1:person-imports`。行 ＝ `{id, batch_id, source, source_person_id,
+   * status, name_full, family_name, given_name, courtesy_names[], art_names[], alias_names[],
+   * birth_year, death_year, native_place, native_place_chs, biography, biography_chs,
+   * nationality, cbdb_id, source_id, imported_by, imported_at, reviewed_at, reviewer_id,
+   * review_note}`；`status` 恰三态单向终态不回退（§3.54.14）；身份类键（`imported_by` /
+   * `reviewer_id`）**零手机号**（沿 §3.49）。
+   * 它是云端 `xiai_person_imports` 集合的本机镜像；**本集合与 `persons` 皆单写者**
+   * （只经采纳路径写；不开放任何直写入口，含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  personImports: 'person-imports'
 }
 
 /* ============================================================================

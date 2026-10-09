@@ -736,7 +736,16 @@ export const PERSON_FIELDS = [
   'dynasty',
   'gender',
   'cbdb_id',
-  'card_id'
+  'card_id',
+  /* **批 2 前置（v1.54｜§3.54.13 / §4.1.14 表下注（v1.54））**：A 支 `xiai_persons` 扩四字段
+     ＋ 两繁简副字段。**繁体为正字段、简体入 `*_chs` 副字段；不做任何转换改写**；
+     `source` / `source_id` 为元数据、**无繁简面**。四字段**只经采纳路径写**（值来自导入行）。 */
+  'native_place',
+  'biography',
+  'source',
+  'source_id',
+  'native_place_chs',
+  'biography_chs'
 ]
 
 /**
@@ -761,4 +770,93 @@ export const PERSON_PROPOSAL_STATUS = {
   PENDING: 'PENDING',
   ACCEPTED: 'ACCEPTED',
   REJECTED: 'REJECTED'
+}
+
+/* ============================================================================
+   **印人批 2 前置增量：外部批量导入通道（v1.54｜§3.54.13 〜 §3.54.18 ＋ §4.1.16）**
+   ----------------------------------------------------------------------------
+   外部批量导入先落暂存集合 `xiai_person_imports` 的 `PENDING` 行；管理员批量采纳
+   （`PENDING → ACCEPTED`）⇒ **幂等**落 `xiai_persons`（按 `source_person_id` 幂等）；
+   `REJECTED` ⇒ **零写入**。两集合皆**单写者**（不开放任何直写入口，含管理员直写）。
+   **本常量区只落「集合名 / 字段真源 / 三态枚举 / 键前缀」**；读写、幂等键、直写门在
+   `data/db.js`；云侧读面在 `data/cloudbase.js`；写通道在 `services/persons.js` ＋ 云函数。
+   本增量**零新增 `reason` 字面值**（值域 / 形态校验若有，一律沿用既有冻结表）。
+   ============================================================================ */
+
+/** 外部批量导入暂存集合名（`xiai_` 前缀；逐字，云控制台新建的集合须与此逐字一致）。 */
+export const XIAI_PERSON_IMPORTS_COLLECTION = 'xiai_person_imports'
+
+/** 导入行文档键前缀（确定性 / 可读）。 */
+export const PERSON_IMPORT_ID_PREFIX = 'pi-'
+
+/** 导入行三态（**恰三态、单向、终态不回退**；与提案三态逐字同形）。 */
+export const PERSON_IMPORT_STATUS = {
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+}
+
+/**
+ * **导入行行级元数据字段（§4.1.16）**：行主键 / 批次 / 来源 / 幂等键 / 状态 / 导入与审核留痕。
+ * 身份类键（`imported_by` / `reviewer_id`）**一律落不透明 uid、零手机号**（沿 §3.49）。
+ */
+export const PERSON_IMPORT_ROW_FIELDS = [
+  'id',
+  'batch_id',
+  'source',
+  'source_person_id',
+  'status',
+  'imported_by',
+  'imported_at',
+  'reviewed_at',
+  'reviewer_id',
+  'review_note'
+]
+
+/**
+ * **导入行归一化载荷字段（§4.1.16「归一化载荷」；同 feicui 侧归一化面）**。
+ *   - 姓 / 名 / 字 / 号 / 别名：文本 / **数组**（沿 §4.1.14 提交面同形）；
+ *   - 生卒：**公元整数**（「不详」＝`null`，不设特值）；
+ *   - `native_place`（＋`_chs`）/ `biography`（＋`_chs`）：**繁体为正、简体入 `*_chs`**；
+ *   - `nationality` / `name_full`：**只落导入行、不落 person**（除非人类另裁）；
+ *   - `source` / `source_id`：元数据；行级另有同名字段（本处为载荷面副本）。
+ */
+export const PERSON_IMPORT_PAYLOAD_FIELDS = [
+  'name_full',
+  'family_name',
+  'given_name',
+  'courtesy_names',
+  'art_names',
+  'alias_names',
+  'birth_year',
+  'death_year',
+  'native_place',
+  'native_place_chs',
+  'biography',
+  'biography_chs',
+  'nationality',
+  'cbdb_id',
+  'source_id'
+]
+
+/**
+ * **导入行字段真源（全集；恰一处定义点）** ＝ 行级元数据 ＋ 归一化载荷。
+ * **不得在别处另立第二套同义字段**（沿「真值函数是唯一尺子」精神）。
+ */
+export const PERSON_IMPORT_FIELDS = [...PERSON_IMPORT_ROW_FIELDS, ...PERSON_IMPORT_PAYLOAD_FIELDS]
+
+/**
+ * 导入一行「值的默认」：数组键 ⇒ `[]`；生卒 ⇒ `null`；其余 ⇒ `''`（缺省一律空、不设特值）。
+ * @returns {object} 空导入载荷面（**不含 `id` / `status` / 身份 / 时间戳** —— 那些由导入 / 采纳路径系统写）
+ */
+export function emptyPersonImportPayload() {
+  const out = {}
+  const arrayKeys = ['courtesy_names', 'art_names', 'alias_names']
+  const nullKeys = ['birth_year', 'death_year']
+  PERSON_IMPORT_PAYLOAD_FIELDS.forEach((key) => {
+    if (arrayKeys.includes(key)) out[key] = []
+    else if (nullKeys.includes(key)) out[key] = null
+    else out[key] = ''
+  })
+  return out
 }

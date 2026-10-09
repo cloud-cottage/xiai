@@ -64,7 +64,10 @@ const COLLECTIONS = Object.freeze({
   roles: 'xiai_roles',
   /* **印人（person-model §2 / §3）**：正式印人（canonical；**只经采纳路径写**）＋ 提案 / 审核行。 */
   persons: 'xiai_persons',
-  personProposals: 'xiai_person_proposals'
+  personProposals: 'xiai_person_proposals',
+  /* **印人批 2 前置（v1.54｜§3.54.14 / §4.1.16）**：外部批量导入暂存 / PENDING 集合
+     （单写者；只经外部导入通道与采纳路径写；不开放任何直写入口）。 */
+  personImports: 'xiai_person_imports'
 })
 
 /** 勘误三态（与 `src/services/corrections.js::CORRECTION_STATUS` **逐字同值**）。 */
@@ -89,6 +92,18 @@ const PERSON_PROPOSAL_STATUS = Object.freeze({
 
 /** 印人提案审核载荷允许键（**封闭键面**：单号 / 决定 / 理由）。 */
 const PERSON_REVIEW_ALLOWED_KEYS = Object.freeze(['proposal_id', 'decision', 'note'])
+
+/* **印人批 2 前置（v1.54｜§3.54.14 / §3.54.15）**：外部批量导入审核（管理员批量采纳通道）。 */
+
+/** 外部导入行三态（与 `src/services/persons.js::PERSON_IMPORT_STATUS` 逐字同值）。 */
+const PERSON_IMPORT_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+})
+
+/** 外部导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
+const PERSON_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
 
 /** 印人编号前缀（与 `src/data/seed.js::PERSON_CODE_PREFIX` 逐字同值）。 */
 const PERSON_CODE_PREFIX = 'PR'
@@ -395,6 +410,25 @@ async function readPersonProposalRow(proposalId) {
   return null
 }
 
+/**
+ * **外部导入行读点（§3.54.14；只读）**：按业务键 `id` / 文档 `_id` 兜底读导入行。
+ * @param {string} importId
+ * @returns {Promise<{row:object, match:object}|null>}
+ */
+async function readPersonImportRow(importId) {
+  const id = text(importId)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.personImports)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
+  return null
+}
+
 /* ---------------------------------------------------------------------------
    公开投影（**脱敏**：从源行的白名单字段重建，绝不透传整行）
    --------------------------------------------------------------------------- */
@@ -660,6 +694,157 @@ const OPS = Object.freeze({
       person,
       plan: { op: 'reviewPersonProposal', writes }
     }
+  },
+
+  /**
+   * **審核外部導入行（採納 / 駁回；§3.54.15）**：① 載荷鍵面 → ② 批次 / 單行 / 決定值域 / 理由長度 →
+   * ③ 審核人身份（服務端派生）→ ④ 讀導入行（批次或單行；只讀）→
+   * **採納** ⇒ 對每條 `PENDING` 行按 `source_person_id` **冪等**落 `xiai_persons`
+   * （重複採納**不改寫既有行**；幂等键缺失的行**保持 `PENDING` 且零寫入**）；
+   * **駁回** ⇒ **零寫入**（僅導入行狀態）。三態單向、終態不回退。reason 一律沿用既有凍結字面值。
+   * @param {object} payload 载荷（允许键见 `PERSON_IMPORT_REVIEW_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份（唯一来源）
+   * @param {number} nowSeconds 服务端时钟（秒；本函数唯一时源）
+   */
+  async reviewPersonImport(payload, identity, nowSeconds) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => PERSON_IMPORT_REVIEW_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const batchId = text(payload.batch_id)
+    const importId = text(payload.import_id)
+    if (!batchId && !importId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少導入批次號（batch_id）或導入行號（import_id）⇒ 拒絕審覈；本次零寫入。')
+    }
+    const rawDecision = text(payload.decision)
+    const decision = LEGACY_DECISION[rawDecision] || rawDecision
+    if (DECISIONS.indexOf(decision) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `審覈決定「${rawDecision || '（空）'}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回）⇒ 拒絕寫入；本次零寫入。`
+      )
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '駁回理由必須是文字 ⇒ 拒絕審覈；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
+    }
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的審核人身份；本次零寫入。')
+    }
+    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。 */
+    let targets = []
+    if (importId) {
+      const found = await readPersonImportRow(importId)
+      if (found) targets = [found.row]
+    } else {
+      targets = rowsOf(await resolveDb().collection(COLLECTIONS.personImports).where({ batch_id: batchId }).get())
+    }
+    if (targets.length === 0) {
+      return deny(REASONS.NOT_FOUND, `未找到匹配的外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
+    }
+    const accepted = decision === PERSON_IMPORT_STATUS.ACCEPTED
+    const at = new Date(Math.floor(Number(nowSeconds)) * 1000).toISOString()
+    const writes = []
+    const acceptedIds = []
+    const rejectedIds = []
+    const skipped = []
+    const failed = []
+    let personsCache = null
+    const personsOf = async () => {
+      if (personsCache === null) personsCache = rowsOf(await resolveDb().collection(COLLECTIONS.persons).get())
+      return personsCache
+    }
+    for (const row of targets) {
+      const rid = text(row && row.id)
+      const current = text(row && row.status) || PERSON_IMPORT_STATUS.PENDING
+      const privatePatch = { status: decision, reviewed_at: at, reviewer_id: identity.uid }
+      if (!accepted && noteText !== '') privatePatch.review_note = noteText
+      /* 终态不回退：已审行**跳过**（幂等重放场景不改写既有终态）。 */
+      if (current !== PERSON_IMPORT_STATUS.PENDING) {
+        skipped.push(rid)
+        continue
+      }
+      if (!accepted) {
+        writes.push({ collection: COLLECTIONS.personImports, action: 'update', match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
+        rejectedIds.push(rid)
+        continue
+      }
+      const sourceId = text(row && row.source_person_id)
+      if (!sourceId) {
+        /* 幂等键缺失 ⇒ **该行失败、保持 PENDING 且零写入**（不动 person、不改本行）。 */
+        failed.push(rid)
+        continue
+      }
+      const persons = await personsOf()
+      const existing = persons.find((item) => text(item && item.source_person_id) === sourceId)
+      if (!existing) {
+        let max = 0
+        persons.forEach((item) => {
+          const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
+          if (matched) max = Math.max(max, Number(matched[1]))
+        })
+        const taken = new Set(persons.map((item) => text(item && item.code)))
+        let index = max + 1
+        while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
+        const code = `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
+        const person = {
+          id: code,
+          code,
+          family_name: text(row.family_name),
+          given_name: text(row.given_name),
+          courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
+          art_names: Array.isArray(row.art_names) ? row.art_names : [],
+          alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
+          birth_year: row.birth_year === undefined ? null : row.birth_year,
+          death_year: row.death_year === undefined ? null : row.death_year,
+          years_lived: null,
+          birth_era_text: '',
+          death_era_text: '',
+          dynasty: '',
+          gender: '',
+          cbdb_id: text(row.cbdb_id),
+          card_id: '',
+          /* **person 六扩字段（值来自采纳的导入行；不做任何转换改写）**。 */
+          native_place: text(row.native_place),
+          biography: text(row.biography),
+          source: text(row.source),
+          source_id: text(row.source_id),
+          native_place_chs: text(row.native_place_chs),
+          biography_chs: text(row.biography_chs),
+          source_person_id: sourceId, // **幂等键（溯源）**
+          proposal_id: '',
+          created_by: identity.uid,
+          created_at: at,
+          updated_at: at
+        }
+        persons.push(person)
+        writes.push({ collection: COLLECTIONS.persons, action: 'set', id: code, doc: person })
+      }
+      writes.push({ collection: COLLECTIONS.personImports, action: 'update', match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
+      acceptedIds.push(rid)
+    }
+    return {
+      ok: true,
+      op: 'reviewPersonImport',
+      accepted,
+      accepted_ids: acceptedIds,
+      rejected_ids: rejectedIds,
+      skipped,
+      failed,
+      plan: { op: 'reviewPersonImport', writes }
+    }
   }
 })
 
@@ -716,11 +901,15 @@ module.exports = {
   PUBLIC_PROJECTION_KEYS,
   PUBLIC_SCHEMA,
   PUBLIC_ID_PREFIX,
+  /* 外部批量導入審核面（批 2 前置 §3.54.14 / §3.54.15；供离线自检直接断言）。 */
+  PERSON_IMPORT_REVIEW_ALLOWED_KEYS,
+  PERSON_IMPORT_STATUS,
   OPS,
   setOpsDbProvider,
   opsDbInjected,
   resolveDb,
   readCorrectionRow,
+  readPersonImportRow,
   readRoleRow,
   IDENTITY_SOURCES,
   isSessionIdentity,

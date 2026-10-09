@@ -56,7 +56,10 @@ export const CLOUD_COLLECTIONS = Object.freeze({
   persons: 'xiai_persons',
   /* 印人提案 / 审核行集合（提交＝登录用户、采纳 / 驳回＝管理员）。本机镜像键见
      `data/db.js` 的 `person-proposals`。 */
-  personProposals: 'xiai_person_proposals'
+  personProposals: 'xiai_person_proposals',
+  /* **印人批 2 前置（v1.54｜§3.54.14 / §4.1.16）**：外部批量导入暂存/ PENDING 集合
+     （单写者；只经外部导入通道与采纳路径写）。本机镜像键见 `data/db.js` 的 `person-imports`。 */
+  personImports: 'xiai_person_imports'
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */
@@ -440,7 +443,10 @@ export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze([
   'correctionsPublic',
   'correctionSummaries',
   'persons',
-  'personProposals'
+  'personProposals',
+  /* **印人批 2 前置（v1.54）**：`personImports` 亦为**待人工新建**的集合 ——
+     集合未建立 / 尚未接线时云端恒 0 行；若判可疑会让整站回落本地种子 ⇒ 一律恒走诚实空态。 */
+  'personImports'
 ])
 
 /**
@@ -710,6 +716,14 @@ export function normalizePersonRow(doc, options = {}) {
     gender: text(row.gender),
     cbdb_id: text(row.cbdb_id),
     card_id: text(row.card_id),
+    /* **批 2 前置（v1.54｜§3.54.13 / §4.1.14 表下注（v1.54））**：四扩字段 ＋ 两繁简副字段。
+       归一为**文本**（NULL / 缺键 ⇒ `''`）；**不做任何繁简转换改写**（繁体为正、简体入 `*_chs`）。 */
+    native_place: text(row.native_place),
+    biography: text(row.biography),
+    source: text(row.source),
+    source_id: text(row.source_id),
+    native_place_chs: text(row.native_place_chs),
+    biography_chs: text(row.biography_chs),
     proposal_id: text(row.proposal_id),
     created_by: text(row.created_by),
     created_at: text(row.created_at),
@@ -752,6 +766,52 @@ export function normalizePersonProposalRow(doc, options = {}) {
   }
 }
 
+/**
+ * **外部批量导入行**（`xiai_person_imports` → 本机 `person-imports` 行形状；批 2 前置 §3.54.14 / §4.1.16）。
+ * 归一（只做空值 / 数组 / 整数归一，**不做业务值改写、不做繁简转换**）：
+ *   · `id` / `batch_id` / `source` / `source_person_id` / 时间戳 ⇒ 文本（NULL ⇒ `''`）；
+ *   · 姓 / 名 / 号 / 籍贯 / 传记（＋`*_chs`）/ `nationality` / `cbdb_id` / `source_id` ⇒ 文本；
+ *   · `字` / `号` / `别名` ⇒ **字符串数组**（缺键 / 非数组 ⇒ `[]`）；
+ *   · 生卒 ⇒ 整数或 `null`（「不详」＝`null`，**不设特值**）；
+ *   · `status` **缺键 ⇒ `PENDING`**（恰三态；显式给了别的状态值则逐字保留）；
+ *   · `imported_by` / `reviewer_id` 是**不透明 uid**（**零手机号**）。
+ * **不产出任何派生显示名**（显示名派生单点仍是 `data/db.js::personDisplayName`）。
+ */
+export function normalizePersonImportRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const id = text(firstOf(row.id, row._id))
+  const asArray = (value) => (Array.isArray(value) ? value.map((item) => text(item)).filter((item) => item !== '') : [])
+  return {
+    ...row,
+    _id: text(row._id),
+    id,
+    batch_id: text(row.batch_id),
+    source: text(row.source),
+    source_person_id: text(row.source_person_id),
+    status: text(firstOf(row.status, 'PENDING')),
+    name_full: text(row.name_full),
+    family_name: text(row.family_name),
+    given_name: text(row.given_name),
+    courtesy_names: asArray(row.courtesy_names),
+    art_names: asArray(row.art_names),
+    alias_names: asArray(row.alias_names),
+    birth_year: intOrNull(row.birth_year),
+    death_year: intOrNull(row.death_year),
+    native_place: text(row.native_place),
+    native_place_chs: text(row.native_place_chs),
+    biography: text(row.biography),
+    biography_chs: text(row.biography_chs),
+    nationality: text(row.nationality),
+    cbdb_id: text(row.cbdb_id),
+    source_id: text(row.source_id),
+    imported_by: text(row.imported_by),
+    imported_at: text(row.imported_at),
+    reviewed_at: text(row.reviewed_at),
+    reviewer_id: text(row.reviewer_id),
+    review_note: text(row.review_note)
+  }
+}
+
 const NORMALIZERS = Object.freeze({
   seals: normalizeSealRow,
   faces: normalizeFaceRow,
@@ -759,7 +819,8 @@ const NORMALIZERS = Object.freeze({
   correctionsPublic: normalizePublicCorrectionRow,
   correctionSummaries: normalizeCorrectionSummaryRow,
   persons: normalizePersonRow,
-  personProposals: normalizePersonProposalRow
+  personProposals: normalizePersonProposalRow,
+  personImports: normalizePersonImportRow
 })
 
 /* ---------------------------------------------------------------------------

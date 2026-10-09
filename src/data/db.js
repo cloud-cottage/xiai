@@ -1726,6 +1726,69 @@ export function savePersonProposalRows(rows) {
   return writeCollection(PERSON_PROPOSAL_COLLECTION_KEY, rows)
 }
 
+/* ---------------------------------------------------------------------------
+   **印人批 2 前置（v1.54｜§3.54.14 〜 §3.54.16 / §4.1.16）：外部批量导入行 ＋ 单写者门**
+   ---------------------------------------------------------------------------
+   · `xiai_person_imports` 的**本机镜像**（键 `person-imports`）：只经「外部批量导入」通道与
+     采纳路径写 —— 低层读取 / 写入助手**仅供该通道调用**，**不开放任何直写入口**；
+   · 幂等键 ＝ `source_person_id`（采纳落 `xiai_persons` 时按它幂等；重复采纳**不改写既有行**）；
+   · **直写门**：任何绕过导入通道 / 采纳路径的直写（含**管理员直写**）一律
+     `FORBIDDEN` ＋ **零写入**（沿 §3.54.3 / §3.54.16）。
+   --------------------------------------------------------------------------- */
+
+/** 外部导入行本机集合键（真实键名 `xiai:v1:person-imports`）。 */
+const PERSON_IMPORT_COLLECTION_KEY = 'person-imports'
+
+/** 读外部导入行（云模式 ⇒ 云端快照；否则本机）。 */
+export function listPersonImportRows() {
+  return readCollection(PERSON_IMPORT_COLLECTION_KEY, [])
+}
+
+/** 写外部导入行（**仅外部导入通道与采纳路径调用**；低层无直写入口）。 */
+export function savePersonImportRows(rows) {
+  return writeCollection(PERSON_IMPORT_COLLECTION_KEY, rows)
+}
+
+/**
+ * **两集合的单写者面（硬要求｜§3.54.3 / §3.54.14 / §3.54.16）**：`xiai_persons` 与
+ * `xiai_person_imports` **均只经采纳路径 / 外部导入通道写** —— **不开放任何直写入口**
+ * （**含管理员直写**）。任何试图「直接写这两集合」的入口经本门 ⇒ `FORBIDDEN` ＋ **零写入**。
+ * 返回值恒为 `null`（该键不属单写者集合，交由既有读写路径）或结构化拒绝对象。
+ * @param {string} collectionKey 集合键（`persons` / `person-imports`）
+ * @returns {null|{ok:false, reason:'FORBIDDEN', message:string}} 放行 ⇒ `null`
+ */
+export function personDirectWriteDenial(collectionKey) {
+  const key = collectionKey === null || collectionKey === undefined ? '' : String(collectionKey).trim()
+  if (key === PERSON_COLLECTION_KEY || key === PERSON_IMPORT_COLLECTION_KEY) {
+    return {
+      ok: false,
+      reason: 'FORBIDDEN',
+      message:
+        `集合（${key}）為單寫者：只經採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
+        '（含管理員直寫）⇒ 已拒絕；本次零寫入。'
+    }
+  }
+  return null
+}
+
+/** 按 `source_person_id` 取正式印人行（**采纳幂等键**；未命中 ⇒ `null`）。 */
+export function personBySourceId(sourcePersonId) {
+  const id = sourcePersonId === null || sourcePersonId === undefined ? '' : String(sourcePersonId).trim()
+  if (!id) return null
+  return (
+    listPersonRows().find((row) => row && String(row.source_person_id || '') === id) || null
+  )
+}
+
+/** 按 `source_person_id` 取导入行（幂等 / 去重用；未命中 ⇒ `null`）。 */
+export function personImportBySourceId(sourcePersonId) {
+  const id = sourcePersonId === null || sourcePersonId === undefined ? '' : String(sourcePersonId).trim()
+  if (!id) return null
+  return (
+    listPersonImportRows().find((row) => row && String(row.source_person_id || '') === id) || null
+  )
+}
+
 /** 取数组首非空文本（`字` / `号` 等数组的取首值口径）。 */
 function firstTextOf(list) {
   if (!Array.isArray(list)) return ''

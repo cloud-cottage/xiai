@@ -36,9 +36,15 @@ import {
   savePersonProposalRows,
   personById,
   personDisplayName,
-  nextPersonCode
+  nextPersonCode,
+  /* **批 2 前置（v1.54）**：外部批量导入行的读 / 写 ＋ 幂等键 ＋ 单写者门。 */
+  listPersonImportRows,
+  savePersonImportRows,
+  personBySourceId,
+  personImportBySourceId,
+  personDirectWriteDenial
 } from '../data/db.js'
-import { PERSON_PROPOSAL_STATUS, emptyPersonFields } from '../data/seed.js'
+import { PERSON_PROPOSAL_STATUS, emptyPersonFields, PERSON_IMPORT_STATUS, PERSON_IMPORT_ID_PREFIX, emptyPersonImportPayload } from '../data/seed.js'
 /* **登录令牌写面门（同一通道）**：与 `corrections.js` / `endorsements.js` / `admin.js` 的写 op
    一律经 `userWriteGate` —— 先保证有一枚可携带的令牌（必要时静默补签），再过云端门
    （`xiai-user-token` 的 `verify`）。**身份由服务端从令牌派生**，载荷里的身份类键由服务端拒。 */
@@ -483,3 +489,335 @@ function mirrorPersonProposalFromAuthority(serverRow) {
   savePersonProposalRows(next)
   return merged
 }
+
+/* ============================================================================
+   **印人批 2 前置（v1.54｜§3.54.13 〜 §3.54.16 / §4.1.16）：外部批量导入通道 ＋ 管理员批量采纳通道**
+   ----------------------------------------------------------------------------
+   · 导入（提交）＝ **外部批量导入通道**（服务端 / 采集侧）：经 `userWriteGate('submitPersonImport', …)`
+     落 `xiai_person_imports` 的 `PENDING` 行（**幂等键 `source_person_id`**；重复导入不改写既有行）。
+   · 采纳 / 驳回 ＝ **管理员**（登录令牌 ＋ 手机号白名单，沿 §3.48；缺 env ⇒ 安全拒 ＋ 零写入）。
+     `ACCEPTED` ⇒ **幂等**落 `xiai_persons`（按 `source_person_id` 幂等；重复采纳**不改写既有行**，
+     并带上 person 六扩字段）；`REJECTED` ⇒ **零写入**（仅导入行状态）。三态单向、终态不回退。
+   · **采纳粒度（W-77 拟案）**：**两个入口都实现** —— 按批次（`batchId`）与按单行（`importId`）；
+     部分失败 ⇒ **失败行保持 `PENDING` 且零写入**、成功行落库；成功面**可重放且幂等**。
+   · **零新增 `reason` 字面值**（一律沿用既有冻结表）。
+   ============================================================================ */
+
+/** 导入行三态（转发真源 `seed.js::PERSON_IMPORT_STATUS`；单向、终态不回退）。 */
+export const PERSON_IMPORT_STATUS_EXPORT = PERSON_IMPORT_STATUS
+
+/** 当前（或指定）账号是否可审核外部导入批次 —— 供 `/my/corrections` 决定是否渲染采纳 / 驳回。 */
+export function canReviewPersonImports(actor) {
+  const who = actor || currentUser()
+  return who !== null && who !== undefined && who.role === 'admin'
+}
+
+/** 归一化载荷 → 导入行载荷面（数组 / 整数 / 文本；**不做繁简转换**）。 */
+function normalizeImportPayload(source) {
+  const src = source && typeof source === 'object' ? source : {}
+  return {
+    name_full: String(src.name_full || '').trim(),
+    family_name: String(src.family_name || '').trim(),
+    given_name: String(src.given_name || '').trim(),
+    courtesy_names: toArray(src.courtesy_names),
+    art_names: toArray(src.art_names),
+    alias_names: toArray(src.alias_names),
+    birth_year: toIntOrNull(src.birth_year),
+    death_year: toIntOrNull(src.death_year),
+    native_place: String(src.native_place || ''),
+    native_place_chs: String(src.native_place_chs || ''),
+    biography: String(src.biography || ''),
+    biography_chs: String(src.biography_chs || ''),
+    nationality: String(src.nationality || '').trim(),
+    cbdb_id: String(src.cbdb_id || '').trim(),
+    source_id: String(src.source_id || '').trim()
+  }
+}
+
+/** 导入行 → person 行（**采纳落行**：带上 person 四扩字段 ＋ 两副字段 ＋ 幂等键 `source_person_id`）。 */
+function buildPersonRowFromImport(importRow, persons, actor, at) {
+  const code = nextPersonCode(persons)
+  return {
+    id: code,
+    code,
+    ...emptyPersonFields(),
+    family_name: String((importRow && importRow.family_name) || ''),
+    given_name: String((importRow && importRow.given_name) || ''),
+    courtesy_names: toArray(importRow && importRow.courtesy_names),
+    art_names: toArray(importRow && importRow.art_names),
+    alias_names: toArray(importRow && importRow.alias_names),
+    birth_year: toIntOrNull(importRow && importRow.birth_year),
+    death_year: toIntOrNull(importRow && importRow.death_year),
+    cbdb_id: String((importRow && importRow.cbdb_id) || ''),
+    card_id: '',
+    /* **person 六扩字段（值来自采纳的导入行；不做任何转换改写）**。 */
+    native_place: String((importRow && importRow.native_place) || ''),
+    biography: String((importRow && importRow.biography) || ''),
+    source: String((importRow && importRow.source) || ''),
+    source_id: String((importRow && importRow.source_id) || ''),
+    native_place_chs: String((importRow && importRow.native_place_chs) || ''),
+    biography_chs: String((importRow && importRow.biography_chs) || ''),
+    source_person_id: String((importRow && importRow.source_person_id) || ''), // **幂等键（溯源）**
+    proposal_id: '', // 导入通道产出（非提案通道）⇒ 空
+    created_by: actor && actor.id ? actor.id : '', // **不透明 uid；零手机号**
+    created_at: at,
+    updated_at: at
+  }
+}
+
+/* ------------------------------ 导入：提交（外部通道） ------------------------------ */
+
+/**
+ * **提交外部导入行**（导入通道；任何登录用户。§3.54.14 / §3.54.15）。
+ *
+ * 判定顺序（**全部在写之前**，拒绝即零写入）：① 登录门 → ② 幂等键（`source_person_id`）必有 /
+ * 形态 → ③ **幂等**（同 `source_person_id` 已有行 ⇒ 原样返回、**不改写既有行**）→
+ * ④ 至少一处姓名 / 字 / 号 / 别名 → ⑤ **写面门**（`userWriteGate('submitPersonImport', …)`）。
+ * @returns {Promise<{ok:true, row:object, authority:string, idempotent?:boolean, message:string}|{ok:false, reason?:string, message:string}>}
+ */
+export async function submitPersonImport({
+  batchId = '',
+  source = '',
+  sourcePersonId = '',
+  payload = {}
+} = {}) {
+  const user = currentUser()
+  if (!user) return { ok: false, message: '請先登錄後再提交外部導入行' }
+
+  const batch = String(batchId || '').trim()
+  if (batch.length > MAX_PROPOSAL_ID_LENGTH) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `導入批次號超出上限（${MAX_PROPOSAL_ID_LENGTH} 字）；本次零寫入。` }
+  }
+  const src = String(source || '').trim()
+  const sourceId = String(sourcePersonId || '').trim()
+  if (!sourceId) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '缺少外部冪等鍵（source_person_id）⇒ 拒絕導入；本次零寫入。' }
+  }
+  if (sourceId.length > MAX_PROPOSAL_ID_LENGTH) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `外部冪等鍵超出上限（${MAX_PROPOSAL_ID_LENGTH} 字）；本次零寫入。` }
+  }
+  const norm = normalizeImportPayload(payload)
+  if (
+    !norm.family_name &&
+    !norm.given_name &&
+    norm.courtesy_names.length === 0 &&
+    norm.art_names.length === 0 &&
+    norm.alias_names.length === 0
+  ) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '導入行請至少帶姓名、字、號或別名之一；本次零寫入。' }
+  }
+
+  /* **幂等**（§3.54.14）：同 `source_person_id` 已有導入行 ⇒ 原樣返回（不改寫既有行）。 */
+  const existing = personImportBySourceId(sourceId)
+  if (existing) {
+    return { ok: true, row: existing, authority: 'LOCAL_IDEMPOTENT', idempotent: true, message: '該外部冪等鍵（source_person_id）已存在導入行 ⇒ 未改寫（冪等）。' }
+  }
+
+  const writePayload = {
+    batch_id: batch,
+    source: src,
+    source_person_id: sourceId,
+    ...norm
+  }
+  const gate = await userWriteGate('submitPersonImport', writePayload)
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+
+  if (gate.mode === 'local-dev') {
+    const at = nowIso()
+    const row = {
+      id: `${PERSON_IMPORT_ID_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      batch_id: batch,
+      source: src,
+      source_person_id: sourceId,
+      status: PERSON_IMPORT_STATUS.PENDING,
+      ...norm,
+      imported_by: user.id, // **不透明 uid；零手机号**
+      imported_at: at,
+      reviewed_at: null,
+      reviewer_id: null,
+      review_note: ''
+    }
+    savePersonImportRows([...listPersonImportRows(), row])
+    return { ok: true, row, authority: 'LOCAL_DEV', message: '已提交外部導入行，待管理員審覈（dev / 離線形態，非正式寫入路徑）' }
+  }
+
+  const serverRow = gate.row
+  if (!serverRow || typeof serverRow !== 'object') {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。' }
+  }
+  savePersonImportRows([...listPersonImportRows(), serverRow])
+  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, message: '已提交外部導入行，待管理員審覈' }
+}
+
+/* ------------------------------ 导入：读面（管理员） ------------------------------ */
+
+/**
+ * **管理员可见的待审外部导入行**（全部用户的 `PENDING`）。
+ * 非管理员 ⇒ **结构化拒绝**（`FORBIDDEN`；不以空集冒充拒绝）。
+ * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:string, message:string}}
+ */
+export function listPendingPersonImportsForAdmin(actor) {
+  const who = actor || currentUser()
+  if (!canReviewPersonImports(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的外部導入批次' }
+  }
+  const rows = listPersonImportRows()
+    .filter((row) => String((row && row.status) || '') === PERSON_IMPORT_STATUS.PENDING || !(row && row.status))
+    .sort((a, b) => String(b.imported_at).localeCompare(String(a.imported_at)))
+  return { ok: true, rows }
+}
+
+/* ------------------------------ 导入：采纳 / 驳回（管理员） ------------------------------ */
+
+/**
+ * **本地采纳 / 驳回判定（不經写面门）**：供 `reviewPersonImport` 过门后回写本机镜像 /
+ * 在 dev·離線 形态作**本地权威**。
+ * 采纳粒度：按批次（`batchId`）或按单行（`importId`）二选一（**两个入口都实现**）。
+ * **部分失败**：失败行保持 `PENDING` 且零写入；成功行落库；成功面**可重放且幂等**。
+ * @returns {{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[], failed?:Array<object>, rows?:Array<object>, reason?:string, message:string}}
+ */
+function applyPersonImportDecision(who, { batchId = '', importId = '', decision = '', note = '' } = {}) {
+  const rawNote = note === null || note === undefined ? '' : note
+  if (typeof rawNote !== 'string') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '駁回理由必須是文字；本次零寫入。' }
+  }
+  const noteText = rawNote.trim()
+  if (noteText.length > MAX_REVIEW_NOTE_LENGTH) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `駁回理由不得超過 ${MAX_REVIEW_NOTE_LENGTH} 字；本次零寫入。` }
+  }
+  const batch = String(batchId || '').trim()
+  const single = String(importId || '').trim()
+  if (!batch && !single) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '缺少導入批次號（batch_id）或導入行號（import_id）⇒ 拒絕審覈；本次零寫入。' }
+  }
+  const normalized = normalizeDecision(decision)
+  if (!normalized) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `審覈決定「${String(decision === null || decision === undefined ? '' : decision)}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回）；本次零寫入。`
+    }
+  }
+  const accepted = normalized === PERSON_IMPORT_STATUS.ACCEPTED
+  const at = nowIso()
+  const imports = listPersonImportRows()
+  /* 选目标：单行优先（指定 `importId`）；否则全批次内 `PENDING` 行。 */
+  const targets = imports.filter((row) => {
+    if (!row) return false
+    if (single) return String(row.id || '') === single
+    return String(row.batch_id || '') === batch
+  })
+  if (targets.length === 0) {
+    return { ok: false, reason: 'NOT_FOUND', message: '未找到匹配的外部導入行（批次 / 單行）；本次零寫入。' }
+  }
+
+  const acceptedIds = []
+  const rejectedIds = []
+  const skipped = []
+  const failed = []
+  const persons = listPersonRows()
+  const nextPersons = persons.slice()
+  const decidedById = new Map()
+
+  targets.forEach((row) => {
+    const current = String(row.status || PERSON_IMPORT_STATUS.PENDING)
+    if (current !== PERSON_IMPORT_STATUS.PENDING) {
+      /* 终态不回退：已审行**跳过**（幂等重放 / 部分失败场景均不改写既有终态）。 */
+      skipped.push(String(row.id || ''))
+      return
+    }
+    if (!accepted) {
+      rejectedIds.push(String(row.id || ''))
+      decidedById.set(String(row.id || ''), {
+        ...row,
+        status: PERSON_IMPORT_STATUS.REJECTED,
+        reviewed_at: at,
+        reviewer_id: who.id,
+        review_note: noteText !== '' ? noteText : row.review_note || ''
+      })
+      return
+    }
+    /* **ACCEPTED**：按 `source_person_id` 幂等落 `xiai_persons`（重复采纳不改写既有行）。 */
+    const sourceId = String(row.source_person_id || '').trim()
+    if (!sourceId) {
+      /* 幂等键缺失 ⇒ **该行失败、保持 PENDING 且零写入**（不动 person、不改本行）。 */
+      failed.push({ id: String(row.id || ''), reason: 'MISSING_REQUIRED', message: '該導入行缺少冪等鍵（source_person_id）⇒ 未採納；本行保持 PENDING。' })
+      return
+    }
+    const existingPerson = personBySourceId(sourceId)
+    if (!existingPerson) {
+      const built = buildPersonRowFromImport(row, nextPersons, who, at)
+      nextPersons.push(built)
+    }
+    acceptedIds.push(String(row.id || ''))
+    decidedById.set(String(row.id || ''), {
+      ...row,
+      status: PERSON_IMPORT_STATUS.ACCEPTED,
+      reviewed_at: at,
+      reviewer_id: who.id,
+      review_note: row.review_note || ''
+    })
+  })
+
+  /* **成功面**：先落采纳产物（幂等）—— 再落导入行状态；两者都在本地（dev / 離線 ＝ 本地权威）。 */
+  if (acceptedIds.length > 0) savePersonRows(nextPersons)
+  if (decidedById.size > 0) {
+    savePersonImportRows(imports.map((row) => {
+      const id = String((row && row.id) || '')
+      return decidedById.has(id) ? decidedById.get(id) : row
+    }))
+  }
+  const done = acceptedIds.length + rejectedIds.length
+  return {
+    ok: true,
+    accepted,
+    accepted_ids: acceptedIds,
+    rejected_ids: rejectedIds,
+    skipped,
+    failed,
+    rows: targets.map((row) => decidedById.get(String(row.id || '')) || row),
+    message: accepted
+      ? `已採納 ${acceptedIds.length} 條外部導入行並冪等生成正式印人（失敗 ${failed.length} / 跳過 ${skipped.length}）`
+      : `已駁回 ${rejectedIds.length} 條外部導入行（跳過 ${skipped.length}）`
+  }
+}
+
+/**
+ * **审核外部导入行（采纳 / 驳回）**（管理员；§3.54.15）。
+ *
+ * 判定顺序（**全部在写之前**）：① 管理员门（非管理员 ⇒ `FORBIDDEN` ＋ 零写入）→
+ * ② 经登录令牌写面门 `userWriteGate('reviewPersonImport', …)`（缺 env ⇒ 安全拒 ＋ 零写入）。
+ * `ACCEPTED` ⇒ 幂等落 `xiai_persons`（按 `source_person_id`）；`REJECTED` ⇒ 零写入。
+ * **两个入口都实现**：按批次（`batchId`）与按单行（`importId`）。
+ * @param {{id?:string, role?:string}|null} actor 管理员
+ * @param {{batchId?:string, importId?:string, decision?:string, note?:string}} [options]
+ * @returns {Promise<{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[], failed?:Array<object>, rows?:Array<object>, reason?:string, message:string}>}
+ */
+export async function reviewPersonImport(actor, options = {}) {
+  const who = actor || currentUser()
+  if (!canReviewPersonImports(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈外部導入批次' }
+  }
+  const gate = await userWriteGate('reviewPersonImport', {
+    batch_id: String((options && options.batchId) || ''),
+    import_id: String((options && options.importId) || ''),
+    decision: String((options && options.decision) || ''),
+    note: String((options && options.note) || '')
+  })
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* 本機鏡像（dev / 離線 ＝ 本地權威；雲端 ＝ 服務端權威後的本機鏡像）。 */
+  return applyPersonImportDecision(who, options)
+}
+
+/** 单写者门转发（供视图 / 自检直调；两集合均不开放直写入口）。 */
+export function personSingleWriterDenial(collectionKey) {
+  return personDirectWriteDenial(collectionKey)
+}
+
+/** 导入行提交人展示 uid（**零手机号**；此处只回 uid，避免第二套名表）。 */
+export function importSubmitterId(row) {
+  return String((row && row.imported_by) || '')
+}
+
+/** 导入载荷默认面（转发真源 `seed.js::emptyPersonImportPayload`；供构造 / 自检复用）。 */
+export { emptyPersonImportPayload }
