@@ -12,6 +12,10 @@ const emit = defineEmits(['download', 'save'])
 const glyph = computed(() => sealGlyph(props.seal.seal_name))
 /* r2：显示名单点（采纳值 → 原始 `seal_name` →「佚名」），与详情页 / 属性表同源。 */
 const currentText = computed(() => corrections.resolveSealDisplayName(props.seal))
+/* **作者显示名单点（§3.54.9）**：与详情 / 导出 / 文本导出**同一单点**
+   （`author_person_id` 命中 ⇒ 印人 display_name → 未命中 ⇒ 旧 `author` → 皆空 ⇒「佚名」）。
+   卡片**不读**裸 `seal.author`（那会绕过引用型、长出第二套名表）。 */
+const authorName = computed(() => corrections.resolveAuthorDisplayName(props.seal))
 
 /* 主印面（服務層判定）：是**影像編號的來源**（不是元數據載體）。 */
 const face = computed(() => seals.primaryFaceOf(props.seal.stamp_id))
@@ -153,7 +157,7 @@ onBeforeUnmount(revokeThumb)
         </div>
         <div>
           <dt>作者</dt>
-          <dd>{{ seal.author }}</dd>
+          <dd>{{ authorName }}</dd>
         </div>
         <div>
           <dt>編號</dt>

@@ -66,7 +66,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
       <input
         v-model="keyword"
         type="search"
-        placeholder="搜索印文、作者或藏品編號"
+        placeholder="搜索印文、作者（印人姓名／字號／別名）或藏品編號"
         aria-label="全局搜索"
         @keyup.enter="submitSearch"
       />

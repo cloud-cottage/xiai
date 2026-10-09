@@ -93,7 +93,13 @@ export function readImageAsDataUrl(file) {
  * （同为层级倒置）⇒ 印文显示值由**调用方**按**单点** `resolveSealDisplayName` 算好后经
  * 第 2 参 `displayName` 传入（采纳值 → 原始 `seal_name` →「佚名」恰一处）；缺省才回落到
  * 行自带的 `seal_name`，两者皆空才「佚名」。
- * @param {object} seal 印章视图模型（含 `faces` / `faceImage` / `edgeImages`）
+ *
+ * **作者显示名（§3.54.9｜同一单点，逐字同型）**：本函数同样**不 import** 任何名表模块
+ * ⇒ 作者显示值取**上游视图模型已按单点**（`data/db.js::resolveAuthorName`
+ * 「引用命中 → 旧 `author` →「佚名」」）算好的 `seal.author_display` / `item.author_display`
+ * —— 本文件**不自行拼链**（不得出现第二套名表）；上游未给该键（旧调用形态）才回落
+ * 裸 `seal.author` / `item.author`，与印文段的兜底形态一致。
+ * @param {object} seal 印章视图模型（含 `faces` / `faceImage` / `edgeImages` / `author_display`）
  * @param {string} [displayName=''] 由 `services/corrections.js::resolveSealDisplayName` 算出的显示印文
  */
 export function hdManifestText(seal, displayName = '') {
@@ -108,7 +114,7 @@ export function hdManifestText(seal, displayName = '') {
     `印文：${rawName || '佚名'}`,
     `朝代：${seal.dynasty || '—'}`,
     `分類：${seal.seal_type || '—'}`,
-    `作者：${seal.author || '—'}`,
+    `作者：${seal.author_display || seal.author || '—'}`,
     `材質：${seal.material || '—'}`,
     `印文釋義：${seal.transcription || '—'}`,
     `印面影像標識：${face.id || '—'}`,
@@ -124,7 +130,7 @@ export function hdManifestText(seal, displayName = '') {
     lines.push(
       `  ${index + 1}. ${item.kind === 'EDGE' ? '邊款' : '印面'} ${item.id}`,
       `     印文：${item.seal_name || '—'}`,
-      `     朝代 / 分類 / 作者：${item.dynasty || '—'} / ${item.seal_type || '—'} / ${item.author || '—'}`,
+      `     朝代 / 分類 / 作者：${item.dynasty || '—'} / ${item.seal_type || '—'} / ${item.author_display || item.author || '—'}`,
       `     印面圖片：${item.face_image_id || '—'}`
     )
     if (item.edge_image_ids && item.edge_image_ids.length > 0) {

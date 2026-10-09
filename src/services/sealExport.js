@@ -33,7 +33,7 @@
 import { FIXED_ATTR_LABELS, SEAL_FIXED_ATTR_LABELS, isAdminSession } from './admin.js'
 import { faceLabelOf, fixedAttributesOf, getSealById, imageDisplaySourceOf, imageSourceOf, listFacesOf } from './seals.js'
 import { listPhotosByStamp, loadPhotoDataUrl } from './photos.js'
-import { resolveMarkable, resolveSealDisplayName } from './corrections.js'
+import { resolveMarkable, resolveSealDisplayName, resolveAuthorDisplayName } from './corrections.js'
 import { clientKindOf, fetchSlices } from './imageFaces.js'
 import { displayDataUrlOf } from './displayImage.js'
 import { bytesToDataUrl } from '../data/assetmeta.js'
@@ -384,9 +384,15 @@ export function buildSheetContent(seal, faces, tasks) {
     push([boldCell(`【可勘誤屬性（系統選中值） · ${label}】`)])
     push([boldCell('屬性'), boldCell('值'), boldCell('取值來源')])
     resolveMarkable(face).forEach((item) => {
+      /* **作者显示名（§3.54.9｜单点）**：作者行改走**单点派生链**（引用命中 ⇒ 印人
+         display_name → 未命中 ⇒ 旧 `author` → 皆空 ⇒「佚名」），与卡片 / 详情 / 文本导出
+         同源；**不得**把 `resolveMarkable` 的原值当成作者名（那会绕过引用型、长出第二套名表）。
+         其余可标记属性沿用系统选中值（`item.display`）。 */
+      const isAuthor = item.key === 'author'
+      const display = isAuthor ? resolveAuthorDisplayName(face) : item.display
       push([
         textCell(item.label),
-        textCell(fixedValueOf(item.display, '未著錄')),
+        textCell(fixedValueOf(display, isAuthor ? '佚名' : '未著錄')),
         textCell(item.source === 'CORRECTION' ? '系統選中' : '原值')
       ])
     })

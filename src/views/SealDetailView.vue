@@ -9,7 +9,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
-import { seals, corrections, endorsements, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
+import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
@@ -343,6 +343,17 @@ function markableOf(face) {
   return corrections.resolveMarkable(face)
 }
 
+/**
+ * 属性表「當前展示值」单元格：**作者行走单点派生链**（`author_person_id` 命中 ⇒ 印人
+ * `display_name` → 未命中 ⇒ 旧 `author` 自由文本 → 皆空 ⇒「佚名」），其余行沿用系统选中值
+ * `item.display`。与卡片 / 导出 / 文本导出**同一单点**（`corrections.resolveAuthorDisplayName`
+ * ——真源仍是数据层 `resolveAuthorName`），**不另写第二套名表**。
+ */
+function detailDisplayOf(face, item) {
+  if (item && item.key === 'author') return corrections.resolveAuthorDisplayName(face) || '佚名'
+  return item.display || '未著錄'
+}
+
 /* ============================================================================
    **採信**（本单新增）：详情页「可標記屬性」区里，就地列出**候选值**
    （值 ＋「N 人提交 / M 人採信」＋ 状态）与【採信】按钮。
@@ -532,6 +543,88 @@ const form = reactive({
   basis: ''
 })
 
+/* ============================================================================
+   【作者】＝**引用型**检索 + 选人控件（person-model §4.1 / §4.3）
+   ----------------------------------------------------------------------------
+   - 「作者」字段改为**检索 + 选人**：选项只来自既有印人（`persons.listPersons` /
+     `persons.searchPersons`）；`form.author` 承载所选印人 id（`author_person_id`）。
+   - **不填 ⇒ 空**（作者仍选填）；填则**必须**指向既有印人（不得手输自由文本）。
+   - **库中无此人 ⇒ 上屏引导去提交印人提案**（不是静默失败、不是放行自由文本）。
+   - 提交提案＝任何登录用户；**入口一律渲染**，未登录点击走登录引导（不得 CSS 隐藏 / disabled 冒充）。
+   ============================================================================ */
+const authorKeyword = ref('')
+const correctionAuthorOptions = computed(() => {
+  const keyword = String(authorKeyword.value || '').trim()
+  const rows = keyword ? persons.searchPersons(keyword) : persons.listPersons()
+  return rows.map((row) => ({ id: String(row.id || ''), name: persons.personName(row) }))
+})
+/** 某印面「作者」的**对外展示名**（单点链：引用 → 旧文本 →「佚名」）。 */
+function authorDisplayValue() {
+  return formFace.value ? corrections.resolveAuthorDisplayName(formFace.value) : ''
+}
+
+/* 印人提案（新增印人）**内联提交面**：仅当检索无命中时露出（§3.54.7 / §4.3）。 */
+const proposalOpen = ref(false)
+const proposalFeedback = ref('')
+const proposalBusy = ref(false)
+const proposal = reactive({
+  familyName: '',
+  givenName: '',
+  courtesy: '',
+  art: '',
+  alias: '',
+  birthYear: '',
+  deathYear: '',
+  cbdbId: '',
+  note: ''
+})
+
+function resetProposal() {
+  proposal.familyName = ''
+  proposal.givenName = ''
+  proposal.courtesy = ''
+  proposal.art = ''
+  proposal.alias = ''
+  proposal.birthYear = ''
+  proposal.deathYear = ''
+  proposal.cbdbId = ''
+  proposal.note = ''
+}
+
+function openPersonProposal() {
+  proposalFeedback.value = ''
+  if (!logged.value) {
+    /* 未登录 ⇒ 入口已渲染，点击走**登录引导**（不得 CSS 隐藏 / disabled 冒充）。 */
+    goLogin()
+    return
+  }
+  proposalOpen.value = true
+}
+
+async function submitPersonProposalForm() {
+  if (proposalBusy.value) return
+  proposalBusy.value = true
+  try {
+    /* 写面接线（本单）：`submitPersonProposal` 已改 `async`（经写面门 `userWriteGate` 验签后落盘）⇒ 须 `await`。 */
+    const result = await persons.submitPersonProposal({
+      targetPersonId: null,
+      familyName: proposal.familyName,
+      givenName: proposal.givenName,
+      courtesyNames: proposal.courtesy,
+      artNames: proposal.art,
+      aliasNames: proposal.alias,
+      birthYear: proposal.birthYear,
+      deathYear: proposal.deathYear,
+      cbdbId: proposal.cbdbId,
+      note: proposal.note
+    })
+    proposalFeedback.value = result.message
+    if (result.ok) resetProposal()
+  } finally {
+    proposalBusy.value = false
+  }
+}
+
 const uploadFeedback = ref('')
 const uploading = ref(false)
 
@@ -645,6 +738,11 @@ function openCorrection(face) {
   })
   form.basis = ''
   formFeedback.value = ''
+  /* 【作者】引用型选人控件：每次开表单重置检索关键字与提案子表单（不残留上次状态）。 */
+  authorKeyword.value = ''
+  proposalOpen.value = false
+  proposalFeedback.value = ''
+  resetProposal()
   formFaceId.value = face.id
   formOpen.value = true
 }
@@ -666,7 +764,7 @@ function correctionFieldVisible(item) {
  * 三動作轉換按鈕）；否则它會以自由文本输入框的形态出现，用户可输入值域外值。
  */
 function correctionFieldIsFreeText(key) {
-  return key !== 'dynasty' && key !== FACE_CONTENT_KEY && key !== FACE_STYLE_KEY && key !== SEAL_CLASS_KEY
+  return key !== 'dynasty' && key !== FACE_CONTENT_KEY && key !== FACE_STYLE_KEY && key !== SEAL_CLASS_KEY && key !== 'author'
 }
 
 async function submitCorrection() {
@@ -1420,7 +1518,7 @@ onBeforeUnmount(() => {
             <tr v-for="item in markableOf(face)" :key="`${face.id}-${item.key}`">
               <td>{{ item.label }}</td>
               <td>
-                <span class="detail__value">{{ item.display || '未著錄' }}</span>
+                <span class="detail__value">{{ detailDisplayOf(face, item) }}</span>
                 <span v-if="item.source === 'CORRECTION'" class="detail__origin">
                   原始值：{{ item.original || '未著錄' }}
                 </span>
@@ -1756,6 +1854,91 @@ onBeforeUnmount(() => {
             >
               <option v-for="k in sealClassOptions" :key="k" :value="k">{{ k }}</option>
             </select>
+            <!-- 【作者】＝**引用型**检索 + 选人（person-model §4.1 / §4.3）：只可选、不可填；
+                 无命中 ⇒ 出「提交印人提案」引导（不静默、不放行自由文本）。 -->
+            <template v-else-if="item.key === 'author'">
+              <input
+                id="cr-author-search"
+                v-model="authorKeyword"
+                type="text"
+                placeholder="檢索印人（姓 / 名 / 字 / 號 / 別名），留空即列出全部"
+                data-author-search="correction"
+              />
+              <select id="cr-author" v-model="form[item.key]" data-author-select="correction">
+                <option value="">（不選，留空）</option>
+                <option v-for="option in correctionAuthorOptions" :key="option.id" :value="option.id">{{ option.name }}</option>
+              </select>
+              <span class="field__hint">
+                本印面當前作者：{{ authorDisplayValue() || '佚名' }}。作者選填：不選即不提交該項。
+              </span>
+              <template v-if="authorKeyword.trim() && !correctionAuthorOptions.length">
+                <span class="field__hint" data-author-nomatch="correction">
+                  庫中沒有匹配「{{ authorKeyword.trim() }}」的印人 ⇒ 不能手輸自由文本。
+                </span>
+                <button
+                  class="btn btn--ghost"
+                  type="button"
+                  data-action="person-proposal-open"
+                  @click="openPersonProposal"
+                >
+                  提交印人提案
+                </button>
+                <span class="field__hint">
+                  庫中無此人 ⇒ 可先提交印人提案，經管理員審覈通過後即可在此選中。
+                </span>
+                <div v-if="proposalOpen" class="proposal-form" data-person-proposal-form>
+                  <h4 class="proposal-form__title">提交印人提案</h4>
+                  <div class="field">
+                    <label for="pp-family">姓</label>
+                    <input id="pp-family" v-model="proposal.familyName" type="text" data-person-proposal-family />
+                  </div>
+                  <div class="field">
+                    <label for="pp-given">名</label>
+                    <input id="pp-given" v-model="proposal.givenName" type="text" data-person-proposal-given />
+                  </div>
+                  <div class="field">
+                    <label for="pp-courtesy">字（多個以逗號分隔）</label>
+                    <input id="pp-courtesy" v-model="proposal.courtesy" type="text" data-person-proposal-courtesy />
+                  </div>
+                  <div class="field">
+                    <label for="pp-art">號（多個以逗號分隔）</label>
+                    <input id="pp-art" v-model="proposal.art" type="text" data-person-proposal-art />
+                  </div>
+                  <div class="field">
+                    <label for="pp-alias">別名（多個以逗號分隔）</label>
+                    <input id="pp-alias" v-model="proposal.alias" type="text" data-person-proposal-alias />
+                  </div>
+                  <div class="field">
+                    <label for="pp-birth">生年（公元，可空）</label>
+                    <input id="pp-birth" v-model="proposal.birthYear" type="text" data-person-proposal-birth />
+                  </div>
+                  <div class="field">
+                    <label for="pp-death">卒年（公元，可空）</label>
+                    <input id="pp-death" v-model="proposal.deathYear" type="text" data-person-proposal-death />
+                  </div>
+                  <div class="field">
+                    <label for="pp-cbdb">CBDB id（可空）</label>
+                    <input id="pp-cbdb" v-model="proposal.cbdbId" type="text" data-person-proposal-cbdb />
+                  </div>
+                  <div class="field">
+                    <label for="pp-note">依據（選填）</label>
+                    <input id="pp-note" v-model="proposal.note" type="text" data-person-proposal-note />
+                  </div>
+                  <p v-if="proposalFeedback" class="notice" data-person-proposal-feedback>{{ proposalFeedback }}</p>
+                  <div class="proposal-form__foot">
+                    <button
+                      class="btn btn--primary"
+                      type="button"
+                      data-action="person-proposal-submit"
+                      :disabled="proposalBusy"
+                      @click="submitPersonProposalForm"
+                    >
+                      提交提案
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </template>
             <input
               v-else
               :id="`cr-${item.key}`"
@@ -2443,5 +2626,26 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
+}
+
+/* 印人提案（新增印人）内联提交面（仅检索无命中时露出）。 */
+.proposal-form {
+  flex: 1 1 100%;
+  margin-top: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  background: var(--c-surface-sunken);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+}
+
+.proposal-form__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--c-text);
+}
+
+.proposal-form__foot {
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

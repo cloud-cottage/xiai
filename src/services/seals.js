@@ -37,6 +37,10 @@ import {
   sealMaterialValue,
   /* 主印面口径（R-44）单点实现也在数据层：本服务只消费，不自写第二份 `find(kind === 'FACE')`。 */
   primaryFaceIn,
+  /* **作者显示名单点（§3.54.9）**：`author_person_id` → 印人 display_name → 旧 `author` →
+     「佚名」的真源函数（数据层单点）。本服务只**消费**它派生视图模型的 `author_display`
+     （供卡片以外的读面 / 文本导出同链取名），**不自写第二套名表**。 */
+  resolveAuthorName,
   sliceMetaOf as dataSliceMetaOf, // 切片元数据**确定性派生**（同 id 必同结果）——本服务不自写切位
   sliceWindowsOf as dataSliceWindowsOf, // 由元数据派生**逐块归一化窗口**（几何唯一真源）
   PermissionError
@@ -71,6 +75,10 @@ import { bytesToDataUrl } from '../data/assetmeta.js'
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：行級分流判據的唯一真源在 `imageAuthority.js`
    （行內有 digest 且二進制在服務端權威庫 ⇒ `digest`；否則 ⇒ `local`）。本層只消費，不自立第二把尺子。 */
 import { digestOfRow, readViaOfRow } from './imageAuthority.js'
+/* **搜索面扩展（§3.54.9｜单点）**：关键字面扩到印人「姓 / 名 / 字 / 号 / 别名 / cbdb_id」——
+   复用印人检索的**唯一实现** `persons.searchPersons`（**不另造第二套同名逻辑**）；命中印人 ⇒
+   该印人（`author_person_id`）名下的印章一并命中。 */
+import { searchPersons } from './persons.js'
 
 export { FACE_KIND }
 
@@ -133,6 +141,9 @@ export function faceViewModel(row) {
     seal_class: sealClassValue(row),
     faceImage: byId(row.face_image_id), // 固定属性「印面图片」解析结果
     edgeImages, // 固定属性「边款图片 ID」解析结果
+    /* **作者显示名（§3.54.9｜单点派生）**：`author_person_id` → 印人 display_name → 旧 `author`
+       →「佚名」；供文本导出等按印面取名（**同一单点**，不另写名表）。 */
+    author_display: resolveAuthorName(row),
     missingEdgeIds: edgeIds.filter((id) => !byId(id)) // 解析不到的编号 ⇒ 页面出空态
   }
 }
@@ -218,6 +229,17 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
   const wantStyle = String(style || '').trim()
   const wantClass = String(sealClass || '').trim()
 
+  /* **搜索面扩展（§3.54.9｜单点）**：关键字命中印人的「姓 / 名 / 字 / 号 / 别名 / cbdb_id」⇒
+     该印人（`author_person_id`）名下的印章一并命中。印人检索**单点复用** `persons.searchPersons`
+     （**不另造第二套同名逻辑**）；空关键字 ⇒ 不检索（`null`，零取数）。 */
+  const matchedPersonIds = kw
+    ? new Set(
+        searchPersons(kw)
+          .map((row) => String((row && (row.id || row.code)) || ''))
+          .filter(Boolean)
+      )
+    : null
+
   return listSealRows()
     .map((row) => {
       const faces = listFacesOf(row.stamp_id)
@@ -240,6 +262,13 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
       const faceClasses = faces
         .map((face) => (face.seal_class === undefined || face.seal_class === null ? '' : String(face.seal_class)))
         .filter(Boolean)
+      /* **作者显示名（§3.54.9｜单点派生）**：`author_person_id` → 印人 display_name → 旧 `author`
+         →「佚名」；卡片 / 详情 / 导出 / 文本导出**同一单点**（数据层 `resolveAuthorName`），
+         本服务不另写第二套名表。 */
+      const authorDisplay = resolveAuthorName({
+        author: resolved.author,
+        author_person_id: (primary && primary.author_person_id) || ''
+      })
       return {
         view: {
           ...row,
@@ -260,13 +289,21 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
           edgeImages,
           hasEdge: edges.length > 0,
           images: listImageRows().filter((img) => img.stamp_id === row.stamp_id),
+          /* **作者显示名（单点派生）**：供文本导出等按印章取名（**同一单点**，不另写名表）。 */
+          author_display: authorDisplay,
           ...resolved
         },
         /* 判定用的**印章行原值**（不落进视图模型）：R-34 明文「dynasty 仍按印章行判」。 */
         rowDynasty: String(row.dynasty || ''),
         faceContents,
         faceStyles,
-        faceClasses
+        faceClasses,
+        /* **搜索面扩展（§3.54.9）**：该印章的印人引用键集合（印面级 `author_person_id`）
+           ＋ 作者显示名（**单点派生** `resolveAuthorName`，与卡片 / 导出 / 文本导出同链）。 */
+        authorPersonIds: faces
+          .map((face) => String((face && face.author_person_id) || ''))
+          .filter(Boolean),
+        authorDisplay: authorDisplay
       }
     })
     .filter((item) => (dynasty ? item.rowDynasty === dynasty : true))
@@ -276,9 +313,15 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
     .filter((item) => {
       if (!kw) return true
       const seal = item.view
+      /* **命中印人 ⇒ 出該印人的印章（§3.54.9）**：关键字命中印人（姓 / 名 / 字 / 号 / 别名 /
+         cbdb_id）⇒ 该印人（`author_person_id`）名下的印章一并命中；此处只读已算好的键集合，
+         检索本身仍是单点 `persons.searchPersons`。 */
+      if (matchedPersonIds && item.authorPersonIds.some((id) => matchedPersonIds.has(id))) return true
       const haystack = [
         seal.seal_name,
         seal.author,
+        /* **作者显示名（单点派生）**：卡片 / 导出上屏的作者显示值同样可搜。 */
+        item.authorDisplay,
         seal.stamp_id,
         ...seal.faces.map((face) => face.seal_name)
       ]

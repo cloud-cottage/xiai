@@ -3,7 +3,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS, isKnownSealClass, suggestSealClass } from '../data/seed.js'
-import { seals } from '../services/index.js'
+import { seals, persons } from '../services/index.js'
 import { pipelineNotice, runUploadPipeline } from './uploadPipeline.js'
 import { IMAGE_LIMITS, loadImageFile } from '../utils/image.js'
 import { formatBytes } from '../utils/format.js'
@@ -33,6 +33,16 @@ const form = reactive({
   shape: '', // 形制（选填；**印章级**固定属性，自由文本）
   author: '',
   transcription: ''
+})
+
+/* 【作者】＝**引用型**（person-model §4.1）：**仍選填** —— 不選 ⇒ 空；選 ⇒ **必須從既有印人中選擇**
+   （不得手輸自由文本）。檢索面＝服務層單點 `persons.searchPersons`（姓 / 名 / 字 / 號 / 別名 / cbdb_id）。
+   `form.author` 承載所選印人 id（`author_person_id`）；留空 ⇒ 不寫引用（合規）。 */
+const authorKeyword = ref('')
+const authorOptions = computed(() => {
+  const keyword = String(authorKeyword.value || '').trim()
+  const rows = keyword ? persons.searchPersons(keyword) : persons.listPersons()
+  return rows.map((row) => ({ id: String(row.id || ''), name: persons.personName(row) }))
 })
 
 /** 已选原图：`{ bitmap, width, height, originalBytes, originalMime, name, previewUrl }`。 */
@@ -545,8 +555,30 @@ onBeforeUnmount(() => {
 
       <div class="field">
         <label for="upload-seal-author">作者（選填）</label>
-        <input id="upload-seal-author" v-model="form.author" type="text" placeholder="例：鄧石如" />
-        <TextTransformButtons v-model="form.author" field-key="upload:author" field-label="作者" />
+        <!-- 【作者】＝**引用型**（person-model §4.1）：**只能選、不能填** —— 選項只來自既有印人
+             （`persons.listPersons` / `persons.searchPersons`）；不選 ⇒ 空（合規）。檢索面含
+             姓 / 名 / 字 / 號 / 別名 / cbdb_id（服務層單點，不在此自寫第二套）。 -->
+        <input
+          id="upload-seal-author-search"
+          v-model="authorKeyword"
+          type="text"
+          placeholder="檢索印人（姓 / 名 / 字 / 號 / 別名），留空即列出全部"
+          data-author-search="upload-seal"
+        />
+        <select id="upload-seal-author" v-model="form.author" data-author-select="upload-seal">
+          <option value="">（不選，留空）</option>
+          <option v-for="option in authorOptions" :key="option.id" :value="option.id">{{ option.name }}</option>
+        </select>
+        <span class="field__hint">
+          作者選填：不選即留空；若填，必須從既有印人中選擇（本框共 {{ authorOptions.length }} 位可選），不能手輸新作者。
+        </span>
+        <span
+          v-if="authorKeyword.trim() && !authorOptions.length"
+          class="field__hint"
+          data-author-nomatch="upload-seal"
+        >
+          庫中沒有匹配「{{ authorKeyword.trim() }}」的印人；本框只可選既有印人，不能手輸新作者。
+        </span>
       </div>
 
       <div class="field">

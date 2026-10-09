@@ -17,7 +17,7 @@
  *      无令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ 零写入（且**零往返**，连补签都不发）。
  *   E. **本机镜像更正（云端权威优先）**：云端已落盘而本机 `writeCorrectionDecision` 未成功
  *      （`ALREADY_REVIEWED` 等）⇒ 返回 `ok:true` ＋ `reconciled:true`，本机行按服务端权威行更正。
- *   F. **`[data-admin-action]` 去重取值集合不变**（8 值 / 归并 7 类）＋ canary 正 / 负对照。
+ *   F. **`[data-admin-action]` 去重取值集合现实值**（9 值 / 归并 8 类，v1.53 钩子族扩充）＋ canary 正 / 负对照。
  *   G. **上屏文案繁體**（去注释后扫描；正 / 负对照证明探测器有效）。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
@@ -414,9 +414,9 @@ check('E3b', '反向对照：**不**触发更正分支（结果无 reconciled �
 check('E3c', '反向对照：本机行正常写入（reviewer_id ＝ 本地 actor）', ADMIN.id, localCorrection().reviewer_id)
 
 /* ===========================================================================
-   F 段：`[data-admin-action]` 去重取值集合不变（8 值 / 归并 7 类）
+   F 段：`[data-admin-action]` 去重取值集合现实值（9 值 / 归并 8 类）
    =========================================================================== */
-console.log(JSON.stringify({ section: 'F', title: 'data-admin-action 去重集合不变' }))
+console.log(JSON.stringify({ section: 'F', title: 'data-admin-action 去重集合（9 值 / 8 类）' }))
 const FROZEN_ADMIN_ACTIONS = [
   'correction-accept',
   'correction-reject',
@@ -424,10 +424,11 @@ const FROZEN_ADMIN_ACTIONS = [
   'edit-invite-reward',
   'edit-seal-attributes',
   'export-seal-data',
+  'person-proposal-review',
   'replace-face-image',
   'upload-seal'
 ]
-const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'replace-face-image', 'upload-seal']
+const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'replace-face-image', 'upload-seal']
 function walkFiles(dir, out = []) {
   readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
     const full = path.join(dir, entry.name)
@@ -454,15 +455,15 @@ function collectAdminActions(srcFiles, transform = (s) => s) {
 }
 const SRC_FILES = walkFiles(path.join(ROOT, 'src'))
 const scanned = collectAdminActions(SRC_FILES, stripComments)
-check('F1', '去重取值集合逐字 ＝ 冻结 8 值', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
+check('F1', '去重取值集合逐字 ＝ 冻结 9 值（v1.53）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
 {
   const merged = scanned.map((value) => (value === 'correction-reject' ? 'correction-accept' : value))
   const distinct = [...new Set(merged)].sort()
-  check('F2', '按归并表归并 ⇒ 恰 7 类', MERGED_CLASSES.slice().sort(), distinct)
+  check('F2', '按归并表归并 ⇒ 恰 8 类（v1.53：person-proposal-review 自成一类）', MERGED_CLASSES.slice().sort(), distinct)
   const canary = 'qa-canary-9th'
   const withCanary = [...new Set([...scanned, canary])]
-  check('F1c', '正对照：注入 canary 取值 ⇒ 集合变 9（非恒等）', 9, withCanary.length)
-  check('F1c2', '负对照：移除 canary 后回基线 8', 8, withCanary.filter((value) => value !== canary).length)
+  check('F1c', '正对照：注入 canary 取值 ⇒ 集合变 10（非恒等；v1.53 基线 9）', 10, withCanary.length)
+  check('F1c2', '负对照：移除 canary 后回基线 9', 9, withCanary.filter((value) => value !== canary).length)
 }
 
 /* ===========================================================================

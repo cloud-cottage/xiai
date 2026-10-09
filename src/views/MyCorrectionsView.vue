@@ -14,7 +14,7 @@
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { corrections, points, seals } from '../services/index.js'
+import { corrections, persons, points, seals } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 import { statusLabel, formatDateTime } from '../utils/format.js'
 
@@ -33,6 +33,60 @@ const feedback = ref('')
 const actor = computed(() => currentUser())
 /* 管理员专属「采纳 / 驳回」按钮的渲染条件（服务层判定；普通用户 / 游客 ⇒ false）。 */
 const canReview = computed(() => corrections.canReviewCorrections(actor.value))
+
+/* ============================================================================
+   **印人提案审核区块（person-model §4.3.3 / §3.54；本单新增）**
+   ----------------------------------------------------------------------------
+   管理员视角在**本页**新增「待審印人提案（全部用戶）」的采纳 / 驳回区块 ——
+   **复用既有按钮形态**、**不新开路由 / 不新建管理员专区**（落点 ＝ §3.9 追加注（v1.53））。
+   - 采纳 / 驳回 ＝ **管理员**：入口仅管理员渲染（非管理员 ⇒ DOM 零命中，不得 CSS 隐藏冒充）；
+     服务层 / 数据层对越权另有**独立拒绝**（`FORBIDDEN` ＋ 零写入）。
+   - 钩子族：新增**恰 1 个** `data-admin-action` 取值 `person-proposal-review`
+     （采纳 / 驳回**共用**；**不复用既有 `correction-accept` 等字面值承载新实体**）
+     ⇒ `[data-admin-action]` 由 8 值 / 归并 7 类 变为 **9 值 / 归并 8 类**。
+   ============================================================================ */
+const canReviewProposals = computed(() => persons.canReviewPersonProposals(actor.value))
+/** 待审印人提案（结构化结果：拒绝 ⇒ `ok:false`，**不以空集冒充拒绝**）。 */
+const proposalResult = computed(() => {
+  void dataVersion.value
+  return persons.listPendingPersonProposalsForAdmin(actor.value)
+})
+const proposals = computed(() => (proposalResult.value.ok ? proposalResult.value.rows : []))
+const proposalNotice = computed(() => (proposalResult.value.ok ? '' : proposalResult.value.message))
+
+/** 提案提交人展示名（沿服务层单点 `submitterLabelOf`：`暱稱（uid 短碼）`，零手机号）。 */
+function proposalSubmitterOf(row) {
+  return corrections.submitterLabelOf(persons.proposalSubmitterId(row))
+}
+
+/** 提案印人显示名（服务层单点 `personName`；空 ⇒ 空串，模板显示「（未命名）」）。 */
+function proposalNameOf(row) {
+  return persons.personName(row)
+}
+
+/** 生卒上屏（「不详」＝空，不设特值；两端皆空 ⇒ 「—」）。 */
+function proposalYearsOf(row) {
+  const birth = row && row.birth_year !== null && row.birth_year !== undefined ? String(row.birth_year) : ''
+  const death = row && row.death_year !== null && row.death_year !== undefined ? String(row.death_year) : ''
+  if (!birth && !death) return '—'
+  return `${birth || '?'}～${death || '?'}`
+}
+
+/** 采纳 / 驳回一条印人提案（服务层判定与幂等生成 / 更新；`message` 原文上屏）。
+ *
+ *  `reviewPersonProposal` 已改 **`async`**（经登录令牌写面门 `userWriteGate` 同一通道，与
+ *  `corrections.review` 同径）⇒ 宿主函数亦须 `async` 并 `await`；否则拿到的是 Promise
+ *  （`result.message` 恒 `undefined`，且 `dataVersion` 在落盘前即自增 ⇒ UI 不按结果更新）。
+ *  返回契约（`persons.js::reviewPersonProposal`）：成功 / 失败皆回 `{ok, …, message}`——
+ *  `ACCEPTED` ⇒ `{ok:true, status, accepted:true, row, message:'已採納…'}`；`REJECTED` ⇒
+ *  `{ok:true, status, accepted:false, row:null, message:'已駁回…'}`；`FORBIDDEN` /
+ *  `ALREADY_REVIEWED` / `NOT_FOUND` 等 ⇒ `{ok:false, reason, message}`。故一律以
+ *  `result.message` 原文上屏，**拒绝不折回「假成功」**（沿用既有 `runReview` 口径）。 */
+async function decideProposal(row, decision) {
+  const result = await persons.reviewPersonProposal(actor.value, row.id, decision, '')
+  feedback.value = result.message
+  dataVersion.value += 1
+}
 
 /** 我的提交（所有登录用户都能看到自己的记录）。 */
 const rows = computed(() => {
@@ -157,6 +211,20 @@ function submitterOf(row) {
   return corrections.submitterLabelOf(row.user_id || row.userId)
 }
 
+/**
+ * **提交值上屏**：`author` 自 person-model §4.2 起为**引用型**（值是 `author_person_id`）
+ * ⇒ 经**显示名单点链**（`corrections.resolveAuthorDisplayName`：引用命中 ⇒ 印人名 →
+ * 未命中 ⇒ 旧文本 →「佚名」）渲染为印人名，便于审核人判读；其余字段原样。
+ * 历史行（值为旧自由文本）经同一链回落到原文本，不被吞掉。
+ */
+function valueLabelOf(row) {
+  const value = row && row.value !== undefined && row.value !== null ? String(row.value) : ''
+  if (row && row.field === 'author') {
+    return corrections.resolveAuthorDisplayName({ author_person_id: value, author: value })
+  }
+  return value
+}
+
 /** 跑一次审核（服务层 `message` 原文展示）；结果原样回传供调用方判断。 */
 async function runReview(row, decision) {
   const result = await corrections.review(actor.value, row.id, decision)
@@ -261,7 +329,7 @@ async function decide(row, decision) {
                   </td>
                   <td>{{ faceLabelOfRow(row) }}</td>
                   <td>{{ row.field_label || row.field }}</td>
-                  <td>{{ row.value }}</td>
+                  <td>{{ valueLabelOf(row) }}</td>
                   <td>{{ submitterOf(row) }}</td>
                   <td>{{ formatDateTime(row.created_at) }}</td>
                   <td class="review__ops">
@@ -293,6 +361,71 @@ async function decide(row, decision) {
           {{ queueNotice }}
         </p>
         <p v-else class="muted-hint">當前沒有待審覈的勘誤。</p>
+      </div>
+    </section>
+
+    <!-- **印人提案审核区块（本单新增）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
+         采纳 / 驳回复用既有按钮形态；**不新开路由 / 专区**（落点＝本页，沿 §3.9 追加注（v1.53））。
+         钩子族新增**恰 1 个**取值 `person-proposal-review`（采纳 / 驳回共用，不复用既有字面值）。 -->
+    <section v-if="canReviewProposals" class="panel">
+      <div class="panel__head">
+        <h2>待審印人提案（全部用戶）</h2>
+        <span class="muted-hint">共 {{ proposals.length }} 條</span>
+      </div>
+      <div class="panel__body">
+        <table v-if="proposals.length" class="list-table">
+          <thead>
+            <tr>
+              <th>印人</th>
+              <th>姓</th>
+              <th>名</th>
+              <th>字 / 號 / 別名</th>
+              <th>生卒</th>
+              <th>提交人</th>
+              <th>提交時間</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in proposals" :key="row.id">
+              <td>{{ proposalNameOf(row) || '（未命名）' }}</td>
+              <td>{{ row.family_name || '—' }}</td>
+              <td>{{ row.given_name || '—' }}</td>
+              <td>
+                {{ [...(row.courtesy_names || []), ...(row.art_names || []), ...(row.alias_names || [])].join('、') || '—' }}
+              </td>
+              <td>{{ proposalYearsOf(row) }}</td>
+              <td>{{ proposalSubmitterOf(row) }}</td>
+              <td>{{ formatDateTime(row.submitted_at) }}</td>
+              <td class="review__ops">
+                <button
+                  class="btn btn--primary"
+                  type="button"
+                  data-admin-action="person-proposal-review"
+                  data-action="person-proposal-accept"
+                  :data-person-proposal-id="row.id"
+                  @click="decideProposal(row, persons.PERSON_STATUS.ACCEPTED)"
+                >
+                  採納
+                </button>
+                <button
+                  class="btn btn--ghost"
+                  type="button"
+                  data-admin-action="person-proposal-review"
+                  data-action="person-proposal-reject"
+                  :data-person-proposal-id="row.id"
+                  @click="decideProposal(row, persons.PERSON_STATUS.REJECTED)"
+                >
+                  駁回
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else-if="proposalNotice" class="notice review__notice" data-person-proposal-notice>
+          {{ proposalNotice }}
+        </p>
+        <p v-else class="muted-hint">當前沒有待審覈的印人提案。</p>
       </div>
     </section>
 
@@ -371,7 +504,7 @@ async function decide(row, decision) {
               </td>
               <td>{{ faceLabelOfRow(row) }}</td>
               <td>{{ row.field_label || row.field }}</td>
-              <td>{{ row.value }}</td>
+              <td>{{ valueLabelOf(row) }}</td>
               <td>{{ row.basis || '—' }}</td>
               <td>
                 <span class="chip" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span>
