@@ -25,13 +25,26 @@
  *      本路整体停用（纯令牌路）——**缺省即安全**，启用须显式。
  *   ⑦ **只读诊断 op**：`sessionProbe`（**无令牌可调**、**context 形状诊断**——**布尔-only ＋
  *      零值回显**：候选容器存在性 / uidPresent / uidKind / anonymousMarker / mode、
- *      **零库读零写入**；由调用方在**鉴权之前**短路，见 `isSessionProbe` / `sessionProbe`）。
+ *      node-sdk auth API 通道三读数（见 ⑨）、**零库读零写入**；由调用方在**鉴权之前**短路，
+ *      见 `isSessionProbe` / `sessionProbe`）。
  *   ⑧ **角色行形状对账**：`role` 单值 / `roles` 数组**都认**、**大小写不敏感**
  *      （`roleFromRow`）。
+ *   ⑨ **node-sdk auth API 通道探测（V6-a 追加；additive）**：`sessionProbe` 追加三读数——
+ *      `authApiPresent`（通道对象在场且带 `getAuthContext`）/ `callerUidViaAuthApi`
+ *      （通道 `getAuthContext(context)` 是否给出非空 uid；**带 3s 超时护栏**
+ *      `AUTH_API_PROBE_TIMEOUT_MS`）/ `eventIdentityKeyNames`（通道身份结果的**键名**回显——
+ *      排序、**只回键名、绝不回吐任何值**）。**零值回显**：通道缺席 / 形状不合 / 抛错 / 超时
+ *      ⇒ 恰为 `false` / `false` / `[]`。通道**只读**（`getAuthContext` 只解析调用方 context
+ *      形状与环境注入，零网络、零写入）、**只进探针、绝不参与判权路径**（判权仍走 ①—⑥ 与
+ *      `setSessionIdentityProvider`）。
  *
  * 注入缝（离线自检 / 宿主用）：`setSessionIdentityProvider(fn)`。
  *   形状：`(context) => {uid, isAnonymous} | null`。
  *   生产不注入 ⇒ 走「从函数 context 取平台身份」的默认读法。
+ * 注入缝（**V6-a 追加**）：`setAuthApiChannelProvider(fn)` —— node-sdk auth API 通道读取器。
+ *   形状：`() => channel | null`（**同步**）；`channel` 契约 ＝ 带 `getAuthContext(context) => Promise`。
+ *   生产由 `index.js` 延迟 require ＋ 懒解析注入（无 SDK ⇒ null ⇒ 探针零值回显）；本文件**零 SDK**：
+ *   只调注入进来的通道对象，**不 require 任何 SDK 模块**（静态判据不变）。
  */
 
 /** 启用开关（环境变量名；**惰性缺省 off** —— 仅显式 `prefer` 启用会话优先）。 */
@@ -58,6 +71,15 @@ const REASONS = Object.freeze({ FORBIDDEN: 'FORBIDDEN', STORAGE_UNAVAILABLE: 'ST
 
 /** **只读诊断 op 名**（`sessionProbe`）：**无令牌可调**、**context 形状诊断**（见 `sessionProbe`）。 */
 const SESSION_PROBE_OP = 'sessionProbe'
+
+/**
+ * **node-sdk auth API 通道探测的 3s 超时护栏**（毫秒；只护探针自身的通道调用——
+ * 到时 ⇒ 该读数落零值，**绝不**波及判权路径）。
+ */
+const AUTH_API_PROBE_TIMEOUT_MS = 3000
+
+/** 超时护栏的到时标记（模块私有；探针据此把该读数落零值）。 */
+const AUTH_API_PROBE_TIMEOUT_MARK = Symbol('AUTH_API_PROBE_TIMEOUT')
 
 function deny(reason, message) {
   return { ok: false, reason, message }
@@ -86,6 +108,76 @@ function sessionIdentityInjected() {
 /** 清除注入（幂等）。 */
 function clearSessionIdentityProvider() {
   sessionIdentityProvider = null
+}
+
+/* ---------------------------------------------------------------------------
+   注入缝：node-sdk auth API 通道读取（离线自检 / 宿主用；生产由 index.js 注入）
+   --------------------------------------------------------------------------- */
+
+let authApiChannelProvider = null
+
+/** 注入 node-sdk auth API 通道读取（传非函数 ⇒ 清除）。形状：`() => channel | null`（**同步**）。 */
+function setAuthApiChannelProvider(fn) {
+  authApiChannelProvider = typeof fn === 'function' ? fn : null
+}
+
+/** 是否已注入通道读取（诊断用，**不含任何凭据**）。 */
+function authApiChannelInjected() {
+  return authApiChannelProvider !== null
+}
+
+/** 清除注入（幂等）。 */
+function clearAuthApiChannelProvider() {
+  authApiChannelProvider = null
+}
+
+/** 通道契约判据：对象且带 `getAuthContext(context) => Promise` 才算「node-sdk auth API 通道在场」。 */
+function isAuthApiChannel(channel) {
+  return !!(channel && typeof channel === 'object' && typeof channel.getAuthContext === 'function')
+}
+
+/** 3s 超时护栏：到时 ⇒ 解析为到时标记（败者的 reject 已被 race 订阅 ⇒ 无未处理拒绝）。 */
+function authApiGuarded(promise) {
+  let timer = null
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(AUTH_API_PROBE_TIMEOUT_MARK), AUTH_API_PROBE_TIMEOUT_MS)
+  })
+  return Promise.race([promise, guard]).finally(() => {
+    if (timer !== null) clearTimeout(timer)
+  })
+}
+
+/**
+ * node-sdk auth API 通道三读数（**零值回显**：缺席 / 形状不合 / 抛错 / 超时 ⇒ 全零）。
+ * 只读：通道侧 `getAuthContext` 只解析调用方 context 形状与环境注入（零网络、零写入）；
+ * **绝不**回吐 uid / loginType / appId 等真实**值**（键名回显仅取结果的键名、排序、≤32 个）。
+ */
+async function probeAuthApiChannel(context) {
+  if (!authApiChannelProvider) return { present: false, callerUid: false, keyNames: [] }
+  let channel = null
+  try {
+    channel = authApiChannelProvider()
+  } catch {
+    return { present: false, callerUid: false, keyNames: [] }
+  }
+  if (!isAuthApiChannel(channel)) return { present: false, callerUid: false, keyNames: [] }
+  let outcome = null
+  try {
+    outcome = await authApiGuarded(Promise.resolve().then(() => channel.getAuthContext(context)))
+  } catch {
+    outcome = null
+  }
+  if (outcome === AUTH_API_PROBE_TIMEOUT_MARK || !outcome || typeof outcome !== 'object') {
+    return { present: true, callerUid: false, keyNames: [] }
+  }
+  return {
+    present: true,
+    callerUid: text(outcome.uid) !== '',
+    keyNames: Object.keys(outcome)
+      .filter((key) => typeof key === 'string')
+      .sort()
+      .slice(0, 32)
+  }
 }
 
 /** 从函数第二参 `context` 取平台注入的调用者身份（候选容器顺次取第一个含 uid 的）。 */
@@ -207,7 +299,8 @@ async function resolveSessionAuthority(input) {
 }
 
 /**
- * 只读诊断 op **`sessionProbe`**（**V6-a 加固修订**：全零信封 → **context 形状诊断**）：
+ * 只读诊断 op **`sessionProbe`**（**V6-a 加固修订**：全零信封 → **context 形状诊断**；**V6-a 追加**：
+ * node-sdk auth API 通道三读数，见文件头 ⑨）：
  * **无令牌即可调**，对调用方递入的函数第二参 `context` 只做**形状**诊断、**布尔-only ＋ 零值回显**——
  *   · `candidates`：候选容器存在性（`userInfo` / `user` / `auth` / 根 `context`，与
  *     `platformIdentityFromContext` 的候选序同源）——**如实布尔**；
@@ -215,19 +308,23 @@ async function resolveSessionAuthority(input) {
  *   · `anonymousMarker`：**承载 uid 的那个候选容器**上是否存在匿名标记（`isAnonymous` / `anonymous`
  *     键**在场即真**、不看取值；无 uid ⇒ 恒 `false`）——**如实布尔**；
  *   · `uidKind` / `mode`：**恒回零值空串**（真实 uid 键形 / 真实开关态**一律不回吐**——零值回显，
- *     键形状为后续诊断预留）。
- * **绝不**回吐真实 uid / 角色 / 令牌 / 开关态 / 任何身份**值**；**零库读、零写入、不碰注入缝**
- * （不查 `xiai_roles`、不调 `sessionIdentityProvider`、不产生任何写）。
- * `context` 缺省 / 非对象 ⇒ **全零回显**（全 false ＋ 空串，不炸）。外层 `ok` 恒 `true`
+ *     键形状为后续诊断预留）；
+ *   · `authApiPresent` / `callerUidViaAuthApi` / `eventIdentityKeyNames`：node-sdk auth API 通道
+ *     三读数（**键名-only ＋ 零值回显**；`callerUidViaAuthApi` 带 3s 超时护栏；**不回吐任何身份值**）。
+ * **绝不**回吐真实 uid / 角色 / 令牌 / 开关态 / 任何身份**值**；**零库读、零写入**、**不碰会话身份
+ * 注入缝**（不查 `xiai_roles`、不调 `sessionIdentityProvider`、不产生任何写）；通道调用本身**只读**（⑨）。
+ * `context` 缺省 / 非对象 ⇒ 形状读数**全零回显**（不炸）。外层 `ok` 恒 `true`
  * 仅表示**探针本身应答成功**（**不是**「恰 3 键」的失败形态，两者不可混淆）。
  * @param {object} [context] 函数第二参（CloudBase 平台注入的调用者上下文）。
- * @returns {{ok: boolean, candidates: {userInfo: boolean, user: boolean, auth: boolean, context: boolean},
- *   uidPresent: boolean, uidKind: string, anonymousMarker: boolean, mode: string}}
+ * @returns {Promise<{ok: boolean, candidates: {userInfo: boolean, user: boolean, auth: boolean, context: boolean},
+ *   uidPresent: boolean, uidKind: string, anonymousMarker: boolean, mode: string,
+ *   authApiPresent: boolean, callerUidViaAuthApi: boolean, eventIdentityKeyNames: string[]}>}
  */
-function sessionProbe(context) {
+async function sessionProbe(context) {
   const root = context && typeof context === 'object' ? context : null
   const exists = (value) => !!(value && typeof value === 'object')
   const holder = platformIdentityFromContext(root)
+  const authApi = await probeAuthApiChannel(root)
   return {
     ok: true,
     candidates: {
@@ -239,7 +336,11 @@ function sessionProbe(context) {
     uidPresent: holder !== null,
     uidKind: '',
     anonymousMarker: !!holder && (holder.isAnonymous !== undefined || holder.anonymous !== undefined),
-    mode: ''
+    mode: '',
+    /* **V6-a 追加**：node-sdk auth API 通道三读数（零值回显；见文件头 ⑨）。 */
+    authApiPresent: authApi.present,
+    callerUidViaAuthApi: authApi.callerUid,
+    eventIdentityKeyNames: authApi.keyNames
   }
 }
 
@@ -252,6 +353,7 @@ module.exports = {
   SESSION_AUTHORITY_ENV,
   SESSION_MODE,
   SESSION_PROBE_OP,
+  AUTH_API_PROBE_TIMEOUT_MS,
   ROLES_COLLECTION,
   ROLES_SCHEMA,
   ROLE,
@@ -262,6 +364,9 @@ module.exports = {
   setSessionIdentityProvider,
   sessionIdentityInjected,
   clearSessionIdentityProvider,
+  setAuthApiChannelProvider,
+  authApiChannelInjected,
+  clearAuthApiChannelProvider,
   platformIdentityFromContext,
   normalizeSessionIdentity,
   sessionIdentityFromContext,

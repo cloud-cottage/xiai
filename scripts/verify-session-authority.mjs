@@ -20,6 +20,12 @@
  *      （**检查条目只增不减**），新增 A18b / A18c / A18d / A18e / A18f / A18g、
  *      B9d / B9e / B9f / B9g、C7c / C7d、
  *      角色行形状对账 `role` 单值 / `roles` 数组 ＋ 大小写不敏感（A10b / A10c）。
+ *   **V6-a 追加**：`sessionProbe` 再**追加** node-sdk auth API 通道三读数（`authApiPresent` /
+ *      `callerUidViaAuthApi`（**3s 超时护栏**）/ `eventIdentityKeyNames`（**键名-only、排序、≤32**、
+ *      绝不回吐任何值））——**布尔-only ＋ 零值回显 ＋ 零值泄漏 ＋ 判权隔离**；探针随之**改为异步**
+ *      （契约 ⑨）。检查条目只增不减，新增 A19–A32、B10–B11、C8–C9、D4–D6。
+ *   **本单修正**：通道读取器（延迟 require `@cloudbase/node-sdk`）**落点在两 `lib/ops.js`**（两 `index.js`
+ *      保持零 SDK 字面）——D4 / D5 / D6 据此指向 `lib/ops.js`（恢复 C3 / C6 / A15 三条静态门；探针语义不变）。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  */
@@ -174,6 +180,21 @@ const sessionProvider = () => currentSession
 userSa.setSessionIdentityProvider(sessionProvider)
 adminSa.setSessionIdentityProvider(sessionProvider)
 
+/* **V6-a 追加**：node-sdk auth API 通道注入缝夹具（契约 ⑨）。
+   `NULL_CHANNEL_PROVIDER` 模拟生产离线形态（`lib/ops.js` 懒解析 `@cloudbase/node-sdk` 失败 ⇒ 通道 null）。 */
+const NULL_CHANNEL_PROVIDER = () => null
+const setAuthChannel = (provider) => {
+  userSa.setAuthApiChannelProvider(provider)
+  adminSa.setAuthApiChannelProvider(provider)
+}
+const authThree = (probe) => ({
+  authApiPresent: probe.authApiPresent,
+  callerUidViaAuthApi: probe.callerUidViaAuthApi,
+  eventIdentityKeyNames: probe.eventIdentityKeyNames
+})
+const ZERO_AUTH3 = { authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }
+const PRESENT_NO_UID_AUTH3 = { authApiPresent: true, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }
+
 /* 角色行种子：会话 uid → 角色（`_id` ＝ uid；另有 `uid` 字段供等值检索）。 */
 const ADMIN_UID = 'plat-admin-uid'
 const USER_UID = 'plat-user-uid'
@@ -235,13 +256,59 @@ check('A14', '标记取值回落：认不出 ⇒ 既有令牌值', 'SERVER_TOKEN
 check('A15', '身份可用判据：令牌路需手机号、会话路可缺', [true, false, true], [userSa.identityUsable({ uid: 'u', phone: '16600' }), userSa.identityUsable({ uid: 'u' }), userSa.identityUsable({ uid: 'u', identity_source: 'SESSION' })])
 check('A16', '注入缝可见性', true, userSa.sessionIdentityInjected() && adminSa.sessionIdentityInjected())
 check('A17', '诊断 op 名 ＋ 判定（去空白后逐字比对、大小写敏感）', ['sessionProbe', true, true, false], [userSa.SESSION_PROBE_OP, userSa.isSessionProbe('sessionProbe'), userSa.isSessionProbe(' sessionProbe '), userSa.isSessionProbe('verify')])
-check('A18', '诊断探针 `sessionProbe`：**context 形状诊断**（无 context ⇒ **全零回显**）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: false }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, userSa.sessionProbe())
-check('A18b', '诊断探针：两副本同一 context ⇒ 回包**逐键恒等**', userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }), adminSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
-check('A18c', '诊断探针：候选容器存在性 ＋ `UID` 键形 ⇒ uidPresent（**如实布尔**）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '' }, userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
-check('A18d', '诊断探针：匿名标记**在场即真**（不看取值；承载 uid 的容器）／无标记 ⇒ false', [true, false], [userSa.sessionProbe({ userInfo: { uid: 'probe-uid', isAnonymous: false } }).anonymousMarker, userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } }).anonymousMarker])
-check('A18e', '诊断探针：`uidKind` / `mode` **恒零值回显**（真实 uid 键形 / 开关态不回吐）', ['', ''], [userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }).uidKind, userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }).mode])
-check('A18f', '诊断探针：**布尔-only** —— 键形状冻结 ＋ 回包不含任何 uid 值', true, ((probe) => !JSON.stringify(probe).includes('probe-secret-uid') && shapeOf(probe) === 'anonymousMarker,candidates,mode,ok,uidKind,uidPresent' && shapeOf(probe.candidates) === 'auth,context,user,userInfo')(userSa.sessionProbe({ userInfo: { uid: 'probe-secret-uid' } })))
-check('A18g', '诊断探针：context 缺省 / null / 非对象 ⇒ **同一全零回显**（不炸）', [true, true], [JSON.stringify(userSa.sessionProbe()) === JSON.stringify(userSa.sessionProbe(null)), JSON.stringify(userSa.sessionProbe()) === JSON.stringify(userSa.sessionProbe('非对象'))])
+check('A18', '诊断探针 `sessionProbe`：**context 形状诊断**（无 context ⇒ **全零回显**）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: false }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, await userSa.sessionProbe())
+check('A18b', '诊断探针：两副本同一 context ⇒ 回包**逐键恒等**', await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }), await adminSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
+check('A18c', '诊断探针：候选容器存在性 ＋ `UID` 键形 ⇒ uidPresent（**如实布尔**）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
+check('A18d', '诊断探针：匿名标记**在场即真**（不看取值；承载 uid 的容器）／无标记 ⇒ false', [true, false], [(await userSa.sessionProbe({ userInfo: { uid: 'probe-uid', isAnonymous: false } })).anonymousMarker, (await userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } })).anonymousMarker])
+check('A18e', '诊断探针：`uidKind` / `mode` **恒零值回显**（真实 uid 键形 / 开关态不回吐）', ['', ''], [(await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })).uidKind, (await userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } })).mode])
+const a18fProbe = await userSa.sessionProbe({ userInfo: { uid: 'probe-secret-uid' } })
+check('A18f', '诊断探针：**布尔-only** —— 键形状冻结 ＋ 回包不含任何 uid 值', true, !JSON.stringify(a18fProbe).includes('probe-secret-uid') && shapeOf(a18fProbe) === 'anonymousMarker,authApiPresent,callerUidViaAuthApi,candidates,eventIdentityKeyNames,mode,ok,uidKind,uidPresent' && shapeOf(a18fProbe.candidates) === 'auth,context,user,userInfo')
+const a18gBase = JSON.stringify(await userSa.sessionProbe())
+check('A18g', '诊断探针：context 缺省 / null / 非对象 ⇒ **同一全零回显**（不炸）', [true, true], [a18gBase === JSON.stringify(await userSa.sessionProbe(null)), a18gBase === JSON.stringify(await userSa.sessionProbe('非对象'))])
+
+/* ---- **V6-a 追加**：node-sdk auth API 通道三读数（契约 ⑨）——超时护栏 / 注入缝 / 零值回显 / 零泄漏 / 判权隔离 ---- */
+check('A19', '通道超时护栏常量 ＝ 3000ms（两副本同值）', [3000, 3000], [userSa.AUTH_API_PROBE_TIMEOUT_MS, adminSa.AUTH_API_PROBE_TIMEOUT_MS])
+check('A20', '通道注入缝完整 ＋ `lib/ops.js` 加载后已注入（set / injected / clear 皆为函数）', ['function', 'function', 'function', true], [typeof userSa.setAuthApiChannelProvider, typeof userSa.authApiChannelInjected, typeof userSa.clearAuthApiChannelProvider, userSa.authApiChannelInjected()])
+setAuthChannel(null)
+check('A21', '通道缺席（未注入）⇒ 三读数全零（false / false / []）', ZERO_AUTH3, authThree(await userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } })))
+setAuthChannel(() => ({ getAuthContext: async () => ({ uid: 'auth-api-uid', loginType: 'PASSWORD', appId: 'wx-app' }) }))
+check('A22', '通道在场 ＋ 结果含非空 uid ⇒ present:true / callerUid:true / 键名升序回显', { authApiPresent: true, callerUidViaAuthApi: true, eventIdentityKeyNames: ['appId', 'loginType', 'uid'] }, authThree(await userSa.sessionProbe()))
+setAuthChannel(() => ({ getAuthContext: async () => ({ loginType: 'ANONYMOUS' }) }))
+check('A23', '通道在场但结果无 uid ⇒ present:true / callerUid:false / 键名回显', { authApiPresent: true, callerUidViaAuthApi: false, eventIdentityKeyNames: ['loginType'] }, authThree(await userSa.sessionProbe()))
+setAuthChannel(() => ({ getAuthContext: async () => 'not-an-object' }))
+const a24String = authThree(await userSa.sessionProbe())
+setAuthChannel(() => ({ getAuthContext: async () => null }))
+const a24Null = authThree(await userSa.sessionProbe())
+check('A24', '通道在场但结果非对象（字符串 / null）⇒ present:true / false / []', [PRESENT_NO_UID_AUTH3, PRESENT_NO_UID_AUTH3], [a24String, a24Null])
+setAuthChannel(() => ({ getAuthContext: () => { throw new Error('injected-auth-api-failure') } }))
+check('A25', '通道 getAuthContext 抛错 ⇒ present:true / false / []（零值回显、不炸）', PRESENT_NO_UID_AUTH3, authThree(await userSa.sessionProbe()))
+setAuthChannel(() => { throw new Error('injected-auth-channel-provider-failure') })
+check('A26', '通道读取器抛错 ⇒ 三读数全零（present:false / false / []）', ZERO_AUTH3, authThree(await userSa.sessionProbe()))
+setAuthChannel(() => ({}))
+check('A27', '通道形状不合（对象无 `getAuthContext`）⇒ 三读数全零', ZERO_AUTH3, authThree(await userSa.sessionProbe()))
+setAuthChannel(() => 'not-a-channel')
+check('A28', '通道读取器返回非对象 ⇒ 三读数全零', ZERO_AUTH3, authThree(await userSa.sessionProbe()))
+setAuthChannel(() => ({ getAuthContext: async () => ({ zeta: 1, alpha: 'SECRET-AUTH-VALUE', uid: 'auth-api-uid' }) }))
+const a29 = await userSa.sessionProbe()
+check('A29', '通道结果键名回显：升序回显 ＋ 绝不回吐任何值（**零值泄漏**）', true, !JSON.stringify(a29).includes('SECRET-AUTH-VALUE') && JSON.stringify(a29.eventIdentityKeyNames) === JSON.stringify(['alpha', 'uid', 'zeta']))
+const a30Keys = {}
+for (let i = 0; i < 40; i += 1) a30Keys[`k${String(i).padStart(2, '0')}`] = i
+setAuthChannel(() => ({ getAuthContext: async () => a30Keys }))
+check('A30', '通道结果键名回显上限 32', 32, (await userSa.sessionProbe()).eventIdentityKeyNames.length)
+setAuthChannel(() => ({ getAuthContext: () => new Promise(() => {}) }))
+const a31Start = Date.now()
+const a31 = await userSa.sessionProbe()
+const a31Elapsed = Date.now() - a31Start
+check('A31', '通道 getAuthContext 永不 resolve ⇒ 3s 超时护栏落到零值（present:true / false / []）', PRESENT_NO_UID_AUTH3, authThree(a31))
+check('A31b', '超时护栏实测耗时 ∈ [2900ms, 6000ms]', true, a31Elapsed >= 2900 && a31Elapsed <= 6000)
+let authApiCalls = 0
+currentSession = { uid: ADMIN_UID }
+setAuthChannel(() => ({ getAuthContext: async () => { authApiCalls += 1; return { uid: 'should-not-be-read' } } }))
+const a32 = await userSa.resolveSessionAuthority({ context: { userInfo: { uid: ADMIN_UID } }, readRole: async () => ({ role: 'admin' }), requiredRoles: ['admin'], env: { XIAI_SESSION_AUTHORITY: 'prefer' } })
+check('A32', '通道只进探针：判权路径（resolveSessionAuthority）不消费通道（调用次数 0）', [true, true, 0], [a32.ok === true, a32.obtained === true, authApiCalls])
+currentSession = null
+/* 恢复「无通道」形态（＝生产离线：`index.js` 懒解析得 null）留给 B / C 段。 */
+setAuthChannel(NULL_CHANNEL_PROVIDER)
 
 /* ===========================================================================
    B 段：管理员写面（xiai-admin-token）
@@ -328,25 +395,51 @@ process.env.XIAI_SESSION_AUTHORITY = 'prefer'
 resetWorld()
 const beforeB9 = store.writes.length
 const b9 = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9', 'sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context：根容器在场、其余全零）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, b9)
+check('B9', 'sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context：根容器在场、其余全零）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9)
 check('B9b', 'sessionProbe 零写入', beforeB9, store.writes.length)
 /* B9c：`sessionProbe` **与开关解耦**（缺省 off 亦可调、回包形状不变）。 */
 resetWorld()
 delete process.env.XIAI_SESSION_AUTHORITY
 const b9c = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9c', '缺省 off 下 sessionProbe 仍可调（诊断与开关解耦；形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, b9c)
+check('B9c', '缺省 off 下 sessionProbe 仍可调（诊断与开关解耦；形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9c)
 process.env.XIAI_SESSION_AUTHORITY = 'prefer'
 /* B9d：**注入缝不参与诊断** —— 会话在场 ⇒ 探针仍只诊断 context 形状、不消费 provider。 */
 resetWorld()
 currentSession = { uid: ADMIN_UID }
 const b9d = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9d', '会话在场 ⇒ sessionProbe 仍只回 context 形状（不消费注入缝、形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, b9d)
+check('B9d', '会话在场 ⇒ sessionProbe 仍只回 context 形状（不消费注入缝、形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9d)
 check('B9e', 'sessionProbe 回包不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(b9d).includes(ADMIN_UID))
 /* B9f：context 形状被**如实诊断**（`user` 容器 ＋ `UID` 键形）且 uid 值不回吐。 */
 resetWorld()
 const b9f = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, { user: { UID: ADMIN_UID } })
-check('B9f', 'context 带 `user.UID` ⇒ candidates.user ＋ uidPresent 如实为真（uidKind / mode 仍零值）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '' }, b9f)
+check('B9f', 'context 带 `user.UID` ⇒ candidates.user ＋ uidPresent 如实为真（uidKind / mode 仍零值）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, b9f)
 check('B9g', 'context 形状诊断不回吐 uid 值（**零泄漏**）', true, !JSON.stringify(b9f).includes(ADMIN_UID))
+
+/* B10：通道经**函数回包**（`index.js` 把函数第二参 `callContext` 递入探针）。 */
+resetWorld()
+let b10Seen = null
+let b10Calls = 0
+adminSa.setAuthApiChannelProvider(() => ({
+  getAuthContext: async (ctx) => {
+    b10Calls += 1
+    b10Seen = ctx
+    return { uid: 'adm-auth-api-uid', loginType: 'PWD' }
+  }
+}))
+const b10Ctx = { user: { UID: ADMIN_UID } }
+const b10 = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, b10Ctx)
+check('B10', 'admin 函数 sessionProbe 经注入通道回三读数（present / callerUid / 键名升序）', { authApiPresent: true, callerUidViaAuthApi: true, eventIdentityKeyNames: ['loginType', 'uid'] }, { authApiPresent: b10.authApiPresent, callerUidViaAuthApi: b10.callerUidViaAuthApi, eventIdentityKeyNames: b10.eventIdentityKeyNames })
+check('B10b', '通道 getAuthContext 收到函数第二参 callContext（同对象）＋ 恰调一次', [true, 1], [b10Seen === b10Ctx, b10Calls])
+check('B10c', 'sessionProbe 回包仍不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(b10).includes(ADMIN_UID) && !JSON.stringify(b10).includes('adm-auth-api-uid'))
+/* B11：通道只进探针 —— 会话路判权（`reviewCorrection`）不消费通道。 */
+resetWorld()
+currentSession = { uid: ADMIN_UID }
+const beforeB11 = b10Calls
+const b11 = await adminFn.main({ action: 'verify', op: 'reviewCorrection', payload: { correction_id: 'cr-pend', decision: 'ACCEPTED' } }, {})
+check('B11', '会话路判权（reviewCorrection）成功', true, b11.ok === true)
+check('B11b', '通道只进探针：会话路判权不消费通道（调用次数不增）', beforeB11, b10Calls)
+/* 恢复「无通道」离线形态。 */
+adminSa.setAuthApiChannelProvider(NULL_CHANNEL_PROVIDER)
 
 /* ===========================================================================
    C 段：用户写面（xiai-user-token）
@@ -413,13 +506,34 @@ check('C6', '会话注入抛错 ⇒ 回落令牌路（不抛异常、不炸）',
 resetWorld()
 const beforeC7 = store.writes.length
 const c7 = await userFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('C7', '用户函数 sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, c7)
+check('C7', '用户函数 sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, c7)
 check('C7b', 'sessionProbe 零写入', beforeC7, store.writes.length)
 /* C7c：context.userInfo 携带 uid ＋ 匿名标记 ⇒ 探针如实报告形状（布尔-only、零值回显、不回吐 uid）。 */
 resetWorld()
 const c7c = await userFn.main({ action: 'verify', op: 'sessionProbe' }, { userInfo: { uid: USER_UID, isAnonymous: true } })
-check('C7c', 'context.userInfo 在场 ⇒ candidates.userInfo ＋ uidPresent ＋ anonymousMarker 如实为真', { ok: true, candidates: { userInfo: true, user: false, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: true, mode: '' }, c7c)
+check('C7c', 'context.userInfo 在场 ⇒ candidates.userInfo ＋ uidPresent ＋ anonymousMarker 如实为真', { ok: true, candidates: { userInfo: true, user: false, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: true, mode: '', authApiPresent: false, callerUidViaAuthApi: false, eventIdentityKeyNames: [] }, c7c)
 check('C7d', 'sessionProbe 回包不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(c7c).includes(USER_UID))
+
+/* C8：通道经用户函数回包（`index.js` 递入 `callContext`）。 */
+resetWorld()
+let c8Calls = 0
+userSa.setAuthApiChannelProvider(() => ({
+  getAuthContext: async () => {
+    c8Calls += 1
+    return { uid: 'usr-auth-api-uid', type: 'WECHAT' }
+  }
+}))
+const c8 = await userFn.main({ action: 'verify', op: 'sessionProbe' }, {})
+check('C8', 'user 函数 sessionProbe 经注入通道回三读数（present / callerUid / 键名升序）', { authApiPresent: true, callerUidViaAuthApi: true, eventIdentityKeyNames: ['type', 'uid'] }, { authApiPresent: c8.authApiPresent, callerUidViaAuthApi: c8.callerUidViaAuthApi, eventIdentityKeyNames: c8.eventIdentityKeyNames })
+/* C9：通道只进探针 —— 用户会话路提交不消费通道。 */
+resetWorld()
+currentSession = { uid: USER_UID }
+const beforeC9 = c8Calls
+const c9 = await userFn.main({ action: 'verify', op: 'submitCorrection', payload: VALID_SUBMIT }, {})
+check('C9', '用户会话路提交成功', true, c9.ok === true)
+check('C9b', '通道只进探针：用户写路不消费通道（调用次数不增）', beforeC9, c8Calls)
+/* 恢复「无通道」离线形态。 */
+userSa.setAuthApiChannelProvider(NULL_CHANNEL_PROVIDER)
 
 /* ===========================================================================
    D 段：静态扫描
@@ -445,6 +559,11 @@ for (const dir of [USER_FN_DIR, ADMIN_FN_DIR]) {
   check(`D2${tag}`, `${dir}/lib/sessionAuthority.js：零 SDK / 零句柄 / 零 fs`, false, FORBIDDEN.test(saSource))
   const eleven = saSource.match(/\b\d{11}\b/g) || []
   check(`D3${tag}`, `${dir}/lib/sessionAuthority.js：零手机号字面值（无 11 位数字）`, [], eleven)
+  const opsSource = sources.get(path.join(ROOT, dir, 'lib/ops.js')) || ''
+  const indexSource = sources.get(path.join(ROOT, dir, 'index.js')) || ''
+  check(`D4${tag}`, `${dir}/lib/sessionAuthority.js：零 SDK 字面值（\`@cloudbase/node-sdk\` 只出现在 lib/ops.js）`, false, /@cloudbase\/node-sdk/.test(saSource))
+  check(`D5${tag}`, `${dir}/lib/ops.js：注入 auth API 通道读取器（\`setAuthApiChannelProvider\` 调用点）`, true, /setAuthApiChannelProvider\s*\(/.test(opsSource))
+  check(`D6${tag}`, `${dir}/index.js：零 SDK 字面值（通道读取器已迁回 lib/ops.js；恢复 C3 / C6 / A15）`, false, /@cloudbase\/node-sdk/.test(indexSource))
 }
 
 /* ---------------------------------------------------------------------------

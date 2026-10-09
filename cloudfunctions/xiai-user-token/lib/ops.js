@@ -39,7 +39,36 @@ const { REASONS, deny, normalizePhone } = require('./config.js')
 const { tiffToPng } = require('./tiffToPng.js')
 /* **V6-a**：调用者**平台会话身份**判权（additive）。`IDENTITY_SOURCES` 是身份来源标记的
    **单一定义点**（既有令牌路取值 `SERVER_TOKEN` 逐字沿用；会话路为 `SESSION`）。 */
-const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsable } = require('./sessionAuthority.js')
+const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsable, setAuthApiChannelProvider } = require('./sessionAuthority.js')
+
+/* ---------------------------------------------------------------------------
+   **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器 —— **本单修正**：自两 `index.js` **迁回本文件**
+   （`lib/ops.js`），使 `index.js` 保持**零 SDK 字面**、**恢复 C3 / C6 / A15 三条静态门**；
+   探针语义与两 `sessionAuthority.js` 副本逐字节同不变。本文件因此＝两个写面函数**唯一的 SDK 落点**。
+   口径：**延迟 require ＋ 懒解析**（离线 / 无 SDK ⇒ 通道为 null ⇒ 探针三读数零值回显；解析只发生一次、
+   且只在探针被调时发生）；通道在探针内**只读**使用（`getAuthContext` 只解析 context 形状与环境注入、
+   零网络零写入）、**绝不参与任何判权路径**；任何失败都被探针的 try/catch 与 3s 超时护栏兜住 ⇒ 不影响写面主路。
+   --------------------------------------------------------------------------- */
+
+let authApiChannelResolved = false
+let authApiChannel = null
+
+/** 会话探针的诊断通道读取器（**同步**返回 `channel | null`；懒解析、只解析一次；抛错由探针侧兜零值）。 */
+function resolveAuthApiChannel() {
+  if (!authApiChannelResolved) {
+    authApiChannelResolved = true
+    try {
+      const tcb = require('@cloudbase/node-sdk')
+      const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
+      authApiChannel = (envId ? tcb.init({ env: envId }) : tcb.init()).auth()
+    } catch {
+      authApiChannel = null
+    }
+  }
+  return authApiChannel
+}
+
+setAuthApiChannelProvider(resolveAuthApiChannel)
 
 /**
  * 集合白名单（封闭；**一律 `xiai_` 前缀**）。
