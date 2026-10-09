@@ -12,7 +12,7 @@
  *   ④ **自愈**：无令牌 ＋ 有会话 ⇒ 先 `issue` 后 `verify`；无令牌 ＋ 无会话 ⇒ 拒 ＋ 零写入 ＋ 零往返；
  *   ⑤ **机械检索**：审核页 / PointsView **无校驗碼输入位**（`data-review-write-code` / `寫入校驗碼`
  *      在 src **码面**（去注释）命中 0）；
- *   ⑥ `[data-admin-action]` 去重集合现实值 **9 值 / 归并 8 类**（v1.53 新增 `person-proposal-review`；＋ canary 正 / 负对照）；
+ *   ⑥ `[data-admin-action]` 去重集合现实值 **10 值 / 归并 9 类**（v1.54 新增 `person-import-review`；＋ canary 正 / 负对照）；
  *   ⑦ 上屏文案**繁體**（正 / 负对照证明探测器有效）；
  *   ⑧ 客户端对 `xiai-admin-token` **零业务引用**（`src/services/**` / `src/views/**` 无
  *      `adminGate(` / `ensureAdminWriteSession(` 调用点；`token.js` 管道本体与 `adminToken.js`
@@ -236,7 +236,7 @@ session.setUser({ id: uidOfPhone(PHONE), phone: PHONE, role: 'admin', nickname: 
    A 段：口径副本对账 ＋ op 注册面
    =========================================================================== */
 console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 ＋ op 注册面' }))
-check('A1', '`ADMIN_OPS` 恰含 {reviewCorrection, reviewPersonProposal, setInviteReward}（本单新增印人提案审核 op）', ['reviewCorrection', 'reviewPersonProposal', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
+check('A1', '`ADMIN_OPS` 恰含 {reviewCorrection, reviewPersonImport, reviewPersonProposal, setInviteReward}（本单新增外部导入审核 op）', ['reviewCorrection', 'reviewPersonImport', 'reviewPersonProposal', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
 check('A2', '审核载荷键面逐字 ＝ 管理员函数 `ALLOWED_KEYS`', sorted(adminOps.ALLOWED_KEYS), sorted(ops.REVIEW_ALLOWED_KEYS))
 check('A3', '邀请奖励键面 ＝ [value]', ['value'], ops.REWARD_ALLOWED_KEYS.slice())
@@ -389,9 +389,9 @@ check('F1n', '负对照：不含钩子的样本不命中', false, CODEFIELD_RE.t
 }
 
 /* ===========================================================================
-   G 段：⑥ `[data-admin-action]` 去重集合 9 值 / 归并 8 类 ＋ canary
+   G 段：⑥ `[data-admin-action]` 去重集合 10 值 / 归并 9 类 ＋ canary
    =========================================================================== */
-console.log(JSON.stringify({ section: 'G', title: '⑥ data-admin-action 去重集合 9 值 / 8 类' }))
+console.log(JSON.stringify({ section: 'G', title: '⑥ data-admin-action 去重集合 10 值 / 9 类' }))
 const FROZEN_ADMIN_ACTIONS = [
   'correction-accept',
   'correction-reject',
@@ -400,10 +400,11 @@ const FROZEN_ADMIN_ACTIONS = [
   'edit-seal-attributes',
   'export-seal-data',
   'person-proposal-review',
+  'person-import-review',
   'replace-face-image',
   'upload-seal'
 ]
-const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'replace-face-image', 'upload-seal']
+const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal']
 {
   const found = new Set()
   walkFiles(path.join(ROOT, 'src')).forEach((file) => {
@@ -412,13 +413,13 @@ const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invi
     matches.forEach((m) => found.add(m.replace(/data-admin-action="/, '').replace(/"$/, '')))
   })
   const scanned = [...found].sort()
-  check('G1', '去重取值集合逐字 ＝ 冻结 9 值（v1.53）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
+  check('G1', '去重取值集合逐字 ＝ 冻结 10 值（v1.54）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
   const merged = scanned.map((v) => (v === 'correction-reject' ? 'correction-accept' : v))
-  check('G2', '按归并表归并 ⇒ 恰 8 类（v1.53：person-proposal-review 自成一类）', MERGED_CLASSES.slice().sort(), [...new Set(merged)].sort())
+  check('G2', '按归并表归并 ⇒ 恰 9 类（v1.54：person-import-review 自成一类）', MERGED_CLASSES.slice().sort(), [...new Set(merged)].sort())
   const canary = 'qa-canary-9th'
   const withCanary = [...new Set([...scanned, canary])]
-  check('G1c', '正对照：注入 canary 取值 ⇒ 集合变 10（非恒等；v1.53 基线 9）', 10, withCanary.length)
-  check('G1c2', '负对照：移除 canary 后回基线 9', 9, withCanary.filter((v) => v !== canary).length)
+  check('G1c', '正对照：注入 canary 取值 ⇒ 集合变 11（非恒等；v1.54 基线 10）', 11, withCanary.length)
+  check('G1c2', '负对照：移除 canary 后回基线 10', 10, withCanary.filter((v) => v !== canary).length)
 }
 
 /* ===========================================================================

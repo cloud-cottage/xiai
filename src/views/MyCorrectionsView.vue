@@ -88,6 +88,107 @@ async function decideProposal(row, decision) {
   dataVersion.value += 1
 }
 
+/* ============================================================================
+   **待審導入批次審核區塊（印人批 2｜§3.54.15 / §4.1.16 / AC-490；本单新增）**
+   ----------------------------------------------------------------------------
+   管理员视角在**本页**新增「待審導入批次（外部批量導入）」的采纳 / 驳回区块 ——
+   **复用既有采纳 / 驳回形态与二次确认体例（沿 §3.44.10 / W-78）**；**不新开路由 / 专区**。
+   - 采纳 / 驳回 ＝ **管理员**：入口仅管理员渲染（非管理员 ⇒ DOM 零命中，不得 CSS 隐藏冒充）；
+     服务层 / 数据层对越权另有**独立拒绝**（`FORBIDDEN` ＋ 零写入）。
+   - 钩子族：新增**恰 1 个** `data-admin-action` 取值 `person-import-review`
+     （采纳 / 驳回**共用**；**不复用既有字面值**）＋ `data-action`（person-import-accept / reject）
+     ⇒ `[data-admin-action]` 由 9 值 / 归并 8 类 变为 **10 值 / 归并 9 类**（v1.54）。
+   - 采纳粒度（W-77 拟案）：**两个入口都实现** —— 按批次（整批）与按单行（逐条）。
+   ============================================================================ */
+const canReviewImports = computed(() => persons.canReviewPersonImports(actor.value))
+/** 待审外部导入行（结构化结果：拒绝 ⇒ `ok:false`，不以空集冒充拒绝）。 */
+const importResult = computed(() => {
+  void dataVersion.value
+  return persons.listPendingPersonImportsForAdmin(actor.value)
+})
+const importRows = computed(() => (importResult.value.ok ? importResult.value.rows : []))
+const importNotice = computed(() => (importResult.value.ok ? '' : importResult.value.message))
+/** 按批次（`batch_id`）分组（视图层分组；单批内逐条采纳仍保留）。 */
+const importBatches = computed(() => {
+  const groups = new Map()
+  importRows.value.forEach((row) => {
+    const key = String((row && row.batch_id) || '（無批次）')
+    if (!groups.has(key)) groups.set(key, { key, batchId: String((row && row.batch_id) || ''), rows: [] })
+    groups.get(key).rows.push(row)
+  })
+  return [...groups.values()]
+})
+/** 导入行外部来源 id（幂等键；零手机号）。 */
+function importSourceIdOf(row) {
+  return String((row && row.source_person_id) || '')
+}
+/** 导入行导入人展示名（服务层单点：`暱稱（uid 短碼）`，零手机号）。 */
+function importSubmitterOf(row) {
+  return corrections.submitterLabelOf(persons.importSubmitterId(row))
+}
+/** 导入行姓名上屏（服务层单点派生；空 ⇒ 回落 `name_full`）。 */
+function importNameOf(row) {
+  return persons.personName(row) || String((row && row.name_full) || '')
+}
+
+/** 二次确认状态（`null` ＝ 未打开）；粒度：按批次（`batch`）/ 按单行（`row`）。 */
+const importDialog = ref(null)
+const importNote = ref('')
+const importBusy = ref(false)
+
+function askImport(target, decision) {
+  importNote.value = ''
+  importDialog.value = { batch: target.batch || null, row: target.row || null, decision }
+}
+
+function cancelImport() {
+  importDialog.value = null
+}
+
+const importConfirmText = computed(() =>
+  importDialog.value && importDialog.value.decision === persons.PERSON_IMPORT_STATUS_EXPORT.ACCEPTED ? '確認採納' : '確認駁回'
+)
+const importDialogTitle = computed(() => {
+  if (!importDialog.value) return ''
+  const scope = importDialog.value.row ? '單行' : '整批'
+  return `${scope}${importDialog.value.decision === persons.PERSON_IMPORT_STATUS_EXPORT.ACCEPTED ? '採納' : '駁回'}`
+})
+const importDialogMessage = computed(() => {
+  if (!importDialog.value) return ''
+  const { batch, row, decision } = importDialog.value
+  const verb = decision === persons.PERSON_IMPORT_STATUS_EXPORT.ACCEPTED ? '採納' : '駁回'
+  const count = row ? 1 : batch ? batch.rows.length : 0
+  const who = row ? importSourceIdOf(row) : batch ? batch.key : ''
+  return `這將對「${who}」的 ${count} 條外部導入行全部${verb}，此操作不可撤銷。`
+})
+/** 弹窗内按钮的 `data-action`（**只用 `data-action`**，不带 `data-admin-action`）。 */
+const importConfirmAction = computed(() => {
+  if (!importDialog.value) return ''
+  return importDialog.value.decision === persons.PERSON_IMPORT_STATUS_EXPORT.ACCEPTED
+    ? 'person-import-confirm-accept'
+    : 'person-import-confirm-reject'
+})
+const IMPORT_CANCEL_ACTION = 'person-import-cancel'
+
+async function confirmImport() {
+  const dialog = importDialog.value
+  if (!dialog || importBusy.value) return
+  const note = dialog.decision === persons.PERSON_IMPORT_STATUS_EXPORT.REJECTED ? importNote.value : ''
+  importBusy.value = true
+  try {
+    /* 两个入口：按单行（`importId`）优先；否则按批次（`batchId`）。服务层 message 原文上屏。 */
+    const options = dialog.row
+      ? { importId: String(dialog.row.id || ''), decision: dialog.decision, note }
+      : { batchId: String((dialog.batch && dialog.batch.batchId) || ''), decision: dialog.decision, note }
+    const result = await persons.reviewPersonImport(actor.value, options)
+    feedback.value = result.message
+    importDialog.value = null
+    dataVersion.value += 1
+  } finally {
+    importBusy.value = false
+  }
+}
+
 /** 我的提交（所有登录用户都能看到自己的记录）。 */
 const rows = computed(() => {
   void dataVersion.value
@@ -429,6 +530,105 @@ async function decide(row, decision) {
       </div>
     </section>
 
+    <!-- **待審導入批次審核區塊（印人批 2｜本单新增）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
+         采纳 / 驳回复用既有按钮形态与**二次确认体例（沿 §3.44.10 / W-78）**；不新开路由 / 专区。
+         钩子族新增**恰 1 个**取值 `person-import-review`（采纳 / 驳回共用，不复用既有字面值）。
+         粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现。 -->
+    <section v-if="canReviewImports" class="panel">
+      <div class="panel__head">
+        <h2>待審導入批次（外部批量導入）</h2>
+        <span class="muted-hint">共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>
+      </div>
+      <div class="panel__body">
+        <div v-if="importBatches.length" class="batch-list">
+          <article
+            v-for="batch in importBatches"
+            :key="batch.key"
+            class="batch"
+            :data-person-import-batch="batch.key"
+          >
+            <header class="batch__head">
+              <div class="batch__meta">
+                <strong class="batch__submitter">批次 {{ batch.batchId || '（無批次）' }}</strong>
+                <span class="chip chip--pending">共 {{ batch.rows.length }} 條</span>
+              </div>
+              <div class="review__ops">
+                <button
+                  class="btn btn--primary"
+                  type="button"
+                  data-admin-action="person-import-review"
+                  data-action="person-import-accept"
+                  :data-person-import-batch="batch.key"
+                  @click="askImport({ batch }, persons.PERSON_IMPORT_STATUS_EXPORT.ACCEPTED)"
+                >
+                  整批採納
+                </button>
+                <button
+                  class="btn btn--ghost"
+                  type="button"
+                  data-admin-action="person-import-review"
+                  data-action="person-import-reject"
+                  :data-person-import-batch="batch.key"
+                  @click="askImport({ batch }, persons.PERSON_IMPORT_STATUS_EXPORT.REJECTED)"
+                >
+                  整批駁回
+                </button>
+              </div>
+            </header>
+            <table class="list-table">
+              <thead>
+                <tr>
+                  <th>印人</th>
+                  <th>姓</th>
+                  <th>名</th>
+                  <th>來源 id</th>
+                  <th>導入人</th>
+                  <th>導入時間</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in batch.rows" :key="row.id">
+                  <td>{{ importNameOf(row) || '（未命名）' }}</td>
+                  <td>{{ row.family_name || '—' }}</td>
+                  <td>{{ row.given_name || '—' }}</td>
+                  <td>{{ importSourceIdOf(row) }}</td>
+                  <td>{{ importSubmitterOf(row) }}</td>
+                  <td>{{ formatDateTime(row.imported_at) }}</td>
+                  <td class="review__ops">
+                    <button
+                      class="btn btn--primary"
+                      type="button"
+                      data-admin-action="person-import-review"
+                      data-action="person-import-accept"
+                      :data-person-import-id="row.id"
+                      @click="askImport({ row }, persons.PERSON_IMPORT_STATUS_EXPORT.ACCEPTED)"
+                    >
+                      採納
+                    </button>
+                    <button
+                      class="btn btn--ghost"
+                      type="button"
+                      data-admin-action="person-import-review"
+                      data-action="person-import-reject"
+                      :data-person-import-id="row.id"
+                      @click="askImport({ row }, persons.PERSON_IMPORT_STATUS_EXPORT.REJECTED)"
+                    >
+                      駁回
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+        <p v-else-if="importNotice" class="notice review__notice" data-person-import-notice>
+          {{ importNotice }}
+        </p>
+        <p v-else class="muted-hint">當前沒有待審覈的外部導入批次。</p>
+      </div>
+    </section>
+
     <!-- 批量审核二次确认（复用 ConfirmDialog；显式、可取消、默认不通过；文案写明批内条数 ＋ 提交人）。
          批量驳回时弹窗内提供**可选**理由（textarea，≤200 字）；弹窗按钮**只用 `data-action`**。 -->
     <ConfirmDialog
@@ -455,6 +655,34 @@ async function decide(row, decision) {
           data-correction-batch-note
         ></textarea>
         <span class="batch__note-hint">填寫後將一併記錄到該批每條勘誤，提交者可在「我的提交」中看到。</span>
+      </div>
+    </ConfirmDialog>
+
+    <!-- **導入批次審核的二次确认（本单新增）**：显式、可取消、默认不通过；文案写明粒度 ＋ 条数；
+         驳回时提供**可选**理由（≤200 字）；弹窗按钮**只用 `data-action`**（不带 `data-admin-action`）。 -->
+    <ConfirmDialog
+      v-if="importDialog"
+      :title="importDialogTitle"
+      :message="importDialogMessage"
+      :confirm-text="importConfirmText"
+      :confirm-action="importConfirmAction"
+      :cancel-action="IMPORT_CANCEL_ACTION"
+      @confirm="confirmImport"
+      @cancel="cancelImport"
+    >
+      <div
+        v-if="importDialog.decision === persons.PERSON_IMPORT_STATUS_EXPORT.REJECTED"
+        class="batch__note"
+      >
+        <label class="batch__note-label" for="person-import-note">駁回理由（可選，最多 200 字）</label>
+        <textarea
+          id="person-import-note"
+          v-model="importNote"
+          class="batch__note-input"
+          maxlength="200"
+          rows="3"
+          data-person-import-note
+        ></textarea>
       </div>
     </ConfirmDialog>
 

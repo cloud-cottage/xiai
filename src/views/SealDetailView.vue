@@ -563,6 +563,33 @@ function authorDisplayValue() {
   return formFace.value ? corrections.resolveAuthorDisplayName(formFace.value) : ''
 }
 
+/* ============================================================================
+   **印人信息区（印人批 2｜§4.1.14 表下注（v1.54）／人类已拍 ②；本单新增）**
+   ----------------------------------------------------------------------------
+   展示该作者（引用型 `author_person_id` → 印人）的**籍貫 / 傳記** —— **只展示正字段（繁体）**；
+   `native_place_chs` / `biography_chs` 副字段**不上屏**；作者显示名仍走**单点链**
+   （`corrections.resolveAuthorDisplayName`）。**不可达 ⇒ 优雅降级**（整区不渲染，不报错、不编造）。
+   ============================================================================ */
+/** 取本印面的作者印人行（引用命中 ⇒ 行；未命中 / 无引用 ⇒ `null`，**不编造**）。 */
+function authorPersonOf(face) {
+  const id = face && face.author_person_id ? String(face.author_person_id) : ''
+  if (!id) return null
+  try {
+    return persons.person(id) || null
+  } catch {
+    return null
+  }
+}
+/** 印人信息区的可上屏内容（籍貫 / 傳記任一非空才返回；否则 `null` ⇒ 整区不渲染、优雅降级）。 */
+function personInfoOf(face) {
+  const person = authorPersonOf(face)
+  if (!person) return null
+  const nativePlace = String(person.native_place || '')
+  const biography = String(person.biography || '')
+  if (!nativePlace && !biography) return null
+  return { name: corrections.resolveAuthorDisplayName(face) || '佚名', nativePlace, biography }
+}
+
 /* 印人提案（新增印人）**内联提交面**：仅当检索无命中时露出（§3.54.7 / §4.3）。 */
 const proposalOpen = ref(false)
 const proposalFeedback = ref('')
@@ -576,6 +603,11 @@ const proposal = reactive({
   birthYear: '',
   deathYear: '',
   cbdbId: '',
+  /* **批 2（v1.54｜人类已拍 ①）**：提案表单亦收四扩字段（籍贯 / 传记 / 来源 / 来源 id）。 */
+  nativePlace: '',
+  biography: '',
+  source: '',
+  sourceId: '',
   note: ''
 })
 
@@ -588,6 +620,10 @@ function resetProposal() {
   proposal.birthYear = ''
   proposal.deathYear = ''
   proposal.cbdbId = ''
+  proposal.nativePlace = ''
+  proposal.biography = ''
+  proposal.source = ''
+  proposal.sourceId = ''
   proposal.note = ''
 }
 
@@ -616,6 +652,11 @@ async function submitPersonProposalForm() {
       birthYear: proposal.birthYear,
       deathYear: proposal.deathYear,
       cbdbId: proposal.cbdbId,
+      /* **四扩字段（正字段，繁体为正）**：逐字提交；**不强制、不拒收、不自动改写**。 */
+      nativePlace: proposal.nativePlace,
+      biography: proposal.biography,
+      source: proposal.source,
+      sourceId: proposal.sourceId,
       note: proposal.note
     })
     proposalFeedback.value = result.message
@@ -1443,6 +1484,27 @@ onBeforeUnmount(() => {
         </p>
         <p v-else class="detail__hint">來源追蹤：暫無</p>
 
+        <!-- **印人信息区（印人批 2｜本单新增）**：展示该作者（引用型 `author_person_id` → 印人）
+             的**籍貫 / 傳記**；**只展示正字段（繁体）**，`*_chs` 副字段不上屏；作者显示名仍走单点链。
+             **不可达 ⇒ 优雅降级**（整区不渲染，不报错、不编造）。 -->
+        <template v-if="personInfoOf(face)">
+          <h3 class="face-block__sub">印人信息</h3>
+          <dl class="detail__fixed" data-face-person-info>
+            <div>
+              <dt>印人</dt>
+              <dd>{{ personInfoOf(face).name }}</dd>
+            </div>
+            <div v-if="personInfoOf(face).nativePlace">
+              <dt>籍貫</dt>
+              <dd data-face-person-native-place>{{ personInfoOf(face).nativePlace }}</dd>
+            </div>
+            <div v-if="personInfoOf(face).biography">
+              <dt>傳記</dt>
+              <dd data-face-person-biography>{{ personInfoOf(face).biography }}</dd>
+            </div>
+          </dl>
+        </template>
+
         <h3 class="face-block__sub">可標記屬性</h3>
         <div class="face-block__sub-head">
           <button v-if="canSubmit" class="btn btn--ghost" type="button" @click="openCorrection(face)">勘誤</button>
@@ -1496,6 +1558,33 @@ onBeforeUnmount(() => {
           <div class="field">
             <label for="pp-cbdb">CBDB id（可空）</label>
             <input id="pp-cbdb" v-model="proposal.cbdbId" type="text" data-person-proposal-cbdb />
+          </div>
+          <!-- **批 2（v1.54｜人类已拍 ①③）**：提案表单亦收四扩字段（籍贯 / 传记 / 来源 / 来源 id）。
+               繁體錄入 ＝ **變體 C**：**軟提示 ＋ 既有「一鍵轉繁」三動作鈕**（TextTransformButtons）；
+               **不強制、不拒收、不自動改寫**（不得攔截提交 ⇒ 四字段全空亦可提交；
+               提交值 ＝ 用戶所見的當前值，逐字，沿 §3.16「不轉用戶輸入」）。 -->
+          <p class="proposal-form__trad-hint" data-person-proposal-trad-hint>
+            建議使用繁體字填寫（不強制，留空亦可提交；系統不自動轉換）。
+          </p>
+          <div class="field">
+            <label for="pp-native-place">籍貫</label>
+            <input id="pp-native-place" v-model="proposal.nativePlace" type="text" data-person-proposal-native-place />
+            <TextTransformButtons v-model="proposal.nativePlace" field-key="person-proposal:native_place" field-label="籍貫" />
+          </div>
+          <div class="field">
+            <label for="pp-biography">傳記</label>
+            <input id="pp-biography" v-model="proposal.biography" type="text" data-person-proposal-biography />
+            <TextTransformButtons v-model="proposal.biography" field-key="person-proposal:biography" field-label="傳記" />
+          </div>
+          <div class="field">
+            <label for="pp-source">來源</label>
+            <input id="pp-source" v-model="proposal.source" type="text" data-person-proposal-source />
+            <TextTransformButtons v-model="proposal.source" field-key="person-proposal:source" field-label="來源" />
+          </div>
+          <div class="field">
+            <label for="pp-source-id">來源 id</label>
+            <input id="pp-source-id" v-model="proposal.sourceId" type="text" data-person-proposal-source-id />
+            <TextTransformButtons v-model="proposal.sourceId" field-key="person-proposal:source_id" field-label="來源 id" />
           </div>
           <div class="field">
             <label for="pp-note">依據（選填）</label>

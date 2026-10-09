@@ -185,6 +185,14 @@ export async function submitPersonProposal({
   deathYear = null,
   cbdbId = '',
   cardId = '',
+  /* **批 2（v1.54｜§3.54.13 / §4.1.16；人类已拍 ①）**：用户提案表单亦收四扩字段
+     （籍贯 / 传记 / 来源 / 来源 id）＋ 两繁简副字段。**只接收、不转改**（零繁简转换）。 */
+  nativePlace = '',
+  biography = '',
+  source = '',
+  sourceId = '',
+  nativePlaceChs = '',
+  biographyChs = '',
   note = ''
 } = {}) {
   const user = currentUser()
@@ -228,7 +236,11 @@ export async function submitPersonProposal({
 
   /* **写面接线（本单）**：与既有写 op（`corrections.submitCorrection`）**同一通道** ——
      经登录令牌写面门 `userWriteGate`（含令牌自愈）。载荷键面**逐字**取服务端封闭面
-     （云函数 `xiai-user-token/lib/ops.js::PERSON_PROPOSAL_ALLOWED_KEYS`：`batch_id` … `note`）；
+     （云函数 `xiai-user-token/lib/ops.js::PERSON_PROPOSAL_ALLOWED_KEYS`：`batch_id` /
+     `target_person_id` / `family_name` / `given_name` / `courtesy_names` / `art_names` /
+     `alias_names` / `birth_year` / `death_year` / `cbdb_id` / `card_id` / `native_place` /
+     `biography` / `source` / `source_id` / `native_place_chs` / `biography_chs` / `note`
+     —— **恰 18 键，与云函数逐字同集**；批 2 由 12 键扩为 18 键）；
      **提交人由服务端从令牌派生**（载荷里的身份类键被服务端拒 ⇒ `INVALID_FIELD` ＋ 零写入）。 */
   const payload = {
     batch_id: batch,
@@ -242,6 +254,13 @@ export async function submitPersonProposal({
     death_year: death,
     cbdb_id: cbdb,
     card_id: card,
+    /* **四扩字段（正字段，繁体为正）＋ 两繁简副字段**：逐字透传，**不做任何转换改写**。 */
+    native_place: String(nativePlace || ''),
+    biography: String(biography || ''),
+    source: String(source || ''),
+    source_id: String(sourceId || ''),
+    native_place_chs: String(nativePlaceChs || ''),
+    biography_chs: String(biographyChs || ''),
     note: String(note || '').trim()
   }
   const gate = await userWriteGate('submitPersonProposal', payload)
@@ -264,6 +283,13 @@ export async function submitPersonProposal({
       death_year: death,
       cbdb_id: cbdb,
       card_id: card,
+      /* **四扩字段 ＋ 两繁简副字段**（local-dev 本地权威行；逐字透传，零转换）。 */
+      native_place: String(nativePlace || ''),
+      biography: String(biography || ''),
+      source: String(source || ''),
+      source_id: String(sourceId || ''),
+      native_place_chs: String(nativePlaceChs || ''),
+      biography_chs: String(biographyChs || ''),
       note: String(note || '').trim(),
       submitted_by: user.id, // **不透明 uid；零手机号**
       submitted_at: at,
@@ -365,6 +391,14 @@ function acceptPersonProposal(proposal, actor, at) {
     death_year: toIntOrNull(proposal && proposal.death_year),
     cbdb_id: String((proposal && proposal.cbdb_id) || ''),
     card_id: String((proposal && proposal.card_id) || ''),
+    /* **批 2（v1.54｜§3.54.13 / §4.1.16）**：采纳提案落 `xiai_persons` 行时**带上六扩字段**
+       （四正字段 ＋ 两繁简副字段；值来自提案行，**不做任何转换改写**）。 */
+    native_place: String((proposal && proposal.native_place) || ''),
+    biography: String((proposal && proposal.biography) || ''),
+    source: String((proposal && proposal.source) || ''),
+    source_id: String((proposal && proposal.source_id) || ''),
+    native_place_chs: String((proposal && proposal.native_place_chs) || ''),
+    biography_chs: String((proposal && proposal.biography_chs) || ''),
     proposal_id: String((proposal && proposal.id) || ''), // 溯源：产出本行的采纳提案
     created_by: actor && actor.id ? actor.id : '', // **不透明 uid；零手机号**
     created_at: at,

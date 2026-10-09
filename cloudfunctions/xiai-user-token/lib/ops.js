@@ -120,7 +120,10 @@ const ALLOWED_KEYS = Object.freeze(['faceId', 'sealId', 'stampId', 'field', 'val
 /** 采信载荷允许键（**封闭键面**：`['faceId','sealId','stampId','field','value']`；身份类键一律拒）。 */
 const ENDORSE_ALLOWED_KEYS = Object.freeze(['faceId', 'sealId', 'stampId', 'field', 'value'])
 
-/** 印人提案载荷允许键（**封闭键面**；身份类键一律拒 —— 提交人由服务端派生）。 */
+/** 印人提案载荷允许键（**封闭键面**；身份类键一律拒 —— 提交人由服务端派生）。
+ *  **批 2（v1.54｜§3.54.13 / §4.1.16）**：`native_place` / `biography` / `source` / `source_id`
+ *  （四扩字段）＋ `native_place_chs` / `biography_chs`（两繁简副字段）—— 12 键扩为 **18 键**，
+ *  与 `src/services/persons.js::submitPersonProposal` 的载荷键面**逐字同集**。 */
 const PERSON_PROPOSAL_ALLOWED_KEYS = Object.freeze([
   'batch_id',
   'target_person_id',
@@ -133,6 +136,12 @@ const PERSON_PROPOSAL_ALLOWED_KEYS = Object.freeze([
   'death_year',
   'cbdb_id',
   'card_id',
+  'native_place',
+  'biography',
+  'source',
+  'source_id',
+  'native_place_chs',
+  'biography_chs',
   'note'
 ])
 
@@ -1396,6 +1405,14 @@ const OPS = Object.freeze({
       death_year: death,
       cbdb_id: cbdb,
       card_id: text(payload.card_id),
+      /* **批 2（v1.54｜§3.54.13 / §4.1.16）**：四扩字段（繁体为正）＋ 两繁简副字段 ——
+         逐字透传、**不做任何转换改写**；采纳时由 `reviewPersonProposal` 映射进 `xiai_persons`。 */
+      native_place: text(payload.native_place),
+      biography: text(payload.biography),
+      source: text(payload.source),
+      source_id: text(payload.source_id),
+      native_place_chs: text(payload.native_place_chs),
+      biography_chs: text(payload.biography_chs),
       note: text(payload.note),
       submitted_by: identity.uid,
       submitted_at: at,
@@ -1814,6 +1831,14 @@ const ADMIN_OPS = Object.freeze({
           gender: '',
           cbdb_id: text(row.cbdb_id),
           card_id: text(row.card_id),
+          /* **批 2（v1.54｜§3.54.13 / §4.1.16）**：采纳提案落 `xiai_persons` 行时带上六扩字段
+             （四正字段 ＋ 两繁简副字段；值来自提案行，**不做任何转换改写**）。 */
+          native_place: text(row.native_place),
+          biography: text(row.biography),
+          source: text(row.source),
+          source_id: text(row.source_id),
+          native_place_chs: text(row.native_place_chs),
+          biography_chs: text(row.biography_chs),
           proposal_id: proposalId,
           created_by: identity.uid,
           created_at: at,
