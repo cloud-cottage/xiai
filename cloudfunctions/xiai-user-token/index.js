@@ -46,7 +46,7 @@ const {
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
 const { OPS, ADMIN_OPS, persist, readRoleRow } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
-   **V6-a 加固**：只读诊断 op `sessionProbe`（无令牌可调、只回形状零值）亦单点自同份文件。 */
+   **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
 
 /** 对外文案（**繁體、如实、不泄漏内部标识**；按内部判别码映射，逐条一一对应）。 */
@@ -166,9 +166,10 @@ function handleIssue(event, config) {
 async function handleVerify(event, config, callContext) {
   const now = serverNowSeconds()
   const op = typeof event.op === 'string' ? event.op.trim() : ''
-  /* **V6-a 加固**：只读诊断 op `sessionProbe` —— **无令牌可调**、**只回形状零值**、**零写入**；
-     **在任何鉴权 / 开关 / 会话 / 令牌判定之前**短路返回。 */
-  if (isSessionProbe(op)) return sessionProbe()
+  /* **V6-a 加固（修订）**：只读诊断 op `sessionProbe` —— **无令牌可调**、**context 形状诊断**
+     （布尔-only ＋ 零值回显：候选容器存在性 / uidPresent / uidKind / anonymousMarker / mode）、
+     **零写入**；**在任何鉴权 / 开关 / 会话 / 令牌判定之前**短路返回（递入 `context` 供形状诊断）。 */
+  if (isSessionProbe(op)) return sessionProbe(callContext)
   /* **V6-a：优先取调用者平台会话身份**（additive）：会话在场 ⇒ 查 `xiai_roles` 判权（fail-closed、
      零写入；读失败 ⇒ `STORAGE_UNAVAILABLE`，**不伪装 FORBIDDEN**）；拿不到会话 ⇒ **回落既有令牌路**
      （下面那一段逐字不变）。 */

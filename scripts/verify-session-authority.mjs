@@ -14,7 +14,11 @@
  *   D. **静态扫描**：`sessionAuthority.js` 两副本逐字节同份 ＋ 零 SDK / 零句柄 / 零 fs ＋
  *      集合句柄调用仍**只**出现在 `lib/ops.js`（两个函数各判一次）。
  *   **V6-a 加固（只增不减）**：开关**惰性缺省 off**（A11 / A11b / A11c / A11d、B8）、
- *      只读诊断 op `sessionProbe`（A17 / A18、B9 / B9c、C7）、
+ *      只读诊断 op `sessionProbe`（A17 / A18、B9 / B9c、C7）——**修订**：探针从「全零信封」
+ *      改为 **context 形状诊断**（**布尔-only ＋ 零值回显**：候选容器存在性 / uidPresent /
+ *      uidKind / anonymousMarker / mode）；A18 / B9 / B9c / C7 的期望值随新契约更新
+ *      （**检查条目只增不减**），新增 A18b / A18c / A18d / A18e / A18f / A18g、
+ *      B9d / B9e / B9f / B9g、C7c / C7d、
  *      角色行形状对账 `role` 单值 / `roles` 数组 ＋ 大小写不敏感（A10b / A10c）。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
@@ -231,7 +235,13 @@ check('A14', '标记取值回落：认不出 ⇒ 既有令牌值', 'SERVER_TOKEN
 check('A15', '身份可用判据：令牌路需手机号、会话路可缺', [true, false, true], [userSa.identityUsable({ uid: 'u', phone: '16600' }), userSa.identityUsable({ uid: 'u' }), userSa.identityUsable({ uid: 'u', identity_source: 'SESSION' })])
 check('A16', '注入缝可见性', true, userSa.sessionIdentityInjected() && adminSa.sessionIdentityInjected())
 check('A17', '诊断 op 名 ＋ 判定（去空白后逐字比对、大小写敏感）', ['sessionProbe', true, true, false], [userSa.SESSION_PROBE_OP, userSa.isSessionProbe('sessionProbe'), userSa.isSessionProbe(' sessionProbe '), userSa.isSessionProbe('verify')])
-check('A18', '诊断探针 `sessionProbe`：**只回形状零值**（键形状 ＋ 数据值全零）', { ok: true, obtained: false, source: '', mode: '', uid: '', role: '' }, userSa.sessionProbe())
+check('A18', '诊断探针 `sessionProbe`：**context 形状诊断**（无 context ⇒ **全零回显**）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: false }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, userSa.sessionProbe())
+check('A18b', '诊断探针：两副本同一 context ⇒ 回包**逐键恒等**', userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }), adminSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
+check('A18c', '诊断探针：候选容器存在性 ＋ `UID` 键形 ⇒ uidPresent（**如实布尔**）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '' }, userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }))
+check('A18d', '诊断探针：匿名标记**在场即真**（不看取值；承载 uid 的容器）／无标记 ⇒ false', [true, false], [userSa.sessionProbe({ userInfo: { uid: 'probe-uid', isAnonymous: false } }).anonymousMarker, userSa.sessionProbe({ userInfo: { uid: 'probe-uid' } }).anonymousMarker])
+check('A18e', '诊断探针：`uidKind` / `mode` **恒零值回显**（真实 uid 键形 / 开关态不回吐）', ['', ''], [userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }).uidKind, userSa.sessionProbe({ user: { UID: 'probe-kind-uid' } }).mode])
+check('A18f', '诊断探针：**布尔-only** —— 键形状冻结 ＋ 回包不含任何 uid 值', true, ((probe) => !JSON.stringify(probe).includes('probe-secret-uid') && shapeOf(probe) === 'anonymousMarker,candidates,mode,ok,uidKind,uidPresent' && shapeOf(probe.candidates) === 'auth,context,user,userInfo')(userSa.sessionProbe({ userInfo: { uid: 'probe-secret-uid' } })))
+check('A18g', '诊断探针：context 缺省 / null / 非对象 ⇒ **同一全零回显**（不炸）', [true, true], [JSON.stringify(userSa.sessionProbe()) === JSON.stringify(userSa.sessionProbe(null)), JSON.stringify(userSa.sessionProbe()) === JSON.stringify(userSa.sessionProbe('非对象'))])
 
 /* ===========================================================================
    B 段：管理员写面（xiai-admin-token）
@@ -314,18 +324,29 @@ check('B8', '缺省（未显式 prefer）⇒ 会话路停用 ⇒ 无令牌 ⇒ F
 check('B8b', '缺省 off 下会话在场亦零写入', 0, store.writes.length)
 process.env.XIAI_SESSION_AUTHORITY = 'prefer'
 
-/* B9：诊断 op `sessionProbe` —— **无令牌可调**、**只回形状零值**、**零写入**（不受开关影响）。 */
+/* B9：诊断 op `sessionProbe` —— **无令牌可调**、**context 形状诊断**（布尔-only ＋ 零值回显）、**零写入**（不受开关影响）。 */
 resetWorld()
 const beforeB9 = store.writes.length
 const b9 = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9', 'sessionProbe **无令牌**可调 ⇒ 只回形状零值', { ok: true, obtained: false, source: '', mode: '', uid: '', role: '' }, b9)
+check('B9', 'sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context：根容器在场、其余全零）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, b9)
 check('B9b', 'sessionProbe 零写入', beforeB9, store.writes.length)
-/* B9c：`sessionProbe` **与开关解耦**（缺省 off 亦可调、仍只回形状零值）。 */
+/* B9c：`sessionProbe` **与开关解耦**（缺省 off 亦可调、回包形状不变）。 */
 resetWorld()
 delete process.env.XIAI_SESSION_AUTHORITY
 const b9c = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('B9c', '缺省 off 下 sessionProbe 仍可调（诊断与开关解耦）', { ok: true, obtained: false, source: '', mode: '', uid: '', role: '' }, b9c)
+check('B9c', '缺省 off 下 sessionProbe 仍可调（诊断与开关解耦；形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, b9c)
 process.env.XIAI_SESSION_AUTHORITY = 'prefer'
+/* B9d：**注入缝不参与诊断** —— 会话在场 ⇒ 探针仍只诊断 context 形状、不消费 provider。 */
+resetWorld()
+currentSession = { uid: ADMIN_UID }
+const b9d = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, {})
+check('B9d', '会话在场 ⇒ sessionProbe 仍只回 context 形状（不消费注入缝、形状不变）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, b9d)
+check('B9e', 'sessionProbe 回包不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(b9d).includes(ADMIN_UID))
+/* B9f：context 形状被**如实诊断**（`user` 容器 ＋ `UID` 键形）且 uid 值不回吐。 */
+resetWorld()
+const b9f = await adminFn.main({ action: 'verify', op: 'sessionProbe' }, { user: { UID: ADMIN_UID } })
+check('B9f', 'context 带 `user.UID` ⇒ candidates.user ＋ uidPresent 如实为真（uidKind / mode 仍零值）', { ok: true, candidates: { userInfo: false, user: true, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: false, mode: '' }, b9f)
+check('B9g', 'context 形状诊断不回吐 uid 值（**零泄漏**）', true, !JSON.stringify(b9f).includes(ADMIN_UID))
 
 /* ===========================================================================
    C 段：用户写面（xiai-user-token）
@@ -388,12 +409,17 @@ const c6 = await userFn.main({ action: 'verify', token: userToken, op: 'submitCo
 userSa.setSessionIdentityProvider(sessionProvider)
 check('C6', '会话注入抛错 ⇒ 回落令牌路（不抛异常、不炸）', 'SERVER_TOKEN', c6.identity_source)
 
-/* C7：诊断 op `sessionProbe` —— 用户函数同样**无令牌可调**、零写入、只回形状零值。 */
+/* C7：诊断 op `sessionProbe` —— 用户函数同样**无令牌可调**、零写入、context 形状诊断。 */
 resetWorld()
 const beforeC7 = store.writes.length
 const c7 = await userFn.main({ action: 'verify', op: 'sessionProbe' }, {})
-check('C7', '用户函数 sessionProbe **无令牌**可调 ⇒ 只回形状零值', { ok: true, obtained: false, source: '', mode: '', uid: '', role: '' }, c7)
+check('C7', '用户函数 sessionProbe **无令牌**可调 ⇒ context 形状诊断（空 context）', { ok: true, candidates: { userInfo: false, user: false, auth: false, context: true }, uidPresent: false, uidKind: '', anonymousMarker: false, mode: '' }, c7)
 check('C7b', 'sessionProbe 零写入', beforeC7, store.writes.length)
+/* C7c：context.userInfo 携带 uid ＋ 匿名标记 ⇒ 探针如实报告形状（布尔-only、零值回显、不回吐 uid）。 */
+resetWorld()
+const c7c = await userFn.main({ action: 'verify', op: 'sessionProbe' }, { userInfo: { uid: USER_UID, isAnonymous: true } })
+check('C7c', 'context.userInfo 在场 ⇒ candidates.userInfo ＋ uidPresent ＋ anonymousMarker 如实为真', { ok: true, candidates: { userInfo: true, user: false, auth: false, context: true }, uidPresent: true, uidKind: '', anonymousMarker: true, mode: '' }, c7c)
+check('C7d', 'sessionProbe 回包不含任何 uid 值（**零泄漏**）', true, !JSON.stringify(c7c).includes(USER_UID))
 
 /* ===========================================================================
    D 段：静态扫描

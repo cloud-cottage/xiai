@@ -23,8 +23,9 @@
  *   ⑥ **开关（惰性缺省 off）**：**仅当**环境变量 `XIAI_SESSION_AUTHORITY` **显式置为**
  *      `prefer`（大小写不敏感）时本路才启用（会话优先）；**缺省 / 其它值 / `off`** ⇒
  *      本路整体停用（纯令牌路）——**缺省即安全**，启用须显式。
- *   ⑦ **只读诊断 op**：`sessionProbe`（**无令牌可调**、**只回形状零值**、**零读取零写入**；
- *      由调用方在**鉴权之前**短路，见 `isSessionProbe` / `sessionProbe`）。
+ *   ⑦ **只读诊断 op**：`sessionProbe`（**无令牌可调**、**context 形状诊断**——**布尔-only ＋
+ *      零值回显**：候选容器存在性 / uidPresent / uidKind / anonymousMarker / mode、
+ *      **零库读零写入**；由调用方在**鉴权之前**短路，见 `isSessionProbe` / `sessionProbe`）。
  *   ⑧ **角色行形状对账**：`role` 单值 / `roles` 数组**都认**、**大小写不敏感**
  *      （`roleFromRow`）。
  *
@@ -55,7 +56,7 @@ const IDENTITY_SOURCES = Object.freeze({ SESSION: 'SESSION', SERVER_TOKEN: 'SERV
 /** 对外 reason（**既有冻结表的子集**；本模块不新增字面值）。 */
 const REASONS = Object.freeze({ FORBIDDEN: 'FORBIDDEN', STORAGE_UNAVAILABLE: 'STORAGE_UNAVAILABLE' })
 
-/** **只读诊断 op 名**（`sessionProbe`）：**无令牌可调**、**只回形状零值**（见 `sessionProbe`）。 */
+/** **只读诊断 op 名**（`sessionProbe`）：**无令牌可调**、**context 形状诊断**（见 `sessionProbe`）。 */
 const SESSION_PROBE_OP = 'sessionProbe'
 
 function deny(reason, message) {
@@ -206,21 +207,39 @@ async function resolveSessionAuthority(input) {
 }
 
 /**
- * 只读诊断 op **`sessionProbe`**（**V6-a 加固**）：**无令牌即可调**、**只回形状零值**。
- * 回吐判权结果面的**键形状**（`{ok, obtained, source, mode, uid, role}`），**数据值一律零值**
- * ——`obtained:false`、`source:''`、`mode:''`、`uid:''`、`role:''`；外层 `ok` 恒 `true`
+ * 只读诊断 op **`sessionProbe`**（**V6-a 加固修订**：全零信封 → **context 形状诊断**）：
+ * **无令牌即可调**，对调用方递入的函数第二参 `context` 只做**形状**诊断、**布尔-only ＋ 零值回显**——
+ *   · `candidates`：候选容器存在性（`userInfo` / `user` / `auth` / 根 `context`，与
+ *     `platformIdentityFromContext` 的候选序同源）——**如实布尔**；
+ *   · `uidPresent`：是否**有候选容器**携带 uid（`uid` / `UID` 键形都认，与既有读法同源）——**如实布尔**；
+ *   · `anonymousMarker`：**承载 uid 的那个候选容器**上是否存在匿名标记（`isAnonymous` / `anonymous`
+ *     键**在场即真**、不看取值；无 uid ⇒ 恒 `false`）——**如实布尔**；
+ *   · `uidKind` / `mode`：**恒回零值空串**（真实 uid 键形 / 真实开关态**一律不回吐**——零值回显，
+ *     键形状为后续诊断预留）。
+ * **绝不**回吐真实 uid / 角色 / 令牌 / 开关态 / 任何身份**值**；**零库读、零写入、不碰注入缝**
+ * （不查 `xiai_roles`、不调 `sessionIdentityProvider`、不产生任何写）。
+ * `context` 缺省 / 非对象 ⇒ **全零回显**（全 false ＋ 空串，不炸）。外层 `ok` 恒 `true`
  * 仅表示**探针本身应答成功**（**不是**「恰 3 键」的失败形态，两者不可混淆）。
- * **绝不**回吐真实开关态 / 会话 uid / 角色 / 令牌 / 任何身份；**零读取、零写入**
- * （不碰 `context`、不查 `xiai_roles`、不产生任何写）。
+ * @param {object} [context] 函数第二参（CloudBase 平台注入的调用者上下文）。
+ * @returns {{ok: boolean, candidates: {userInfo: boolean, user: boolean, auth: boolean, context: boolean},
+ *   uidPresent: boolean, uidKind: string, anonymousMarker: boolean, mode: string}}
  */
-function sessionProbe() {
+function sessionProbe(context) {
+  const root = context && typeof context === 'object' ? context : null
+  const exists = (value) => !!(value && typeof value === 'object')
+  const holder = platformIdentityFromContext(root)
   return {
     ok: true,
-    obtained: false,
-    source: '',
-    mode: '',
-    uid: '',
-    role: ''
+    candidates: {
+      userInfo: exists(root && root.userInfo),
+      user: exists(root && root.user),
+      auth: exists(root && root.auth),
+      context: root !== null
+    },
+    uidPresent: holder !== null,
+    uidKind: '',
+    anonymousMarker: !!holder && (holder.isAnonymous !== undefined || holder.anonymous !== undefined),
+    mode: ''
   }
 }
 
