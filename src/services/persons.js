@@ -546,10 +546,13 @@ export function canReviewPersonImports(actor) {
   return who !== null && who !== undefined && who.role === 'admin'
 }
 
-/** 归一化载荷 → 导入行载荷面（数组 / 整数 / 文本；**不做繁简转换**）。 */
+/** 归一化载荷 → 导入行载荷面（数组 / 整数 / 文本；**不做繁简转换**）。
+ *  **v1.57（§3.54.19）**：3 個 extraction 鍵（`courtesy_names_extraction` / `art_names_extraction` /
+ *  `alias_names_extraction`）**僅在載荷顯式提供時**帶上（缺鍵 ⇒ 不擴載荷面；沿「舊 18 鍵形態必須
+ *  仍被接受」，亦避免以默認空陣列冒充「已提供」而在雲端觸發等長校驗）。*/
 function normalizeImportPayload(source) {
   const src = source && typeof source === 'object' ? source : {}
-  return {
+  const out = {
     name_full: String(src.name_full || '').trim(),
     family_name: String(src.family_name || '').trim(),
     given_name: String(src.given_name || '').trim(),
@@ -566,6 +569,15 @@ function normalizeImportPayload(source) {
     cbdb_id: String(src.cbdb_id || '').trim(),
     source_id: String(src.source_id || '').trim()
   }
+  /* **v1.57（§3.54.19）**：3 個 extraction 鍵 —— 僅在載荷顯式提供時帶上（值域不封閉）。 */
+  ;[
+    'courtesy_names_extraction',
+    'art_names_extraction',
+    'alias_names_extraction'
+  ].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = toArray(src[key])
+  })
+  return out
 }
 
 /** 导入行 → person 行（**采纳落行**：带上 person 四扩字段 ＋ 两副字段 ＋ 幂等键 `source_person_id`）。 */
@@ -639,6 +651,31 @@ export async function submitPersonImport({
     norm.alias_names.length === 0
   ) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '導入行請至少帶姓名、字、號或別名之一；本次零寫入。' }
+  }
+
+  /* **v1.57（§3.54.19）**：3 個 extraction 鍵形態校驗 —— **僅在載荷提供了該鍵時**校驗
+     （`string[]` ＋ 元素為非空字串 ＋ 與對應值陣列等長；**值域不封閉**）。違形態 ⇒
+     `INVALID_VALUE` ＋ 零寫入（沿既有凍結 reason 表）。 */
+  {
+    const rawSource = payload && typeof payload === 'object' ? payload : {}
+    const extractionPairs = [
+      ['courtesy_names_extraction', norm.courtesy_names],
+      ['art_names_extraction', norm.art_names],
+      ['alias_names_extraction', norm.alias_names]
+    ]
+    for (const [key, counterpart] of extractionPairs) {
+      if (!Object.prototype.hasOwnProperty.call(rawSource, key)) continue
+      const value = rawSource[key]
+      if (!Array.isArray(value)) {
+        return { ok: false, reason: 'INVALID_VALUE', message: `載荷 ${key} 必須是陣列（string[]）；本次零寫入。` }
+      }
+      if (value.some((item) => typeof item !== 'string' || item.trim() === '')) {
+        return { ok: false, reason: 'INVALID_VALUE', message: `載荷 ${key} 的元素必須是非空字串；本次零寫入。` }
+      }
+      if (value.length !== counterpart.length) {
+        return { ok: false, reason: 'INVALID_VALUE', message: `載荷 ${key} 必須與對應值陣列等長（${value.length} ≠ ${counterpart.length}）；本次零寫入。` }
+      }
+    }
   }
 
   /* **幂等**（§3.54.14）：同 `source_person_id` 已有導入行 ⇒ 原樣返回（不改寫既有行）。 */

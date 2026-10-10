@@ -17,7 +17,10 @@
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import path from 'node:path'
+
+const require = createRequire(import.meta.url)
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
@@ -234,6 +237,171 @@ check('G4', 'P2-c 静态：数据层未导出通用写口（`writeCollection` / 
   check('BG4', 'P2-c 行为：服务层转发 ≡ 数据层门（三键逐字同值）',
     [db.personDirectWriteDenial('persons'), db.personDirectWriteDenial('person-imports'), db.personDirectWriteDenial('seals')],
     [personsSvc.personSingleWriterDenial('persons'), personsSvc.personSingleWriterDenial('person-imports'), personsSvc.personSingleWriterDenial('seals')])
+}
+
+/* ===========================================================================
+   D 段（本單新增）：導入行歸一化載荷擴 3 個 extraction 鍵（v1.57｜§3.54.19）
+   ---------------------------------------------------------------------------
+   判據 id ＝ `X1*` 〜 `XN`（**本單新增；既有 id 一字未動、既有斷言未刪未改**）。
+   對應規範：AC-507（鍵面恰 21）/ AC-508（等長 ＋ 非空校驗）/ AC-509（缺鍵不拒收）/
+            AC-510（採納不落 person 行 ＋ 回歸面）。
+   手法：**注入式假 DB**（內存；「零寫入」判據 ＝ 是否產出 `plan`）交**真實雲函數體**
+        `xiai-user-token/lib/ops.js`（封閉鍵面真源）。
+   =========================================================================== */
+const userOps = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/ops.js'))
+const cloudbase = await import(path.join(ROOT, 'src/data/cloudbase.js'))
+const EXTRACTION_KEYS = ['courtesy_names_extraction', 'art_names_extraction', 'alias_names_extraction']
+
+/** 內存假 DB（形狀對齊 ops.js 的 `collection(name).where(match).get()` / `.get()` / `.doc(id).get()`）。 */
+function makeFakeDb(seed = {}) {
+  const collections = new Map()
+  Object.keys(seed).forEach((name) => collections.set(name, new Map((seed[name] || []).map((row, i) => [String(row._id || row.id || `${name}-${i}`), row]))))
+  return () => ({
+    collection(name) {
+      const map = collections.get(name) || new Map()
+      collections.set(name, map)
+      const list = () => [...map.values()].map((row) => Object.assign({}, row))
+      return {
+        where(match) {
+          return { async get() { return { data: list().filter((row) => Object.keys(match).every((k) => row[k] === match[k])) } } }
+        },
+        async get() { return { data: list() } },
+        doc(id) { return { async get() { const row = map.get(String(id)); return { data: row ? [Object.assign({}, row)] : [] } } } }
+      }
+    }
+  })
+}
+const IMPORT_IDENT = { uid: 'u-import', phone: '13800000000' }
+const ADMIN_IDENT = { uid: 'u-admin', phone: '13800000000' }
+const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
+
+/* AC-507：封閉鍵面恰 21（雲端）＋ 計數連帶（載荷 18 / PERSON_IMPORT_FIELDS 28 / 空載荷缺省 []）。 */
+{
+  const keys = userOps.PERSON_IMPORT_ALLOWED_KEYS
+  check('X1a', 'AC-507 雲端 `PERSON_IMPORT_ALLOWED_KEYS` 恰 21 鍵（v1.57：18 → 21）', 21, keys.length)
+  check('X1b', 'AC-507 3 個 extraction 鍵逐字 ∈ 鍵面', EXTRACTION_KEYS.slice().sort(), EXTRACTION_KEYS.filter((k) => keys.indexOf(k) !== -1).sort())
+  check('X1c', '計數連帶：載荷字段恰 18（15 → 18）', 18, seed.PERSON_IMPORT_PAYLOAD_FIELDS.length)
+  check('X1d', '計數連帶：`PERSON_IMPORT_FIELDS` 恰 28（行級 10 ＋ 載荷 18）', 28, seed.PERSON_IMPORT_FIELDS.length)
+  const empty = seed.emptyPersonImportPayload()
+  check('X1e', '空導入載荷：3 個 extraction 鍵缺省 `[]`', { c: [], a: [], l: [] }, { c: empty.courtesy_names_extraction, a: empty.art_names_extraction, l: empty.alias_names_extraction })
+  check('X1f', '鍵面無重複（21 鍵去重後仍 21）', 21, new Set(keys).size)
+  /* 負對照 canary：注入第 22 鍵 ⇒ 21 尺必報紅（證明非恆等於 21）。 */
+  check('X1x', '負對照：注入第 22 鍵 ⇒ 21 尺必報紅', 22, keys.concat(['canary_extra_key']).length)
+}
+
+/* AC-509：缺鍵不拒收（舊 18 鍵形態 ⇒ ok:true）。 */
+{
+  userOps.setOpsDbProvider(makeFakeDb())
+  const legacy = {
+    batch_id: 'B-legacy', source: 'SRC', source_person_id: 'SP-legacy',
+    name_full: '郭照', family_name: '郭', given_name: '照',
+    courtesy_names: ['容光', '子青'], art_names: ['曉樓'], alias_names: ['郭容光'],
+    birth_year: 1827, death_year: 1895, native_place: '浙江秀水（今嘉興）人。',
+    native_place_chs: '浙江秀水（今嘉兴）人。', biography: '郭照(容光)。', biography_chs: '郭照(容光)。',
+    nationality: '中國', cbdb_id: null, source_id: 'RW2132'
+  }
+  const res = await userOps.OPS.submitPersonImport(legacy, IMPORT_IDENT)
+  check('X2', 'AC-509 缺鍵不拒收：舊 18 鍵載荷 ⇒ ok:true', true, res.ok === true)
+  check('X2b', 'AC-509 該載荷鍵面恰 18（無 3 個 extraction 鍵）', 18, Object.keys(legacy).length)
+  check('X2c', 'AC-509 落行 3 個 extraction 鍵為缺省 `[]`（不因缺鍵拒收）', { c: [], a: [], l: [] },
+    { c: res.row && res.row.courtesy_names_extraction, a: res.row && res.row.art_names_extraction, l: res.row && res.row.alias_names_extraction })
+}
+
+/* AC-508（正）：等長 ＋ 非空 ⇒ ok:true；落行含 3 鍵且各與值陣列等長；值域不封閉。 */
+{
+  userOps.setOpsDbProvider(makeFakeDb())
+  const good = {
+    batch_id: 'B-ok', source: 'SRC', source_person_id: 'SP-ok', family_name: '郭', given_name: '照',
+    courtesy_names: ['容光', '子青'], courtesy_names_extraction: ['rule-based', 'rule-based'],
+    art_names: ['曉樓'], art_names_extraction: ['rule-based'],
+    alias_names: ['郭容光'], alias_names_extraction: ['manual']
+  }
+  const res = await userOps.OPS.submitPersonImport(good, IMPORT_IDENT)
+  const row = (res && res.row) || {}
+  check('X3', 'AC-508 等長（2/1/1）⇒ ok:true', true, res.ok === true)
+  check('X3b', 'AC-508 落行 3 鍵各與對應值陣列等長', { c: 2, a: 1, l: 1 },
+    { c: (row.courtesy_names_extraction || []).length, a: (row.art_names_extraction || []).length, l: (row.alias_names_extraction || []).length })
+  check('X3c', '值域不封閉：非 `rule-based` 取值（`manual`）仍被接受', ['manual'], row.alias_names_extraction)
+  const readBack = cloudbase.normalizePersonImportRow(row)
+  check('X3d', '讀面 `normalizePersonImportRow` 含 3 鍵、同形歸一', { c: ['rule-based', 'rule-based'], a: ['rule-based'], l: ['manual'] },
+    { c: readBack.courtesy_names_extraction, a: readBack.art_names_extraction, l: readBack.alias_names_extraction })
+}
+
+/* AC-508（負）：不等長 / 空元素 / 非數組 ⇒ `INVALID_VALUE` ＋ 零寫入（無 plan）。 */
+{
+  userOps.setOpsDbProvider(makeFakeDb())
+  const base = { batch_id: 'B-shape', source: 'SRC', family_name: '郭', given_name: '照', courtesy_names: ['容光', '子青'] }
+  const uneven = await userOps.OPS.submitPersonImport({ ...base, source_person_id: 'SP-uneven', courtesy_names_extraction: ['rule-based', 'rule-based', 'rule-based'] }, IMPORT_IDENT)
+  check('X4', 'AC-508 不等長（值 2 vs extraction 3）⇒ INVALID_VALUE', { ok: false, reason: 'INVALID_VALUE' }, { ok: uneven.ok, reason: uneven.reason })
+  check('X4b', 'AC-508 不等長 ⇒ 零寫入（無 plan）', undefined, uneven.plan)
+  const emptyEl = await userOps.OPS.submitPersonImport({ ...base, source_person_id: 'SP-empty', courtesy_names_extraction: ['rule-based', ''] }, IMPORT_IDENT)
+  check('X5', 'AC-508 空元素 ⇒ INVALID_VALUE ＋ 零寫入', { reason: 'INVALID_VALUE', plan: undefined }, { reason: emptyEl.reason, plan: emptyEl.plan })
+  const notArray = await userOps.OPS.submitPersonImport({ ...base, source_person_id: 'SP-str', courtesy_names_extraction: 'rule-based' }, IMPORT_IDENT)
+  check('X5b', 'AC-508 非數組 ⇒ INVALID_VALUE ＋ 零寫入', { reason: 'INVALID_VALUE', plan: undefined }, { reason: notArray.reason, plan: notArray.plan })
+}
+
+/* AC-510：採納生成 `xiai_persons` 行**不帶** 3 個 extraction 鍵（一句話可改）。 */
+{
+  const importRow = {
+    _id: 'pi-acc-1', id: 'pi-acc-1', batch_id: 'B-acc', source: 'SRC', source_person_id: 'SP-acc',
+    status: 'PENDING', family_name: '郭', given_name: '照',
+    courtesy_names: ['容光'], courtesy_names_extraction: ['rule-based'],
+    art_names: ['曉樓'], art_names_extraction: ['rule-based'],
+    alias_names: ['郭容光'], alias_names_extraction: ['manual']
+  }
+  userOps.setOpsDbProvider(makeFakeDb({ xiai_person_imports: [importRow] }))
+  const res = await userOps.ADMIN_OPS.reviewPersonImport({ batch_id: 'B-acc', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
+  const personWrite = ((res.plan && res.plan.writes) || []).find((w) => w.collection === 'xiai_persons')
+  check('X6', 'AC-510 採納確生成 person 行（kind=set）', true, !!personWrite && personWrite.kind === 'set')
+  const personDoc = (personWrite && personWrite.doc) || {}
+  check('X6b', 'AC-510 person 行**不含** 3 個 extraction 鍵', [], EXTRACTION_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(personDoc, k)))
+  check('X6c', 'AC-510 person 行仍帶值陣列（值面不受影響）', { c: ['容光'], art: ['曉樓'], alias: ['郭容光'] },
+    { c: personDoc.courtesy_names, art: personDoc.art_names, alias: personDoc.alias_names })
+  /* 迴歸面：集合總數未增（仍 19）；`[data-admin-action]` 未新增由既有 N-1 段/static-check 另判。 */
+  const storageKeys = await import(path.join(ROOT, 'src/data/storage.js'))
+  check('X7', 'AC-510 回歸面：`STORAGE_KEYS` 集合總數仍未增（25；本單不新增集合）', 25, Object.keys(storageKeys.STORAGE_KEYS).length)
+}
+
+/* ===========================================================================
+   Y 段（本單新增）：**本地服務層**同口徑（`src/services/persons.js`；local-dev 形態）
+   ---------------------------------------------------------------------------
+   判據 id ＝ `Y1` 〜 `Y4`（本單新增）。同一 3 個 extraction 鍵的口徑在**服務層寫路**上
+   逐條對齊雲端：缺鍵不拒收 / 不等長 `INVALID_VALUE` ＋ 零寫入 / 加成不破壞 / 採納落 person
+   行不帶 3 鍵。
+   =========================================================================== */
+{
+  const writeFaceMode = await import(path.join(ROOT, 'src/data/writeFaceMode.js'))
+  writeFaceMode.setWriteFaceModeOverride('local-dev')
+  const session = await import(path.join(ROOT, 'src/data/session.js'))
+  const personsSvc2 = await import(path.join(ROOT, 'src/services/persons.js'))
+  const actor = { id: 'u-admin', uid: 'u-admin', role: 'admin' }
+  session.setUser(actor)
+
+  const legacy = await personsSvc2.submitPersonImport({ batchId: 'B-LOC', source: 'SRC', sourcePersonId: 'LOC-1', payload: { family_name: '郭', given_name: '照', courtesy_names: ['a', 'b'], art_names: ['x'], alias_names: [] } })
+  check('Y1', '服務層：缺鍵不拒收（舊 18 鍵載荷 ⇒ ok:true；本地行不擴鍵）', { ok: true, hasExt: false },
+    { ok: legacy.ok, hasExt: legacy.row && Object.prototype.hasOwnProperty.call(legacy.row, 'courtesy_names_extraction') })
+
+  const mismatch = await personsSvc2.submitPersonImport({ batchId: 'B-LOC', source: 'SRC', sourcePersonId: 'LOC-2', payload: { family_name: '郭', courtesy_names: ['a', 'b'], courtesy_names_extraction: ['rule-based'] } })
+  check('Y2', '服務層：不等長（值 2 vs extraction 1）⇒ INVALID_VALUE ＋ 零寫入', { ok: false, reason: 'INVALID_VALUE' }, { ok: mismatch.ok, reason: mismatch.reason })
+
+  const good = await personsSvc2.submitPersonImport({ batchId: 'B-LOC', source: 'SRC', sourcePersonId: 'LOC-3', payload: { family_name: '郭', courtesy_names: ['a'], courtesy_names_extraction: ['rule-based'], alias_names: ['z'], alias_names_extraction: ['manual'] } })
+  check('Y3', '服務層：加成不破壞（等長 ⇒ ok:true；本地行含 3 鍵且值域不封閉）', { ok: true, c: ['rule-based'], a: ['manual'] },
+    { ok: good.ok, c: good.row && good.row.courtesy_names_extraction, a: good.row && good.row.alias_names_extraction })
+
+  const before = personsSvc2.listPersons().length
+  const adopt = await personsSvc2.reviewPersonImport(actor, { batchId: 'B-LOC', decision: 'ACCEPTED' })
+  const personRows = personsSvc2.listPersons()
+  const adopted = personRows.find((r) => String(r.source_person_id) === 'LOC-3') || {}
+  check('Y4', '服務層：採納落 `xiai_persons` 行**不含** 3 個 extraction 鍵', [], EXTRACTION_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(adopted, k)))
+  check('Y4b', '服務層：採納確生成 person 行（恰 2：LOC-1 / LOC-3；LOC-2 被拒未落）', { ok: true, added: 2 }, { ok: adopt.ok, added: personRows.length - before })
+}
+
+/* 自證：本套件判據條數**只增不減**（基線 32 ＋ 本單新增；靜態計數，扣 `function check(` 定義 1）。 */
+{
+  const selfSrc = readFileSync(path.join(ROOT, 'scripts/verify-person-model.mjs'), 'utf8')
+  const checkCalls = (selfSrc.match(/(^|[^\w])check\(/g) || []).length - 1
+  console.log(JSON.stringify({ section: 'D', title: 'extraction 鍵（v1.57）', check_calls: checkCalls }))
+  check('XN', '自證：本套件判據條數只增不減（基線 32 ＋ 本單新增）', true, checkCalls >= 51)
 }
 
 /* ---------------------------------------------------------------------------

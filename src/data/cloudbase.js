@@ -782,6 +782,8 @@ export function normalizePersonProposalRow(doc, options = {}) {
  *   · 生卒 ⇒ 整数或 `null`（「不详」＝`null`，**不设特值**）；
  *   · `status` **缺键 ⇒ `PENDING`**（恰三态；显式给了别的状态值则逐字保留）；
  *   · `imported_by` / `reviewer_id` 是**不透明 uid**（**零手机号**）。
+ *   · **v1.57（§3.54.19）**：`courtesy_names_extraction` / `art_names_extraction` /
+ *     `alias_names_extraction` ⇒ 同形数组归一（缺键 ⇒ `[]`）。
  * **不产出任何派生显示名**（显示名派生单点仍是 `data/db.js::personDisplayName`）。
  */
 export function normalizePersonImportRow(doc, options = {}) {
@@ -800,8 +802,11 @@ export function normalizePersonImportRow(doc, options = {}) {
     family_name: text(row.family_name),
     given_name: text(row.given_name),
     courtesy_names: asArray(row.courtesy_names),
+    courtesy_names_extraction: asArray(row.courtesy_names_extraction),
     art_names: asArray(row.art_names),
+    art_names_extraction: asArray(row.art_names_extraction),
     alias_names: asArray(row.alias_names),
+    alias_names_extraction: asArray(row.alias_names_extraction),
     birth_year: intOrNull(row.birth_year),
     death_year: intOrNull(row.death_year),
     native_place: text(row.native_place),

@@ -823,14 +823,21 @@ export const PERSON_IMPORT_ROW_FIELDS = [
  *   - `native_place`（＋`_chs`）/ `biography`（＋`_chs`）：**繁体为正、简体入 `*_chs`**；
  *   - `nationality` / `name_full`：**只落导入行、不落 person**（除非人类另裁）；
  *   - `source` / `source_id`：元数据；行级另有同名字段（本处为载荷面副本）。
+ *   - **v1.57（§3.54.19）**：`courtesy_names_extraction` / `art_names_extraction` /
+ *     `alias_names_extraction` —— 各 `string[]`、与对应值数组**等长**、元素为**非空字符串**、
+ *     **值域不封闭**（今日恒 `rule-based`）；**加性、可选、不破坏**（缺键不拒收）；
+ *     **只落导入行、采纳不落 person 行**。载荷字段 **15 → 18**。
  */
 export const PERSON_IMPORT_PAYLOAD_FIELDS = [
   'name_full',
   'family_name',
   'given_name',
   'courtesy_names',
+  'courtesy_names_extraction',
   'art_names',
+  'art_names_extraction',
   'alias_names',
+  'alias_names_extraction',
   'birth_year',
   'death_year',
   'native_place',
@@ -854,7 +861,7 @@ export const PERSON_IMPORT_FIELDS = [...PERSON_IMPORT_ROW_FIELDS, ...PERSON_IMPO
  */
 export function emptyPersonImportPayload() {
   const out = {}
-  const arrayKeys = ['courtesy_names', 'art_names', 'alias_names']
+  const arrayKeys = ['courtesy_names', 'courtesy_names_extraction', 'art_names', 'art_names_extraction', 'alias_names', 'alias_names_extraction']
   const nullKeys = ['birth_year', 'death_year']
   PERSON_IMPORT_PAYLOAD_FIELDS.forEach((key) => {
     if (arrayKeys.includes(key)) out[key] = []

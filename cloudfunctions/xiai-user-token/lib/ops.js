@@ -167,7 +167,11 @@ const PERSON_IMPORT_STATUS = Object.freeze({
 /** 外部导入行文档键前缀（确定性 / 可读；与前端 `pi-` 同族）。 */
 const PERSON_IMPORT_ID_PREFIX = 'pi-'
 
-/** 外部导入提交载荷允许键（**封闭键面**；身份类键一律拒 —— 导入人由服务端派生）。 */
+/** 外部导入提交载荷允许键（**封闭键面**；身份类键一律拒 —— 导入人由服务端派生）。
+ *  **v1.57（§3.54.19 / §4.1.16 追加注）**：归一化载荷加性扩 3 个 extraction 键
+ *  （`courtesy_names_extraction` / `art_names_extraction` / `alias_names_extraction`）——
+ *  与 `src/data/seed.js::PERSON_IMPORT_PAYLOAD_FIELDS` / `src/services/persons.js` 逐字同集；
+ *  封闭键面 **18 → 21**；缺键不拒收（旧 18 键形态仍被接受；仅提供时校验形态）。 */
 const PERSON_IMPORT_ALLOWED_KEYS = Object.freeze([
   'batch_id',
   'source',
@@ -176,8 +180,11 @@ const PERSON_IMPORT_ALLOWED_KEYS = Object.freeze([
   'family_name',
   'given_name',
   'courtesy_names',
+  'courtesy_names_extraction',
   'art_names',
+  'art_names_extraction',
   'alias_names',
+  'alias_names_extraction',
   'birth_year',
   'death_year',
   'native_place',
@@ -1635,6 +1642,35 @@ const OPS = Object.freeze({
     if (!family && !given && courtesy.length === 0 && art.length === 0 && alias.length === 0) {
       return deny(REASONS.MISSING_REQUIRED, '導入行請至少帶姓名 / 字 / 號 / 別名之一 ⇒ 拒絕導入；本次零寫入。')
     }
+    /* **v1.57（§3.54.19 / §4.1.16 追加注）**：3 個 extraction 鍵的形態校驗 ——
+       **僅在載荷提供了該鍵時**校驗：`string[]` ＋ 元素為非空字串 ＋ 與對應值陣列等長；
+       **值域不封閉**（今日恒 `rule-based`，不據取值拒收）。違形態 ⇒ `INVALID_VALUE` ＋ 零寫入
+       （沿既有凍結 reason 表，**零新增**）。 */
+    const extractionDenial = (key, counterpart) => {
+      if (!Object.prototype.hasOwnProperty.call(payload, key)) return null
+      const value = payload[key]
+      if (!Array.isArray(value)) {
+        return deny(REASONS.INVALID_VALUE, `載荷 ${key} 必須是陣列（string[]）⇒ 拒絕導入；本次零寫入。`)
+      }
+      for (const item of value) {
+        if (typeof item !== 'string' || item.trim() === '') {
+          return deny(REASONS.INVALID_VALUE, `載荷 ${key} 的元素必須是非空字串 ⇒ 拒絕導入；本次零寫入。`)
+        }
+      }
+      if (value.length !== counterpart.length) {
+        return deny(REASONS.INVALID_VALUE, `載荷 ${key} 必須與對應值陣列等長（${value.length} ≠ ${counterpart.length}）⇒ 拒絕導入；本次零寫入。`)
+      }
+      return null
+    }
+    const extractionPairs = [
+      ['courtesy_names_extraction', courtesy],
+      ['art_names_extraction', art],
+      ['alias_names_extraction', alias]
+    ]
+    for (const [key, counterpart] of extractionPairs) {
+      const denial = extractionDenial(key, counterpart)
+      if (denial) return denial
+    }
     if (!identityUsable(identity)) {
       return deny(REASONS.FORBIDDEN, '缺少可驗證的導入人身份；本次零寫入。')
     }
@@ -1659,8 +1695,11 @@ const OPS = Object.freeze({
       family_name: family,
       given_name: given,
       courtesy_names: courtesy,
+      courtesy_names_extraction: asArray(payload.courtesy_names_extraction),
       art_names: art,
+      art_names_extraction: asArray(payload.art_names_extraction),
       alias_names: alias,
+      alias_names_extraction: asArray(payload.alias_names_extraction),
       birth_year: toInt(payload.birth_year),
       death_year: toInt(payload.death_year),
       native_place: text(payload.native_place),
