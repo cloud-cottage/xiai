@@ -363,14 +363,17 @@ async function handleVerify(event, config, callContext) {
     response.renewedExpiresAt = renewed.claims.exp
     response.renewedTtlSeconds = config.ttlSeconds
   }
-  /* **遷移讀數面（本單｜additive 白名單透傳）**：`migrateDynastyValues` 的內部讀數
-     （`dry_run` / `scanned` / `changed` / `samples` / `idempotent`）**僅當 `opResult` 確有該鍵時**
-     逐字疊進回包；其餘 op（`submitCorrection` / `submitPersonImport` / `reviewXxx` / `setInviteReward` /
-     `registerArtifact` …）本無這些鍵 ⇒ 一個都不疊 ⇒ 既有回包**逐字不變**（序列化後亦不新增鍵）。
-     **`plan` 是內部落盤計劃（內部面），不在白名單內 ⇒ 絕不外傳**。既有字段一律不刪、不改。 */
-  const MIGRATION_READOUT_KEYS = ['dry_run', 'scanned', 'changed', 'samples', 'idempotent']
-  for (const key of MIGRATION_READOUT_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  /* **遷移讀數面（additive 透傳｜**按 `op` 收窄**）**：`dry_run` / `scanned` / `changed` / `samples` /
+     `idempotent` **僅當 `op === 'migrateDynastyValues'` 且 `opResult` 確有該鍵時**才逐字疊進回包；
+     **其餘任何 op 一律不透傳這 5 個鍵**（即使 `opResult` 意外帶有 —— 例如 `submitPersonImport` /
+     `submitSealImport` / `registerArtifact` 的冪等路徑 `idempotent` 亦**一個都不外泄**）⇒ 既有回包**逐字不變**
+     （序列化後亦不新增鍵）。**`plan` 是內部落盤計劃（內部面），不在白名單內 ⇒ 絕不外傳**。
+     既有字段一律不刪、不改。 */
+  if (op === 'migrateDynastyValues') {
+    const MIGRATION_READOUT_KEYS = ['dry_run', 'scanned', 'changed', 'samples', 'idempotent']
+    for (const key of MIGRATION_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
   }
   return response
 }
