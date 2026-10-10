@@ -13,7 +13,7 @@
  * 本体 22 字段（X4）落 `xiai_items`；**`raw_json` 只存导入行**（正式集合不带）。
  * 繁简（X5）：**繁体为正**（`title` / `title_other` / `abstract`），简体入 `*_chs`（**落库不做上屏逻辑**）。
  * 值域 / 形态门（X6）：`volume_count` / `date_year` **整数或 `null`**（不得 `0` / 空串等特值）；
- * `has_image` / `has_annotation` **布尔**；`date_text` 的源侧占位 `'N.D.'` **归一为 `null`**；
+ * `has_image` / `has_annotation` **布尔或 `null`**（`null` ＝ 源側未知 ⇒ 放行、不改写）；`date_text` 的源侧占位 `'N.D.'` **归一为 `null`**；
  * 载荷形态违规 ⇒ `INVALID_VALUE` ＋ **零写入**（`reason` **零新增**）。
  * 读面（X7）：云读取面已配置但**未落定 / 读取失败**时**零行不再冒充事实空集** ⇒
  * 显式可读降级（`ok:false` ＋ `message`）；`off` **不降级**；有本机行照常返回。
@@ -142,7 +142,7 @@ export function normalizeItemMisc(value) {
 /**
  * **值域 / 形态门（X6；判定恒在写之前）**：放行 ⇒ `null`；违规 ⇒ 结构化拒绝 `{ok:false, reason:'INVALID_VALUE', …}`。
  * 覆盖：`volume_count` / `date_year` 整数或 `null`（不得 `0` / 空串等特值）；
- * `has_image` / `has_annotation` 在场时必须为布尔（缺键 ⇒ 走默认 `false`，不因缺键拒收）。
+ * `has_image` / `has_annotation` 在场时必须为**布尔或 `null`**（`null` ＝ 源側未知 ⇒ 放行；缺键 ⇒ 走默认 `false`，不因缺键拒收）。
  * @returns {null|{ok:false, reason:'INVALID_VALUE', message:string}}
  */
 export function itemPayloadValueDenial(payload) {
@@ -159,11 +159,11 @@ export function itemPayloadValueDenial(payload) {
   }
   for (const key of ITEM_BODY_BOOL_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(src, key)) continue
-    if (typeof src[key] !== 'boolean') {
+    if (src[key] !== null && typeof src[key] !== 'boolean') {
       return {
         ok: false,
         reason: 'INVALID_VALUE',
-        message: `${key} 必須是布爾（true / false）；本次零寫入。`
+        message: `${key} 必須是布爾（true / false）或 null（源側未知）；本次零寫入。`
       }
     }
   }
@@ -189,7 +189,8 @@ export function normalizeItemBody(payload) {
       return
     }
     if (ITEM_BODY_BOOL_FIELDS.includes(key)) {
-      out[key] = src[key] === true
+      /* **布爾或 `null`**（`null` ＝ 源側未知 ⇒ 原樣保留，不落 `false`、不歸一成布爾；缺鍵 ⇒ 默認 `false`）。 */
+      out[key] = src[key] === null ? null : src[key] === true
       return
     }
     out[key] = itemBodyTextOrNull(key, src[key])
@@ -216,7 +217,8 @@ export function buildItemRowFromImport(importRow) {
       return
     }
     if (ITEM_BODY_BOOL_FIELDS.includes(key)) {
-      out[key] = src[key] === true
+      /* **布爾或 `null`**（`null` ＝ 源側未知 ⇒ 原樣保留，不落 `false`、不歸一成布爾；缺鍵 ⇒ 默認 `false`）。 */
+      out[key] = src[key] === null ? null : src[key] === true
       return
     }
     out[key] = itemBodyTextOrNull(key, src[key])

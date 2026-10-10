@@ -5,7 +5,9 @@
  * 逐条对应派单口径 X1 〜 X8 ＋ 自证 ① 〜 ⑥：
  *   · **① 静态**：集合名 / 本机镜像键 / 键前缀 / 三态 / 本体 22 字段表 / 封闭键面（逐字）。
  *   · **② 值域门（X6）**：`volume_count=0` / `date_year=""` ⇒ `INVALID_VALUE` ＋ 零写入；
- *     `date_text='N.D.'` ⇒ 归一为 `null`；`has_image="1"`（非布尔）⇒ 拒。
+ *     `date_text='N.D.'` ⇒ 归一为 `null`；`has_image="1"`（非布尔）⇒ 拒；
+ *     **布尔门 null 容忍（B-2）**：`has_annotation=null` ⇒ 放行且落 `null`（不落 `false`）；
+ *     `has_annotation="false"`（字符串）/ `has_image=1`（数字）⇒ 仍必拒 ＋ 零写入。
  *   · **③ 幂等（X3）**：同 `source_item_id` 重提 ⇒ 不改写既有行（对拍行指纹）。
  *   · **④ 采纳（X2）**：提交 2 条 ⇒ 采纳 1 条 ⇒ `xiai_items` 恰 +1、導入行置 `ACCEPTED`、
  *     重复采纳不改写；正式行恰本体 22 字段（**无 `raw_json`**）。
@@ -190,6 +192,20 @@ const IDENT = { uid: 'u-import', phone: '13800000000' }
   const badBool = noteReason(await userOps.OPS.submitItemImport(itemPayload('V-bool', { has_image: '1' }), IDENT))
   check('V4', 'X6 `has_image="1"`（非布尔）⇒ INVALID_VALUE ＋ 零写入', { ok: false, reason: 'INVALID_VALUE', plan: undefined }, { ok: badBool.ok, reason: badBool.reason, plan: badBool.plan })
 
+  /* **布尔门 null 容忍（本单 B-2）**：布尔 **或 `null`**（源側未知 ⇒ 放行、不落 `false`）；其余值域**不放宽**。 */
+  userOps.setOpsDbProvider(makeFakeDb())
+  const strBool = noteReason(await userOps.OPS.submitItemImport(itemPayload('V-boolstr', { has_annotation: 'false' }), IDENT))
+  check('V4b', 'X6 `has_annotation="false"`（字符串）⇒ INVALID_VALUE ＋ 零写入（null 容忍不放宽字符串）', { ok: false, reason: 'INVALID_VALUE', plan: undefined }, { ok: strBool.ok, reason: strBool.reason, plan: strBool.plan })
+
+  userOps.setOpsDbProvider(makeFakeDb())
+  const numBool = noteReason(await userOps.OPS.submitItemImport(itemPayload('V-boolnum', { has_image: 1 }), IDENT))
+  check('V4c', 'X6 `has_image=1`（数字）⇒ INVALID_VALUE ＋ 零写入', { ok: false, reason: 'INVALID_VALUE', plan: undefined }, { ok: numBool.ok, reason: numBool.reason, plan: numBool.plan })
+
+  userOps.setOpsDbProvider(makeFakeDb())
+  const nullBool = await userOps.OPS.submitItemImport(itemPayload('V-boolnull', { has_annotation: null }), IDENT)
+  check('V4d', 'X6 `has_annotation=null`（源側未知）⇒ **放行**（ok:true）', true, nullBool.ok === true)
+  check('V4e', 'X6 `has_annotation=null` ⇒ 落行**原樣 `null`**（不落 `false`、不歸一成布爾）', null, nullBool.row && nullBool.row.has_annotation)
+
   userOps.setOpsDbProvider(makeFakeDb())
   const nullInt = await userOps.OPS.submitItemImport(itemPayload('V-null', { volume_count: null, date_year: null }), IDENT)
   check('V5', 'X6 `volume_count=null` / `date_year=null` ⇒ 接受（合法空）', { ok: true, vc: null, dy: null }, { ok: nullInt.ok, vc: nullInt.row && nullInt.row.volume_count, dy: nullInt.row && nullInt.row.date_year })
@@ -205,6 +221,15 @@ const IDENT = { uid: 'u-import', phone: '13800000000' }
   check('V6c', '服务层 X6 `date_text="N.D."` ⇒ `null`（落行）', { ok: true, dateText: null }, { ok: sNd.ok, dateText: sNd.row && sNd.row.date_text })
   /* 被拒的两例 ⇒ 本机導入行零新增（仍只 1 条：S-nd）。 */
   check('V6d', '服务层被拒两例 ⇒ 零写入（本机導入行恰 1 条）', 1, db.listItemImportRows().length)
+
+  /* **服务层同口径（本单 B-2）**：null 放行且落 `null`；字符串 / 数字仍必拒。 */
+  const sNullBool = await items.submitItemImport({ batchId: 'SB', source: 'SRC', sourceItemId: 'S-boolnull', payload: itemPayload('S-boolnull', { has_annotation: null }) })
+  check('V6e', '服务层 X6 `has_annotation=null` ⇒ 放行且落行 `null`（不落 `false`）', { ok: true, v: null }, { ok: sNullBool.ok, v: sNullBool.row && sNullBool.row.has_annotation })
+  const sStrBool = noteReason(await items.submitItemImport({ batchId: 'SB', source: 'SRC', sourceItemId: 'S-boolstr', payload: itemPayload('S-boolstr', { has_annotation: 'false' }) }))
+  check('V6f', '服务层 X6 `has_annotation="false"`（字符串）⇒ INVALID_VALUE ＋ 零写入', { ok: false, reason: 'INVALID_VALUE' }, { ok: sStrBool.ok, reason: sStrBool.reason })
+  const sNumBool = noteReason(await items.submitItemImport({ batchId: 'SB', source: 'SRC', sourceItemId: 'S-boolnum', payload: itemPayload('S-boolnum', { has_image: 1 }) }))
+  check('V6g', '服务层 X6 `has_image=1`（数字）⇒ INVALID_VALUE ＋ 零写入', { ok: false, reason: 'INVALID_VALUE' }, { ok: sNumBool.ok, reason: sNumBool.reason })
+  check('V6h', '服务层 null 放行 ⇒ 導入行恰 +1（无「0」或「false」冒充）', 2, db.listItemImportRows().length)
 }
 
 /* ===========================================================================

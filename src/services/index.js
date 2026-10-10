@@ -26,8 +26,11 @@ import * as imageFaces from './imageFaces.js'
 /* **印人（person）门面（v1.53 新增｜person-model §6）**：正式印人查询 / 选人搜索 ＋ 提案的
    提交 / 采纳 / 驳回（管理员）。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as persons from './persons.js'
+/* **印谱（item）门面（v1.61 新增｜item 通道切片 A）**：外部批量導入的提交 / 待審讀面 /
+   採納·駁回。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
+import * as items from './items.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items }
 export default services

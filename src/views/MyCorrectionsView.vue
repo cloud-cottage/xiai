@@ -14,7 +14,7 @@
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { corrections, persons, points, seals } from '../services/index.js'
+import { corrections, persons, points, seals, items } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 import { statusLabel, formatDateTime } from '../utils/format.js'
 
@@ -291,6 +291,125 @@ async function confirmSealImport() {
     dataVersion.value += 1
   } finally {
     sealImportBusy.value = false
+  }
+}
+
+/* ============================================================================
+   **印谱導入待審行（第三類｜v1.62；本单新增）**
+   ----------------------------------------------------------------------------
+   在既有「待審導入批次」區塊內新增**第三塊**（前两块 ＝ 印人导入 / 印章导入），
+   形态**逐项照搬既有两块**：
+   - 待审源 ＝ 服务层既有 `items.listPendingItemImportsForAdmin(actor)`（已含「不静默显示 0」降级）；
+     采纳 / 驳回走服务层既有 `items.reviewItemImport(actor, {...})`（**视图不重建业务逻辑**）。
+   - **共用同一钩子值** `person-import-review` ⇒ `[data-admin-action]` **不新增取值**。
+   - 非管理员 ⇒ **不渲染**（条件渲染；不得 CSS 隐藏 / `disabled` 冒充）。
+   - **列面只展示正字段（繁体）**，**不展示 `*_chs` 副字段**。
+   - 驳回理由上限用服务层单点 `items.MAX_ITEM_REVIEW_NOTE_LENGTH`。
+   - **两态终态行仍能显示**：行渲染不假设 `PENDING`（`data-item-import-status` 标记当前状态），
+     终态行照常上屏、置灰（`is-terminal` class），**不因终态而报错**。
+   ============================================================================ */
+const canReviewItemImports = computed(() => items.canReviewItemImports(actor.value))
+const itemImportResult = computed(() => {
+  void dataVersion.value
+  return items.listPendingItemImportsForAdmin(actor.value)
+})
+const itemImportRows = computed(() => (itemImportResult.value.ok ? itemImportResult.value.rows : []))
+const itemImportNotice = computed(() => (itemImportResult.value.ok ? '' : itemImportResult.value.message))
+/** 按批次（`batch_id`）分组（视图层分组；单批内逐条采纳仍保留，与印人 / 印章导入同型）。 */
+const itemImportBatches = computed(() => {
+  const groups = new Map()
+  itemImportRows.value.forEach((row) => {
+    const key = String((row && row.batch_id) || '（無批次）')
+    if (!groups.has(key)) groups.set(key, { key, batchId: String((row && row.batch_id) || ''), rows: [] })
+    groups.get(key).rows.push(row)
+  })
+  return [...groups.values()]
+})
+/** 印谱導入行外部来源 id（幂等键；零手机号）。 */
+function itemImportSourceIdOf(row) {
+  return String((row && row.source_item_id) || '')
+}
+/** 印谱導入行导入人展示名（服务层单点：`暱稱（uid 短碼）`，零手机号）。 */
+function itemImportSubmitterOf(row) {
+  return corrections.submitterLabelOf(items.itemImportSubmitterId(row))
+}
+/** 印谱導入行题名上屏（**正字段 `title`**；缺 ⇒ 模板回落「（未命名）」）。 */
+function itemImportTitleOf(row) {
+  return String((row && row.title) || '')
+}
+/** 印谱導入行年代上屏（**正字段 `date_text`**；空 ⇒ 「—」）。 */
+function itemImportDateTextOf(row) {
+  const t = row && row.date_text
+  return t === null || t === undefined || t === '' ? '—' : String(t)
+}
+/** 印谱導入行卷數上屏（**正字段 `volume_count`**；空 ⇒ 「—」）。 */
+function itemImportVolumeCountOf(row) {
+  const v = row && row.volume_count
+  return v === null || v === undefined ? '—' : String(v)
+}
+/** 终态行（`ACCEPTED` / `REJECTED`）⇒ 置灰标记（**不因终态而报错**）。 */
+function itemImportIsTerminal(row) {
+  const status = String((row && row.status) || '')
+  return status === items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED || status === items.ITEM_IMPORT_STATUS_EXPORT.REJECTED
+}
+
+/** 印谱导入二次确认状态（`null` ＝ 未打开）；粒度：按批次（`batch`）/ 按单行（`row`）。 */
+const itemImportDialog = ref(null)
+const itemImportNote = ref('')
+const itemImportBusy = ref(false)
+
+function askItemImport(target, decision) {
+  itemImportNote.value = ''
+  itemImportDialog.value = { batch: target.batch || null, row: target.row || null, decision }
+}
+
+function cancelItemImport() {
+  itemImportDialog.value = null
+}
+
+const itemImportConfirmText = computed(() =>
+  itemImportDialog.value && itemImportDialog.value.decision === items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED ? '確認採納' : '確認駁回'
+)
+const itemImportDialogTitle = computed(() => {
+  if (!itemImportDialog.value) return ''
+  const scope = itemImportDialog.value.row ? '單行' : '整批'
+  return `${scope}${itemImportDialog.value.decision === items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED ? '採納' : '駁回'}`
+})
+const itemImportDialogMessage = computed(() => {
+  if (!itemImportDialog.value) return ''
+  const { batch, row, decision } = itemImportDialog.value
+  const verb = decision === items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED ? '採納' : '駁回'
+  const count = row ? 1 : batch ? batch.rows.length : 0
+  const who = row ? itemImportSourceIdOf(row) : batch ? batch.key : ''
+  return `這將對「${who}」的 ${count} 條印谱外部導入行全部${verb}，此操作不可撤銷。`
+})
+/** 弹窗内按钮的 `data-action`（**只用 `data-action`**，不带 `data-admin-action`）。 */
+const itemImportConfirmAction = computed(() => {
+  if (!itemImportDialog.value) return ''
+  return itemImportDialog.value.decision === items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED
+    ? 'item-import-confirm-accept'
+    : 'item-import-confirm-reject'
+})
+const ITEM_IMPORT_CANCEL_ACTION = 'item-import-cancel'
+/** 驳回理由上限（服务层单点 `MAX_ITEM_REVIEW_NOTE_LENGTH`；不在视图另立数值）。 */
+const ITEM_IMPORT_NOTE_MAX = items.MAX_ITEM_REVIEW_NOTE_LENGTH
+
+async function confirmItemImport() {
+  const dialog = itemImportDialog.value
+  if (!dialog || itemImportBusy.value) return
+  const note = dialog.decision === items.ITEM_IMPORT_STATUS_EXPORT.REJECTED ? itemImportNote.value : ''
+  itemImportBusy.value = true
+  try {
+    /* 服务层单点：按单行（`importId`）优先；否则按批次（`batchId`）。message 原文上屏。 */
+    const options = dialog.row
+      ? { importId: String(dialog.row.id || ''), decision: dialog.decision, note }
+      : { batchId: String((dialog.batch && dialog.batch.batchId) || ''), decision: dialog.decision, note }
+    const result = await items.reviewItemImport(actor.value, options)
+    feedback.value = result.message
+    itemImportDialog.value = null
+    dataVersion.value += 1
+  } finally {
+    itemImportBusy.value = false
   }
 }
 
@@ -635,16 +754,17 @@ async function decide(row, decision) {
       </div>
     </section>
 
-    <!-- **待審導入批次審核區塊（印人批 2 ＋ 印章批 3｜本单合并同屏）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
+    <!-- **待審導入批次審核區塊（印人批 2 ＋ 印章批 3 ＋ 印谱批 4｜同屏合并）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
          采纳 / 驳回复用既有按钮形态与**二次确认体例（沿 §3.44.10 / W-78）**；不新开路由 / 专区。
-         **两类导入行同屏**（印人导入 ＋ 印章导入），**共用同一钩子值** `person-import-review`
-         （采纳 / 驳回共用，不复用既有字面值，也不新增取值 ⇒ 仍恰 10 值 / 归并 9 类）。
-         粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现（两类同型）。 -->
-    <section v-if="canReviewImports || canReviewSealImports" class="panel">
+         **三类导入行同屏**（印人导入 ＋ 印章导入 ＋ 印谱导入），**共用同一钩子值** `person-import-review`
+         （采纳 / 驳回共用，不复用既有字面值，也不新增取值 ⇒ 取值集合不增）。
+         粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现（三类同型）。 -->
+    <section v-if="canReviewImports || canReviewSealImports || canReviewItemImports" class="panel">
       <div class="panel__head">
         <h2>待審導入批次（外部批量導入）</h2>
         <span class="muted-hint">印人導入 共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>
         <span class="muted-hint">印章導入 共 {{ sealImportRows.length }} 條 · {{ sealImportBatches.length }} 批</span>
+        <span class="muted-hint">印谱導入 共 {{ itemImportRows.length }} 條 · {{ itemImportBatches.length }} 批</span>
       </div>
       <div class="panel__body">
         <div v-if="importBatches.length" class="batch-list">
@@ -819,13 +939,110 @@ async function decide(row, decision) {
           {{ sealImportNotice }}
         </p>
 
-        <!-- **合并空态**：两类皆空且无拒绝理由时才显示（可读、繁體、不白屏）。 -->
+        <!-- **印谱導入（第三類｜同屏、共用同一钩子值 `person-import-review`）**：
+             待审源 ＝ `items.listPendingItemImportsForAdmin`；采纳 / 驳回走 `items.reviewItemImport`。
+             列面**只展示正字段（繁体）**（`title` / `as_book_id` / `volume_count` / `date_text`），
+             **不展示 `*_chs` 副字段**；终态行照常上屏并置灰（`is-terminal`）。 -->
+        <div v-if="itemImportBatches.length" class="batch-list" data-item-import-list>
+          <article
+            v-for="batch in itemImportBatches"
+            :key="'item:' + batch.key"
+            class="batch"
+            :data-item-import-batch="batch.key"
+          >
+            <header class="batch__head">
+              <div class="batch__meta">
+                <strong class="batch__submitter">批次 {{ batch.batchId || '（無批次）' }}</strong>
+                <span class="chip chip--pending">共 {{ batch.rows.length }} 條</span>
+              </div>
+              <div class="review__ops">
+                <button
+                  class="btn btn--primary"
+                  type="button"
+                  data-admin-action="person-import-review"
+                  data-action="item-import-accept"
+                  :data-item-import-batch="batch.key"
+                  @click="askItemImport({ batch }, items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED)"
+                >
+                  整批採納
+                </button>
+                <button
+                  class="btn btn--ghost"
+                  type="button"
+                  data-admin-action="person-import-review"
+                  data-action="item-import-reject"
+                  :data-item-import-batch="batch.key"
+                  @click="askItemImport({ batch }, items.ITEM_IMPORT_STATUS_EXPORT.REJECTED)"
+                >
+                  整批駁回
+                </button>
+              </div>
+            </header>
+            <table class="list-table">
+              <thead>
+                <tr>
+                  <th>印譜</th>
+                  <th>書號</th>
+                  <th>卷數</th>
+                  <th>年代</th>
+                  <th>來源 id</th>
+                  <th>導入人</th>
+                  <th>導入時間</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in batch.rows"
+                  :key="row.id"
+                  :data-item-import-status="row.status"
+                  :class="{ 'is-terminal': itemImportIsTerminal(row) }"
+                >
+                  <td>{{ itemImportTitleOf(row) || '（未命名）' }}</td>
+                  <td>{{ row.as_book_id || '—' }}</td>
+                  <td>{{ itemImportVolumeCountOf(row) }}</td>
+                  <td>{{ itemImportDateTextOf(row) }}</td>
+                  <td>{{ itemImportSourceIdOf(row) }}</td>
+                  <td>{{ itemImportSubmitterOf(row) }}</td>
+                  <td>{{ formatDateTime(row.imported_at) }}</td>
+                  <td class="review__ops">
+                    <button
+                      class="btn btn--primary"
+                      type="button"
+                      data-admin-action="person-import-review"
+                      data-action="item-import-accept"
+                      :data-item-import-id="row.id"
+                      @click="askItemImport({ row }, items.ITEM_IMPORT_STATUS_EXPORT.ACCEPTED)"
+                    >
+                      採納
+                    </button>
+                    <button
+                      class="btn btn--ghost"
+                      type="button"
+                      data-admin-action="person-import-review"
+                      data-action="item-import-reject"
+                      :data-item-import-id="row.id"
+                      @click="askItemImport({ row }, items.ITEM_IMPORT_STATUS_EXPORT.REJECTED)"
+                    >
+                      駁回
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+        <p v-else-if="itemImportNotice" class="notice review__notice" data-item-import-notice>
+          {{ itemImportNotice }}
+        </p>
+
+        <!-- **合并空态**：三类皆空且无拒绝理由时才显示（可读、繁體、不白屏）。 -->
         <p
-          v-if="!importBatches.length && !sealImportBatches.length && !importNotice && !sealImportNotice"
+          v-if="!importBatches.length && !sealImportBatches.length && !itemImportBatches.length && !importNotice && !sealImportNotice && !itemImportNotice"
           class="muted-hint"
           data-import-empty
         >
-          當前沒有待審覈的印人 / 印章外部導入批次。
+          當前沒有待審覈的印人 / 印章 / 印谱外部導入批次。
         </p>
       </div>
     </section>
@@ -911,6 +1128,34 @@ async function decide(row, decision) {
           :maxlength="SEAL_IMPORT_NOTE_MAX"
           rows="3"
           data-seal-import-note
+        ></textarea>
+      </div>
+    </ConfirmDialog>
+
+    <!-- **印谱導入審核的二次确认（本单新增）**：显式、可取消、默认不通过；文案写明粒度 ＋ 条数；
+         驳回理由上限引服务层单点 `MAX_ITEM_REVIEW_NOTE_LENGTH`；弹窗按钮**只用 `data-action`**。 -->
+    <ConfirmDialog
+      v-if="itemImportDialog"
+      :title="itemImportDialogTitle"
+      :message="itemImportDialogMessage"
+      :confirm-text="itemImportConfirmText"
+      :confirm-action="itemImportConfirmAction"
+      :cancel-action="ITEM_IMPORT_CANCEL_ACTION"
+      @confirm="confirmItemImport"
+      @cancel="cancelItemImport"
+    >
+      <div
+        v-if="itemImportDialog.decision === items.ITEM_IMPORT_STATUS_EXPORT.REJECTED"
+        class="batch__note"
+      >
+        <label class="batch__note-label" for="item-import-note">駁回理由（可選，最多 {{ ITEM_IMPORT_NOTE_MAX }} 字）</label>
+        <textarea
+          id="item-import-note"
+          v-model="itemImportNote"
+          class="batch__note-input"
+          :maxlength="ITEM_IMPORT_NOTE_MAX"
+          rows="3"
+          data-item-import-note
         ></textarea>
       </div>
     </ConfirmDialog>
@@ -1057,6 +1302,11 @@ async function decide(row, decision) {
   display: block;
   color: var(--c-text-muted);
   font-size: var(--t-xs);
+}
+
+/* 终态導入行（`ACCEPTED` / `REJECTED`）置灰标记（**不因终态而报错**）。 */
+.is-terminal {
+  opacity: 0.55;
 }
 
 .chip {

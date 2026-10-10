@@ -283,7 +283,7 @@ const ITEM_DATE_PLACEHOLDER = 'N.D.'
 /** 整數或 `null` 的字段（**不得 `0` / 空串等特值**）。 */
 const ITEM_BODY_INT_FIELDS = Object.freeze(['volume_count', 'date_year'])
 
-/** 布爾字段（形態門：非布爾 ⇒ `INVALID_VALUE` ＋ 零寫入）。 */
+/** 布爾字段（形態門：**布爾或 `null`**；`null` ＝ 源側未知 ⇒ 放行、不拒收、不落 `false`；其它非布爾 ⇒ `INVALID_VALUE` ＋ 零寫入）。 */
 const ITEM_BODY_BOOL_FIELDS = Object.freeze(['has_image', 'has_annotation'])
 
 /**
@@ -1085,7 +1085,7 @@ function normalizeItemMisc(value) {
   return out
 }
 
-/** **值域 / 形态门（X6）**：放行 ⇒ `null`；违规 ⇒ 结构化拒绝（`INVALID_VALUE`）。 */
+/** **值域 / 形态门（X6）**：放行 ⇒ `null`；违规 ⇒ 结构化拒绝（`INVALID_VALUE`）。布尔字段为**布尔或 `null`**（`null` ＝ 源側未知）。 */
 function itemValueDenial(payload) {
   const src = payload && typeof payload === 'object' ? payload : {}
   for (const key of ITEM_BODY_INT_FIELDS) {
@@ -1096,8 +1096,8 @@ function itemValueDenial(payload) {
   }
   for (const key of ITEM_BODY_BOOL_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(src, key)) continue
-    if (typeof src[key] !== 'boolean') {
-      return deny(REASONS.INVALID_VALUE, `${key} 必須是布爾（true / false）⇒ 拒絕導入；本次零寫入。`)
+    if (src[key] !== null && typeof src[key] !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, `${key} 必須是布爾（true / false）或 null（源側未知）⇒ 拒絕導入；本次零寫入。`)
     }
   }
   return null
@@ -1122,7 +1122,8 @@ function itemBodyOf(src) {
       return
     }
     if (ITEM_BODY_BOOL_FIELDS.includes(key)) {
-      out[key] = s[key] === true
+      /* **布爾或 `null`**：`null` ＝ 源側未知 ⇒ **原樣保留**（不落 `false`、不歸一成布爾）；缺鍵 ⇒ 默認 `false`。 */
+      out[key] = s[key] === null ? null : s[key] === true
       return
     }
     out[key] = itemTextOrNull(key, s[key])
