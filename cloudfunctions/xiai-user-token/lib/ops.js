@@ -101,7 +101,12 @@ const COLLECTIONS = Object.freeze({
   sealImports: 'xiai_seal_imports',
   seals: 'xiai_seals',
   faces: 'xiai_faces',
-  images: 'xiai_images'
+  images: 'xiai_images',
+  /* **item 通道切片 A（v1.61）**：正式印谱（`xiai_items`，canonical；**只经采纳路径写**）
+     与印谱外部批量導入暂存 / PENDING 集合（`xiai_item_imports`；单写者）。
+     本机镜像键见 `src/data/db.js` 的 `items` / `item-imports`。 */
+  items: 'xiai_items',
+  itemImports: 'xiai_item_imports'
 })
 
 /**
@@ -255,6 +260,66 @@ const SEAL_IMPORT_ALLOWED_KEYS = Object.freeze([
 
 /** 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
 const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
+
+/* **item 通道切片 A（v1.61）**：印谱外部批量導入通道 ＋ 管理員採納通道。
+   与 `src/data/seed.js` / `src/services/items.js` 的冻结面**逐字同值**。 */
+
+/** 印谱導入行三态（与 `src/data/seed.js::ITEM_IMPORT_STATUS` 逐字同值）。 */
+const ITEM_IMPORT_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+})
+
+/** 印谱導入行文档键前缀（确定性 / 可读；与前端 `ii-` 同族）。 */
+const ITEM_IMPORT_ID_PREFIX = 'ii-'
+
+/** `misc` 子對象的 5 鍵（与 `src/data/seed.js::ITEM_MISC_FIELDS` 逐字同值）。 */
+const ITEM_MISC_FIELDS = Object.freeze(['bookZzxs', 'bookCj', 'bookSk', 'bookSz', 'bookPsqk'])
+
+/** 源側「無紀年」佔位字面（歸一 ⇒ `null`；与 `seed.js::ITEM_DATE_PLACEHOLDER` 同值）。 */
+const ITEM_DATE_PLACEHOLDER = 'N.D.'
+
+/** 整數或 `null` 的字段（**不得 `0` / 空串等特值**）。 */
+const ITEM_BODY_INT_FIELDS = Object.freeze(['volume_count', 'date_year'])
+
+/** 布爾字段（形態門：非布爾 ⇒ `INVALID_VALUE` ＋ 零寫入）。 */
+const ITEM_BODY_BOOL_FIELDS = Object.freeze(['has_image', 'has_annotation'])
+
+/**
+ * 印谱本體 22 字段（与 `src/data/seed.js::ITEM_BODY_FIELDS` **逐字同值**；不另立第二套）。
+ * `raw_json` **不在此列**（只存導入行）。
+ */
+const ITEM_BODY_FIELDS = Object.freeze([
+  'source_item_id',
+  'as_book_id',
+  'as_id',
+  'book_uri',
+  'category',
+  'title',
+  'title_chs',
+  'title_other',
+  'title_other_chs',
+  'volume_count',
+  'date_text',
+  'date_year',
+  'publisher',
+  'abstract',
+  'abstract_chs',
+  'abstract_title',
+  'edition',
+  'donor',
+  'has_image',
+  'has_annotation',
+  'language',
+  'misc'
+])
+
+/** 印谱导入提交载荷允许键（**封闭键面**；身份类键一律拒 —— 导入人由服务端派生）。 */
+const ITEM_IMPORT_ALLOWED_KEYS = Object.freeze(['batch_id', 'source', 'raw_json', ...ITEM_BODY_FIELDS])
+
+/** 印谱导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
+const ITEM_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
 
 /** 印人提案三态（与 `src/services/persons.js::PERSON_STATUS` 逐字同值）。 */
 const PERSON_PROPOSAL_STATUS = Object.freeze({
@@ -977,6 +1042,110 @@ async function findSealImportImageRow(face) {
     const rows = await readRows(COLLECTIONS.images, { storage_key: key })
     if (rows.length > 0) return rows[0]
   }
+  return null
+}
+
+/* ---------------------------------------------------------------------------
+   item 通道切片 A（v1.61）：印谱導入辅助（值域 / 形態門 ＋ 本體归一 ＋ 讀行）
+   --------------------------------------------------------------------------- */
+
+/** **整数或 `null`**（**不得 `0` / 空串 / 非整数 / 布尔**）；违规 ⇒ `{ok:false}`。 */
+function itemStrictIntOrNull(value) {
+  if (value === null || value === undefined) return { ok: true, value: null }
+  if (typeof value === 'boolean') return { ok: false }
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value === 0) return { ok: false }
+    return { ok: true, value }
+  }
+  if (typeof value === 'string') {
+    const t = value.trim()
+    if (t === '' || !/^-?\d+$/.test(t)) return { ok: false }
+    const n = Number(t)
+    if (!Number.isInteger(n) || n === 0) return { ok: false }
+    return { ok: true, value: n }
+  }
+  return { ok: false }
+}
+
+/** 本体文本归一（**逐字保留 `null`**；`date_text` 的源侧占位 `'N.D.'` ⇒ `null`）。 */
+function itemTextOrNull(key, value) {
+  if (value === null || value === undefined) return null
+  const t = String(value)
+  if (key === 'date_text' && t.trim() === ITEM_DATE_PLACEHOLDER) return null
+  return t
+}
+
+/** `misc` 子對象归一（5 鍵；缺鍵 ⇒ `null`）。 */
+function normalizeItemMisc(value) {
+  const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const out = {}
+  ITEM_MISC_FIELDS.forEach((key) => {
+    out[key] = src[key] === undefined ? null : src[key]
+  })
+  return out
+}
+
+/** **值域 / 形态门（X6）**：放行 ⇒ `null`；违规 ⇒ 结构化拒绝（`INVALID_VALUE`）。 */
+function itemValueDenial(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  for (const key of ITEM_BODY_INT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
+    if (!itemStrictIntOrNull(src[key]).ok) {
+      return deny(REASONS.INVALID_VALUE, `${key} 必須是整數或 null（不得 0 / 空串等特值）⇒ 拒絕導入；本次零寫入。`)
+    }
+  }
+  for (const key of ITEM_BODY_BOOL_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
+    if (typeof src[key] !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, `${key} 必須是布爾（true / false）⇒ 拒絕導入；本次零寫入。`)
+    }
+  }
+  return null
+}
+
+/** 由载荷 / 導入行取**本体 22 字段**（归一；`raw_json` / 行级元数据不在内）。 */
+function itemBodyOf(src) {
+  const s = src && typeof src === 'object' ? src : {}
+  const out = {}
+  ITEM_BODY_FIELDS.forEach((key) => {
+    if (key === 'source_item_id') {
+      out[key] = text(s.source_item_id)
+      return
+    }
+    if (key === 'misc') {
+      out[key] = normalizeItemMisc(s.misc)
+      return
+    }
+    if (ITEM_BODY_INT_FIELDS.includes(key)) {
+      const parsed = itemStrictIntOrNull(s[key])
+      out[key] = parsed.ok ? parsed.value : null
+      return
+    }
+    if (ITEM_BODY_BOOL_FIELDS.includes(key)) {
+      out[key] = s[key] === true
+      return
+    }
+    out[key] = itemTextOrNull(key, s[key])
+  })
+  return out
+}
+
+/**
+ * 按導入行號讀印谱導入行（先按業務鍵 `id` 檢索；未命中再按文檔 `_id` 兜底；**只讀**）。
+ * @param {string} importId
+ * @returns {Promise<{row:object, match:object}|null>}
+ */
+async function readItemImportRow(importId) {
+  const id = text(importId)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.itemImports)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
   return null
 }
 
@@ -1789,6 +1958,70 @@ const OPS = Object.freeze({
       row,
       plan: { writes: [{ kind: 'add', collection: COLLECTIONS.sealImports, doc: row }] }
     }
+  },
+
+  /**
+   * **提交印谱外部導入行（v1.61；外部批量導入通道）**：封閉鍵面 → 冪等鍵（`source_item_id`）必有 →
+   * **值域 / 形態門（X6）** → **冪等**（同 `source_item_id` 已有行 ⇒ 原樣返回、不改寫既有行）→
+   * 落 `xiai_item_imports`（**status 初始 `PENDING`；導入人 uid 由服務端派生、零手機號**）。
+   * `raw_json` **只落導入行**（正式集合不帶）。
+   * @param {object} payload 载荷（允许键见 `ITEM_IMPORT_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @returns {Promise<{ok:boolean, op:string, row?:object, idempotent?:boolean, plan?:object, reason?:string, message:string}>}
+   */
+  async submitItemImport(payload, identity) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => ITEM_IMPORT_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const sourceId = text(payload.source_item_id)
+    if (!sourceId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少外部冪等鍵（source_item_id）⇒ 拒絕導入；本次零寫入。')
+    }
+    if (sourceId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `外部冪等鍵超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕導入；本次零寫入。`)
+    }
+    /* **值域 / 形態門（X6）**：任一違規 ⇒ `INVALID_VALUE` ＋ 零寫入。 */
+    const valueDenial = itemValueDenial(payload)
+    if (valueDenial) return valueDenial
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的導入人身份；本次零寫入。')
+    }
+    /* **冪等**：同 `source_item_id` 已有導入行 ⇒ 原樣返回（不改寫既有行）。 */
+    const duplicates = await readRows(COLLECTIONS.itemImports, { source_item_id: sourceId })
+    if (duplicates.length > 0) {
+      return { ok: true, op: 'submitItemImport', row: duplicates[0], idempotent: true, message: '該外部冪等鍵（source_item_id）已存在導入行 ⇒ 未改寫（冪等）。' }
+    }
+    const body = itemBodyOf({ ...payload, source_item_id: sourceId })
+    const at = new Date().toISOString()
+    const row = {
+      id: `${ITEM_IMPORT_ID_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      batch_id: text(payload.batch_id),
+      source: text(payload.source),
+      source_item_id: sourceId,
+      status: ITEM_IMPORT_STATUS.PENDING,
+      ...body,
+      raw_json: payload.raw_json === undefined ? null : payload.raw_json,
+      imported_by: identity.uid,
+      imported_at: at,
+      reviewed_at: null,
+      reviewer_id: null,
+      review_note: ''
+    }
+    return {
+      ok: true,
+      op: 'submitItemImport',
+      row,
+      plan: { writes: [{ kind: 'add', collection: COLLECTIONS.itemImports, doc: row }] }
+    }
   }
 })
 
@@ -2493,6 +2726,123 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **審核印谱外部導入行（採納 / 駁回；v1.61）**：① 管理員白名單門 → ② 載荷鍵面 →
+   * ③ 批次 / 單行 / 決定值域 / 理由長度 → ④ 讀導入行（批次或單行；只讀）→
+   * **採納** ⇒ 對每條 `PENDING` 行按 `source_item_id` **冪等**落 `xiai_items`
+   * （重複採納**不改寫既有行**；冪等鍵缺失的行**保持 `PENDING` 且零寫入**）；
+   * **駁回** ⇒ **零寫入**（僅導入行狀態）。三態單向、終態不回退。reason 一律沿用既有凍結字面值。
+   * 採納落正式行：**恰本體 22 字段**（**無 `raw_json`**；沿 X4）。
+   * @param {object} payload 载荷（允许键见 `ITEM_IMPORT_REVIEW_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async reviewItemImport(payload, identity, context) {
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => ITEM_IMPORT_REVIEW_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => REVIEW_IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const batchId = text(payload.batch_id)
+    const importId = text(payload.import_id)
+    if (!batchId && !importId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少導入批次號（batch_id）或導入行號（import_id）⇒ 拒絕審覈；本次零寫入。')
+    }
+    const rawDecision = text(payload.decision)
+    const decision = LEGACY_DECISION[rawDecision] || rawDecision
+    if (DECISIONS.indexOf(decision) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `審覈決定「${rawDecision || '（空）'}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回）⇒ 拒絕寫入；本次零寫入。`
+      )
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '駁回理由必須是文字 ⇒ 拒絕審覈；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
+    }
+    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。 */
+    let targets = []
+    if (importId) {
+      const found = await readItemImportRow(importId)
+      if (found) targets = [found.row]
+    } else {
+      targets = await readRows(COLLECTIONS.itemImports, { batch_id: batchId })
+    }
+    if (targets.length === 0) {
+      return deny(REASONS.NOT_FOUND, `未找到匹配的印谱外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
+    }
+    const accepted = decision === ITEM_IMPORT_STATUS.ACCEPTED
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context && context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const writes = []
+    const acceptedIds = []
+    const rejectedIds = []
+    const skipped = []
+    const failed = []
+    let itemsCache = null
+    const itemsOf = async () => {
+      if (itemsCache === null) itemsCache = rowsOfReply(await resolveDb().collection(COLLECTIONS.items).get())
+      return itemsCache
+    }
+    for (const row of targets) {
+      const rid = text(row && row.id)
+      const current = text(row && row.status) || ITEM_IMPORT_STATUS.PENDING
+      const privatePatch = { status: decision, reviewed_at: at, reviewer_id: identity.uid }
+      if (!accepted && noteText !== '') privatePatch.review_note = noteText
+      /* 终态不回退：已审行**跳过**（幂等重放场景不改写既有终态）。 */
+      if (current !== ITEM_IMPORT_STATUS.PENDING) {
+        skipped.push(rid)
+        continue
+      }
+      if (!accepted) {
+        writes.push({ kind: 'update', collection: COLLECTIONS.itemImports, match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
+        rejectedIds.push(rid)
+        continue
+      }
+      const sourceId = text(row && row.source_item_id)
+      if (!sourceId) {
+        /* 幂等键缺失 ⇒ **该行失败、保持 PENDING 且零写入**（不动 items、不改本行）。 */
+        failed.push(rid)
+        continue
+      }
+      const items = await itemsOf()
+      const existing = items.find((item) => text(item && item.source_item_id) === sourceId)
+      if (!existing) {
+        /* **採納落正式行：恰本體 22 字段**（**無 `raw_json`、無行級元數據**）。 */
+        const itemDoc = itemBodyOf(row)
+        items.push(itemDoc)
+        writes.push({ kind: 'set', collection: COLLECTIONS.items, id: sourceId, doc: itemDoc })
+      }
+      writes.push({ kind: 'update', collection: COLLECTIONS.itemImports, match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
+      acceptedIds.push(rid)
+    }
+    return {
+      ok: true,
+      op: 'reviewItemImport',
+      accepted,
+      accepted_ids: acceptedIds,
+      rejected_ids: rejectedIds,
+      skipped,
+      failed,
+      plan: { op: 'reviewItemImport', writes }
+    }
+  },
+
+  /**
    * **一次性朝代值迁移（幂等管理员 op｜§3.53.5 两值收窄）**：把**两张集合** `xiai_seals` 与
    * `xiai_faces` 里 `dynasty` 字段的两个**人类点名旧值**归一 —— `战国` → `戰國`；
    * `秦汉` → 清空（`''`）。
@@ -2693,6 +3043,16 @@ module.exports = {
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,
+  /* 印谱外部批量導入面（item 通道切片 A｜v1.61；供离线自检直接断言）。 */
+  ITEM_IMPORT_ALLOWED_KEYS,
+  ITEM_IMPORT_REVIEW_ALLOWED_KEYS,
+  ITEM_IMPORT_STATUS,
+  ITEM_IMPORT_ID_PREFIX,
+  ITEM_BODY_FIELDS,
+  ITEM_MISC_FIELDS,
+  ITEM_BODY_INT_FIELDS,
+  ITEM_BODY_BOOL_FIELDS,
+  ITEM_DATE_PLACEHOLDER,
   /* 一次性朝代值遷移面（§3.53.5；供離線自檢直接斷言）。 */
   MIGRATE_ALLOWED_KEYS,
   DYNASTY_MIGRATION,
@@ -2710,6 +3070,7 @@ module.exports = {
   readPersonProposalRow,
   readPersonImportRow,
   readSealImportRow,
+  readItemImportRow,
   IDENTITY_SOURCES,
   isSessionIdentity,
   identitySourceOf,

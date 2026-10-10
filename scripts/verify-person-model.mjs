@@ -359,7 +359,7 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     { c: personDoc.courtesy_names, art: personDoc.art_names, alias: personDoc.alias_names })
   /* 迴歸面：集合總數未增（仍 19）；`[data-admin-action]` 未新增由既有 N-1 段/static-check 另判。 */
   const storageKeys = await import(path.join(ROOT, 'src/data/storage.js'))
-  check('X7', 'AC-510 回歸面：`STORAGE_KEYS` 集合總數仍未增（25；本單不新增集合）', 25, Object.keys(storageKeys.STORAGE_KEYS).length)
+  check('X7', 'AC-510 回歸面：`STORAGE_KEYS` 集合總數（v1.61：25 → 27，本批新增 items / itemImports）', 27, Object.keys(storageKeys.STORAGE_KEYS).length)
 }
 
 /* ===========================================================================
@@ -447,6 +447,38 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
   const mutatedZ = dbSrcZ.replace(`  ${entry('person-imports', 'personImports')},\n`, '')
   check('Z9', 'Z9 負對照 canary：刪掉 `person-imports` 映射 ⇒ Z1 計數變 4（必紅）', 4,
     Object.entries(MAP).filter(([l, c]) => mutatedZ.includes(entry(l, c))).length)
+}
+
+/* ===========================================================================
+   W 段（本單新增）：**AC-522 鍵表可達性斷言**（v1.60 §3.58.2／§10.58 → 本批落實現）
+   ---------------------------------------------------------------------------
+   口徑（逐字）：`CLOUD_COLLECTIONS` 的**每一個雲鍵**，必須被「**同名本機鏡像鍵**」
+   （`STORAGE_KEYS` 的值集）或「**`CLOUD_KEY_OF_LOCAL` 的值集**」（異名映射）**覆蓋到**
+   （不滿足即判負）；且**必須覆蓋本批新集合**（`items` / `itemImports`）。
+   --------------------------------------------------------------------------- */
+{
+  const cloudbaseW = await import(path.join(ROOT, 'src/data/cloudbase.js'))
+  const storageW = await import(path.join(ROOT, 'src/data/storage.js'))
+  const cloudKeys = cloudbaseW.CLOUD_COLLECTION_KEYS
+  const localMirrorValues = new Set(Object.values(storageW.STORAGE_KEYS))
+  /* 从 db.js 源码取 `CLOUD_KEY_OF_LOCAL` 的**值集**（异名映射目标 = 云键）。 */
+  const dbSrcW = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
+  const mapStart = dbSrcW.indexOf('const CLOUD_KEY_OF_LOCAL')
+  const mapSeg = mapStart === -1 ? '' : dbSrcW.slice(mapStart, dbSrcW.indexOf('})', mapStart))
+  const mappedCloudKeys = new Set([...mapSeg.matchAll(/:\s*'([A-Za-z0-9_]+)'/g)].map((m) => m[1]))
+  const uncovered = cloudKeys.filter((k) => !localMirrorValues.has(k) && !mappedCloudKeys.has(k))
+  check('W1', 'AC-522 可達性：`CLOUD_COLLECTIONS` 每個雲鍵被「同名本機鏡像鍵」或「`CLOUD_KEY_OF_LOCAL` 值集」覆蓋',
+    [], uncovered)
+  check('W2', 'AC-522 **必須覆蓋新集合**：`items` / `itemImports` 均被覆蓋', [],
+    ['items', 'itemImports'].filter((k) => !cloudKeys.includes(k) || uncovered.includes(k)))
+  check('W2b', 'AC-522 覆蓋面讀數（雲鍵數 / 本機鏡像值 / 異名映射目標）',
+    { cloudKeys: 11, localHasItems: true, mappedHasItemImports: true, mappedHasItems: false },
+    { cloudKeys: cloudKeys.length, localHasItems: localMirrorValues.has('items'), mappedHasItemImports: mappedCloudKeys.has('itemImports'), mappedHasItems: mappedCloudKeys.has('items') })
+  /* 負對照 canary：注入一個兩表皆未覆蓋的雲鍵 ⇒ 尺必報紅（證明非恆綠）。 */
+  const mutated = cloudKeys.concat(['ghostCloudKey'])
+  check('W3', 'AC-522 負對照：注入未覆蓋雲鍵 ⇒ 可達性尺必報紅',
+    ['ghostCloudKey'],
+    mutated.filter((k) => !localMirrorValues.has(k) && !mappedCloudKeys.has(k)))
 }
 
 /* ---------------------------------------------------------------------------

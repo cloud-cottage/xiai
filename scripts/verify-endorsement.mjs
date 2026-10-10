@@ -653,7 +653,7 @@ check('D2n', '繁體判据**负向对照**（繁體「誤」⇒ 不命中）', f
     endorsements: storage.STORAGE_KEYS.endorsements,
     correctionSummaries: storage.STORAGE_KEYS.correctionSummaries
   })
-  check('D3c', '键总数 ＝ 25（v1.55：24 → 25，新增 sealImports）', 25, Object.keys(storage.STORAGE_KEYS).length)
+  check('D3c', '键总数 ＝ 27（v1.61：25 → 27，新增 items / itemImports）', 27, Object.keys(storage.STORAGE_KEYS).length)
   check('D3d', '旧键 `endorsementCounts` 已收拢（`STORAGE_KEYS.endorsementCounts` 不再存在）', 'undefined', typeof storage.STORAGE_KEYS.endorsementCounts)
   check('D3e', '恰新增两个印人键（persons / personProposals）', { persons: 'persons', personProposals: 'person-proposals' }, {
     persons: storage.STORAGE_KEYS.persons,

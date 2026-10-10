@@ -225,7 +225,31 @@ export const STORAGE_KEYS = {
    * （只经管理员采纳路径写；不开放任何直写入口，含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
    * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
    */
-  sealImports: 'seal-imports'
+  sealImports: 'seal-imports',
+  /**
+   * **用途：正式印谱（item）的本機鏡像**（item 通道切片 A｜v1.61 新增；
+   * 写方 ＝ `db.js::saveItemRows`（**仅采纳路径调用**），读方 ＝ `listItemRows` /
+   * `itemBySourceId`）。真实键名 `xiai:v1:items`。
+   * 行 ＝ **印谱本体 22 字段**（逐字，见 `seed.js::ITEM_BODY_FIELDS`；**繁体为正、简体入 `*_chs`**；
+   * `volume_count` / `date_year` 整数或 `null`；`has_image` / `has_annotation` 布尔；
+   * `misc` 子对象 5 键）。**`raw_json` 不在正式集合**（只存导入行）。
+   * 它是云端 `xiai_items` 集合的本機鏡像；**本集合單寫者**
+   * （只经管理员采纳路径写；不开放任何直写入口，含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  items: 'items',
+  /**
+   * **用途：印谱外部批量導入行（暫存 / PENDING）的本機鏡像**（v1.61 新增；
+   * 写方 ＝ `db.js::saveItemImportRows`（**仅外部导入通道与采纳路径调用**），读方 ＝
+   * `listItemImportRows` / `itemImportBySourceId`）。真实键名 `xiai:v1:item-imports`。
+   * 行 ＝ `{id, batch_id, source, source_item_id, status, imported_by, imported_at,
+   * reviewed_at, reviewer_id, review_note, raw_json, ...本体 22 字段}`；`status` 恰三态
+   * 单向终态不回退；身份类键（`imported_by` / `reviewer_id`）**零手机号**（沿 §3.49）。
+   * 它是云端 `xiai_item_imports` 集合的本機鏡像；**本集合與 `items` 皆单写者**
+   * （只经采纳路径写；不开放任何直写入口，含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  itemImports: 'item-imports'
 }
 
 /* ============================================================================

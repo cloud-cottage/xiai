@@ -238,7 +238,7 @@ session.setUser({ id: uidOfPhone(PHONE), phone: PHONE, role: 'admin', nickname: 
    A 段：口径副本对账 ＋ op 注册面
    =========================================================================== */
 console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 ＋ op 注册面' }))
-check('A1', '`ADMIN_OPS` 恰含 {migrateDynastyValues, reviewCorrection, reviewPersonImport, reviewPersonProposal, reviewSealImport, setInviteReward}（新增一次性朝代值遷移 op）', ['migrateDynastyValues', 'reviewCorrection', 'reviewPersonImport', 'reviewPersonProposal', 'reviewSealImport', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
+check('A1', '`ADMIN_OPS` 恰含 {migrateDynastyValues, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setInviteReward}（v1.61 增 reviewItemImport）', ['migrateDynastyValues', 'reviewCorrection', 'reviewItemImport', 'reviewPersonImport', 'reviewPersonProposal', 'reviewSealImport', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
 check('A2', '审核载荷键面逐字 ＝ 管理员函数 `ALLOWED_KEYS`', sorted(adminOps.ALLOWED_KEYS), sorted(ops.REVIEW_ALLOWED_KEYS))
 check('A3', '邀请奖励键面 ＝ [value]', ['value'], ops.REWARD_ALLOWED_KEYS.slice())

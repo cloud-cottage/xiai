@@ -1010,3 +1010,130 @@ export function sealImportFingerprint(fields) {
   ).join('\u0001')
   return sha256Hex(normalized)
 }
+
+/* ============================================================================
+   **印谱（item）批前置增量：印谱外部批量導入通道（v1.61｜item 通道切片 A）**
+   ----------------------------------------------------------------------------
+   外部批量導入先落暫存集合 `xiai_item_imports` 的 `PENDING` 行；管理員採納
+   （`PENDING → ACCEPTED`）⇒ **冪等**落 `xiai_items`（按 `source_item_id` 冪等；
+   重複採納**不改寫既有行**）；`REJECTED` ⇒ **零寫入**。兩集合皆**單寫者**
+   （不開放任何直寫入口，含管理員直寫）。
+   **本常量區只落「集合名 / 字段真源 / 三態枚舉 / 鍵前綴」**；讀寫、冪等鍵、直寫門在
+   `data/db.js`；雲側讀面在 `data/cloudbase.js`；寫通道在 `services/items.js` ＋ 雲函數。
+   本增量**零新增 `reason` 字面值**（值域 / 形態校驗一律沿用既有凍結表）。
+   ============================================================================ */
+
+/** 正式印谱集合名（`xiai_` 前綴；與雲控制台新建的集合逐字一致）。 */
+export const XIAI_ITEMS_COLLECTION = 'xiai_items'
+
+/** 印谱外部批量導入暫存集合名（`xiai_` 前綴；逐字，雲控制台新建的集合須與此逐字一致）。 */
+export const XIAI_ITEM_IMPORTS_COLLECTION = 'xiai_item_imports'
+
+/** 印谱導入行文檔鍵前綴（確定性 / 可讀）。 */
+export const ITEM_IMPORT_ID_PREFIX = 'ii-'
+
+/** 導入行三態（**恰三態、單向、終態不回退**）。 */
+export const ITEM_IMPORT_STATUS = {
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+}
+
+/** `misc` 子對象的 5 鍵（逐字；原樣落正式行）。 */
+export const ITEM_MISC_FIELDS = ['bookZzxs', 'bookCj', 'bookSk', 'bookSz', 'bookPsqk']
+
+/**
+ * 源側「無紀年」佔位字面（歸一時 ⇒ `null`；**不得當紀年原文**）。
+ * 归一处：`services/items.js` 與雲函數 `ops.js`（一處定義點，兩側同值）。
+ */
+export const ITEM_DATE_PLACEHOLDER = 'N.D.'
+
+/** 整數或 `null` 的字段（**不得 `0` 或空串等特值**；值域門見服務層 / 雲函數）。 */
+export const ITEM_BODY_INT_FIELDS = ['volume_count', 'date_year']
+
+/** 布爾字段（形態門：非布爾 ⇒ `INVALID_VALUE` ＋ 零寫入）。 */
+export const ITEM_BODY_BOOL_FIELDS = ['has_image', 'has_annotation']
+
+/**
+ * **印谱本體 22 字段（逐字；均落 `xiai_items`）** —— **恰一處定義點**。
+ *
+ * 繁簡面（X5）：**繁體為正**（`title` / `title_other` / `abstract`），簡體入 `*_chs` 副字段
+ * （**落庫但不做上屏邏輯**）。
+ * `raw_json` **不在此列** —— **只存於導入行**（正式集合不帶）。
+ * 值域（X6）：`volume_count` / `date_year` 為**整數或 `null`**（不得 `0` / 空串等特值）；
+ * `has_image` / `has_annotation` 為**布爾**；`date_text` 的源側佔位字面 `'N.D.'` 歸 `null`。
+ */
+export const ITEM_BODY_FIELDS = [
+  'source_item_id',
+  'as_book_id',
+  'as_id',
+  'book_uri',
+  'category',
+  'title',
+  'title_chs',
+  'title_other',
+  'title_other_chs',
+  'volume_count',
+  'date_text',
+  'date_year',
+  'publisher',
+  'abstract',
+  'abstract_chs',
+  'abstract_title',
+  'edition',
+  'donor',
+  'has_image',
+  'has_annotation',
+  'language',
+  'misc'
+]
+
+/**
+ * 導入行行級元數據字段：行主鍵 / 批次 / 來源 / 冪等鍵 / 狀態 / 導入與審核留痕 / 原始快照。
+ * 身份類鍵（`imported_by` / `reviewer_id`）**一律落不透明 uid、零手機號**（沿 §3.49）。
+ */
+export const ITEM_IMPORT_ROW_FIELDS = [
+  'id',
+  'batch_id',
+  'source',
+  'source_item_id',
+  'status',
+  'imported_by',
+  'imported_at',
+  'reviewed_at',
+  'reviewer_id',
+  'review_note',
+  /* **原始快照**：源側整行 JSON 原樣留存（**只落導入行、正式集合不帶**；不參與任何判定）。 */
+  'raw_json'
+]
+
+/**
+ * **導入行字段真源（全集；恰一處定義點）** ＝ 行級元數據 ＋ 本體 22 字段。
+ * **不得在別處另立第二套同義字段**（沿「真值函數是唯一尺子」精神）。
+ */
+export const ITEM_IMPORT_FIELDS = [...ITEM_IMPORT_ROW_FIELDS, ...ITEM_BODY_FIELDS]
+
+/** `misc` 空面（5 鍵缺省 `null`；缺省一律空、不設特值）。 */
+export function emptyItemMisc() {
+  const out = {}
+  ITEM_MISC_FIELDS.forEach((key) => {
+    out[key] = null
+  })
+  return out
+}
+
+/**
+ * 印谱一行「值的默認」：文本鍵 ⇒ `''`；`volume_count` / `date_year` ⇒ `null`；
+ * `has_image` / `has_annotation` ⇒ `false`；`misc` ⇒ 空 5 鍵對象。
+ * @returns {object} 空本體字段面（**不含 `id` / `status` / 身份 / 時間戳 / `raw_json`**）
+ */
+export function emptyItemFields() {
+  const out = {}
+  ITEM_BODY_FIELDS.forEach((key) => {
+    if (ITEM_BODY_INT_FIELDS.includes(key)) out[key] = null
+    else if (ITEM_BODY_BOOL_FIELDS.includes(key)) out[key] = false
+    else if (key === 'misc') out[key] = emptyItemMisc()
+    else out[key] = ''
+  })
+  return out
+}

@@ -278,7 +278,11 @@ const CLOUD_KEY_OF_LOCAL = Object.freeze({
   'correction-summaries': 'correctionSummaries',
   'person-proposals': 'personProposals',
   'person-imports': 'personImports',
-  'seal-imports': 'sealImports'
+  'seal-imports': 'sealImports',
+  /* **item 通道切片 A（v1.61）**：`items` 两键**恰好同名**（`STORAGE_KEYS.items` ＝ `items`
+     ＝ 云键），**不入本表**（AC-522 可達性由同名覆蓋）；`item-imports` ↔ `itemImports` **异名**
+     ⇒ 必须登记（否则云快照里的 `xiai_item_imports` 行永远读不回来 —— 570 行事故同型）。 */
+  'item-imports': 'itemImports'
 })
 
 /** 本机镜像键 → 云集合键（未登记 / 翻译后仍非云键 ⇒ 原样返回）。 */
@@ -1898,6 +1902,80 @@ export function sealBySourceKey(source, sourceSealId) {
         String(row.source_seal_id || '') === sid &&
         String(row.source || '') === s
     ) || null
+  )
+}
+
+/* ---------------------------------------------------------------------------
+   **item 通道切片 A（v1.61）：正式印谱（item）＋ 印谱外部批量導入行 ＋ 單寫者門**
+   ---------------------------------------------------------------------------
+   · `xiai_items`（正式）／ `xiai_item_imports`（導入暫存）的**本機鏡像**：只經「外部批量導入」
+     通道與管理員採納路徑寫 —— 低層讀取 / 寫入助手**僅供該通道調用**，**不開放任何直寫入口**；
+   · 冪等鍵 ＝ `source_item_id`（採納落 `xiai_items` 時按它冪等；重複採納**不改寫既有行**）；
+   · **直寫門**：任何繞過導入通道 / 採納路徑的直寫（含**管理員直寫**）一律
+     `FORBIDDEN` ＋ **零寫入**。
+   --------------------------------------------------------------------------- */
+
+/** 正式印谱本机集合键（真实键名 `xiai:v1:items`；与云键 `items` 同名）。 */
+const ITEM_COLLECTION_KEY = 'items'
+
+/** 印谱外部導入行本机集合键（真实键名 `xiai:v1:item-imports`；云键 `itemImports`）。 */
+const ITEM_IMPORT_COLLECTION_KEY = 'item-imports'
+
+/** 讀正式印谱行（云模式 ⇒ 云端快照；否則本機）。 */
+export function listItemRows() {
+  return readCollection(ITEM_COLLECTION_KEY, [])
+}
+
+/** 寫正式印谱行（**僅採納路徑調用**；低層無直寫入口）。 */
+export function saveItemRows(rows) {
+  return writeCollection(ITEM_COLLECTION_KEY, rows)
+}
+
+/** 讀印谱外部導入行（云模式 ⇒ 云端快照；否則本機）。 */
+export function listItemImportRows() {
+  return readCollection(ITEM_IMPORT_COLLECTION_KEY, [])
+}
+
+/** 寫印谱外部導入行（**僅外部導入通道與採納路徑調用**；低層無直寫入口）。 */
+export function saveItemImportRows(rows) {
+  return writeCollection(ITEM_IMPORT_COLLECTION_KEY, rows)
+}
+
+/**
+ * **两集合的單寫者面（硬要求）**：`xiai_items` 與 `xiai_item_imports` **均只經採納路徑 /
+ * 外部導入通道寫** —— **不開放任何直寫入口**（**含管理員直寫**）。任何試圖「直接寫這兩集合」
+ * 的入口經本門 ⇒ `FORBIDDEN` ＋ **零寫入**。
+ * 返回值恒為 `null`（該鍵不屬單寫者集合，交由既有讀寫路徑）或結構化拒絕對象。
+ * @param {string} collectionKey 集合键（`items` / `item-imports`）
+ * @returns {null|{ok:false, reason:'FORBIDDEN', message:string}} 放行 ⇒ `null`
+ */
+export function itemDirectWriteDenial(collectionKey) {
+  const key = collectionKey === null || collectionKey === undefined ? '' : String(collectionKey).trim()
+  if (key === ITEM_COLLECTION_KEY || key === ITEM_IMPORT_COLLECTION_KEY) {
+    return {
+      ok: false,
+      reason: 'FORBIDDEN',
+      message:
+        `集合（${key}）為單寫者：只經採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
+        '（含管理員直寫）⇒ 已拒絕；本次零寫入。'
+    }
+  }
+  return null
+}
+
+/** 按 `source_item_id` 取正式印谱行（**採納冪等鍵**；未命中 ⇒ `null`）。 */
+export function itemBySourceId(sourceItemId) {
+  const id = sourceItemId === null || sourceItemId === undefined ? '' : String(sourceItemId).trim()
+  if (!id) return null
+  return listItemRows().find((row) => row && String(row.source_item_id || '') === id) || null
+}
+
+/** 按 `source_item_id` 取導入行（幂等 / 去重用；未命中 ⇒ `null`）。 */
+export function itemImportBySourceId(sourceItemId) {
+  const id = sourceItemId === null || sourceItemId === undefined ? '' : String(sourceItemId).trim()
+  if (!id) return null
+  return (
+    listItemImportRows().find((row) => row && String(row.source_item_id || '') === id) || null
   )
 }
 

@@ -85,7 +85,7 @@ console.log(JSON.stringify({
   storageKeys: Object.keys(storage.STORAGE_KEYS).length
 }))
 /* K1 / K2：两条与既有套件（verify-endorsement D3c / verify-admin-write-via-login A1）同源的现态读数。 */
-check('K1', 'STORAGE_KEYS 鍵總數 ＝ 25（v1.55：24 → 25，新增 sealImports）', 25, Object.keys(storage.STORAGE_KEYS).length)
+check('K1', 'STORAGE_KEYS 鍵總數 ＝ 27（v1.61：25 → 27，新增 items / itemImports）', 27, Object.keys(storage.STORAGE_KEYS).length)
 check('K2', '`ADMIN_OPS` 含 `reviewSealImport`（v1.55 新增印章導入審核 op）', true, Object.prototype.hasOwnProperty.call(userOps.ADMIN_OPS, 'reviewSealImport'))
 
 /* ---------------------------------------------------------------------------
