@@ -363,6 +363,15 @@ async function handleVerify(event, config, callContext) {
     response.renewedExpiresAt = renewed.claims.exp
     response.renewedTtlSeconds = config.ttlSeconds
   }
+  /* **遷移讀數面（本單｜additive 白名單透傳）**：`migrateDynastyValues` 的內部讀數
+     （`dry_run` / `scanned` / `changed` / `samples` / `idempotent`）**僅當 `opResult` 確有該鍵時**
+     逐字疊進回包；其餘 op（`submitCorrection` / `submitPersonImport` / `reviewXxx` / `setInviteReward` /
+     `registerArtifact` …）本無這些鍵 ⇒ 一個都不疊 ⇒ 既有回包**逐字不變**（序列化後亦不新增鍵）。
+     **`plan` 是內部落盤計劃（內部面），不在白名單內 ⇒ 絕不外傳**。既有字段一律不刪、不改。 */
+  const MIGRATION_READOUT_KEYS = ['dry_run', 'scanned', 'changed', 'samples', 'idempotent']
+  for (const key of MIGRATION_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
   return response
 }
 
