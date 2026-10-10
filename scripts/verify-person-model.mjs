@@ -15,7 +15,7 @@
  * 用法：`node scripts/verify-person-model.mjs`
  */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -160,6 +160,80 @@ async function seedSealAndFace({ personId = '', legacyAuthor = '' } = {}) {
   /* 视图模型 `author_person_id` 取**主印面**（印章行无该键仍正确）。 */
   check('B12', '视图模型 author_person_id ＝ 主印面引用', PERSON_ID, vRef && vRef.author_person_id)
   check('B13', '视图模型 author_person_id 于无引用印章 ⇒ 空', '', vNone && vNone.author_person_id)
+}
+
+/* ---------------------------------------------------------------------------
+   5. 写路径清单与单写者门（P2-c：门的调用点 / 是否存在绕过门的写路径）
+   ---------------------------------------------------------------------------
+   取证口径（机械可复核；本段**只加断言**，不改任何既有断言）：
+     · 两集合（`persons` / `person-imports`）的**唯一写入口** ＝ 数据层导出
+       `savePersonRows` / `savePersonImportRows`；逐文件扫描证明除定义处 `src/data/db.js`
+       与 `src/services/persons.js`（采纳路径 / 外部导入通道）外，**无任何产品模块调用**。
+     · 数据层**不导出**任何「按任意键写入」的通用写口（`writeCollection` / `writeKey` 私有）。
+     · 产品源码**不经原始 `writeKey` 原语**写这两键。
+     · 云水合层 `cloudbase.js` **不持有文档写句柄**（无 `.doc(`）。
+     · 门谓词对两集合键恒 `FORBIDDEN`、对其它键放行（`null`）；服务层转发逐字同值。
+   结论：**不存在绕过门的写路径**（无通用直写入口可调用），门即单写者面的机械判据。
+   ========================================================================== */
+const srcWalk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  const full = path.join(dir, entry.name)
+  return entry.isDirectory() ? srcWalk(full) : [full]
+})
+const relOf = (file) => path.relative(ROOT, file)
+const srcFiles = [...srcWalk(path.join(ROOT, 'src')), ...srcWalk(path.join(ROOT, 'cloudfunctions'))].filter((file) => file.endsWith('.js') || file.endsWith('.vue') || file.endsWith('.mjs'))
+const srcText = new Map(srcFiles.map((file) => [file, readFileSync(file, 'utf8')]))
+const callersOf = (needles) => srcFiles
+  .filter((file) => needles.some((needle) => srcText.get(file).includes(needle)))
+  .map(relOf)
+  .sort()
+
+check('G1', 'P2-c 静态：数据层导出单写者门 `personDirectWriteDenial`', true, dbSrc.includes('export function personDirectWriteDenial('))
+const personsSrc = readFileSync(path.join(ROOT, 'src/services/persons.js'), 'utf8')
+{
+  const at = personsSrc.indexOf('export function personSingleWriterDenial')
+  const seg = at === -1 ? '' : personsSrc.slice(at, at + 200)
+  check('G2', 'P2-c 静态：服务层 `personSingleWriterDenial` 存在且逐字转发数据层门', true, seg.includes('return personDirectWriteDenial(collectionKey)'))
+}
+check('G3', 'P2-c 静态：调用 `savePersonRows(` / `savePersonImportRows(` 的产品文件恰为 {db.js, services/persons.js}', ['src/data/db.js', 'src/services/persons.js'], callersOf(['savePersonRows(', 'savePersonImportRows(']))
+check('G4', 'P2-c 静态：数据层未导出通用写口（`writeCollection` / `writeKey` 私有；无「按任意键写入」直写入口）', [], ['writeCollection', 'writeKey'].filter((name) => dbSrc.includes('export function ' + name + '(') || dbSrc.includes('export const ' + name + ' ')))
+{
+  const hits = []
+  srcFiles.forEach((file) => {
+    srcText.get(file).split('\n').forEach((line, i) => {
+      const isWrite = line.includes('writeKey(') || line.includes('migrationBackupWriteKey(')
+      const isPersonKey = line.includes('STORAGE_KEYS.persons') || line.includes('STORAGE_KEYS.personImports') || line.includes("'persons'") || line.includes("'person-imports'")
+      if (isWrite && isPersonKey) hits.push(relOf(file) + ':' + (i + 1))
+    })
+  })
+  check('G5', 'P2-c 静态：无产品源码经 `writeKey(` 原语直写 persons / person-imports 键', [], hits)
+}
+{
+  const cbSrc = readFileSync(path.join(ROOT, 'src/data/cloudbase.js'), 'utf8')
+  check('G6', 'P2-c 静态：云水合层 `cloudbase.js` 不持有文档写句柄（无 `.doc(`）', false, cbSrc.includes('.doc('))
+}
+/* 负对照 canary：证明上述静态扫描非空转。 */
+{
+  const canary = new Map(srcText)
+  canary.set(path.join(ROOT, 'src/views/__canary__.vue'), "import { savePersonRows } from '../data/db.js'; savePersonRows([])")
+  const withCanary = [...canary.keys()].filter((file) => ['savePersonRows(', 'savePersonImportRows('].some((needle) => canary.get(file).includes(needle))).map(relOf).sort()
+  check('C3', '负对照 canary：新模块调用 `savePersonRows(` ⇒ G3 扫描会变红（多出该文件）', true, withCanary.length > 2)
+}
+{
+  const mutated = dbSrc.replace('function writeCollection(key, rows) {', 'export function writeCollection(key, rows) {')
+  check('C4', '负对照 canary：把 `writeCollection` 改成导出 ⇒ G4 扫描会变红', true, mutated.includes('export function writeCollection('))
+}
+
+/* 行为：门谓词（真函数体直调）＋ 服务层转发逐字同值。 */
+{
+  const personsSvc = await import(path.join(ROOT, 'src/services/persons.js'))
+  const dPersons = db.personDirectWriteDenial('persons')
+  const dImports = db.personDirectWriteDenial('person-imports')
+  check('BG1', 'P2-c 行为：门对 `persons` ⇒ FORBIDDEN（ok:false）', true, !!dPersons && dPersons.ok === false && dPersons.reason === 'FORBIDDEN')
+  check('BG2', 'P2-c 行为：门对 `person-imports` ⇒ FORBIDDEN（ok:false）', true, !!dImports && dImports.ok === false && dImports.reason === 'FORBIDDEN')
+  check('BG3', 'P2-c 行为：门对非单写者键（`seals`）⇒ 放行（null；门面收窄）', null, db.personDirectWriteDenial('seals'))
+  check('BG4', 'P2-c 行为：服务层转发 ≡ 数据层门（三键逐字同值）',
+    [db.personDirectWriteDenial('persons'), db.personDirectWriteDenial('person-imports'), db.personDirectWriteDenial('seals')],
+    [personsSvc.personSingleWriterDenial('persons'), personsSvc.personSingleWriterDenial('person-imports'), personsSvc.personSingleWriterDenial('seals')])
 }
 
 /* ---------------------------------------------------------------------------

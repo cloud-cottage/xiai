@@ -1954,7 +1954,7 @@ const ADMIN_OPS = Object.freeze({
       if (!existing) {
         let max = 0
         persons.forEach((item) => {
-          const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\\\d{9})$`).exec(text(item && item.code))
+          const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
           if (matched) max = Math.max(max, Number(matched[1]))
         })
         const taken = new Set(persons.map((item) => text(item && item.code)))

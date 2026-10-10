@@ -679,6 +679,14 @@ const OPS = Object.freeze({
           gender: '',
           cbdb_id: text(row.cbdb_id),
           card_id: text(row.card_id),
+          /* **批 2（v1.54｜§3.54.13 / §4.1.16）**：采纳提案落 `xiai_persons` 行时带上六扩字段
+             （四正字段 ＋ 两繁简副字段；值来自提案行，**不做任何转换改写**）。 */
+          native_place: text(row.native_place),
+          biography: text(row.biography),
+          source: text(row.source),
+          source_id: text(row.source_id),
+          native_place_chs: text(row.native_place_chs),
+          biography_chs: text(row.biography_chs),
           proposal_id: proposalId,
           created_by: identity.uid,
           created_at: at,
