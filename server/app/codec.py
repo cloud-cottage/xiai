@@ -66,7 +66,7 @@ STORAGE_AVIF_QUALITY = 0.92
 
 # ── 上限（**沿用既有真源数值，不得改值** —— J-5 / J-9 / AC-33）───────────────────
 MAX_INPUT_BYTES = 1_048_576            # 输入侧（原始文件字节）＝ 1 MB
-STORED_MAX_BYTES = 4 * 1024 * 1024     # 产物侧（产物二进制）＝ 4 MiB
+STORED_MAX_BYTES = 8 * 1024 * 1024     # 产物侧（产物二进制）＝ 8 MiB
 MAX_REENCODE_ROUNDS = 3                # 产物超限时**有界**降质重编轮数（上界 3）
 REENCODE_SIDE_FLOOR = 256              # 每轮最长边 ÷2 的下界（有界降幅）
 REENCODE_QUALITY_STEP = 0.2            # 每轮降幅（沿用既有前端口径）
