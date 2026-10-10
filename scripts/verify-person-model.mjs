@@ -414,22 +414,35 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
    ========================================================================== */
 {
   const dbSrcZ = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
+  /* **真源期望表**（v1.61 起 **6 條**：切片 A 新增 `'item-imports': 'itemImports'`）。 */
   const MAP = {
     'corrections-public': 'correctionsPublic',
     'correction-summaries': 'correctionSummaries',
     'person-proposals': 'personProposals',
     'person-imports': 'personImports',
-    'seal-imports': 'sealImports'
+    'seal-imports': 'sealImports',
+    'item-imports': 'itemImports'
   }
   const entry = (l, c) => `'${l}': '${c}'`
-  check('Z1', 'Z1 靜態：`CLOUD_KEY_OF_LOCAL` 恰 5 條異名映射（逐字）', 5,
+  /* 真源字面体逐条撮出（剥块注释后按 `'k': 'v'` 逮对）—— 供**严格等值**尺与 canary 共用同一把尺。 */
+  const mapPairsOf = (src) => {
+    const at = src.indexOf('const CLOUD_KEY_OF_LOCAL')
+    const seg = at === -1 ? '' : src.slice(at, src.indexOf('})', at))
+    const body = seg.replace(/\/\*[\s\S]*?\*\//g, '')
+    return [...body.matchAll(/'([^']+)'\s*:\s*'([^']+)'/g)].map((m) => [m[1], m[2]])
+  }
+  const sortByKey = (pairs) => pairs.slice().sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  check('Z1', 'Z1 靜態：`CLOUD_KEY_OF_LOCAL` 恰 6 條異名映射（逐字：corrections-public→correctionsPublic / correction-summaries→correctionSummaries / person-proposals→personProposals / person-imports→personImports / seal-imports→sealImports / item-imports→itemImports）', 6,
     Object.entries(MAP).filter(([l, c]) => dbSrcZ.includes(entry(l, c))).length)
+  /* **嚴格等值（本單補）**：真表**條目總數恰 6** —— 多一條雜項映射、或漏登記一條，皆攔。 */
+  check('Z1b', 'Z1 嚴格等值：`CLOUD_KEY_OF_LOCAL` 真表條目總數**恰 6**（非範圍、非子集、不比大小）', 6, mapPairsOf(dbSrcZ).length)
+  check('Z1c', 'Z1 逐對對拍：真源 6 條映射 ≡ 期望表（鍵→值逐字，含 `item-imports` → `itemImports`）', sortByKey(Object.entries(MAP)), sortByKey(mapPairsOf(dbSrcZ)))
   check('Z2', 'Z2 靜態：`readCollection` 經 `cloudKeyOfLocal(key)` 取雲鍵餵 `cloudBaseReadOf`', true,
     /const cloudKey = cloudKeyOfLocal\(key\)[\s\S]{0,200}cloudBaseReadOf\(cloudKey\)/.test(dbSrcZ))
   check('Z3', 'Z3 靜態：覆蓋層按「雲鍵 ＋ 本機鍵」雙參調用', true, dbSrcZ.includes('withLocalOverlay(cloudKey, cloud.rows, key)'))
   check('Z4', 'Z4 靜態：本機鏡像讀 / 種子指紋用 `localKey`（不再拿雲鍵讀本機）', true,
     /function withLocalOverlay\(key, cloudRows, localKey = key\)/.test(dbSrcZ) && dbSrcZ.includes('const local = readKey(localKey)'))
-  check('Z5', 'Z5 行為：5 個映射目標逐字 ∈ `CLOUD_COLLECTION_KEYS`（真源）', [],
+  check('Z5', 'Z5 行為：6 個映射目標逐字 ∈ `CLOUD_COLLECTION_KEYS`（真源）', [],
     Object.values(MAP).filter((k) => !cloudbase.CLOUD_COLLECTION_KEYS.includes(k)))
   check('Z6', 'Z6 行為：連字符鏡像鍵**既非**雲鍵（真因坐實：`person-imports` ∉ 雲鍵面）', false,
     cloudbase.CLOUD_COLLECTION_KEYS.includes('person-imports'))
@@ -443,10 +456,14 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     { ok: zRes.ok, rows: zRes.ok ? zRes.rows.length : -1 })
   check('Z8', 'Z8 靜態：導入讀面具「不靜默」降級分支（`importReadDegradedMessage`）', true,
     readFileSync(path.join(ROOT, 'src/services/persons.js'), 'utf8').includes('function importReadDegradedMessage'))
-  /* 負對照 canary：刪掉 `person-imports` 映射 ⇒ Z1 計數變 4（會紅）。 */
+  /* 負對照 canary：刪掉 `person-imports` 映射 ⇒ 嚴格等值尺變 5（會紅）。 */
   const mutatedZ = dbSrcZ.replace(`  ${entry('person-imports', 'personImports')},\n`, '')
-  check('Z9', 'Z9 負對照 canary：刪掉 `person-imports` 映射 ⇒ Z1 計數變 4（必紅）', 4,
-    Object.entries(MAP).filter(([l, c]) => mutatedZ.includes(entry(l, c))).length)
+  check('Z9', 'Z9 負對照 canary：刪掉一條映射（`person-imports`）⇒ 嚴格等值尺變 5（必紅）', 5,
+    mapPairsOf(mutatedZ).length)
+  /* 負對照 canary：真表**多**一條（雜項映射）⇒ 嚴格等值尺變 7（會紅）。 */
+  const mutatedZPlus = dbSrcZ.replace(`  ${entry('item-imports', 'itemImports')}\n`, `  ${entry('item-imports', 'itemImports')},\n  'ghost-key': 'ghostKey'\n`)
+  check('Z9b', 'Z9b 負對照 canary：真表多一條雜項映射（`ghost-key`）⇒ 嚴格等值尺變 7（必紅）', 7,
+    mapPairsOf(mutatedZPlus).length)
 }
 
 /* ===========================================================================

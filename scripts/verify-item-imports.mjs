@@ -14,6 +14,9 @@
  *   · **⑤ 读面（X7）**：注入假 `xiai_items` 行 ⇒ 能读回；异名键翻译在位；
  *     云 `failed` ＋ 零行 ⇒ 降级（`ok:false`）；`off` 不降级；非管理员 ⇒ `FORBIDDEN`。
  *   · **⑥ 云函数键面**：`OPS.submitItemImport` / `ADMIN_OPS.reviewItemImport` 存在（动态派发）。
+ *   · **⑦ 護欄（本單補；行為已在位、僅缺斷言）**：封閉鍵面外的欄位 ⇒ `INVALID_FIELD` ＋ 零寫入；
+ *     載荷自報身份（`uid` / `phone` / `imported_by`）⇒ 被拒（服務端身份來自令牌、不採信自報）；
+ *     身份缺失 / 不可用 ⇒ `FORBIDDEN` ＋ 零寫入。
  *
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 用法：node scripts/verify-item-imports.mjs
@@ -375,6 +378,49 @@ console.log(JSON.stringify({ section: 'G', title: '单写者门 / 云函数键�
   /* reason 零新增（观测面：本套件已触发的拒绝 reason 全部 ∈ 既有冻结表）。 */
   check('G4', '观测到的 `reason` 字面值全部 ∈ 既有凍結表（零新增）', [], [...new Set(OBSERVED_REASONS)].filter((r) => FROZEN_REASONS.indexOf(r) === -1))
   check('G4x', '负对照：注入新 `reason` 字面值 ⇒ 零新增尺必报红', ['TOTALLY_NEW_REASON'], [...new Set([...OBSERVED_REASONS, 'TOTALLY_NEW_REASON'])].filter((r) => FROZEN_REASONS.indexOf(r) === -1))
+}
+
+/* ===========================================================================
+   ⑦ 封閉鍵面 ＋ 身份來源門（X8 護欄；行為已在位，本單只補斷言）
+   ---------------------------------------------------------------------------
+   雲端真函數體判序（`ops.js::submitItemImport`）：未知鍵 → 冪等鍵必有 → **值域 / 形態門（X6）**
+   → **身份可用（`identityUsable`）** → 冪等 → 寫（全部在寫之前）。本段沿 V 段同形（三件套
+   `{ok, reason, plan}` ＋「零寫入 ＝ 無 plan」）補三條嚴格等值護欄：
+     ① 封閉鍵面外的欄位 ⇒ `INVALID_FIELD` ＋ 零寫入；
+     ② 載荷自報身份（`uid` / `phone` / `imported_by`）⇒ 被拒（服務端身份來自令牌、不採信自報）；
+     ③ 身份缺失 / 不可用 ⇒ `FORBIDDEN` ＋ 零寫入。
+   =========================================================================== */
+console.log(JSON.stringify({ section: 'U', title: '封閉鍵面 / 身份來源門（X8 護欄）' }))
+{
+  /* ① 封閉鍵面：鍵面外欄位 ⇒ `INVALID_FIELD` ＋ 零寫入。 */
+  userOps.setOpsDbProvider(makeFakeDb())
+  const unknownKey = noteReason(await userOps.OPS.submitItemImport(itemPayload('U-unknown', { unknown_column: 'x' }), IDENT))
+  check('U1', 'X8 封閉鍵面外的欄位 ⇒ INVALID_FIELD ＋ 零寫入', { ok: false, reason: 'INVALID_FIELD', plan: undefined }, { ok: unknownKey.ok, reason: unknownKey.reason, plan: unknownKey.plan })
+  check('U1b', 'X8 未知鍵的拒絕文案點明「如實報回，不靜默丟鍵」', true, String(unknownKey.message).includes('不靜默丟鍵'))
+
+  /* ② 載荷自報身份（身份類鍵 `uid` / `phone`；落行時由服務端派生的 `imported_by`）⇒ 一律拒 ＋ 零寫入。 */
+  userOps.setOpsDbProvider(makeFakeDb())
+  const spoofUid = noteReason(await userOps.OPS.submitItemImport(itemPayload('U-spoof-uid', { uid: 'u-evil' }), IDENT))
+  check('U2', 'X8 載荷自報身份（`uid`）⇒ INVALID_FIELD ＋ 零寫入（服務端身份來自令牌、不採信自報）', { ok: false, reason: 'INVALID_FIELD', plan: undefined }, { ok: spoofUid.ok, reason: spoofUid.reason, plan: spoofUid.plan })
+  check('U2b', 'X8 身份類鍵的拒絕文案點明「不採信前端自稱」', true, String(spoofUid.message).includes('不採信前端自稱'))
+  userOps.setOpsDbProvider(makeFakeDb())
+  const spoofPhone = noteReason(await userOps.OPS.submitItemImport(itemPayload('U-spoof-phone', { phone: '13900000000' }), IDENT))
+  check('U2c', 'X8 載荷自報手機號（`phone`）⇒ INVALID_FIELD ＋ 零寫入', { ok: false, reason: 'INVALID_FIELD', plan: undefined }, { ok: spoofPhone.ok, reason: spoofPhone.reason, plan: spoofPhone.plan })
+  userOps.setOpsDbProvider(makeFakeDb())
+  const spoofImporter = noteReason(await userOps.OPS.submitItemImport(itemPayload('U-spoof-importedby', { imported_by: 'u-evil' }), IDENT))
+  check('U2d', 'X8 載荷自報導入人（`imported_by`；落行值取 `identity.uid`）⇒ INVALID_FIELD ＋ 零寫入', { ok: false, reason: 'INVALID_FIELD', plan: undefined }, { ok: spoofImporter.ok, reason: spoofImporter.reason, plan: spoofImporter.plan })
+
+  /* ③ 身份缺失 / 不可用（`null` / 空值 / 令牌路缺手機號）⇒ `FORBIDDEN` ＋ 零寫入（寫之前判）。 */
+  const unusableDenials = [{ ok: false, reason: 'FORBIDDEN', plan: undefined }, { ok: false, reason: 'FORBIDDEN', plan: undefined }, { ok: false, reason: 'FORBIDDEN', plan: undefined }]
+  const unusable = []
+  for (const identity of [null, {}, { uid: 'u-import' }]) {
+    userOps.setOpsDbProvider(makeFakeDb())
+    const res = noteReason(await userOps.OPS.submitItemImport(itemPayload(`U-noident-${unusable.length}`), identity))
+    unusable.push({ ok: res.ok, reason: res.reason, plan: res.plan, message: res.message })
+  }
+  check('U3', 'X8 身份不可用（`null` / `{}` / 令牌路缺手機號）⇒ FORBIDDEN ＋ 零寫入', unusableDenials,
+    unusable.map(({ ok, reason, plan }) => ({ ok, reason, plan })))
+  check('U3b', 'X8 身份不可用拒絕文案點明「缺少可驗證的導入人身份」', true, unusable.every((r) => String(r.message).includes('缺少可驗證的導入人身份')))
 }
 
 /* ---------------------------------------------------------------------------
