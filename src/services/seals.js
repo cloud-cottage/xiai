@@ -89,6 +89,7 @@ import { displayDataUrlOf } from './displayImage.js'
    本层只消费，**不自立第二份对象键解析**。 */
 import {
   cloudBaseActive,
+  cloudBaseConfigured,
   cloudBaseObjectKeyOf,
   cloudBaseStatus,
   cloudObjectBytesOfRow,
@@ -1461,6 +1462,10 @@ export async function submitSealImport({ batchId = '', source = '', sourceSealId
 /**
  * **管理員可見的待審印章外部導入行**（全部用戶的 `PENDING`）。
  * 非管理員 ⇒ **結構化拒絕**（`FORBIDDEN`；不以空集冒充拒絕）。
+ *
+ * **不靜默顯示 0**（与印人导入读面同口径）：云读取面已配置但**未落定 / 读取失败**时，
+ * **零行**不再是「事实空集」⇒ 显式回可读降级文案（`ok:false` ＋ `message`），由视图既有
+ * `sealImportNotice` 位渲染；有任何本机镜像行可列时**照常返回**。`reason` 不新增字面值。
  * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:string, message:string}}
  */
 export function listPendingSealImportsForAdmin(actor) {
@@ -1471,7 +1476,22 @@ export function listPendingSealImportsForAdmin(actor) {
   const rows = listSealImportRows()
     .filter((row) => normalizeSealImportStatus(row && row.status) === SEAL_IMPORT_STATUS.PENDING)
     .sort((a, b) => String(b.imported_at).localeCompare(String(a.imported_at)))
+  if (rows.length === 0) {
+    const degraded = sealImportReadDegradedMessage()
+    if (degraded) return { ok: false, reason: cloudBaseStatus().reason || '', message: degraded }
+  }
   return { ok: true, rows }
+}
+
+/** 数据源未落定 / 读取失败时的可读降级文案（正常 / 未配置 ⇒ `''`；判据收口在数据层）。 */
+function sealImportReadDegradedMessage() {
+  if (!cloudBaseConfigured()) return ''
+  const status = cloudBaseStatus() || {}
+  if (status.state === 'pending') return '雲端資料載入中，待審印章導入批次稍後自動出現；請稍候再試。'
+  if (status.state === 'failed') {
+    return `雲端資料讀取失敗（${status.message || '未知原因'}），暫時無法列出全部待審印章導入批次；請稍後重試。`
+  }
+  return ''
 }
 
 /* --------------------------- 導入：採納 / 駁回（管理員） --------------------------- */

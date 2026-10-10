@@ -262,6 +262,31 @@ function ensureSeed() {
 /** 参与覆盖层的集合键（真源＝`cloudbase.js` 的 `CLOUD_COLLECTION_KEYS`，不另立一份字面量）。 */
 const OVERLAY_COLLECTION_KEYS = CLOUD_COLLECTION_KEYS
 
+/**
+ * **本机镜像键 → 云集合键**（仅**两处键名不同**者登记；同名的直用）。
+ *
+ * 为什么需要这张表：云读面（`cloudBaseReadOf`）与覆盖层（`OVERLAY_COLLECTION_KEYS`）认的都是
+ * **云集合键**（`CLOUD_COLLECTIONS` 的驼峰名，如 `personImports`），而数据层各读入口是按
+ * **本机镜像键**（`STORAGE_KEYS` 的值，如 `person-imports`）调用 `readCollection` 的。
+ * `seals` / `faces` / `images` / `persons` 两组键**恰好同名** ⇒ 一直正常；其余 5 个集合
+ * 早年取的是连字符镜像名，与驼峰云键**对不上** ⇒ `cloudBaseReadOf` 恒判 `off` ⇒ 云快照里的行
+ * **永远读不回来**（线上实据：云有 570 行 `xiai_person_imports`，UI 却显示 0）。
+ * 未登记的键原样返回 ⇒ 非接管集合（`users` / `corrections` / …）行为一字未变。
+ */
+const CLOUD_KEY_OF_LOCAL = Object.freeze({
+  'corrections-public': 'correctionsPublic',
+  'correction-summaries': 'correctionSummaries',
+  'person-proposals': 'personProposals',
+  'person-imports': 'personImports',
+  'seal-imports': 'sealImports'
+})
+
+/** 本机镜像键 → 云集合键（未登记 / 翻译后仍非云键 ⇒ 原样返回）。 */
+function cloudKeyOfLocal(localKey) {
+  const mapped = CLOUD_KEY_OF_LOCAL[localKey]
+  return mapped && CLOUD_COLLECTION_KEYS.includes(mapped) ? mapped : localKey
+}
+
 const firstPresent = (...values) => values.find((value) => value !== undefined && value !== null)
 
 /**
@@ -308,19 +333,21 @@ function isVerbatimSeedRow(key, row) {
  *
  * @param {string} key 集合键
  * @param {Array<object>} cloudRows 云端快照行
+ * @param {string} [localKey] 本机镜像键（**默认同 `key`**）—— 覆盖层成员判据用云集合键 `key`，
+ *   而读本机镜像 / 比种子指纹用 `localKey`（两键异名的集合如 `personImports` ↔ `person-imports`）。
  * @returns {Array<object>} 合并后的行（**新数组**；云端行对象只在被覆盖时新建）
  */
-function withLocalOverlay(key, cloudRows) {
+function withLocalOverlay(key, cloudRows, localKey = key) {
   const cloud = Array.isArray(cloudRows) ? cloudRows : []
   if (!OVERLAY_COLLECTION_KEYS.includes(key)) return cloud
   /* **不调 `ensureSeed()`**：云模式下一行种子都不许写进 localStorage；这里只读**已有**的本地行。 */
-  const local = readKey(key)
+  const local = readKey(localKey)
   if (!Array.isArray(local) || local.length === 0) return cloud
   const overlays = new Map()
   local.forEach((row) => {
     const id = overlayIdentityOf(row)
     if (!id) return
-    if (isVerbatimSeedRow(key, row)) return // 本机示范种子 ⇒ 不并入（见本节头注）
+    if (isVerbatimSeedRow(localKey, row)) return // 本机示范种子 ⇒ 不并入（见本节头注）
     overlays.set(id, row)
   })
   if (overlays.size === 0) return cloud
@@ -361,8 +388,12 @@ function readCollection(key, fallback) {
   /* **启动兜底**：`main.js` 不在本单接线面内 ⇒ 首次读取顺带把水合拉起来（幂等；未配置时零成本）。
      这样即使启动引导链被改动，云端接管也不会静默失效。 */
   ensureCloudBaseHydration()
-  const cloud = cloudBaseReadOf(key)
-  if (cloud.state === 'ready' && Array.isArray(cloud.rows)) return withLocalOverlay(key, cloud.rows)
+  /* **本机镜像键 → 云集合键**：`cloudBaseReadOf` / 覆盖层认的是 **云集合键**（`CLOUD_COLLECTION_KEYS`
+     的驼峰名）；而本函数由数据层各读入口按**本机镜像键**调用（如 `person-imports`）。
+     两键同名的集合（`seals`/`faces`/`images`/`persons`）直用；异名者经 `cloudKeyOfLocal` 翻译。 */
+  const cloudKey = cloudKeyOfLocal(key)
+  const cloud = cloudBaseReadOf(cloudKey)
+  if (cloud.state === 'ready' && Array.isArray(cloud.rows)) return withLocalOverlay(cloudKey, cloud.rows, key)
   if (cloud.state === 'pending') return []
   ensureSeed()
   const value = readKey(key)

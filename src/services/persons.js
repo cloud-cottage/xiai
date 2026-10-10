@@ -49,6 +49,7 @@ import { PERSON_PROPOSAL_STATUS, emptyPersonFields, PERSON_IMPORT_STATUS, PERSON
    一律经 `userWriteGate` —— 先保证有一枚可携带的令牌（必要时静默补签），再过云端门
    （`xiai-user-token` 的 `verify`）。**身份由服务端从令牌派生**，载荷里的身份类键由服务端拒。 */
 import { userWriteGate } from './userWrite.js'
+import { cloudBaseConfigured, cloudBaseStatus } from '../data/cloudbase.js'
 
 /** 印人提案三态（转发真源 `seed.js::PERSON_PROPOSAL_STATUS`；单向、终态不回退）。 */
 export const PERSON_STATUS = PERSON_PROPOSAL_STATUS
@@ -725,6 +726,13 @@ export async function submitPersonImport({
 /**
  * **管理员可见的待审外部导入行**（全部用户的 `PENDING`）。
  * 非管理员 ⇒ **结构化拒绝**（`FORBIDDEN`；不以空集冒充拒绝）。
+ *
+ * **不静默显示 0**：云读取面已配置但**未落定 / 读取失败**（`pending` / `failed`）时，
+ * **零行**不再是「事实空集」—— 显式返回可读降级文案（`ok:false` ＋ `message`），
+ * 由视图的既有 `importNotice` 位渲染。理由：云读取面被权限 / 配置拦下时 `query` 可能
+ * **静默返回 0 行**（见 `data/cloudbase.js` §3c 头注），若此处照旧交出 `{ok:true, rows:[]}`，
+ * 管理员会把「读不到」误判成「没有待审批次」。`reason` **不新增字面值**（转发数据源的既有 reason）。
+ * 有任何本机镜像行可列时**照常返回**（不因云端未落定而隐藏本机已知行）。
  * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:string, message:string}}
  */
 export function listPendingPersonImportsForAdmin(actor) {
@@ -735,7 +743,25 @@ export function listPendingPersonImportsForAdmin(actor) {
   const rows = listPersonImportRows()
     .filter((row) => String((row && row.status) || '') === PERSON_IMPORT_STATUS.PENDING || !(row && row.status))
     .sort((a, b) => String(b.imported_at).localeCompare(String(a.imported_at)))
+  if (rows.length === 0) {
+    const degraded = importReadDegradedMessage()
+    if (degraded) return { ok: false, reason: cloudBaseStatus().reason || '', message: degraded }
+  }
   return { ok: true, rows }
+}
+
+/**
+ * **数据源未落定 / 读取失败**时的可读降级文案（正常 / 未配置 ⇒ `''`）。
+ * 判据收口在数据层 `cloudBaseStatus()`（**不自立第二份判据**）。
+ */
+function importReadDegradedMessage() {
+  if (!cloudBaseConfigured()) return ''
+  const status = cloudBaseStatus() || {}
+  if (status.state === 'pending') return '雲端資料載入中，待審導入批次稍後自動出現；請稍候再試。'
+  if (status.state === 'failed') {
+    return `雲端資料讀取失敗（${status.message || '未知原因'}），暫時無法列出全部待審導入批次；請稍後重試。`
+  }
+  return ''
 }
 
 /* ------------------------------ 导入：采纳 / 驳回（管理员） ------------------------------ */

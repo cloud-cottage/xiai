@@ -404,6 +404,51 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
   check('XN', '自證：本套件判據條數只增不減（基線 32 ＋ 本單新增）', true, checkCalls >= 51)
 }
 
+/* ===========================================================================
+   Z 段（本單新增）：**導入讀面的「本機鏡像鍵 ↔ 雲集合鍵」翻譯**（570 行讀不到的真因）
+   ---------------------------------------------------------------------------
+   坐實：`db.js::readCollection` 被各讀入口按**本機鏡像鍵**調用（如 `person-imports`），
+   而 `cloudBaseReadOf` / 覆蓋層認的是**雲集合鍵**（`CLOUD_COLLECTION_KEYS` 的駝峰名，如
+   `personImports`）—— 早年連字符鏡像名與駝峰雲鍵**對不上** ⇒ 雲快照裡的行永遠讀不回
+   （線上實據：雲有 570 行 `xiai_person_imports`，UI 顯示 0）。修法＝在讀入口單點翻譯鍵。
+   ========================================================================== */
+{
+  const dbSrcZ = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
+  const MAP = {
+    'corrections-public': 'correctionsPublic',
+    'correction-summaries': 'correctionSummaries',
+    'person-proposals': 'personProposals',
+    'person-imports': 'personImports',
+    'seal-imports': 'sealImports'
+  }
+  const entry = (l, c) => `'${l}': '${c}'`
+  check('Z1', 'Z1 靜態：`CLOUD_KEY_OF_LOCAL` 恰 5 條異名映射（逐字）', 5,
+    Object.entries(MAP).filter(([l, c]) => dbSrcZ.includes(entry(l, c))).length)
+  check('Z2', 'Z2 靜態：`readCollection` 經 `cloudKeyOfLocal(key)` 取雲鍵餵 `cloudBaseReadOf`', true,
+    /const cloudKey = cloudKeyOfLocal\(key\)[\s\S]{0,200}cloudBaseReadOf\(cloudKey\)/.test(dbSrcZ))
+  check('Z3', 'Z3 靜態：覆蓋層按「雲鍵 ＋ 本機鍵」雙參調用', true, dbSrcZ.includes('withLocalOverlay(cloudKey, cloud.rows, key)'))
+  check('Z4', 'Z4 靜態：本機鏡像讀 / 種子指紋用 `localKey`（不再拿雲鍵讀本機）', true,
+    /function withLocalOverlay\(key, cloudRows, localKey = key\)/.test(dbSrcZ) && dbSrcZ.includes('const local = readKey(localKey)'))
+  check('Z5', 'Z5 行為：5 個映射目標逐字 ∈ `CLOUD_COLLECTION_KEYS`（真源）', [],
+    Object.values(MAP).filter((k) => !cloudbase.CLOUD_COLLECTION_KEYS.includes(k)))
+  check('Z6', 'Z6 行為：連字符鏡像鍵**既非**雲鍵（真因坐實：`person-imports` ∉ 雲鍵面）', false,
+    cloudbase.CLOUD_COLLECTION_KEYS.includes('person-imports'))
+  /* 行為：雲未配置 ⇒ 本機鏡像讀路徑回歸（照讀本機 PENDING 行，不空轉、不誤報降級）。 */
+  const personsSvcZ = await import(path.join(ROOT, 'src/services/persons.js'))
+  storage.writeKey(storage.STORAGE_KEYS.personImports, [
+    { id: 'pi-z1', batch_id: 'B-Z', source_person_id: 'SP-Z1', status: 'PENDING', imported_at: '2026-10-10T00:00:00.000Z' }
+  ])
+  const zRes = personsSvcZ.listPendingPersonImportsForAdmin({ id: 'u-admin', uid: 'u-admin', role: 'admin' })
+  check('Z7', 'Z7 行為：雲未配置 ⇒ 照讀本機 PENDING 行（讀面回歸）', { ok: true, rows: 1 },
+    { ok: zRes.ok, rows: zRes.ok ? zRes.rows.length : -1 })
+  check('Z8', 'Z8 靜態：導入讀面具「不靜默」降級分支（`importReadDegradedMessage`）', true,
+    readFileSync(path.join(ROOT, 'src/services/persons.js'), 'utf8').includes('function importReadDegradedMessage'))
+  /* 負對照 canary：刪掉 `person-imports` 映射 ⇒ Z1 計數變 4（會紅）。 */
+  const mutatedZ = dbSrcZ.replace(`  ${entry('person-imports', 'personImports')},\n`, '')
+  check('Z9', 'Z9 負對照 canary：刪掉 `person-imports` 映射 ⇒ Z1 計數變 4（必紅）', 4,
+    Object.entries(MAP).filter(([l, c]) => mutatedZ.includes(entry(l, c))).length)
+}
+
 /* ---------------------------------------------------------------------------
    4. 汇总
    --------------------------------------------------------------------------- */
