@@ -34,7 +34,7 @@ import {
   saveCorrectionSummaryRows
 } from '../data/db.js'
 import { currentUser } from '../data/session.js'
-/* 值域真源**复用**：朝代 14 类 = `seed.js` 的 `DYNASTY_OPTIONS` / `isKnownDynasty`（R-20）；
+/* 值域真源**复用**：朝代 15 类 = `seed.js` 的 `DYNASTY_OPTIONS` / `isKnownDynasty`（R-20）；
    印面内容 9 值 = `FACE_CONTENT_OPTIONS` / `isKnownFaceContent`（R-30）；
    印面风格 23 值 = `FACE_STYLE_OPTIONS` / `isKnownFaceStyle`（R-31）。
    （**不得在此自写第二套枚举**——第二套必然与真源漂移，且数据层判据是按字面值检索的。） */
@@ -270,13 +270,13 @@ function markableMeta(field) {
    勘误**提交侧**值域门（R-20 门 2 的缺口补全）
    ----------------------------------------------------------------------------
    为什么必须有：`submitCorrection` 原只校验「字段可勘误 + 值非空」，
-   绕过 UI（选择框）直调服务层即可提交 `dynasty:'宋朝'` 这种 ∉ 14 类的 PENDING 勘误。
+   绕过 UI（选择框）直调服务层即可提交 `dynasty:'宋朝'` 这种 ∉ 15 类的 PENDING 勘误。
    值与真源：**复用** `seed.js` 的 `DYNASTY_OPTIONS` / `isKnownDynasty`，**不自写第二套**。
    判定时机：**写在写之前**。`saveCorrectionRows` 是**整集合覆盖写**且调用方不读返回值，
    所以「先写再靠返回值回滚」会**静默丢写入**（上一单已踩过）⇒ 本门一律在 `saveCorrectionRows`
    之前返回，天然零写入（勘误行数不变）。
    形态：表驱动（`field -> 值域描述`），便于将来其它字段封闭化；当前启用
-   `dynasty`（R-20｜14 类）/ `seal_type`（R-30｜【印面内容】9 类）/ `face_style`（R-31｜【印面风格】23 类）；
+   `dynasty`（R-20｜15 类）/ `seal_type`（R-30｜【印面内容】9 类）/ `face_style`（R-31｜【印面风格】23 类）；
    表里没有的字段 ⇒ 自由文本，一律放行（作者 / 印文等本轮不动）。
    ============================================================================ */
 
@@ -285,7 +285,7 @@ function markableMeta(field) {
  * 未登记 ⇒ 自由文本（不拦）。
  *
  * 现有四项（**真源一律在 `src/data/seed.js`，不得自写第二套**）：
- *   - `dynasty`（R-20）：14 类，`DYNASTY_OPTIONS` / `isKnownDynasty`；
+ *   - `dynasty`（R-20）：15 类，`DYNASTY_OPTIONS` / `isKnownDynasty`；
  *   - `seal_type`（R-30｜【印面内容】）：**9 值**，`FACE_CONTENT_OPTIONS` / `isKnownFaceContent`；
  *   - `face_style`（R-31｜【印面风格】）：**23 值**，`FACE_STYLE_OPTIONS` / `isKnownFaceStyle`；
  *   - `seal_class`（本单｜【大類】）：**3 值**，`SEAL_CLASS_OPTIONS` / `isKnownSealClass`。
@@ -302,7 +302,7 @@ const FIELD_VALUE_DOMAINS = {
   dynasty: {
     accepts: (text) => isKnownDynasty(text),
     denyMessage: (label, text) =>
-      `${label}「${text}」不在允許的 14 類之內（${DYNASTY_OPTIONS.join('、')}），已拒絕提交；` +
+      `${label}「${text}」不在允許的 ${DYNASTY_OPTIONS.length} 類之內（${DYNASTY_OPTIONS.join('、')}），已拒絕提交；` +
       '請從給定選項中選擇。'
   },
   /* 【印面内容】（R-30）：真源＝`FACE_CONTENT_OPTIONS`（9 值；键名沿用 `seal_type`）。 */
@@ -458,7 +458,7 @@ export function submissionGroupsOfFace(face) {
  * 拒绝形态一律**结构化**（`{ok:false, reason?, message}`），**不抛未捕获异常**：
  *   - 未登录 / 字段不可勘误 / 未指定印面 / 值为空 ⇒ 只有 `message`（无 `reason`，历史形态保留）；
  *   - **值域门（R-20 / R-30 / R-31）**：字段落在 `FIELD_VALUE_DOMAINS`
- *     （`dynasty` 14 类 / `seal_type` 9 类 / `face_style` 23 类）且值 ∉ 真源
+ *     （`dynasty` 15 类 / `seal_type` 9 类 / `face_style` 23 类）且值 ∉ 真源
  *     ⇒ `{ok:false, reason:'INVALID_VALUE', message}` + **零写入**（**写之前**判定）。
  *
  * **写面 Phase A 切片（2026-09-30）**：本入口由**同步**改为 **`async`**，判定顺序改为：

@@ -183,7 +183,7 @@ const canExportSeal = computed(() => sealExport.canExportSealData())
    勘误表单的**封闭选择框**（R-20 / R-30 / R-31 / R-43）
    ----------------------------------------------------------------------------
    选项**只来自真源常量**（顺序即真源顺序，不追加占位项 / 库内派生值）：
-     - 朝代 `dynasty` ⇒ `DYNASTY_OPTIONS`（14 类）；
+     - 朝代 `dynasty` ⇒ `DYNASTY_OPTIONS`（15 类）；
      - 【印面内容】`seal_type` ⇒ `FACE_CONTENT_OPTIONS`（9 值）；
      - 【印面风格】`face_style` ⇒ `FACE_STYLE_OPTIONS`（23 值）。
    其余可标记属性（印文简体/古字、作者、印文释义）**仍是自由文本**（本次不动）。
@@ -1967,7 +1967,7 @@ onBeforeUnmount(() => {
         </p>
 
         <!-- 可标记属性：**按字段提供按需渲染器**（R-20 / R-30 / R-31 / R-43）。
-             - 朝代 ⇒ 封闭选择框（真源 `DYNASTY_OPTIONS`，14 类）；
+             - 朝代 ⇒ 封闭选择框（真源 `DYNASTY_OPTIONS`，15 类）；
              - 【印面内容】⇒ 封闭选择框（真源 `FACE_CONTENT_OPTIONS`，9 值）；
              - 【印面风格】⇒ 封闭选择框（真源 `FACE_STYLE_OPTIONS`，23 值）；
              - 【大類】（本单）⇒ 封闭选择框（真源 `SEAL_CLASS_OPTIONS`，3 值；**不得**当自由文本 + s2t）；
@@ -2060,7 +2060,7 @@ onBeforeUnmount(() => {
               :field-label="item.label"
             />
             <span v-if="item.key === 'dynasty'" class="field__hint">
-              朝代固定 14 類（本框共 {{ dynastyOptions.length }} 項），只可選不可填；不填即不提交該項。
+              朝代固定 {{ dynastyOptions.length }} 類，只可選不可填；不填即不提交該項。
             </span>
             <span
               v-else-if="item.key === FACE_CONTENT_KEY"
