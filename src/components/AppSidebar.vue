@@ -4,10 +4,14 @@ import { computed } from 'vue'
 import { isLoggedIn } from '../data/session.js'
 
 /**
- * 侧边菜单 —— **5 项**（璽印匯類 / 我的勘误记录 / 我的实物照片 / 积分中心 / **我的雲盤**）。
- * 第 5 项【我的雲盤】为 v1.21 新增（规范 §3.21.2 / §8.3 收口注（v1.21 追加））：label 逐字
- * 「我的雲盤」、glyph 逐字单字「盤」（既有约定是单字，不画 SVG）、`to` 指向 `/my/drive`。
- * **前 4 项的 label 与顺序逐字未改**。
+ * 侧边菜单 —— **恰四项**（璽印匯類 / 印風匯覽 / 印家匯徵 / 我的雲盤）。
+ * 顺序**逐字**：`璽印匯類`（`square`）→ `印風匯覽`（`styles`）→ `印家匯徵`（`persons`）
+ * → `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `盤`。
+ *
+ * 【Slice M1 改版】侧边栏**恰四项**；删去原 `我的勘誤記錄` / `我的實物照片` / `積分中心`
+ * **三个侧边栏条目**，但**三条路由**（`/my/corrections` / `/my/photos` / `/points`）
+ * **与三个视图文件一律保留**——顶部弹出菜单（`AppHeader.vue` 的 `go('my-corrections')` /
+ * `go('my-photos')` / `go('points')`）仍在用它们。**删入口 ≠ 删路由 / 删页面**。
  *
  * 管理员与普通用户看到**同一套**菜单：管理员的差异体现在页面内的「管理员专属按钮」，
  * 不体现为独立入口（故本组件无需任何角色判断）。
@@ -21,9 +25,8 @@ const logged = isLoggedIn
 
 const items = computed(() => [
   { key: 'square', to: { name: 'square' }, glyph: '匯', label: '璽印匯類' },
-  { key: 'my-corrections', to: { name: 'my-corrections' }, glyph: '勘', label: '我的勘誤記錄' },
-  { key: 'my-photos', to: { name: 'my-photos' }, glyph: '影', label: '我的實物照片' },
-  { key: 'points', to: { name: 'points' }, glyph: '金', label: '積分中心' },
+  { key: 'styles', to: { name: 'styles' }, glyph: '風', label: '印風匯覽' },
+  { key: 'persons', to: { name: 'persons' }, glyph: '家', label: '印家匯徵' },
   { key: 'my-drive', to: { name: 'my-drive' }, glyph: '盤', label: '我的雲盤' }
 ])
 </script>
