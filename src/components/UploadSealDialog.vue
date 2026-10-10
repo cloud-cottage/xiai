@@ -458,13 +458,13 @@ onBeforeUnmount(() => {
 
       <div class="field">
         <label for="upload-seal-dynasty">朝代</label>
-        <!-- 封闭选择框：选项只来自真源常量 DYNASTY_OPTIONS（共 14 项，逐字规范顺序）；
+        <!-- 封闭选择框：选项只来自真源常量 DYNASTY_OPTIONS（共 15 项，逐字规范顺序）；
              无「∪ 库内派生值」、无自定义输入项。 -->
         <select id="upload-seal-dynasty" v-model="form.dynasty" data-dynasty-select="upload-seal">
           <option v-for="item in dynastyOptions" :key="item" :value="item">{{ item }}</option>
         </select>
         <span class="field__hint">
-          朝代固定 14 類（本框共 {{ dynastyOptions.length }} 項），只可選不可填。
+          朝代固定 15 類（本框共 {{ dynastyOptions.length }} 項），只可選不可填。
         </span>
         <span v-if="!form.dynasty" class="field__hint" data-dynasty-unselected="upload-seal">
           尚未選擇朝代（必填）。

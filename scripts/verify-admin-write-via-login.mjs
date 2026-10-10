@@ -18,6 +18,8 @@
  *      `adminGate(` / `ensureAdminWriteSession(` 调用点；`token.js` 管道本体与 `adminToken.js`
  *      转口**不算违规但要如实登记**）。
  * 另加：服务端 `ADMIN_OPS` 口径副本与 `xiai-admin-token/lib/ops.js` **逐字对账**（不让副本静默漂移）。
+ * ⑨ `migrateDynastyValues` 一次性朝代值迁移（§3.53.5）：预演（零写入）/ 执行（只改点名值）/ 重放
+ *    （零改动 ＋ 幂等）三态 ＋ 相邻值不动 ＋ 白名单门（非白名单 FORBIDDEN / 缺 env 安全拒，均零写入）。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 环境变量缺省用**合成值**（非真实凭据；可用 env 覆盖）：XIAI_ADMIN_PHONE / XIAI_ADMIN_TOKEN_SECRET。
@@ -236,7 +238,7 @@ session.setUser({ id: uidOfPhone(PHONE), phone: PHONE, role: 'admin', nickname: 
    A 段：口径副本对账 ＋ op 注册面
    =========================================================================== */
 console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 ＋ op 注册面' }))
-check('A1', '`ADMIN_OPS` 恰含 {reviewCorrection, reviewPersonImport, reviewPersonProposal, reviewSealImport, setInviteReward}（v1.55 新增印章外部導入審核 op）', ['reviewCorrection', 'reviewPersonImport', 'reviewPersonProposal', 'reviewSealImport', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
+check('A1', '`ADMIN_OPS` 恰含 {migrateDynastyValues, reviewCorrection, reviewPersonImport, reviewPersonProposal, reviewSealImport, setInviteReward}（新增一次性朝代值遷移 op）', ['migrateDynastyValues', 'reviewCorrection', 'reviewPersonImport', 'reviewPersonProposal', 'reviewSealImport', 'setInviteReward'], sorted(Object.keys(ops.ADMIN_OPS)))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
 check('A2', '审核载荷键面逐字 ＝ 管理员函数 `ALLOWED_KEYS`', sorted(adminOps.ALLOWED_KEYS), sorted(ops.REVIEW_ALLOWED_KEYS))
 check('A3', '邀请奖励键面 ＝ [value]', ['value'], ops.REWARD_ALLOWED_KEYS.slice())
@@ -476,6 +478,70 @@ console.log(JSON.stringify({ section: 'I', title: '⑧ 客户端对 xiai-admin-t
     a: /from\s+'\.\/userWrite\.js'/.test(adminSrc)
   })
 }
+
+/* ===========================================================================
+   J 段：⑨ migrateDynastyValues 一次性朝代值迁移（§3.53.5）
+   =========================================================================== */
+console.log(JSON.stringify({ section: 'J', title: '⑨ 一次性朝代值迁移：预演 / 执行 / 重放' }))
+const ADMIN_IDENTITY = { uid: uidOfPhone(PHONE), phone: PHONE, identity_source: 'SERVER_TOKEN' }
+const ADMIN_CTX = { adminPhone: PHONE, nowSeconds: nowS() }
+/* 种子：seals 6 行（2 命中 ＋ 4 相邻/新值域/空值不动）＋ faces 3 行（2 命中 ＋ 1 新值域不动）。 */
+const DYN_SEED = [
+  { __collection: 'xiai_seals', _id: 's1', id: 's1', stamp_id: 'XAI-1', seal_name: '甲', dynasty: '战国' },
+  { __collection: 'xiai_seals', _id: 's2', id: 's2', stamp_id: 'XAI-2', seal_name: '乙', dynasty: '秦汉' },
+  { __collection: 'xiai_seals', _id: 's3', id: 's3', stamp_id: 'XAI-3', seal_name: '丙', dynasty: '明' },
+  { __collection: 'xiai_seals', _id: 's4', id: 's4', stamp_id: 'XAI-4', seal_name: '丁', dynasty: '清' },
+  { __collection: 'xiai_seals', _id: 's5', id: 's5', stamp_id: 'XAI-5', seal_name: '戊', dynasty: '明早中期' },
+  { __collection: 'xiai_seals', _id: 's6', id: 's6', stamp_id: 'XAI-6', seal_name: '己', dynasty: '' },
+  { __collection: 'xiai_faces', _id: 'f1', id: 'f1', sealId: 's1', dynasty: '战国' },
+  { __collection: 'xiai_faces', _id: 'f2', id: 'f2', sealId: 's2', dynasty: '秦汉' },
+  { __collection: 'xiai_faces', _id: 'f3', id: 'f3', sealId: 's3', dynasty: '民國' }
+]
+const findRow = (collection, id) => store.collections[collection].get(id) || {}
+/* J1：预演（dry_run:true，缺省）⇒ 零写入 ＋ 计数正确 ＋ 抽样。 */
+store.load(DYN_SEED)
+const dry = await ops.ADMIN_OPS.migrateDynastyValues({ dry_run: true }, ADMIN_IDENTITY, ADMIN_CTX)
+if (dry.plan) await ops.persist(dry.plan)
+check('J1', '预演 ⇒ ok ＋ op ＋ dry_run:true', { ok: true, op: 'migrateDynastyValues', dry_run: true }, { ok: dry.ok, op: dry.op, dry_run: dry.dry_run })
+check('J1b', '预演 ⇒ scanned ＝ 逐集合读取行数', { seals: 6, faces: 3 }, dry.scanned)
+check('J1c', '预演 ⇒ changed ＝ 逐集合目标值命中数', { seals: 2, faces: 2 }, dry.changed)
+check('J1d', '预演 ⇒ **零写入**（无落盘计划）', 0, store.stats.writes.length)
+check('J1e', '预演 ⇒ idempotent:false（库内有残留）', false, dry.idempotent)
+check('J1f', '抽样给出 from/to（战国⇒戰國 / 秦汉⇒空）', true, dry.samples.some((s) => s.from === '战国' && s.to === '戰國') && dry.samples.some((s) => s.from === '秦汉' && s.to === ''))
+/* J2：执行（dry_run:false）⇒ 只改点名值；相邻值逐字不动。 */
+store.load(DYN_SEED)
+const run = await ops.ADMIN_OPS.migrateDynastyValues({ dry_run: false }, ADMIN_IDENTITY, ADMIN_CTX)
+if (run.plan) await ops.persist(run.plan)
+check('J2', '执行 ⇒ changed 命中数不变', { seals: 2, faces: 2 }, run.changed)
+check('J2b', '执行 ⇒ 只改点名值：战国 ⇒ 戰國', '戰國', findRow('xiai_seals', 's1').dynasty)
+check('J2c', '执行 ⇒ 只改点名值：秦汉 ⇒ 置空', '', findRow('xiai_seals', 's2').dynasty)
+check('J2d', '⑤ 相邻值不动（seals：明 / 清 / 明早中期 / 空）', ['明', '清', '明早中期', ''], ['s3', 's4', 's5', 's6'].map((id) => findRow('xiai_seals', id).dynasty))
+check('J2e', '⑤ 相邻值不动（faces：新值域值 民國）', '民國', findRow('xiai_faces', 'f3').dynasty)
+check('J2f', '执行 ⇒ 落盘数 ＝ 命中数（4 处 update）', 4, store.stats.writes.length)
+/* J3：重放（无残留）⇒ changed 全 0 ＋ 幂等 ＋ 零写入。 */
+const beforeReplay = store.stats.writes.length
+const replay = await ops.ADMIN_OPS.migrateDynastyValues({ dry_run: false }, ADMIN_IDENTITY, ADMIN_CTX)
+if (replay.plan) await ops.persist(replay.plan)
+check('J3', '重放 ⇒ changed 全 0（无残留）', { seals: 0, faces: 0 }, replay.changed)
+check('J3b', '重放 ⇒ idempotent:true', true, replay.idempotent)
+check('J3c', '重放 ⇒ **零写入**', 0, store.stats.writes.length - beforeReplay)
+/* J4：非白名单 ⇒ FORBIDDEN ＋ 零写入。 */
+store.load(DYN_SEED)
+const foreignMig = await ops.ADMIN_OPS.migrateDynastyValues({ dry_run: false }, { uid: 'u-x', phone: NON_WHITELIST_PHONE, identity_source: 'SERVER_TOKEN' }, ADMIN_CTX)
+check('J4', '非白名单 ⇒ FORBIDDEN（恰 3 键）', true, isDenial(foreignMig) && foreignMig.reason === 'FORBIDDEN')
+check('J4b', '非白名单 ⇒ 零写入', 0, store.stats.writes.length)
+/* J5：缺 env ⇒ STORAGE_UNAVAILABLE ＋ 零写入。 */
+const noEnvMig = await ops.ADMIN_OPS.migrateDynastyValues({ dry_run: false }, ADMIN_IDENTITY, { adminPhone: '', nowSeconds: nowS() })
+check('J5', '缺 env ⇒ STORAGE_UNAVAILABLE（非 FORBIDDEN）', true, isDenial(noEnvMig) && noEnvMig.reason === 'STORAGE_UNAVAILABLE')
+check('J5b', '缺 env ⇒ 零写入', 0, store.stats.writes.length)
+/* J6：契约面（封闭键面 / 两值映射 / 未知键门）。 */
+check('J6', '载荷封闭键面 ＝ [dry_run]', ['dry_run'], ops.MIGRATE_ALLOWED_KEYS.slice())
+check('J6b', '迁移映射恰两值（战国⇒戰國 / 秦汉⇒空）', { '战国': '戰國', '秦汉': '' }, Object.assign({}, ops.DYNASTY_MIGRATION))
+const badKey = await ops.ADMIN_OPS.migrateDynastyValues({ nope: 1 }, ADMIN_IDENTITY, ADMIN_CTX)
+check('J6c', '未知载荷键 ⇒ INVALID_FIELD ＋ 零写入', true, isDenial(badKey) && badKey.reason === 'INVALID_FIELD' && store.stats.writes.length === 0)
+/* J7：真实入口（fn.main）预演 ⇒ ok:true ＋ 零写入。 */
+const viaMain = await fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'migrateDynastyValues', payload: { dry_run: true } })
+check('J7', '真实入口（fn.main）预演 ⇒ ok:true ＋ 零写入', true, viaMain.ok === true && store.stats.writes.length === 0)
 
 /* ===========================================================================
    汇总

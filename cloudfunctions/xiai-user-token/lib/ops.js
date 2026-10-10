@@ -337,13 +337,14 @@ const DECISIONS = Object.freeze(['ACCEPTED', 'REJECTED'])
 
 /* 采纳值域真源副本（真源 ＝ `src/data/seed.js`；与管理员函数 `VALUE_DOMAINS` 逐字同值）。 */
 const DYNASTY_OPTIONS = Object.freeze([
-  '先秦',
+  '春秋',
+  '戰國',
   '秦',
   '漢',
   '魏晉',
   '隋唐',
   '宋元',
-  '明中期',
+  '明早中期',
   '晚明',
   '清初',
   '清中期',
@@ -1802,6 +1803,11 @@ const OPS = Object.freeze({
    每个 op 只**产出落盘计划**（或成功回包），落库一律在 `persist()`。
    --------------------------------------------------------------------------- */
 
+/* **一次性朝代值迁移（§3.53.5）**：只改两个**人类点名旧值** —— `战国` → `戰國`；`秦汉` → 清空（`''`）。
+   其它任何 `dynasty` 取值一律逐字不动（R-21 旧值不改写红线）。载荷封闭键面 ＝ `['dry_run']`。 */
+const MIGRATE_ALLOWED_KEYS = Object.freeze(['dry_run'])
+const DYNASTY_MIGRATION = Object.freeze({ '\u6218\u56fd': '戰國', '\u79e6\u6c49': '' })
+
 const ADMIN_OPS = Object.freeze({
   /**
    * 审核勘误（**管理员写路径**；两处落盘：先公开脱敏投影、后私有状态）。
@@ -2484,6 +2490,97 @@ const ADMIN_OPS = Object.freeze({
       failed,
       plan: { op: 'reviewSealImport', writes }
     }
+  },
+
+  /**
+   * **一次性朝代值迁移（幂等管理员 op｜§3.53.5 两值收窄）**：把**两张集合** `xiai_seals` 与
+   * `xiai_faces` 里 `dynasty` 字段的两个**人类点名旧值**归一 —— `战国` → `戰國`；
+   * `秦汉` → 清空（`''`）。
+   *
+   * 契约记录（逐条）：
+   *   · **一次性**：仅针对上述两个**点名旧值**，**只改这两个字符串**；**其它任何 `dynasty`
+   *     取值一律逐字不动**（含 `明` / `清` / `近現代` / 空值 等 —— R-21「旧值不改写」红线）。
+   *   · **幂等**：重跑（无 `战国` / `秦汉` 残留）⇒ `changed` 计数全 0、**零写入**、`idempotent:true`。
+   *   · **预演 `dry_run:true`（缺省）** ⇒ **零写入**，只返回命中计数与抽样（`changed` 为**将改**行数）。
+   *   · **入参**：`{ dry_run?: boolean }`（缺省 `true`）。
+   *   · **回包（固定键面）**：`{ ok, op, dry_run, scanned:{seals,faces}, changed:{seals,faces},
+   *     samples:[{collection,id,from,to}], idempotent }`；**行数口径 ＝ 逐集合目标值命中数**
+   *     （`changed` 为命中数，非 driver `updated` 猜测）。
+   *   · **权限**：走既有管理员白名单（缺 env ⇒ 结构化拒 ＋ 零写入；非白名单 ⇒ `FORBIDDEN` ＋
+   *     零写入）；**零新增 `reason` 字面值**；判定在写之前。
+   * @param {object} [payload] `{ dry_run?: boolean }`（缺省 ⇒ `{dry_run:true}`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, op:string, dry_run:boolean, scanned:object, changed:object,
+   *          samples:Array<object>, idempotent:boolean, plan?:object}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async migrateDynastyValues(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，写之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    const input = payload === undefined || payload === null ? {} : payload
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const unknown = Object.keys(input).filter((key) => MIGRATE_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}；本次零寫入。`)
+    }
+    /* `dry_run` 缺省 `true`（只讀預演）；给了就必须是布林。 */
+    let dryRun = true
+    if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+      if (typeof input.dry_run !== 'boolean') {
+        return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+      }
+      dryRun = input.dry_run
+    }
+    /* ② 只读扫描：逐集合读全部行，统计**目标值命中数**（口径 ＝ 命中数，非 affected 猜测）。 */
+    const targets = [
+      { collection: COLLECTIONS.seals, key: 'seals' },
+      { collection: COLLECTIONS.faces, key: 'faces' }
+    ]
+    const scanned = { seals: 0, faces: 0 }
+    const changed = { seals: 0, faces: 0 }
+    const samples = []
+    const writes = []
+    const MAX_SAMPLES = 5
+    for (const target of targets) {
+      const rows = await readRows(target.collection, {})
+      scanned[target.key] = rows.length
+      for (const row of rows) {
+        const from = text(row && row.dynasty)
+        const to = DYNASTY_MIGRATION[from]
+        if (to === undefined) continue
+        changed[target.key] += 1
+        const id = text(row && (row._id || row.id))
+        if (samples.length < MAX_SAMPLES) {
+          samples.push({ collection: target.collection, id, from, to })
+        }
+        if (!dryRun && id) {
+          writes.push({
+            kind: 'update',
+            collection: target.collection,
+            match: { _id: id },
+            doc: { dynasty: to },
+            expectAtLeast: 1
+          })
+        }
+      }
+    }
+    const idempotent = changed.seals + changed.faces === 0
+    const result = {
+      ok: true,
+      op: 'migrateDynastyValues',
+      dry_run: dryRun,
+      scanned,
+      changed,
+      samples,
+      idempotent
+    }
+    /* 只有「执行态且有写入」才产出落盘计划 ⇒ `dry_run` / 无残留 ⇒ **零写入**。 */
+    if (!dryRun && writes.length > 0) result.plan = { op: 'migrateDynastyValues', writes }
+    return result
   }
 })
 
@@ -2596,6 +2693,9 @@ module.exports = {
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,
+  /* 一次性朝代值遷移面（§3.53.5；供離線自檢直接斷言）。 */
+  MIGRATE_ALLOWED_KEYS,
+  DYNASTY_MIGRATION,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,

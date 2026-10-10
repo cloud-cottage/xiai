@@ -8,12 +8,12 @@
  *       ＋ **零写入**（逐字段快照取证）；**判定在写之前**。运行时经**服务端采纳门**取证：
  *       用户函数 `xiai-user-token` ＋ 管理函数 `xiai-admin-token` 的 `reviewCorrection`。
  *   (b) **多印面聚合筛**：多印面、**任一命中即命中**（R-34 口型）—— 经服务层 `listSeals` 取证。
- *   (c) **上传预填**：朝代 ⇒ 建议值 **6/6/2** 全覆盖（先秦〜宋元 ⇒ 古璽、明中期〜民國 ⇒ 流派印、
+ *   (c) **上传预填**：朝代 ⇒ 建议值 **7/6/2** 全覆盖（春秋〜宋元 ⇒ 古璽、明早中期〜民國 ⇒ 流派印、
  *       新中國/當代 ⇒ 雜項）；**不锁死**（手改值优先）—— 视图层静态接线。
  *   (d) **勘误面**：`MARKABLE_FIELDS` 含 `seal_class` ⇒「大類」；两函数值域副本含 `seal_class`；
  *       前端 `FIELD_VALUE_DOMAINS` 接 `seal_class`（静态 ＋ 运行时）。
  *   (e) **逐字相等**：前端真源（`seed.js` / `corrections.js`）↔ 用户函数副本 ↔ 管理函数副本，
- *       四套枚举（朝代 14 / 印面内容 9 / 印面风格 23 / 大類 3）**全部逐字相等**。
+ *       四套枚举（朝代 15 / 印面内容 9 / 印面风格 23 / 大類 3）**全部逐字相等**。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 若并行单的视图层文件尚未出现，(c) 的静态接线断言允许先失败并在报告里登记（派单方复跑）。
@@ -302,24 +302,24 @@ try {
 }
 
 /* ---------------------------------------------------------------------------
-   6. (c) 上传预填 —— 朝代 ⇒ 建议值 6/6/2 ＋ 不锁死
+   6. (c) 上传预填 —— 朝代 ⇒ 建议值 7/6/2 ＋ 不锁死
    --------------------------------------------------------------------------- */
-console.log(JSON.stringify({ section: 'c', title: '上传预填：朝代 ⇒ 建议值（6/6/2）＋ 不锁死' }))
+console.log(JSON.stringify({ section: 'c', title: '上传预填：朝代 ⇒ 建议值（7/6/2）＋ 不锁死' }))
 {
   const suggestions = seed.SEAL_CLASS_SUGGESTIONS
   const covered = []
   suggestions.forEach((entry) => entry.dynasties.forEach((d) => covered.push(d)))
-  check('c1', '建议表覆盖朝代全 14 类（逐字集合相等）', seed.DYNASTY_OPTIONS.slice().sort(), covered.slice().sort())
+  check('c1', '建议表覆盖朝代全 15 类（逐字集合相等）', seed.DYNASTY_OPTIONS.slice().sort(), covered.slice().sort())
   const counts = {
     古璽: suggestions.find((s) => s.seal_class === '古璽').dynasties.length,
     流派印: suggestions.find((s) => s.seal_class === '流派印').dynasties.length,
     雜項: suggestions.find((s) => s.seal_class === '雜項').dynasties.length
   }
-  check('c2', '分段计数 ＝ 6/6/2', { 古璽: 6, 流派印: 6, 雜項: 2 }, counts)
-  check('c2b', '先秦〜宋元 ⇒ 古璽', ['古璽', '古璽', '古璽', '古璽', '古璽', '古璽'], ['先秦', '秦', '漢', '魏晉', '隋唐', '宋元'].map(seed.suggestSealClass))
-  check('c2c', '明中期〜民國 ⇒ 流派印', ['流派印', '流派印', '流派印', '流派印', '流派印', '流派印'], ['明中期', '晚明', '清初', '清中期', '晚清', '民國'].map(seed.suggestSealClass))
+  check('c2', '分段计数 ＝ 7/6/2', { 古璽: 7, 流派印: 6, 雜項: 2 }, counts)
+  check('c2b', '春秋〜宋元 ⇒ 古璽', ['古璽', '古璽', '古璽', '古璽', '古璽', '古璽', '古璽'], ['春秋', '戰國', '秦', '漢', '魏晉', '隋唐', '宋元'].map(seed.suggestSealClass))
+  check('c2c', '明早中期〜民國 ⇒ 流派印', ['流派印', '流派印', '流派印', '流派印', '流派印', '流派印'], ['明早中期', '晚明', '清初', '清中期', '晚清', '民國'].map(seed.suggestSealClass))
   check('c2d', '新中國 / 當代 ⇒ 雜項', ['雜項', '雜項'], ['新中國', '當代'].map(seed.suggestSealClass))
-  check('c2e', '未知 / 空朝代 ⇒ 空串（不猜、不回落）', ['', '', ''], ['', null, '戰國'].map(seed.suggestSealClass))
+  check('c2e', '未知 / 空朝代 ⇒ 空串（不猜、不回落）', ['', '', ''], ['', null, '先秦'].map(seed.suggestSealClass))
   check('c2f', '建议值恒 ∈ 冻结 3 类', true, covered.every((d) => seed.isKnownSealClass(seed.suggestSealClass(d))))
 }
 /* 不锁死（手改值优先）：视图层静态接线（并行单未落地时允许失败并登记）。 */
@@ -361,8 +361,8 @@ check('d3b', '服务端值域门**运行时**生效（值域外 ⇒ INVALID_VALU
    8. (e) 逐字相等 —— 前端真源 ↔ 用户函数副本 ↔ 管理函数副本
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'e', title: '逐字相等：seed ↔ 用户函数 ↔ 管理函数' }))
-check('e1', '朝代 14：seed ＝ 用户副本', seed.DYNASTY_OPTIONS.slice(), USER_OPS.DYNASTY_OPTIONS.slice())
-check('e1b', '朝代 14：seed ＝ 管理副本', seed.DYNASTY_OPTIONS.slice(), ADMIN_OPS.DYNASTY_OPTIONS.slice())
+check('e1', '朝代 15：seed ＝ 用户副本', seed.DYNASTY_OPTIONS.slice(), USER_OPS.DYNASTY_OPTIONS.slice())
+check('e1b', '朝代 15：seed ＝ 管理副本', seed.DYNASTY_OPTIONS.slice(), ADMIN_OPS.DYNASTY_OPTIONS.slice())
 check('e2', '印面内容 9：seed ＝ 用户副本', seed.FACE_CONTENT_OPTIONS.slice(), USER_OPS.FACE_CONTENT_OPTIONS.slice())
 check('e2b', '印面内容 9：seed ＝ 管理副本', seed.FACE_CONTENT_OPTIONS.slice(), ADMIN_OPS.FACE_CONTENT_OPTIONS.slice())
 check('e3', '印面风格 23：seed ＝ 用户副本', seed.FACE_STYLE_OPTIONS.slice(), USER_OPS.FACE_STYLE_OPTIONS.slice())

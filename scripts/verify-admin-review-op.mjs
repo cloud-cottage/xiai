@@ -430,7 +430,7 @@ const seed = await import(path.join(ROOT, 'src/data/seed.js'))
   const serverMarkable = Object.entries(ops.MARKABLE_FIELDS)
   check('D1', '服务端字段表与前端真源**逐字相等**', clientMarkable, serverMarkable)
 }
-check('D2', '朝代 14 类与真源逐字相等', seed.DYNASTY_OPTIONS.slice(), ops.DYNASTY_OPTIONS.slice())
+check('D2', '朝代 15 类与真源逐字相等', seed.DYNASTY_OPTIONS.slice(), ops.DYNASTY_OPTIONS.slice())
 check('D2b', '印面内容 9 类与真源逐字相等', seed.FACE_CONTENT_OPTIONS.slice(), ops.FACE_CONTENT_OPTIONS.slice())
 check('D2c', '印面风格 23 类与真源逐字相等', seed.FACE_STYLE_OPTIONS.slice(), ops.FACE_STYLE_OPTIONS.slice())
 check('D3', '勘误三态与前端真源逐字相等', correctionsSvc.CORRECTION_STATUS, ops.CORRECTION_STATUS)

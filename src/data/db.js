@@ -2132,7 +2132,7 @@ function assertKnownFields(patch, allowed = FIXED_ATTR_FIELDS) {
  *
  * 语义边界（与另两个 reason 互不覆盖）：
  *   - 空值**不走本门**（「该给的没给」由 `MISSING_REQUIRED` 判，必填门在前）；
- *   - 非空且 ∉ 14 类 ⇒ `{ok:false, reason:'INVALID_VALUE'}` + **零写入** + 可读文案。
+ *   - 非空且 ∉ 15 类 ⇒ `{ok:false, reason:'INVALID_VALUE'}` + **零写入** + 可读文案。
  *
  * **R-21 边界（务必遵守）**：本门只拦**写入**。**读路径、迁移、归一一律不调本门**，
  * 既有行的 `dynasty` **保留原样**（不映射、不归一、不重写）——否则旧值 `漢` / `戰國` / `明` /
@@ -2146,7 +2146,7 @@ function dynastyValueDenial(value) {
     ok: false,
     reason: 'INVALID_VALUE',
     message:
-      `朝代「${text}」不在允許的 14 類之內（${DYNASTY_OPTIONS.join('、')}），已拒絕寫入；` +
+      `朝代「${text}」不在允許的 15 類之內（${DYNASTY_OPTIONS.join('、')}），已拒絕寫入；` +
       '既有行的舊值保留原樣、不受影響。'
   }
 }
@@ -3175,7 +3175,7 @@ export async function insertFaceRow(actor, payload = {}) {
   const sealRow = listSealRows().find((row) => row.stamp_id === sealId)
   if (!sealRow) return { ok: false, reason: 'UNKNOWN_SEAL', message: `未找到該印章：${sealId}` }
 
-  /* 第二道门（R-20）：**只判“显式传入”的朝代**（新值必须 ∈ 14 类）；
+  /* 第二道门（R-20）：**只判“显式传入”的朝代**（新值必须 ∈ 15 类）；
      继承自所属印章的旧值**原样照抄**（R-21：旧值不改写，不得因新值域而挡住既有印章加印面）。 */
   const explicitDynasty = pickText(payload, ['dynasty'])
   if (explicitDynasty) {

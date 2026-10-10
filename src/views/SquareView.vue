@@ -57,7 +57,7 @@ function retryDataSource() {
 /* ============================================================================
    筛选条四维度值集（R-21 / R-30 / R-31 / R-34）
    ----------------------------------------------------------------------------
-   四维度＝① 朝代 `dynasty`（DYNASTY_OPTIONS 14 类）② 印面内容 `seal_type`
+   四维度＝① 朝代 `dynasty`（DYNASTY_OPTIONS 15 类）② 印面内容 `seal_type`
    （FACE_CONTENT_OPTIONS 9 类）③ 印面风格 `face_style`（FACE_STYLE_OPTIONS 23 类）
    ④ **大類 `seal_class`（SEAL_CLASS_OPTIONS 3 类，印面级、无回落）**。
    值集口径统一为「**真源常量（规范顺序、在前）＋ 库内旧值（去重、追加于后）**」：
