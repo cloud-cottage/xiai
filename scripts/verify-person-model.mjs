@@ -498,6 +498,45 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     mutated.filter((k) => !localMirrorValues.has(k) && !mappedCloudKeys.has(k)))
 }
 
+/* ===========================================================================
+   W 段續（本單新增）：**印章導入通道鍵面擴面**（E-1 ／ E-4）的可達性與計數斷言
+   ---------------------------------------------------------------------------
+   本單只擴**字段面**（印章級 51 鍵 ＋ 印面 1 鍵），**不動集合面** ⇒ 逐條坐實：
+   ① `CLOUD_COLLECTIONS` / `CLOUD_KEY_OF_LOCAL` **零增減**（仍 11 鍵 / 6 條）；
+   ② 印章導入通道兩鍵三處逐字在位（本機鏡像 `seal-imports` ↔ 映射值 `sealImports` ↔ 雲鍵
+      `xiai_seal_imports`），且被 AC-522 可達性尺覆蓋；
+   ③ 負對照：若本單偷偷新開一個集合而未同批登記 ⇒ 可達性尺必紅（證明尺子對「新增集合」有效）。
+   =========================================================================== */
+{
+  const cloudbaseW2 = await import(path.join(ROOT, 'src/data/cloudbase.js'))
+  const storageW2 = await import(path.join(ROOT, 'src/data/storage.js'))
+  const dbSrcW2 = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
+  const at2 = dbSrcW2.indexOf('const CLOUD_KEY_OF_LOCAL')
+  const seg2 = at2 === -1 ? '' : dbSrcW2.slice(at2, dbSrcW2.indexOf('})', at2)).replace(/\/\*[\s\S]*?\*\//g, '')
+  const pairs2 = [...seg2.matchAll(/'([^']+)'\s*:\s*'([^']+)'/g)].map((m) => [m[1], m[2]])
+  const mapOf2 = Object.fromEntries(pairs2)
+  /* 本區塊自持兩把尺子（上游 W 段的同名常量是塊作用域，不跨界引用）。 */
+  const localMirrorValues2 = new Set(Object.values(storageW2.STORAGE_KEYS))
+  const mappedCloudKeys2 = new Set(pairs2.map((pair) => pair[1]))
+  check('W4', 'AC-522（本單）：擴面不改集合面 —— `CLOUD_COLLECTIONS` 仍恰 11 鍵、異名映射仍恰 6 條',
+    { cloudKeys: 11, mappings: 6 },
+    { cloudKeys: cloudbaseW2.CLOUD_COLLECTION_KEYS.length, mappings: pairs2.length })
+  check('W5', 'AC-522（本單）：印章導入通道兩鍵三處逐字在位（本機鏡像 / 映射值 / 雲鍵）',
+    { mirror: 'seal-imports', mapped: 'sealImports', cloud: 'xiai_seal_imports' },
+    {
+      mirror: String(storageW2.STORAGE_KEYS.sealImports),
+      mapped: String(mapOf2['seal-imports']),
+      cloud: String(cloudbaseW2.CLOUD_COLLECTIONS.sealImports)
+    })
+  check('W6', 'AC-522（本單）：印章導入雲鍵被覆蓋（映射值 ∈ 雲鍵面；不靠同名）',
+    { inCloudKeys: true, sameName: false },
+    { inCloudKeys: cloudbaseW2.CLOUD_COLLECTION_KEYS.includes(mapOf2['seal-imports']), sameName: 'seal-imports' === mapOf2['seal-imports'] })
+  /* 負對照：本單若新開集合而未登記 ⇒ 尺必紅。 */
+  const injected = cloudbaseW2.CLOUD_COLLECTION_KEYS.concat(['xiai_seal_source_fields'])
+  check('W7', 'AC-522 負對照（本單）：新增集合未同批登記 ⇒ 可達性尺必報紅', ['xiai_seal_source_fields'],
+    injected.filter((k) => !localMirrorValues2.has(k) && !mappedCloudKeys2.has(k)))
+}
+
 /* ---------------------------------------------------------------------------
    4. 汇总
    --------------------------------------------------------------------------- */

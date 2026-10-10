@@ -246,15 +246,90 @@ const SEAL_IMPORT_FACE_FIELDS = Object.freeze([
   'image_storage_key',
   'image_sha256',
   'image_bytes',
-  'image_mime'
+  'image_mime',
+  /* **影面新增鍵**：`image_source_kind`（`yt` / `ytsw` / `yzbk`；**值域不封閉**、原样收）。 */
+  'image_source_kind'
 ])
+
+/* **印章導入行：源側擴面（51 鍵）** —— 与 `src/data/seed.js::SEAL_IMPORT_SOURCE_FIELDS`
+   **逐字同值**（不另立第二套）。`raw_json` 不在此面（**只落導入行**）。 */
+const SEAL_IMPORT_SOURCE_FIELDS = Object.freeze([
+  'source_seal_id',
+  'seal_uri',
+  'category',
+  'seal_wen',
+  'seal_wen_chs',
+  'seal_wen_pinyin',
+  'seal_wen_wzly',
+  'seal_wen_wzly_chs',
+  'seal_wen_yssw',
+  'seal_wen_yssw_chs',
+  'seal_wen_wyz',
+  'seal_wen_zjsw',
+  'seal_wen_zjsw_chs',
+  'seal_ys_xz',
+  'seal_ys_label',
+  'seal_ys_kf',
+  'seal_ys_st',
+  'seal_zyz',
+  'seal_yz',
+  'seal_yz_person_name',
+  'seal_yz_person_name_chs',
+  'seal_yz_name',
+  'seal_yz_ref_id',
+  'seal_yzzkz',
+  'seal_yzzkz_chs',
+  'seal_yzzkz_id',
+  'seal_bk',
+  'seal_bk_chs',
+  'seal_bkzkz',
+  'seal_bkzkz_chs',
+  'seal_bkzkz_id',
+  'as_book_id',
+  'related_book',
+  'seal_yt_url',
+  'seal_ytsw_url',
+  'seal_yzbk_url',
+  'seal_yzqt_url',
+  'seal_threed_url',
+  'seal_title',
+  'seal_title_chs',
+  'seal_org',
+  'seal_org_name',
+  'seal_cz',
+  'seal_cc',
+  'seal_ly',
+  'seal_yn',
+  'seal_yksj_lsjn',
+  'seal_yksj_lsjn_chs',
+  'seal_yksj_gyjn',
+  'audit_status',
+  'misc'
+])
+
+/** 源側擴面中整數或 `null` 的字段（**不得 `0` / 空串等特值**；与 `seed.js` 同值）。 */
+const SEAL_IMPORT_SOURCE_INT_FIELDS = Object.freeze(['seal_ys_xz'])
+/** 源側擴面中對象（或 `null`）的字段（**原样落**；与 `seed.js` 同值）。 */
+const SEAL_IMPORT_SOURCE_OBJECT_FIELDS = Object.freeze(['misc'])
+/** 源側擴面中原样收的字段（字符串或數字；**不得据它过滤、不得归一**；与 `seed.js` 同值）。 */
+const SEAL_IMPORT_SOURCE_RAW_FIELDS = Object.freeze(['audit_status'])
+
+/** 印章級鍵面（全集）＝ 既有 8 鍵 ＋ 源側擴面 51 鍵（恰 59 鍵）。 */
+const SEAL_IMPORT_SEAL_LEVEL_FIELDS = Object.freeze([...SEAL_IMPORT_SEAL_FIELDS, ...SEAL_IMPORT_SOURCE_FIELDS])
+
+/** 指紋面 ＝ 印章級鍵面**減行級冪等鍵** `source_seal_id`（恰 58 鍵；与 `seed.js` 同值）。 */
+const SEAL_IMPORT_FINGERPRINT_FIELDS = Object.freeze(
+  SEAL_IMPORT_SEAL_LEVEL_FIELDS.filter((key) => key !== 'source_seal_id')
+)
 
 /** 印章导入提交载荷允许键（**封闭键面**；身份类键一律拒 —— 导入人由服务端派生）。 */
 const SEAL_IMPORT_ALLOWED_KEYS = Object.freeze([
   'batch_id',
   'source',
-  'source_seal_id',
+  /* `raw_json` **只落導入行**（正式集合不帶）；`source_seal_id` 由源側擴面帶入（冪等鍵）。 */
+  'raw_json',
   ...SEAL_IMPORT_SEAL_FIELDS,
+  ...SEAL_IMPORT_SOURCE_FIELDS,
   'faces'
 ])
 
@@ -963,18 +1038,80 @@ async function readSealImportRow(importId) {
   return null
 }
 
-/** 印章導入行**内容指纹**（纯函数；印章级字段规范化串杂凑 —— 与 `seed.js::sealImportFingerprint` 同算法）。 */
+/** 印章導入行**内容指纹**（纯函数；印章級鍵面（8 ＋ 51）规范化串杂凑 —— 与 `seed.js::sealImportFingerprint` 同算法）。 */
 function sealImportFingerprintOf(fields) {
   const src = fields && typeof fields === 'object' ? fields : {}
-  const normalized = SEAL_IMPORT_SEAL_FIELDS.map((key) => text(src[key] === undefined || src[key] === null ? '' : src[key])).join('\u0001')
+  const normalized = SEAL_IMPORT_FINGERPRINT_FIELDS.map((key) => text(src[key] === undefined || src[key] === null ? '' : src[key])).join('\u0001')
   return crypto.createHash('sha256').update(normalized, 'utf8').digest('hex')
 }
 
-/** 归一刻章级字段面（逐键取 `SEAL_IMPORT_SEAL_FIELDS`；缺值 ⇒ 空串）。 */
+/** 源側擴面**單值归一**（**原样保留**：字符串 / 整數 / `null`；`misc` ⇒ 對象或 `null`；缺值 ⇒ `null`）。 */
+function sealSourceValueOf(key, value) {
+  if (value === undefined || value === null) return null
+  if (SEAL_IMPORT_SOURCE_OBJECT_FIELDS.indexOf(key) !== -1) {
+    return typeof value === 'object' && !Array.isArray(value) ? { ...value } : null
+  }
+  return typeof value === 'string' || typeof value === 'number' ? value : null
+}
+
+/** 源側擴面（51 鍵）从導入行取（**原样**：字符串 / 整數 / `null`；`misc` 對象；缺值 ⇒ `null`）。 */
+function sealSourceFieldsOf(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  const out = {}
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    out[key] = key === 'source_seal_id' ? text(src.source_seal_id) : sealSourceValueOf(key, src[key])
+  })
+  return out
+}
+
+/**
+ * **源側擴面形態門**（判定恒在寫之前）：只允许「字符串（非空）/ 整數（非 `0`）/ `null`」；
+ * `misc` ⇒ 對象或 `null`；`audit_status` 原样收（字符串或數字）。
+ * 违规 ⇒ `INVALID_VALUE` ＋ 零写入（`reason` 零新增）。
+ * @returns {null|{ok:false, reason:string, message:string}}
+ */
+function sealSourceValueDenial(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  for (const key of SEAL_IMPORT_SOURCE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
+    const value = src[key]
+    if (value === null || value === undefined) continue
+    if (SEAL_IMPORT_SOURCE_OBJECT_FIELDS.indexOf(key) !== -1) {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        return deny(REASONS.INVALID_VALUE, `${key} 必須是對象或 null ⇒ 拒絕導入；本次零寫入。`)
+      }
+      continue
+    }
+    if (typeof value === 'string') {
+      if (value === '') {
+        return deny(REASONS.INVALID_VALUE, `${key} 不得為空串（源側無值請用 null）⇒ 拒絕導入；本次零寫入。`)
+      }
+      continue
+    }
+    if (typeof value === 'number') {
+      if (!Number.isInteger(value) || value === 0) {
+        return deny(REASONS.INVALID_VALUE, `${key} 必須是整數或 null（不得 0 / 空串等特值）⇒ 拒絕導入；本次零寫入。`)
+      }
+      continue
+    }
+    return deny(REASONS.INVALID_VALUE, `${key} 只允許字符串 / 整數 / null ⇒ 拒絕導入；本次零寫入。`)
+  }
+  return null
+}
+
+/** 归一刻章級字段面（既有 8 鍵 ⇒ 文本；源側擴面 51 鍵 ⇒ **原样**：字符串 / 整數 / `null`、`misc` 對象）。 */
 function pickSealImportSealFields(payload) {
+  const src = payload === undefined || payload === null ? {} : payload
   const out = {}
   SEAL_IMPORT_SEAL_FIELDS.forEach((key) => {
-    out[key] = text(payload === undefined || payload === null ? '' : payload[key])
+    out[key] = text(src[key])
+  })
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    if (key === 'source_seal_id') {
+      out[key] = text(src.source_seal_id)
+      return
+    }
+    out[key] = sealSourceValueOf(key, src[key])
   })
   return out
 }
@@ -1896,9 +2033,11 @@ const OPS = Object.freeze({
 
   /**
    * **提交印章外部導入行（§3.55.5；外部批量導入通道）**：封闭键面 → 冪等鍵（`source_seal_id`）必有 →
-   * `faces[]` 至少 1 条（1..N，含边款 `kind=EDGE`）→ **冪等**（同 `source` ＋ `source_seal_id`
+   * `faces[]` 至少 1 条（1..N，含边款 `kind=EDGE`）→ **源側擴面形態門（E-1：字符串（非空）/ 整數（非 0）/
+   * `null`；`misc` 對象；`audit_status` 原样收）** → **冪等**（同 `source` ＋ `source_seal_id`
    * 已有行 ⇒ 原样返回、不改写既有行）→ 落 `xiai_seal_imports`（**status 初始 `PENDING`；
    * 導入人 uid 由服务端派生、零手机号**）。内容指纹只作软提示、**不构成拒收理由**。
+   * `raw_json` **只落導入行**（正式集合不帶）。
    * @param {object} payload 载荷（允许键见 `SEAL_IMPORT_ALLOWED_KEYS`）
    * @param {{uid:string, phone:string}} identity **服务端派生**的身份
    * @returns {Promise<{ok:boolean, op:string, row?:object, idempotent?:boolean, plan?:object, reason?:string, message:string}>}
@@ -1927,6 +2066,9 @@ const OPS = Object.freeze({
     if (faces.length === 0) {
       return deny(REASONS.MISSING_REQUIRED, '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE）⇒ 拒絕導入；本次零寫入。')
     }
+    /* **源側擴面形態門**：任一違規 ⇒ `INVALID_VALUE` ＋ 零寫入（在寫之前、亦在冪等判定之前）。 */
+    const sourceDenial = sealSourceValueDenial(payload)
+    if (sourceDenial) return sourceDenial
     if (!identityUsable(identity)) {
       return deny(REASONS.FORBIDDEN, '缺少可驗證的導入人身份；本次零寫入。')
     }
@@ -1946,6 +2088,8 @@ const OPS = Object.freeze({
       status: SEAL_IMPORT_STATUS.PENDING,
       ...sealFields,
       faces,
+      /* `raw_json` **只落導入行**（正式集合不帶；不參與任何判定）。 */
+      raw_json: payload.raw_json === undefined ? null : payload.raw_json,
       content_fingerprint: sealImportFingerprintOf(sealFields),
       imported_by: identity.uid,
       imported_at: at,
@@ -2657,6 +2801,8 @@ const ADMIN_OPS = Object.freeze({
         const source = text(row && row.source)
         const sealName = text(row && row.seal_name)
         const sealDoc = {
+          /* **源側擴面 51 鍵整條落正式行**（E-3；`category` 逐字由下方平台別名覆蓋 ⇒ 見注）。 */
+          ...sealSourceFieldsOf(row),
           sealGroupId: `g-${serial}`,
           stamp_id: stampId,
           id: stampId,
@@ -2665,12 +2811,14 @@ const ADMIN_OPS = Object.freeze({
           transcription: text(row && row.transcription),
           dynasty: text(row && row.dynasty),
           seal_type: text(row && row.seal_type),
+          /* `category` 是**平台既有別名**（＝ `seal_type`，印面內容）；源側 `category`（印章 / 印譜）
+             只留導入行 ⇒ 不得让别名语义被覆盖（`normalizeSealRow` 读面亦按 `seal_type` 归一）。 */
           category: text(row && row.seal_type),
           seal_style: text(row && row.seal_style),
           material: text(row && row.material),
           shape: text(row && row.shape),
           asset_kind: 'SEAL',
-          /* **同置**：採納 ⇒ 正式行 `review_status='APPROVED'`（与导入行 `status='ACCEPTED'` 同时推进）。 */
+          /* **同置**：採納 ⇒ 正式行 `review_status='APPROVED'`（与導入行 `status='ACCEPTED'` 同时推进）。 */
           review_status: 'APPROVED',
           author: text(row && row.author),
           source,
@@ -2702,6 +2850,8 @@ const ADMIN_OPS = Object.freeze({
             author: text(face.author),
             author_person_id: text(face.author_person_id),
             transcription: text(face.transcription),
+            /* **影面新增鍵**（原样收；值域不封閉）。 */
+            image_source_kind: text(face.image_source_kind),
             source,
             uploaded_by: identity.uid,
             created_at: at,
@@ -3044,6 +3194,13 @@ module.exports = {
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,
+  /* 印章導入行源側擴面（51 鍵｜E-1；供離線自檢直接斷言）。 */
+  SEAL_IMPORT_SOURCE_FIELDS,
+  SEAL_IMPORT_SEAL_LEVEL_FIELDS,
+  SEAL_IMPORT_FINGERPRINT_FIELDS,
+  SEAL_IMPORT_SOURCE_INT_FIELDS,
+  SEAL_IMPORT_SOURCE_OBJECT_FIELDS,
+  SEAL_IMPORT_SOURCE_RAW_FIELDS,
   /* 印谱外部批量導入面（item 通道切片 A｜v1.61；供离线自检直接断言）。 */
   ITEM_IMPORT_ALLOWED_KEYS,
   ITEM_IMPORT_REVIEW_ALLOWED_KEYS,

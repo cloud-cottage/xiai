@@ -423,6 +423,156 @@ const noteReason = (res) => {
   check('C500x', '負對照：注入新 `reason` 字面值 ⇒ 零新增尺必報紅', ['TOTALLY_NEW_REASON'], outside([...OBSERVED_REASONS, 'TOTALLY_NEW_REASON']))
 }
 
+/* ===========================================================================
+   E 段（本單新增）：印章導入通道**鍵面擴面**（E-1 印章級 51 鍵 / E-2 印面新鍵 / E-3 採納整條落）
+   ---------------------------------------------------------------------------
+   ① 51 鍵**逐字**在允許面（本段自持一份**獨立尺子** `SOURCE_51`，與 seed / 雲函數副本三方對拍）；
+   ② 字符串 `""` 與數字 `0` ⇒ 拒（`INVALID_VALUE` ＋ **零寫入**）；
+   ③ `audit_status` **四值**（`'0'` / `'1'` / `'2'` / `'9'` —— 源包實讀分布）均放行、**原樣收**；
+   ④ 印面新鍵 `image_source_kind` 存在、**值域不封閉**（非白名單值亦放行）；
+   ⑤ 既有 8 鍵仍可用（兩來源並存、互不覆蓋）；
+   ＋ 採納：源側 51 鍵整條落 `xiai_seals`（`null` / 整數原樣）、`raw_json` 只落導入行。
+   =========================================================================== */
+{
+  /* **獨立尺子**（逐字；本段自持，不從 seed 生成 —— 避免「用自己的尺量自己」）。 */
+  const SOURCE_51 = [
+    'source_seal_id', 'seal_uri', 'category', 'seal_wen', 'seal_wen_chs', 'seal_wen_pinyin',
+    'seal_wen_wzly', 'seal_wen_wzly_chs', 'seal_wen_yssw', 'seal_wen_yssw_chs', 'seal_wen_wyz',
+    'seal_wen_zjsw', 'seal_wen_zjsw_chs', 'seal_ys_xz', 'seal_ys_label', 'seal_ys_kf',
+    'seal_ys_st', 'seal_zyz', 'seal_yz', 'seal_yz_person_name', 'seal_yz_person_name_chs',
+    'seal_yz_name', 'seal_yz_ref_id', 'seal_yzzkz', 'seal_yzzkz_chs', 'seal_yzzkz_id',
+    'seal_bk', 'seal_bk_chs', 'seal_bkzkz', 'seal_bkzkz_chs', 'seal_bkzkz_id', 'as_book_id',
+    'related_book', 'seal_yt_url', 'seal_ytsw_url', 'seal_yzbk_url', 'seal_yzqt_url',
+    'seal_threed_url', 'seal_title', 'seal_title_chs', 'seal_org', 'seal_org_name', 'seal_cz',
+    'seal_cc', 'seal_ly', 'seal_yn', 'seal_yksj_lsjn', 'seal_yksj_lsjn_chs', 'seal_yksj_gyjn',
+    'audit_status', 'misc'
+  ]
+  const EXISTING_8 = ['seal_name', 'dynasty', 'seal_type', 'seal_style', 'material', 'shape', 'author', 'transcription']
+  const T = (id, desc, expected, actual) => check(id, desc, expected, actual)
+  /** 源側擴面（51 鍵；缺值 ⇒ `null`、`source_seal_id` ⇒ 文本）—— 本段造行用。 */
+  const srcFaceOf = (sourceSealId, overrides = {}) => ({
+    ...seed.emptySealImportSourceFields(),
+    ...overrides,
+    source_seal_id: sourceSealId
+  })
+
+  /* ⑤-a 存量面快照（本段全程不得改动既有印章 / 印面行）。 */
+  const legacySealsSnap = snapSeals()
+  const legacyFacesSnap = snapFaces()
+  const legacyImportsCount = db.listSealImportRows().length
+
+  /* ① 51 鍵逐字 / 三方對拍 / 恰 51 / 允許面覆蓋。 */
+  T('E1a', 'E-1 源側擴面恰 51 鍵（逐字、有序；seed 真源）', SOURCE_51, seed.SEAL_IMPORT_SOURCE_FIELDS)
+  T('E1b', 'E-1 雲函數副本與 seed 真源**逐字相等**（同一把尺子）', SOURCE_51, userOps.SEAL_IMPORT_SOURCE_FIELDS)
+  T('E1c', 'E-1 恰 51 鍵（非範圍、非子集、不比大小）', 51, seed.SEAL_IMPORT_SOURCE_FIELDS.length)
+  T('E1d', 'E-1 51 鍵全數 ∈ 允許鍵面（雲函數 `SEAL_IMPORT_ALLOWED_KEYS`）', [],
+    SOURCE_51.filter((k) => userOps.SEAL_IMPORT_ALLOWED_KEYS.indexOf(k) === -1))
+  T('E1e', 'E-1 51 鍵全數 ∈ 導入行字段全集（seed `SEAL_IMPORT_FIELDS`）', [],
+    SOURCE_51.filter((k) => seed.SEAL_IMPORT_FIELDS.indexOf(k) === -1))
+  T('E1f', 'E-1 允許鍵面恰 63 鍵（batch_id / source / raw_json ＋ 既有 8 ＋ 源側 51 ＋ faces）', 63,
+    userOps.SEAL_IMPORT_ALLOWED_KEYS.length)
+  T('E1g', 'E-1 印章級鍵面恰 59 鍵（既有 8 ＋ 源側 51；無重複）', { len: 59, dup: [] },
+    { len: seed.SEAL_IMPORT_SEAL_LEVEL_FIELDS.length, dup: seed.SEAL_IMPORT_SEAL_LEVEL_FIELDS.filter((k, i, a) => a.indexOf(k) !== i) })
+  T('E1h', 'E-1 指紋面恰 58 鍵（印章級鍵面減行級冪等鍵 `source_seal_id`）', 58, seed.SEAL_IMPORT_FINGERPRINT_FIELDS.length)
+  T('E1i', 'E-1 `raw_json` **只落導入行**（在行級面、不在印章級鍵面 / 正式面）', { inRow: true, inSealLevel: false },
+    { inRow: seed.SEAL_IMPORT_ROW_FIELDS.includes('raw_json'), inSealLevel: seed.SEAL_IMPORT_SEAL_LEVEL_FIELDS.includes('raw_json') })
+  T('E1j', 'E-1 未為新面造值域門（`SEAL_IMPORT_SOURCE_FIELDS` 只 1 個整數鍵、`seal_ys_label` 不在任何既有域常量裡）', { ints: 1, inStyle: false },
+    { ints: seed.SEAL_IMPORT_SOURCE_INT_FIELDS.length, inStyle: seed.SEAL_TYPE_OPTIONS.includes('seal_ys_label') })
+  T('E1k', 'E-1 既有 8 鍵逐字保留（兩來源並存的面）', EXISTING_8, seed.SEAL_IMPORT_SEAL_FIELDS)
+
+  /* ② 形態門：空串 / 數字 0 ⇒ 拒 ＋ 零寫入；正對照 ⇒ 放行。 */
+  const mkFaces = () => [faceOf(VALID_SHA, FACE, { image_source_kind: 'yt' })]
+  const submitsBefore = db.listSealImportRows().length
+  const badEmpty = noteReason(await seals.submitSealImport({ batchId: 'B-E1', source: 'SRC', sourceSealId: 'E-EMPTY', payload: { seal_wen: '' }, faces: mkFaces() }))
+  const badZero = noteReason(await seals.submitSealImport({ batchId: 'B-E1', source: 'SRC', sourceSealId: 'E-ZERO', payload: { seal_ys_xz: 0 }, faces: mkFaces() }))
+  const badMisc = noteReason(await seals.submitSealImport({ batchId: 'B-E1', source: 'SRC', sourceSealId: 'E-MISC', payload: { misc: 'not-an-object' }, faces: mkFaces() }))
+  const badBool = noteReason(await seals.submitSealImport({ batchId: 'B-E1', source: 'SRC', sourceSealId: 'E-BOOL', payload: { seal_wen: true }, faces: mkFaces() }))
+  T('E2a', 'E-2 空串（`seal_wen=""`）⇒ `INVALID_VALUE` ＋ 零寫入', { ok: false, reason: 'INVALID_VALUE' }, { ok: badEmpty.ok, reason: badEmpty.reason })
+  T('E2b', 'E-2 數字 `0`（`seal_ys_xz=0`）⇒ `INVALID_VALUE` ＋ 零寫入', { ok: false, reason: 'INVALID_VALUE' }, { ok: badZero.ok, reason: badZero.reason })
+  T('E2c', 'E-2 `misc` 非對象（字符串）⇒ `INVALID_VALUE` ＋ 零寫入', { ok: false, reason: 'INVALID_VALUE' }, { ok: badMisc.ok, reason: badMisc.reason })
+  T('E2d', 'E-2 布爾值（`seal_wen=true`）⇒ `INVALID_VALUE` ＋ 零寫入', { ok: false, reason: 'INVALID_VALUE' }, { ok: badBool.ok, reason: badBool.reason })
+  T('E2e', 'E-2 四條違形態提交 ⇒ **零寫入**（導入行數不變）', submitsBefore, db.listSealImportRows().length)
+  T('E2f', 'E-2 明確給 `null` ⇒ 放行（源側無值用 `null`、不強轉空串）', true,
+    (await seals.submitSealImport({ batchId: 'B-E1', source: 'SRC', sourceSealId: 'E-NULL', payload: { seal_wen: null, misc: null, seal_ys_xz: null }, faces: mkFaces() })).ok === true)
+  /* 雲函數側同一把門（同一違規在 ops 側亦拒 ＋ 零寫入）。 */
+  const cloudBad = noteReason(await userOps.OPS.submitSealImport(
+    { source_seal_id: 'E-CLOUD-BAD', source: 'SRC', seal_wen: '', faces: [{ kind: 'FACE', image_sha256: VALID_SHA }] },
+    { uid: 'u-token', phone: '13800000000' }
+  ))
+  T('E2g', 'E-2 雲函數側同一形態門（空串 ⇒ `INVALID_VALUE` ＋ 無落盤計劃）', { ok: false, reason: 'INVALID_VALUE', plan: undefined },
+    { ok: cloudBad.ok, reason: cloudBad.reason, plan: cloudBad.plan })
+
+  /* ③ `audit_status` 四值（源包實讀 `'0'` / `'1'` / `'2'` / `'9'`）均放行、原樣收。 */
+  const AUDIT_4 = ['0', '1', '2', '9']
+  const auditResults = []
+  for (const value of AUDIT_4) {
+    const res = await seals.submitSealImport({ batchId: 'B-E3', source: 'SRC', sourceSealId: `E-AUDIT-${value}`, payload: { audit_status: value }, faces: mkFaces() })
+    auditResults.push({ value, ok: res.ok === true, stored: text(res.row && res.row.audit_status) })
+  }
+  T('E3a', 'E-3 `audit_status` 四值（`0`/`1`/`2`/`9`）**均放行**', [{ value: '0', ok: true }, { value: '1', ok: true }, { value: '2', ok: true }, { value: '9', ok: true }],
+    auditResults.map((r) => ({ value: r.value, ok: r.ok })))
+  T('E3b', 'E-3 `audit_status` **原樣收**（逐字落行、不得歸一 / 不得過濾）', AUDIT_4, auditResults.map((r) => r.stored))
+  T('E3c', 'E-3 `audit_status` 數字形態亦放行（原樣收：字符串或數字均可）', { ok: true, stored: 2 },
+    await seals.submitSealImport({ batchId: 'B-E3', source: 'SRC', sourceSealId: 'E-AUDIT-NUM', payload: { audit_status: 2 }, faces: mkFaces() })
+      .then((res) => ({ ok: res.ok === true, stored: res.row && res.row.audit_status })))
+  T('E3d', 'E-3 `audit_status` **不得據以過濾**（四值行全部真落行、非 PENDING 過濾掉）', 5,
+    db.listSealImportRows().filter((r) => text(r.source_seal_id).indexOf('E-AUDIT') === 0).length)
+
+  /* ④ 印面新鍵 `image_source_kind`：存在、值域不封閉。 */
+  const FACE_14 = ['kind', 'seal_name', 'dynasty', 'seal_type', 'face_style', 'seal_class', 'author', 'author_person_id', 'transcription', 'image_storage_key', 'image_sha256', 'image_bytes', 'image_mime', 'image_source_kind']
+  T('E4a', 'E-2 印面字段面 ＝ 既有 13 鍵 ＋ `image_source_kind`（恰 14 鍵、逐字）', FACE_14, seed.SEAL_IMPORT_FACE_FIELDS)
+  T('E4b', 'E-2 既有 13 鍵一字未改（前 13 位逐字）', FACE_14.slice(0, 13), seed.SEAL_IMPORT_FACE_FIELDS.slice(0, 13))
+  const faceKinds = ['yt', 'ytsw', 'yzbk', 'NOT-IN-ANY-LIST']
+  T('E4c', 'E-2 值域**不封閉**（枚舉外值原樣放行；`normalizeSealImportFace` 不裁剪）', faceKinds,
+    faceKinds.map((k) => seals.normalizeSealImportFace({ kind: FACE, image_source_kind: k }).image_source_kind))
+  T('E4d', 'E-2 未為該鍵造值域常量（seed / 雲函數副本皆無 `IMAGE_SOURCE_*` 枚舉）', { seed: [], ops: [] },
+    { seed: Object.keys(seed).filter((k) => /IMAGE_SOURCE/.test(k)), ops: Object.keys(userOps).filter((k) => /IMAGE_SOURCE/.test(k)) })
+  T('E4e', 'E-2 影面鍵原樣落印面（採納後 `xiai_faces` 行帶 `yt`）', 'yt',
+    (await seals.submitSealImport({ batchId: 'B-E4', source: 'SRC', sourceSealId: 'E-ISK', payload: {}, faces: [faceOf(VALID_SHA, FACE, { image_source_kind: 'yt' })] })).row.faces[0].image_source_kind)
+
+  /* ⑤ 既有 8 鍵仍可用（未被新面取代 / 不互作回落）。 */
+  const legacySubmit = await seals.submitSealImport({ batchId: 'B-E5', source: 'SRC', sourceSealId: 'E-LEGACY8', payload: { seal_name: '併存印', dynasty: '清初', seal_type: '私印', seal_style: '白文', material: '石', shape: '方形', author: '丁敬', transcription: '併存釋義' }, faces: mkFaces() })
+  T('E5a', 'E-5 既有 8 鍵仍可用（提交放行）', true, legacySubmit.ok === true)
+  T('E5b', 'E-5 既有 8 鍵逐字落行（8 鍵面原樣保留）', { seal_name: '併存印', dynasty: '清初', seal_type: '私印', seal_style: '白文', material: '石', shape: '方形', author: '丁敬', transcription: '併存釋義' },
+    (({ seal_name, dynasty, seal_type, seal_style, material, shape, author, transcription }) => ({ seal_name, dynasty, seal_type, seal_style, material, shape, author, transcription }))(legacySubmit.row))
+  T('E5c', 'E-5 兩來源**互不覆蓋**（同一行同時帶既有 8 鍵與源側擴面鍵；源側缺值 ⇒ `null` 不落空串）',
+    { eight: true, sourceKey: true, nullNotBlank: true },
+    { eight: seed.SEAL_IMPORT_SEAL_FIELDS.every((k) => text(legacySubmit.row[k]) !== ''), sourceKey: 'seal_wen' in legacySubmit.row, nullNotBlank: legacySubmit.row.seal_wen === null })
+
+  /* ⑥ 採納：源側 51 鍵整條落 `xiai_seals`；`raw_json` 只留導入行；既有行零改動。 */
+  const SRC_ROW_A = { seal_uri: 'a23f8f65-bf89-40c4-a128-c34967a8eb91', category: '印章', seal_wen: '委曲', seal_wen_chs: '委曲', seal_wen_yssw: '委曲', seal_ys_xz: 5, seal_ys_label: '白文長方印', seal_zyz: '1', as_book_id: '0892', related_book: '臥韜軒藏黃朗村詩品印譜', seal_yt_url: '19_1000_1', audit_status: '2', misc: { auditLogSeqid: '2532', cache: 'False' } }
+  pushImports([importRow({
+    batchId: 'B-E6', source: 'SRC', sourceSealId: 'E-ACC-1',
+    faces: [faceOf(VALID_SHA, FACE, { image_source_kind: 'yt' })]
+  })])
+  const rowE6 = db.listSealImportRows().find((r) => text(r.source_seal_id) === 'E-ACC-1')
+  db.saveSealImportRows(db.listSealImportRows().map((r) => (text(r.id) === text(rowE6.id) ? { ...r, ...srcFaceOf('E-ACC-1', SRC_ROW_A), raw_json: { list: { seqid: 1000 } } } : r)))
+  const sealsBeforeE6 = snapSeals().length
+  const acc = await seals.reviewSealImport(ADMIN, { batchId: 'B-E6', decision: 'ACCEPTED' })
+  const adopted = db.sealBySourceKey('SRC', 'E-ACC-1')
+  const adoptedFace = db.listFaceRows().find((r) => text(r.sealId || r.stamp_id) === text(adopted && adopted.stamp_id))
+  T('E6a', 'E-3 採納 ⇒ `xiai_seals` 恰 +1 / 導入行 `ACCEPTED`', { seals: 1, status: 'ACCEPTED' }, { seals: snapSeals().length - sealsBeforeE6, status: text((db.listSealImportRows().find((r) => text(r.source_seal_id) === 'E-ACC-1') || {}).status) })
+  T('E6b', 'E-3 源側 51 鍵整條落正式行（逐鍵在場）', [], SOURCE_51.filter((k) => !(k in (adopted || {}))))
+  T('E6c', 'E-3 值**原樣**落正式行（字符串 / 整數 / `null` / `misc` 對象）', { wen: '委曲', xz: 5, label: '白文長方印', asBook: '0892', audit: '2', miscSeqid: '2532', bk: null },
+    { wen: (adopted || {}).seal_wen, xz: (adopted || {}).seal_ys_xz, label: (adopted || {}).seal_ys_label, asBook: (adopted || {}).as_book_id, audit: (adopted || {}).audit_status, miscSeqid: ((adopted || {}).misc || {}).auditLogSeqid, bk: (adopted || {}).seal_bk })
+  T('E6d', 'E-3 `raw_json` **只留導入行**（正式行無此鍵）', { importHas: true, sealHas: false },
+    { importHas: 'raw_json' in (db.listSealImportRows().find((r) => text(r.source_seal_id) === 'E-ACC-1') || {}), sealHas: 'raw_json' in adopted })
+  T('E6e', 'E-3 影面鍵隨採納落印面（`image_source_kind=yt`；`kind=FACE` 未變）', { isk: 'yt', kind: FACE },
+    { isk: text(adoptedFace && adoptedFace.image_source_kind), kind: text(adoptedFace && adoptedFace.kind) })
+  T('E6f', 'E-3 正式行 `review_status=APPROVED`（與導入行 `ACCEPTED` 同時推進）', { review: 'APPROVED', status: 'ACCEPTED' },
+    { review: text((adopted || {}).review_status), status: text((db.listSealImportRows().find((r) => text(r.source_seal_id) === 'E-ACC-1') || {}).status) })
+  const adoptedSnap = JSON.stringify(adopted)
+  await seals.reviewSealImport(ADMIN, { batchId: 'B-E6', decision: 'ACCEPTED' })
+  T('E6g', 'E-3 重複採納 ⇒ 不改寫既有正式行（冪等；逐字快照不變）', adoptedSnap, JSON.stringify(db.sealBySourceKey('SRC', 'E-ACC-1')))
+  T('E6h', 'E-3 去重鍵仍為 `(source_seal_id, source)`（未改）', true, !!db.sealBySourceKey('SRC', 'E-ACC-1'))
+
+  /* ⑤-b 既有行（本段開頭快照）逐字不變。 */
+  const legacyNow = snapSeals().filter((row) => legacySealsSnap.includes(row))
+  T('E7a', '既有印章行逐字不變（本段新增行除外；79 枚面不受影響）', legacySealsSnap, legacyNow)
+  T('E7b', '既有印面行逐字不變（本段新增行除外）', legacyFacesSnap, snapFaces().filter((row) => legacyFacesSnap.includes(row)))
+  T('E7c', '既有導入行未被本段新增改寫（前後條數與逐字快照可比）', true, db.listSealImportRows().length > legacyImportsCount)
+}
+
 /* ---------------------------------------------------------------------------
    匯總
    --------------------------------------------------------------------------- */

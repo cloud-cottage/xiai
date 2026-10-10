@@ -916,6 +916,9 @@ export const SEAL_IMPORT_ROW_FIELDS = [
   'reviewed_at',
   'reviewer_id',
   'review_note',
+  /* **原始快照**：源側整行 JSON 原樣留存（**只落導入行、正式集合不帶**；不參與任何判定；
+     沿 item 通道切片 A 同型）。 */
+  'raw_json',
   /* **內容指紋（軟提示）**：印章級標識字段的規範化串雜湊；**只作「疑似重複」軟提示**，
      **不構成拒收理由**（明文：指紋不構成拒收理由；沿 §3.55.5）。 */
   'content_fingerprint'
@@ -940,6 +943,107 @@ export const SEAL_IMPORT_SEAL_FIELDS = [
   'transcription'
 ]
 
+/* ============================================================================
+   **印章導入行：源側擴面（51 鍵｜凍結鍵面）**
+   ----------------------------------------------------------------------------
+   來源 ＝ feicui 側就緒包 `seals.jsonl` 的 **52 鍵**減 `raw_json`（`raw_json` **只落導入行**、
+   **不落正式集合**，故不入本面）。
+   本面為**新增面**：與上面**既有 8 鍵**（`seal_name` / `dynasty` / `seal_type` / `seal_style` /
+   `material` / `shape` / `author` / `transcription`）**並存、互不覆蓋** —— 同一行可同時帶兩面；
+   兩來源分別落各自的鍵，**不得互相填入、不得互作回落**。
+   形態門（逐字）：新面字段只允許「**字符串 / 整數 / `null`**」；**不得為空串、不得為數字 `0`**
+   （字符串 `'0'` 合法 —— 源側 `audit_status` 實有 `'0'` 值）；
+   `misc` 為**對象**（或 `null`）；`audit_status` **原樣收**（字符串或數字均可，**不得據此過濾、
+   不得歸一**）；`seal_ys_xz` 為**整數或 `null`**。違形態 ⇒ `INVALID_VALUE` ＋ **零寫入**。
+   **不為新面造值域門**（明文：**不得**把 `seal_ys_label`（形製 10 類）往 `seal_style`（23 類）
+   一類既有域裡塞 —— 兩者**不同域**）。
+   ============================================================================ */
+
+/**
+ * **印章導入行「源側擴面」字段真源（恰 51 鍵；逐字）** —— 恰一處定義點。
+ * 含行級冪等鍵 `source_seal_id`（源側包內同名鍵；導入行 / 正式行皆落）。
+ */
+export const SEAL_IMPORT_SOURCE_FIELDS = [
+  'source_seal_id',
+  'seal_uri',
+  'category',
+  'seal_wen',
+  'seal_wen_chs',
+  'seal_wen_pinyin',
+  'seal_wen_wzly',
+  'seal_wen_wzly_chs',
+  'seal_wen_yssw',
+  'seal_wen_yssw_chs',
+  'seal_wen_wyz',
+  'seal_wen_zjsw',
+  'seal_wen_zjsw_chs',
+  'seal_ys_xz',
+  'seal_ys_label',
+  'seal_ys_kf',
+  'seal_ys_st',
+  'seal_zyz',
+  'seal_yz',
+  'seal_yz_person_name',
+  'seal_yz_person_name_chs',
+  'seal_yz_name',
+  'seal_yz_ref_id',
+  'seal_yzzkz',
+  'seal_yzzkz_chs',
+  'seal_yzzkz_id',
+  'seal_bk',
+  'seal_bk_chs',
+  'seal_bkzkz',
+  'seal_bkzkz_chs',
+  'seal_bkzkz_id',
+  'as_book_id',
+  'related_book',
+  'seal_yt_url',
+  'seal_ytsw_url',
+  'seal_yzbk_url',
+  'seal_yzqt_url',
+  'seal_threed_url',
+  'seal_title',
+  'seal_title_chs',
+  'seal_org',
+  'seal_org_name',
+  'seal_cz',
+  'seal_cc',
+  'seal_ly',
+  'seal_yn',
+  'seal_yksj_lsjn',
+  'seal_yksj_lsjn_chs',
+  'seal_yksj_gyjn',
+  'audit_status',
+  'misc'
+]
+
+/** 源側擴面中**整數或 `null`** 的字段（**不得 `0` / 空串等特值**）。 */
+export const SEAL_IMPORT_SOURCE_INT_FIELDS = ['seal_ys_xz']
+
+/** 源側擴面中**對象（或 `null`）**的字段（**原樣落**，不做子鍵裁剪）。 */
+export const SEAL_IMPORT_SOURCE_OBJECT_FIELDS = ['misc']
+
+/** 源側擴面中**原樣收**的字段（字符串或數字均可；**不得據此過濾、不得歸一**）。 */
+export const SEAL_IMPORT_SOURCE_RAW_FIELDS = ['audit_status']
+
+/**
+ * **印章級鍵面（全集）** ＝ 既有 8 鍵 ＋ 源側擴面 51 鍵（**恰 59 鍵、無重複**）。
+ * 導入行與正式行（`xiai_seals`）的印章級鍵面同此一面。
+ */
+export const SEAL_IMPORT_SEAL_LEVEL_FIELDS = [
+  ...SEAL_IMPORT_SEAL_FIELDS,
+  ...SEAL_IMPORT_SOURCE_FIELDS
+]
+
+/**
+ * **指紋面** ＝ 印章級鍵面**減行級冪等鍵** `source_seal_id`（**恰 58 鍵**）。
+ * 理由：指紋只作「疑似重複」**軟提示**，而兩條同內容的行**必然**帶不同 `source_seal_id`
+ * ⇒ 把冪等鍵算進指紋會讓這把尺子**恆判不重複**（尺子失效）。故指紋只取**內容面**。
+ */
+export const SEAL_IMPORT_FINGERPRINT_FIELDS = SEAL_IMPORT_SEAL_LEVEL_FIELDS.filter(
+  (key) => key !== 'source_seal_id'
+)
+
 /**
  * **導入行印面級字段（每印面；含影像鍵 / 摘要引用）** —— `kind` ∈ `FACE_KIND`
  * （`FACE` / `EDGE`；**邊款 `kind=EDGE` 須在列，不得排除**）。
@@ -958,17 +1062,27 @@ export const SEAL_IMPORT_FACE_FIELDS = [
   'image_storage_key',
   'image_sha256',
   'image_bytes',
-  'image_mime'
+  'image_mime',
+  /* **影面（E-2 新增；原樣收）**：影像來源類別 `yt` / `ytsw` / `yzbk`
+     （源側 `seal_yt_url` / `seal_ytsw_url` / `seal_yzbk_url` 三面之別）。
+     **值域不封閉**（只作原樣字符串收錄，**不建枚舉門、不得據此過濾**）。 */
+  'image_source_kind'
 ]
 
 /** 影像引用鍵面（每印面；**（鍵 / 摘要）二元組** —— 導入行只存引用、不存二進制）。 */
 export const SEAL_IMPORT_IMAGE_REF_FIELDS = ['image_storage_key', 'image_sha256', 'image_bytes', 'image_mime']
 
 /**
- * **導入行字段真源（全集；恰一處定義點）** ＝ 行級元數據 ＋ 印章級 ＋ 印面數組 `faces`。
+ * **導入行字段真源（全集；恰一處定義點）** ＝ 行級元數據 ＋ 印章級鍵面（既有 8 鍵 ＋ 源側擴面
+ * 51 鍵；`source_seal_id` 與行級同名 ⇒ 只列一次）＋ 印面數組 `faces`。
  * **不得在別處另立第二套同義字段**（沿「真值函數是唯一尺子」精神）。
+ * `raw_json` **只落導入行**（正式集合不帶）。
  */
-export const SEAL_IMPORT_FIELDS = [...SEAL_IMPORT_ROW_FIELDS, ...SEAL_IMPORT_SEAL_FIELDS, 'faces']
+export const SEAL_IMPORT_FIELDS = [
+  ...SEAL_IMPORT_ROW_FIELDS,
+  ...SEAL_IMPORT_SEAL_LEVEL_FIELDS.filter((key) => SEAL_IMPORT_ROW_FIELDS.indexOf(key) === -1),
+  'faces'
+]
 
 /**
  * 導入行「值的默認」（印章級）：**一律空串**（缺省不設特值）。
@@ -978,6 +1092,19 @@ export function emptySealImportFields() {
   const out = {}
   SEAL_IMPORT_SEAL_FIELDS.forEach((key) => {
     out[key] = ''
+  })
+  return out
+}
+
+/**
+ * 導入行「源側擴面的值的默認」（**缺省一律 `null`**，不設特值；`source_seal_id` 為行級冪等鍵
+ * ⇒ 默認空串）。
+ * @returns {object} 空源側擴面（51 鍵；**不含 `id` / `status` / 身份 / 時間戳 / `raw_json`**）
+ */
+export function emptySealImportSourceFields() {
+  const out = {}
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    out[key] = key === 'source_seal_id' ? '' : null
   })
   return out
 }
@@ -997,15 +1124,16 @@ export function emptySealImportFace() {
 }
 
 /**
- * **導入行內容指紋（純函數；§3.55.5 軟提示用）**：印章級標識字段的**規範化串雜湊**
- * （逐字段 `trim` 後以 `\u0001` 連接、取 `sha256`）。
+ * **導入行內容指紋（純函數；§3.55.5 軟提示用）**：**指紋面**（印章級鍵面減行級冪等鍵
+ * `source_seal_id`；恰 58 鍵）的**規範化串雜湊**（逐字段 `trim` 後以 `\u0001` 連接、取 `sha256`；
+ * `null` ⇒ 空串）。
  * **只作「疑似重複」軟提示、交管理員裁；明文：指紋不構成拒收理由**（沿 §3.55.5）。
  * @param {object} fields 印章級字段面（導入行 / 正式印章行均可）
  * @returns {string} 64 位小寫十六進制指紋
  */
 export function sealImportFingerprint(fields) {
   const src = fields && typeof fields === 'object' ? fields : {}
-  const normalized = SEAL_IMPORT_SEAL_FIELDS.map((key) =>
+  const normalized = SEAL_IMPORT_FINGERPRINT_FIELDS.map((key) =>
     String(src[key] === undefined || src[key] === null ? '' : src[key]).trim()
   ).join('\u0001')
   return sha256Hex(normalized)

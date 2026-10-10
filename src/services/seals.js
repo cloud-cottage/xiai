@@ -66,8 +66,15 @@ import {
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,
+  /* **源側擴面（51 鍵｜本單 E-1）**：既有 8 鍵之外的源側字段真源 ＋ 形態門分類表。 */
+  SEAL_IMPORT_SOURCE_FIELDS,
+  SEAL_IMPORT_SEAL_LEVEL_FIELDS,
+  SEAL_IMPORT_SOURCE_INT_FIELDS,
+  SEAL_IMPORT_SOURCE_OBJECT_FIELDS,
+  SEAL_IMPORT_SOURCE_RAW_FIELDS,
   emptySealImportFields,
   emptySealImportFace,
+  emptySealImportSourceFields,
   sealImportFingerprint
 } from '../data/seed.js'
 import {
@@ -1343,6 +1350,72 @@ export function normalizeSealImportSealFields(payload) {
   return out
 }
 
+/**
+ * 源側擴面**單值歸一**（**逐字保留、不臆造**）：字符串 / 整數原樣；`null` / 缺鍵 ⇒ `null`；
+ * `misc` ⇒ 對象（拷貝）或 `null`；其它形態（布爾 / 數組 / 別的對象）⇒ `null`。
+ * **`audit_status` 原樣收**（不歸一、不據它過濾）。
+ */
+function sealSourceValueOf(key, value) {
+  if (value === undefined || value === null) return null
+  if (SEAL_IMPORT_SOURCE_OBJECT_FIELDS.indexOf(key) !== -1) {
+    return typeof value === 'object' && !Array.isArray(value) ? { ...value } : null
+  }
+  return typeof value === 'string' || typeof value === 'number' ? value : null
+}
+
+/**
+ * **源側擴面形態門（E-1；判定恒在寫之前）**：新面字段只允許「**字符串（非空）/ 整數（非 `0`）/
+ * `null`**」；`misc` ⇒ **對象或 `null`**；`audit_status` **原樣收**（字符串或數字）。
+ * 違形態 ⇒ `INVALID_VALUE` ＋ **零寫入**（`reason` **零新增** —— 一律沿用既有凍結字面值）；
+ * **不為新面造值域門**（既不比對 `seal_ys_label` 等源側碼表，也不往既有域裡塞）。
+ * @returns {null|{ok:false, reason:'INVALID_VALUE', message:string}}
+ */
+export function sealImportSourceDenial(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  for (const key of SEAL_IMPORT_SOURCE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
+    const value = src[key]
+    if (value === null || value === undefined) continue
+    if (SEAL_IMPORT_SOURCE_OBJECT_FIELDS.indexOf(key) !== -1) {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        return { ok: false, reason: 'INVALID_VALUE', message: `${key} 必須是對象或 null；本次零寫入。` }
+      }
+      continue
+    }
+    if (typeof value === 'string') {
+      if (value === '') {
+        return { ok: false, reason: 'INVALID_VALUE', message: `${key} 不得為空串（源側無值請用 null）；本次零寫入。` }
+      }
+      continue
+    }
+    if (typeof value === 'number') {
+      if (!Number.isInteger(value) || value === 0) {
+        return { ok: false, reason: 'INVALID_VALUE', message: `${key} 必須是整數或 null（不得 0 / 空串等特值）；本次零寫入。` }
+      }
+      continue
+    }
+    return { ok: false, reason: 'INVALID_VALUE', message: `${key} 只允許字符串 / 整數 / null；本次零寫入。` }
+  }
+  return null
+}
+
+/**
+ * 歸一源側擴面 → `SEAL_IMPORT_SOURCE_FIELDS`（**恰 51 鍵**；缺鍵 ⇒ `null`；`source_seal_id` ⇒ 文本）。
+ * @returns {object} 源側擴面（**不含 `id` / `status` / 身份 / 時間戳 / `raw_json`**）
+ */
+export function normalizeSealImportSourceFields(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  const out = emptySealImportSourceFields()
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    if (key === 'source_seal_id') {
+      out[key] = importText(src[key])
+      return
+    }
+    out[key] = sealSourceValueOf(key, src[key])
+  })
+  return out
+}
+
 /** 當前（或指定）賬號是否可審核印章外部導入批次 —— 供 `/my/corrections` 決定是否渲染採納 / 駁回。 */
 export function canReviewSealImports(actor) {
   const who = actor || currentUser()
@@ -1360,8 +1433,8 @@ export function canSubmitSealImport(actor) {
  * **提交印章外部導入行**（外部批量導入通道；任何登錄用戶。§3.55.3 / §3.55.5）。
  *
  * 判定順序（**全部在寫之前**，拒絕即零寫入）：① 登錄門 → ② 批次 / 冪等鍵（`source_seal_id`）形態 →
- * ③ `faces[]` 至少 1 條（1..N，含邊款）→ ④ **冪等**（同 `source` ＋ `source_seal_id` 已有行 ⇒
- * 原樣返回、**不改寫既有行**）→ ⑤ **寫面門**（`userWriteGate('submitSealImport', …)`）。
+ * ③ `faces[]` 至少 1 條（1..N，含邊款）→ ④ **源側擴面形態門（E-1）** → ⑤ **冪等**（同 `source` ＋
+ * `source_seal_id` 已有行 ⇒ 原樣返回、**不改寫既有行**）→ ⑥ **寫面門**（`userWriteGate('submitSealImport', …)`）。
  *
  * **內容指紋僅作軟提示**：指紋與既有未駁回導入行相同 ⇒ 隨返回體給疑似重複標記（`suspect_duplicate`），
  * **不構成拒收理由**（沿 §3.55.5）。
@@ -1369,7 +1442,14 @@ export function canSubmitSealImport(actor) {
  * @returns {Promise<{ok:true, row:object, authority:string, idempotent?:boolean, suspect_duplicate?:boolean,
  *   duplicate_of?:string, message:string}|{ok:false, reason?:string, message:string}>}
  */
-export async function submitSealImport({ batchId = '', source = '', sourceSealId = '', payload = {}, faces = [] } = {}) {
+export async function submitSealImport({
+  batchId = '',
+  source = '',
+  sourceSealId = '',
+  payload = {},
+  faces = [],
+  rawJson = null
+} = {}) {
   const user = currentUser()
   if (!user) return { ok: false, message: '請先登錄後再提交印章外部導入行' }
 
@@ -1378,7 +1458,8 @@ export async function submitSealImport({ batchId = '', source = '', sourceSealId
     return { ok: false, reason: 'INVALID_VALUE', message: `導入批次號超出上限（${MAX_SEAL_IMPORT_ID_LENGTH} 字）；本次零寫入。` }
   }
   const src = String(source || '').trim()
-  const sourceId = String(sourceSealId || '').trim()
+  const payloadObj = payload && typeof payload === 'object' ? payload : {}
+  const sourceId = String(sourceSealId || payloadObj.source_seal_id || '').trim()
   if (!sourceId) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '缺少外部冪等鍵（source_seal_id）⇒ 拒絕導入；本次零寫入。' }
   }
@@ -1389,7 +1470,17 @@ export async function submitSealImport({ batchId = '', source = '', sourceSealId
   if (faceRows.length === 0) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE）；本次零寫入。' }
   }
-  const sealFields = normalizeSealImportSealFields(payload)
+
+  /* **源側擴面形態門（E-1）**：任一違規 ⇒ `INVALID_VALUE` ＋ 零寫入（在寫之前、亦在冪等判定之前）。 */
+  const denial = sealImportSourceDenial(payloadObj)
+  if (denial) return denial
+  const sealFields = {
+    ...normalizeSealImportSealFields(payloadObj),
+    ...normalizeSealImportSourceFields({ ...payloadObj, source_seal_id: sourceId }),
+    /* 行級冪等鍵為權威（參數優先；`sealFields` 內同名鍵同值）。 */
+    source_seal_id: sourceId
+  }
+  const sourceRaw = rawJson !== null && rawJson !== undefined ? rawJson : (payloadObj.raw_json === undefined ? null : payloadObj.raw_json)
 
   /* **冪等**（§3.55.5）：同 `source` ＋ `source_seal_id` 已有導入行 ⇒ 原樣返回（不改寫既有行）。 */
   const existing = sealImportBySourceKey(src, sourceId)
@@ -1417,7 +1508,9 @@ export async function submitSealImport({ batchId = '', source = '', sourceSealId
     source: src,
     source_seal_id: sourceId,
     ...sealFields,
-    faces: faceRows
+    faces: faceRows,
+    /* `raw_json` **只落導入行**（正式集合不帶）。 */
+    raw_json: sourceRaw
   }
   const gate = await userWriteGate('submitSealImport', writePayload)
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
@@ -1432,6 +1525,8 @@ export async function submitSealImport({ batchId = '', source = '', sourceSealId
       status: SEAL_IMPORT_STATUS.PENDING,
       ...sealFields,
       faces: faceRows,
+      /* `raw_json` **只落導入行**（正式集合不帶；不參與任何判定）。 */
+      raw_json: sourceRaw,
       content_fingerprint: fingerprint,
       imported_by: user.id, // **不透明 uid；零手機號**
       imported_at: at,
@@ -1505,6 +1600,19 @@ function importFaceImageRow(face) {
 }
 
 /**
+ * 由導入行取**源側擴面（51 鍵）** —— 採納時**整條落正式行** `xiai_seals`（E-3）；
+ * **原樣**（字符串 / 整數 / `null`；`misc` 對象），缺值 ⇒ `null`；`source_seal_id` ⇒ 文本。
+ */
+function sealSourceFieldsOf(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  const out = {}
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    out[key] = key === 'source_seal_id' ? importText(src[key]) : sealSourceValueOf(key, src[key])
+  })
+  return out
+}
+
+/**
  * 由導入行**構造**整條正式印章產物（印章行 ＋ 印面行）；**先校驗、後派生** ⇒ 拒絕即零寫入、不落半條。
  *
  * 影像引用校驗（§3.55.6）：**逐條**校驗引用對象存在 —— 宣告了引用卻解析不到 ⇒ 該條拒絕；
@@ -1537,6 +1645,8 @@ function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
   const source = String((importRow && importRow.source) || '')
   const sealName = String((importRow && importRow.seal_name) || '')
   const seal = {
+    /* **源側擴面 51 鍵整條落正式行**（E-3）；`category` 之別名語義見下（平台既有口徑不改）。 */
+    ...sealSourceFieldsOf(importRow),
     sealGroupId: `g-${serialMatch ? serialMatch[1] : stampId}`,
     stamp_id: stampId, // 兼容別名（既落盤視圖按它定位），勿刪
     id: stampId, // §4.1.1 規範字段名
@@ -1545,6 +1655,8 @@ function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
     transcription: String((importRow && importRow.transcription) || ''),
     dynasty: String((importRow && importRow.dynasty) || ''),
     seal_type: String((importRow && importRow.seal_type) || ''),
+    /* `category` 為**平台既有別名**（＝ `seal_type`，印面內容，沿 §4.1.2 读面归一）；
+       源側 `category`（印章 / 印譜）只留導入行 ⇒ 不覆蓋別名語義。 */
     category: String((importRow && importRow.seal_type) || ''),
     seal_style: String((importRow && importRow.seal_style) || ''),
     material: String((importRow && importRow.material) || ''),
@@ -1582,6 +1694,8 @@ function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
       author: face.author,
       author_person_id: face.author_person_id,
       transcription: face.transcription,
+      /* **影面新增鍵**（`yt` / `ytsw` / `yzbk`；原樣收、值域不封閉）。 */
+      image_source_kind: importText(face.image_source_kind),
       source,
       uploaded_by: actor && actor.id ? actor.id : '',
       created_at: at,

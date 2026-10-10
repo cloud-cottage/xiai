@@ -30,7 +30,7 @@ import { loadCloudBaseSdk } from './cloudbaseSdk.js'
 import { readKey, STORAGE_KEYS } from './storage.js'
 /* **item 通道切片 A（v1.61）**：本体 22 字段里 `misc` 的 5 键真源从 `seed.js` 取
    （**不另立第二份**；读面归一按同一真源）。 */
-import { ITEM_MISC_FIELDS } from './seed.js'
+import { ITEM_MISC_FIELDS, SEAL_IMPORT_SOURCE_FIELDS, SEAL_IMPORT_SOURCE_OBJECT_FIELDS } from './seed.js'
 /* 容器判定**不自立第二份实现**（R-25）：按字节魔数的那把尺子仍恰 1 处 ＝ `utils/image.js`。 */
 import { sniffBytesMime } from '../utils/image.js'
 
@@ -582,6 +582,8 @@ export function normalizeFaceRow(doc, options = {}) {
     transcription: text(row.transcription),
     face_style: text(row.face_style),
     author: text(row.author),
+    /* **影面新增鍵（原樣收，值域不封閉）**：`image_source_kind`（`yt` / `ytsw` / `yzbk`）。 */
+    image_source_kind: text(row.image_source_kind),
     created_at: text(row.created_at),
     updated_at: text(firstOf(row.updated_at, row.created_at))
   }
@@ -850,6 +852,29 @@ export function normalizePersonImportRow(doc, options = {}) {
  *   · `imported_by` / `reviewer_id` 是**不透明 uid**（**零手機號**）。
  * **不產出任何派生顯示名**。
  */
+
+/**
+ * 印章導入行**源側擴面的單值讀面歸一**（**逐字保留、不臆造**）：字符串 / 整數原樣；
+ * `null` / 缺鍵 ⇒ `null`；`misc` ⇒ 對象（拷貝）或 `null`；其它形態（布爾 / 數組 / 別的對象）
+ * ⇒ `null`（**不猜、不強轉**）。**`audit_status` 原樣收**（不歸一、不據它過濾）。
+ */
+const sealSourceValueOf = (key, value) => {
+  if (value === undefined || value === null) return null
+  if (SEAL_IMPORT_SOURCE_OBJECT_FIELDS.indexOf(key) !== -1) {
+    return typeof value === 'object' && !Array.isArray(value) ? { ...value } : null
+  }
+  return typeof value === 'string' || typeof value === 'number' ? value : null
+}
+
+/** 印章導入行源側擴面（51 鍵）從雲行取回（缺鍵 ⇒ `null`；`source_seal_id` ⇒ 文本）。 */
+function sealImportSourceOf(row) {
+  const out = {}
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    out[key] = key === 'source_seal_id' ? text(row.source_seal_id) : sealSourceValueOf(key, row[key])
+  })
+  return out
+}
+
 export function normalizeSealImportRow(doc, options = {}) {
   const row = withoutArchive(doc || {}, options.keepProvenance === true)
   const id = text(firstOf(row.id, row._id))
@@ -870,7 +895,9 @@ export function normalizeSealImportRow(doc, options = {}) {
           image_storage_key: text(f.image_storage_key),
           image_sha256: text(f.image_sha256),
           image_bytes: intOrNull(f.image_bytes),
-          image_mime: text(f.image_mime)
+          image_mime: text(f.image_mime),
+          /* **影面新增鍵（原樣收）**：`image_source_kind`（`yt` / `ytsw` / `yzbk`；值域不封閉）。 */
+          image_source_kind: text(f.image_source_kind)
         }
       })
     : []
@@ -899,7 +926,10 @@ export function normalizeSealImportRow(doc, options = {}) {
     imported_at: text(row.imported_at),
     reviewed_at: text(row.reviewed_at),
     reviewer_id: text(row.reviewer_id),
-    review_note: text(row.review_note)
+    review_note: text(row.review_note),
+    raw_json: row.raw_json === undefined ? null : row.raw_json,
+    /* 源側擴面 51 鍵（**逐字保留**：字符串 / 整數 / `null`；`misc` ⇒ 對象或 `null`）。 */
+    ...sealImportSourceOf(row)
   }
 }
 
