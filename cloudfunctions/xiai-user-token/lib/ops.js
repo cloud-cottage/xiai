@@ -330,8 +330,17 @@ const SEAL_IMPORT_ALLOWED_KEYS = Object.freeze([
   'raw_json',
   ...SEAL_IMPORT_SEAL_FIELDS,
   ...SEAL_IMPORT_SOURCE_FIELDS,
-  'faces'
+  'faces',
+  /* **行級缺圖標記** `image_status`（值域恰二值 `present` / `source_no_image`；缺省 ⇒ `present`）：
+     源側**無圖**之印章以 `source_no_image` 落行（`faces[]` 允許為空，保住文本本體）。 */
+  'image_status'
 ])
+
+/** 導入行行級鍵 `image_status` 的值域（恰二值；与 `seed.js::SEAL_IMPORT_IMAGE_STATUS` 逐字同值）。 */
+const SEAL_IMPORT_IMAGE_STATUS = Object.freeze({
+  PRESENT: 'present',
+  SOURCE_NO_IMAGE: 'source_no_image'
+})
 
 /** 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
 const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
@@ -1096,6 +1105,20 @@ function sealSourceValueDenial(payload) {
     }
     return deny(REASONS.INVALID_VALUE, `${key} 只允許字符串 / 整數 / null ⇒ 拒絕導入；本次零寫入。`)
   }
+  return null
+}
+
+/**
+ * **行級鍵 `image_status` 取値**：未提供（`undefined` / `null`）⇒ **`present`**（向後兼容）；
+ * 已提供 ⇒ 逐字取值，**值域外 ⇒ `null`**（调用方据此 `INVALID_VALUE` ＋ 零写入）。
+ * @returns {string|null} `present` / `source_no_image` / `null`（非法）
+ */
+function sealImportImageStatusOf(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  const raw = src.image_status
+  if (raw === undefined || raw === null) return SEAL_IMPORT_IMAGE_STATUS.PRESENT
+  const value = text(raw)
+  if (value === SEAL_IMPORT_IMAGE_STATUS.PRESENT || value === SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE) return value
   return null
 }
 
@@ -2062,9 +2085,16 @@ const OPS = Object.freeze({
     if (sourceId.length > MAX_ID_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `外部冪等鍵超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕導入；本次零寫入。`)
     }
+    const imageStatus = sealImportImageStatusOf(payload)
+    if (imageStatus === null) {
+      return deny(REASONS.INVALID_VALUE, 'image_status 只允許 present / source_no_image（缺省視為 present）⇒ 拒絕導入；本次零寫入。')
+    }
     const faces = Array.isArray(payload.faces) ? payload.faces.map(normalizeSealImportFace) : []
-    if (faces.length === 0) {
-      return deny(REASONS.MISSING_REQUIRED, '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE）⇒ 拒絕導入；本次零寫入。')
+    if (faces.length === 0 && imageStatus !== SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE) {
+      return deny(
+        REASONS.MISSING_REQUIRED,
+        '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE；源側無圖之印章可帶 image_status=source_no_image 例外）⇒ 拒絕導入；本次零寫入。'
+      )
     }
     /* **源側擴面形態門**：任一違規 ⇒ `INVALID_VALUE` ＋ 零寫入（在寫之前、亦在冪等判定之前）。 */
     const sourceDenial = sealSourceValueDenial(payload)
@@ -2088,6 +2118,10 @@ const OPS = Object.freeze({
       status: SEAL_IMPORT_STATUS.PENDING,
       ...sealFields,
       faces,
+      /* **行級缺圖標記**：只在載荷宣告時落該鍵（未提供 ⇒ 不落鍵，既有帶 faces 之載荷行為一字不變）。 */
+      ...(Object.prototype.hasOwnProperty.call(payload, 'image_status') && payload.image_status !== undefined && payload.image_status !== null
+        ? { image_status: imageStatus }
+        : {}),
       /* `raw_json` **只落導入行**（正式集合不帶；不參與任何判定）。 */
       raw_json: payload.raw_json === undefined ? null : payload.raw_json,
       content_fingerprint: sealImportFingerprintOf(sealFields),
@@ -3191,6 +3225,7 @@ module.exports = {
   SEAL_IMPORT_ALLOWED_KEYS,
   SEAL_IMPORT_REVIEW_ALLOWED_KEYS,
   SEAL_IMPORT_STATUS,
+  SEAL_IMPORT_IMAGE_STATUS,
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,

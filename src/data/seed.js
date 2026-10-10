@@ -901,6 +901,17 @@ export const SEAL_IMPORT_STATUS = {
 }
 
 /**
+ * **導入行行級鍵 `image_status` 的值域（恰二值）** —— `present`（源側有圖；**缺省即此值**）／
+ * `source_no_image`（源側**無圖**：源包抓圖失敗，須「**落行 ＋ 缺圖標記**」以保住文本本體）。
+ * 明文：**不得由源側 URL 推斷**（鍵在、圖抓不到 —— 209 枚中 201 枚 `seal_yt_url` / `seal_ytsw_url`
+ * 非空、8 枚僅 `seal_yt_url`）⇒ **只能由載荷聲明**。值域外一律拒（`INVALID_VALUE` ＋ 零寫入）。
+ */
+export const SEAL_IMPORT_IMAGE_STATUS = {
+  PRESENT: 'present',
+  SOURCE_NO_IMAGE: 'source_no_image'
+}
+
+/**
  * **導入行行級元數據字段（§3.55.3 / §4.1.17）**：行主鍵 / 批次 / 來源 / 冪等鍵 / 狀態 /
  * 導入與審核留痕 / 內容指紋（軟提示）。身份類鍵（`imported_by` / `reviewer_id`）
  * **一律落不透明 uid、零手機號**（沿 §3.49）。
@@ -910,6 +921,9 @@ export const SEAL_IMPORT_ROW_FIELDS = [
   'batch_id',
   'source',
   'source_seal_id',
+  /* **行級缺圖標記**（`present` / `source_no_image`；缺省 ⇒ `present`）：源側無圖之印章
+     以 `source_no_image` **落行**（`faces[]` 允許為空），保住文本本體。只在載荷宣告時落該鍵。 */
+  'image_status',
   'status',
   'imported_by',
   'imported_at',

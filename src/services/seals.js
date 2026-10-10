@@ -63,6 +63,7 @@ import {
   SLICE_META_FIELD,
   /* **印章批 3（v1.55｜§3.55 ＋ §4.1.17）**：印章導入行三態 / 鍵前綴 / 字段真源 / 指紋。 */
   SEAL_IMPORT_STATUS,
+  SEAL_IMPORT_IMAGE_STATUS,
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,
@@ -1466,9 +1467,18 @@ export async function submitSealImport({
   if (sourceId.length > MAX_SEAL_IMPORT_ID_LENGTH) {
     return { ok: false, reason: 'INVALID_VALUE', message: `外部冪等鍵超出上限（${MAX_SEAL_IMPORT_ID_LENGTH} 字）；本次零寫入。` }
   }
+  /* **行級缺圖標記門**（值域恰二值；缺省 ⇒ `present`）：值域外 ⇒ `INVALID_VALUE` ＋ 零寫入。 */
+  const imageStatus = sealImportImageStatusOf(payloadObj)
+  if (imageStatus === null) {
+    return { ok: false, reason: 'INVALID_VALUE', message: 'image_status 只允許 present / source_no_image（缺省視為 present）；本次零寫入。' }
+  }
   const faceRows = Array.isArray(faces) ? faces.map(normalizeSealImportFace) : []
-  if (faceRows.length === 0) {
-    return { ok: false, reason: 'MISSING_REQUIRED', message: '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE）；本次零寫入。' }
+  if (faceRows.length === 0 && imageStatus !== SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE) {
+    return {
+      ok: false,
+      reason: 'MISSING_REQUIRED',
+      message: '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE；源側無圖之印章可帶 image_status=source_no_image 例外）；本次零寫入。'
+    }
   }
 
   /* **源側擴面形態門（E-1）**：任一違規 ⇒ `INVALID_VALUE` ＋ 零寫入（在寫之前、亦在冪等判定之前）。 */
@@ -1481,6 +1491,8 @@ export async function submitSealImport({
     source_seal_id: sourceId
   }
   const sourceRaw = rawJson !== null && rawJson !== undefined ? rawJson : (payloadObj.raw_json === undefined ? null : payloadObj.raw_json)
+  /* **只在載荷宣告時落該鍵**（未提供 ⇒ 不落鍵，既有帶 faces 之載荷行為一字不變）。 */
+  const imageStatusDeclared = payloadObj.image_status !== undefined && payloadObj.image_status !== null
 
   /* **冪等**（§3.55.5）：同 `source` ＋ `source_seal_id` 已有導入行 ⇒ 原樣返回（不改寫既有行）。 */
   const existing = sealImportBySourceKey(src, sourceId)
@@ -1509,6 +1521,7 @@ export async function submitSealImport({
     source_seal_id: sourceId,
     ...sealFields,
     faces: faceRows,
+    ...(imageStatusDeclared ? { image_status: imageStatus } : {}),
     /* `raw_json` **只落導入行**（正式集合不帶）。 */
     raw_json: sourceRaw
   }
@@ -1525,6 +1538,7 @@ export async function submitSealImport({
       status: SEAL_IMPORT_STATUS.PENDING,
       ...sealFields,
       faces: faceRows,
+      ...(imageStatusDeclared ? { image_status: imageStatus } : {}),
       /* `raw_json` **只落導入行**（正式集合不帶；不參與任何判定）。 */
       raw_json: sourceRaw,
       content_fingerprint: fingerprint,
@@ -1597,6 +1611,21 @@ function importFaceImageRow(face) {
   const key = String((face && face.image_storage_key) || '').trim()
   if (!sha && !key) return { hasRef: false, row: null }
   return { hasRef: true, row: imageRowByRef({ image_sha256: sha, image_storage_key: key }) }
+}
+
+/**
+ * **行級鍵 `image_status` 取値**：未提供（`undefined` / `null`）⇒ `present`（向後兼容）；
+ * 已提供 ⇒ 逐字取值，**值域外 ⇒ `null`**（调用方据此 `INVALID_VALUE` ＋ 零写入）。
+ * 与雲函數 `ops.js::sealImportImageStatusOf` / `seed.js::SEAL_IMPORT_IMAGE_STATUS` 同口徑。
+ * @returns {string|null} `present` / `source_no_image` / `null`（非法）
+ */
+function sealImportImageStatusOf(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  const raw = src.image_status
+  if (raw === undefined || raw === null) return SEAL_IMPORT_IMAGE_STATUS.PRESENT
+  const value = String(raw).trim()
+  if (value === SEAL_IMPORT_IMAGE_STATUS.PRESENT || value === SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE) return value
+  return null
 }
 
 /**

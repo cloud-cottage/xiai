@@ -151,8 +151,73 @@ const SEAL_IMPORT_FACE_FIELDS = Object.freeze([
   'image_storage_key',
   'image_sha256',
   'image_bytes',
-  'image_mime'
+  'image_mime',
+  /* **影面新增鍵**（E-2｜对齐 `src/data/seed.js` / `xiai-user-token` 副本）：`image_source_kind`
+     （`yt` / `ytsw` / `yzbk`；**值域不封閉**、原样收）。 */
+  'image_source_kind'
 ])
+
+/**
+ * **印章導入行「源側擴面」字段真源副本（恰 51 鍵）** —— 与
+ * `src/data/seed.js::SEAL_IMPORT_SOURCE_FIELDS` / `xiai-user-token/lib/ops.js` 的冻结面**逐字同值**
+ * （本次收口：末次擴面單遗留于此副本未同步）。
+ */
+const SEAL_IMPORT_SOURCE_FIELDS = Object.freeze([
+  'source_seal_id',
+  'seal_uri',
+  'category',
+  'seal_wen',
+  'seal_wen_chs',
+  'seal_wen_pinyin',
+  'seal_wen_wzly',
+  'seal_wen_wzly_chs',
+  'seal_wen_yssw',
+  'seal_wen_yssw_chs',
+  'seal_wen_wyz',
+  'seal_wen_zjsw',
+  'seal_wen_zjsw_chs',
+  'seal_ys_xz',
+  'seal_ys_label',
+  'seal_ys_kf',
+  'seal_ys_st',
+  'seal_zyz',
+  'seal_yz',
+  'seal_yz_person_name',
+  'seal_yz_person_name_chs',
+  'seal_yz_name',
+  'seal_yz_ref_id',
+  'seal_yzzkz',
+  'seal_yzzkz_chs',
+  'seal_yzzkz_id',
+  'seal_bk',
+  'seal_bk_chs',
+  'seal_bkzkz',
+  'seal_bkzkz_chs',
+  'seal_bkzkz_id',
+  'as_book_id',
+  'related_book',
+  'seal_yt_url',
+  'seal_ytsw_url',
+  'seal_yzbk_url',
+  'seal_yzqt_url',
+  'seal_threed_url',
+  'seal_title',
+  'seal_title_chs',
+  'seal_org',
+  'seal_org_name',
+  'seal_cz',
+  'seal_cc',
+  'seal_ly',
+  'seal_yn',
+  'seal_yksj_lsjn',
+  'seal_yksj_lsjn_chs',
+  'seal_yksj_gyjn',
+  'audit_status',
+  'misc'
+])
+
+/** 源側擴面中**對象（或 `null`）** 的字段（原样落；与 seed / user-token 副本同值）。 */
+const SEAL_IMPORT_SOURCE_OBJECT_FIELDS = Object.freeze(['misc'])
 
 /** 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
 const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
@@ -506,6 +571,25 @@ function pickSealImportSealFields(payload) {
   const out = {}
   SEAL_IMPORT_SEAL_FIELDS.forEach((key) => {
     out[key] = text(payload === undefined || payload === null ? '' : payload[key])
+  })
+  return out
+}
+
+/** 源側擴面**單值归一**（原样保留：字符串 / 整數 / `null`；`misc` ⇒ 對象或 `null`；缺值 ⇒ `null`）。 */
+function sealSourceValueOf(key, value) {
+  if (value === undefined || value === null) return null
+  if (SEAL_IMPORT_SOURCE_OBJECT_FIELDS.indexOf(key) !== -1) {
+    return typeof value === 'object' && !Array.isArray(value) ? { ...value } : null
+  }
+  return typeof value === 'string' || typeof value === 'number' ? value : null
+}
+
+/** 源側擴面（51 鍵）从導入行取（原样：字符串 / 整數 / `null`；`misc` 對象；缺值 ⇒ `null`）。 */
+function sealSourceFieldsOf(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  const out = {}
+  SEAL_IMPORT_SOURCE_FIELDS.forEach((key) => {
+    out[key] = key === 'source_seal_id' ? text(src.source_seal_id) : sealSourceValueOf(key, src[key])
   })
   return out
 }
@@ -1136,6 +1220,8 @@ const OPS = Object.freeze({
         const source = text(row && row.source)
         const sealName = text(row && row.seal_name)
         const sealDoc = {
+          /* **源側擴面 51 鍵整條落正式行**（E-3；`category` 由下方平台別名覆盖 ⇒ 见注）。 */
+          ...sealSourceFieldsOf(row),
           sealGroupId: `g-${serial}`,
           stamp_id: stampId,
           id: stampId,
@@ -1181,6 +1267,8 @@ const OPS = Object.freeze({
             author: text(face.author),
             author_person_id: text(face.author_person_id),
             transcription: text(face.transcription),
+            /* **影面新增鍵**（原样收；值域不封閉）—— 与 user-token 副本对齐。 */
+            image_source_kind: text(face.image_source_kind),
             source,
             uploaded_by: identity.uid,
             created_at: at,

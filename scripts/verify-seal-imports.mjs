@@ -469,8 +469,15 @@ const noteReason = (res) => {
     SOURCE_51.filter((k) => userOps.SEAL_IMPORT_ALLOWED_KEYS.indexOf(k) === -1))
   T('E1e', 'E-1 51 鍵全數 ∈ 導入行字段全集（seed `SEAL_IMPORT_FIELDS`）', [],
     SOURCE_51.filter((k) => seed.SEAL_IMPORT_FIELDS.indexOf(k) === -1))
-  T('E1f', 'E-1 允許鍵面恰 63 鍵（batch_id / source / raw_json ＋ 既有 8 ＋ 源側 51 ＋ faces）', 63,
+  T('E1f', 'E-1 允許鍵面恰 64 鍵（batch_id / source / raw_json ＋ 既有 8 ＋ 源側 51 ＋ faces ＋ image_status；本單 63 → 64）', 64,
     userOps.SEAL_IMPORT_ALLOWED_KEYS.length)
+  T('E1f2', 'E-1 新增行級鍵 `image_status` ∈ 允許鍵面（嚴格等值：恰一處）', 1,
+    userOps.SEAL_IMPORT_ALLOWED_KEYS.filter((k) => k === 'image_status').length)
+  T('E1f3', 'E-1 行級鍵 `image_status` ∈ 導入行字段全集（seed `SEAL_IMPORT_ROW_FIELDS` / `SEAL_IMPORT_FIELDS`）', { row: true, all: true },
+    { row: seed.SEAL_IMPORT_ROW_FIELDS.includes('image_status'), all: seed.SEAL_IMPORT_FIELDS.includes('image_status') })
+  T('E1f4', 'E-1 `image_status` 值域恰二值（逐字 `present` / `source_no_image`）', { present: 'present', sourceNoImage: 'source_no_image' },
+    { present: seed.SEAL_IMPORT_IMAGE_STATUS.PRESENT, sourceNoImage: seed.SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE })
+  T('E1f5', 'E-1 雲函數副本 `SEAL_IMPORT_IMAGE_STATUS` 与 seed 真源逐字同值', seed.SEAL_IMPORT_IMAGE_STATUS, userOps.SEAL_IMPORT_IMAGE_STATUS)
   T('E1g', 'E-1 印章級鍵面恰 59 鍵（既有 8 ＋ 源側 51；無重複）', { len: 59, dup: [] },
     { len: seed.SEAL_IMPORT_SEAL_LEVEL_FIELDS.length, dup: seed.SEAL_IMPORT_SEAL_LEVEL_FIELDS.filter((k, i, a) => a.indexOf(k) !== i) })
   T('E1h', 'E-1 指紋面恰 58 鍵（印章級鍵面減行級冪等鍵 `source_seal_id`）', 58, seed.SEAL_IMPORT_FINGERPRINT_FIELDS.length)
@@ -571,6 +578,68 @@ const noteReason = (res) => {
   T('E7a', '既有印章行逐字不變（本段新增行除外；79 枚面不受影響）', legacySealsSnap, legacyNow)
   T('E7b', '既有印面行逐字不變（本段新增行除外）', legacyFacesSnap, snapFaces().filter((row) => legacyFacesSnap.includes(row)))
   T('E7c', '既有導入行未被本段新增改寫（前後條數與逐字快照可比）', true, db.listSealImportRows().length > legacyImportsCount)
+
+  /* -------------------------------------------------------------------------
+     ⑨（本單新增）：**缺圖印章落行** —— 行級鍵 `image_status`（恰二值）＋ faces 門放寬
+     -------------------------------------------------------------------------
+     ① `faces:[]` 無標記 ⇒ 拒（`MISSING_REQUIRED`）＋ **零寫入**；
+     ② `faces:[]` ＋ `image_status='source_no_image'` ⇒ 放行、落行、**不生成 faces**
+        （採納：同批 1 無圖 ＋ 1 有圖 ⇒ seals +2 / faces 恰 +1；無圖那條 0 印面）；
+     ③ `image_status='present'` ＋ `faces[]` ⇒ **同舊行為**；
+     ④ `image_status` 非法值（`'none'`）⇒ 拒（`INVALID_VALUE`；值域恰二值）；
+     ⑤ `image_status` 缺省 ⇒ 按 `present` 處理（**不落鍵** ⇒ 既有帶 faces 之載荷行為一字不變）。
+     ------------------------------------------------------------------------- */
+
+  /* ⑤ 缺省 ⇒ present（不拒、不落鍵）。 */
+  const e8Default = await seals.submitSealImport({ batchId: 'B-E8', source: 'SRC', sourceSealId: 'E-DEFAULT', payload: {}, faces: mkFaces() })
+  T('E8p', 'E-8 `image_status` 缺省 ⇒ 按 `present` 處理（放行、**不落鍵**）', { ok: true, hasKey: false },
+    { ok: e8Default.ok === true, hasKey: Object.prototype.hasOwnProperty.call(e8Default.row || {}, 'image_status') })
+
+  /* ① faces:[] 無標記 ⇒ 拒 ＋ 零寫入。 */
+  const e8ImportsBefore = db.listSealImportRows().length
+  const e8NoMark = noteReason(await seals.submitSealImport({ batchId: 'B-E8', source: 'SRC', sourceSealId: 'E-NOMARK', payload: {}, faces: [] }))
+  T('E8a', 'E-8 faces:[] 無 `image_status` ⇒ `MISSING_REQUIRED`', { ok: false, reason: 'MISSING_REQUIRED' }, { ok: e8NoMark.ok, reason: e8NoMark.reason })
+  T('E8b', 'E-8 faces:[] 無標記 ⇒ **零寫入**（導入行數不變）', e8ImportsBefore, db.listSealImportRows().length)
+
+  /* ④ image_status 非法值（'none'）⇒ 拒（值域恰二值）；本地 ＋ 雲函數兩側同一把門。 */
+  const e8Bad = noteReason(await seals.submitSealImport({ batchId: 'B-E8', source: 'SRC', sourceSealId: 'E-BADSTATUS', payload: { image_status: 'none' }, faces: [] }))
+  const e8BadCloud = noteReason(await userOps.OPS.submitSealImport(
+    { source_seal_id: 'E-BADSTATUS-C', source: 'SRC', image_status: 'none', faces: [] },
+    { uid: 'u-token', phone: '13800000000' }
+  ))
+  T('E8d', 'E-8 `image_status` 非法值（`none`）⇒ `INVALID_VALUE`（值域恰二值）', { ok: false, reason: 'INVALID_VALUE' }, { ok: e8Bad.ok, reason: e8Bad.reason })
+  T('E8d2', 'E-8 雲函數側同一把門（`none` ⇒ `INVALID_VALUE` ＋ 無落盤計劃）', { ok: false, reason: 'INVALID_VALUE', plan: undefined },
+    { ok: e8BadCloud.ok, reason: e8BadCloud.reason, plan: e8BadCloud.plan })
+  T('E8e', 'E-8 非法值 ⇒ **零寫入**（導入行數不變）', e8ImportsBefore, db.listSealImportRows().length)
+
+  /* ② faces:[] ＋ image_status='source_no_image' ⇒ 放行、落行、不生成 faces。 */
+  const e8NoImg = await seals.submitSealImport({ batchId: 'B-E8X', source: 'SRC', sourceSealId: 'E-NOIMG', payload: { image_status: 'source_no_image' }, faces: [] })
+  T('E8f', 'E-8 faces:[] ＋ `image_status=source_no_image` ⇒ **放行**', true, e8NoImg.ok === true)
+  T('E8g', 'E-8 該行落行：`image_status` 原樣落 ＋ `faces` 為空數組（**不生成 faces**）', { status: 'source_no_image', faces: 0 },
+    { status: text(e8NoImg.row && e8NoImg.row.image_status), faces: ((e8NoImg.row && e8NoImg.row.faces) || []).length })
+
+  /* ③ image_status='present' ＋ faces[] ⇒ 同舊行為。 */
+  const e8Present = await seals.submitSealImport({ batchId: 'B-E8X', source: 'SRC', sourceSealId: 'E-PRESENT', payload: { image_status: 'present' }, faces: mkFaces() })
+  T('E8h', 'E-8 `image_status=present` ＋ faces[1] ⇒ **同舊行為**（放行、faces 恰 1、標記原樣落）', { ok: true, faces: 1, status: 'present' },
+    { ok: e8Present.ok === true, faces: ((e8Present.row && e8Present.row.faces) || []).length, status: text(e8Present.row && e8Present.row.image_status) })
+
+  /* ②-b 採納：同批注入 1 無圖 ＋ 1 有圖 ⇒ seals +2 / faces 恰 +1（無圖那條不生成 faces）／導入行均 ACCEPTED。 */
+  const e8SealsBefore = snapSeals().length
+  const e8FacesBefore = snapFaces().length
+  await seals.reviewSealImport(ADMIN, { batchId: 'B-E8X', decision: 'ACCEPTED' })
+  const e8NoImgRow = db.listSealImportRows().find((r) => text(r.source_seal_id) === 'E-NOIMG')
+  const e8PresentRow = db.listSealImportRows().find((r) => text(r.source_seal_id) === 'E-PRESENT')
+  const e8NoImgSeal = db.sealBySourceKey('SRC', 'E-NOIMG')
+  const e8NoImgFaces = db.listFaceRows().filter((r) => text(r.sealId || r.stamp_id) === text(e8NoImgSeal && e8NoImgSeal.stamp_id))
+  const e8PresentSeal = db.sealBySourceKey('SRC', 'E-PRESENT')
+  T('E8i', 'E-8 同批採納（1 無圖 ＋ 1 有圖）⇒ `xiai_seals` 恰 +2', 2, snapSeals().length - e8SealsBefore)
+  T('E8j', 'E-8 ⇒ `xiai_faces` 恰 +1（**無圖那條不生成 faces**）', 1, snapFaces().length - e8FacesBefore)
+  T('E8k', 'E-8 無圖印章名下印面行恰 0（**不憑空造 faces**）；有圖印章名下恰 1', { noimg: 0, present: 1 },
+    { noimg: e8NoImgFaces.length, present: db.listFaceRows().filter((r) => text(r.sealId || r.stamp_id) === text(e8PresentSeal && e8PresentSeal.stamp_id)).length })
+  T('E8l', 'E-8 兩行導入狀態均 `ACCEPTED`', { noimg: 'ACCEPTED', present: 'ACCEPTED' },
+    { noimg: text(e8NoImgRow && e8NoImgRow.status), present: text(e8PresentRow && e8PresentRow.status) })
+  T('E8m', 'E-8 無圖印章行可取到缺圖標記（**標記不丟**；取自導入行）', 'source_no_image',
+    text(e8NoImgRow && e8NoImgRow.image_status))
 }
 
 /* ---------------------------------------------------------------------------
