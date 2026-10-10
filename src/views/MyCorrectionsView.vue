@@ -189,6 +189,111 @@ async function confirmImport() {
   }
 }
 
+/* ============================================================================
+   **印章導入待審行（批 3｜v1.55 §3.55.8 / §4.1.17；本单新增）**
+   ----------------------------------------------------------------------------
+   与上方「印人导入」区块**同屏、合并为一个区块**（人类 2026-10-10 拍定）：
+   - 待审源 ＝ 服务层既有 `seals.listPendingSealImportsForAdmin(actor)`；
+     采纳 / 驳回走服务层既有 `seals.reviewSealImport(actor, {...})`（**视图不重建业务逻辑**）。
+   - **共用同一钩子值** `person-import-review` ⇒ `[data-admin-action]` **不新增取值**
+     （仍恰 10 值 / 归并 9 类）。
+   - 非管理员 ⇒ **不渲染**（条件渲染；不得 CSS 隐藏 / `disabled` 冒充）。
+   - 驳回理由上限用服务层单点 `seals.MAX_SEAL_REVIEW_NOTE_LENGTH`。
+   ============================================================================ */
+const canReviewSealImports = computed(() => seals.canReviewSealImports(actor.value))
+const sealImportResult = computed(() => {
+  void dataVersion.value
+  return seals.listPendingSealImportsForAdmin(actor.value)
+})
+const sealImportRows = computed(() => (sealImportResult.value.ok ? sealImportResult.value.rows : []))
+const sealImportNotice = computed(() => (sealImportResult.value.ok ? '' : sealImportResult.value.message))
+/** 按批次（`batch_id`）分组（视图层分组；单批内逐条采纳仍保留，与印人导入同型）。 */
+const sealImportBatches = computed(() => {
+  const groups = new Map()
+  sealImportRows.value.forEach((row) => {
+    const key = String((row && row.batch_id) || '（無批次）')
+    if (!groups.has(key)) groups.set(key, { key, batchId: String((row && row.batch_id) || ''), rows: [] })
+    groups.get(key).rows.push(row)
+  })
+  return [...groups.values()]
+})
+/** 印章導入行外部来源 id（幂等键；零手机号）。 */
+function sealImportSourceIdOf(row) {
+  return String((row && row.source_seal_id) || '')
+}
+/** 印章導入行导入人展示名（服务层单点：`暱稱（uid 短碼）`，零手机号）。 */
+function sealImportSubmitterOf(row) {
+  return corrections.submitterLabelOf(seals.sealImportSubmitterId(row))
+}
+/** 印章導入行印名上屏（缺 ⇒ 模板回落「（未命名）」）。 */
+function sealImportNameOf(row) {
+  return String((row && row.seal_name) || '')
+}
+/** 印章導入行印面数（同屏读数；缺 ⇒ 0）。 */
+function sealImportFaceCountOf(row) {
+  return Array.isArray(row && row.faces) ? row.faces.length : 0
+}
+
+/** 印章导入二次确认状态（`null` ＝ 未打开）；粒度：按批次（`batch`）/ 按单行（`row`）。 */
+const sealImportDialog = ref(null)
+const sealImportNote = ref('')
+const sealImportBusy = ref(false)
+
+function askSealImport(target, decision) {
+  sealImportNote.value = ''
+  sealImportDialog.value = { batch: target.batch || null, row: target.row || null, decision }
+}
+
+function cancelSealImport() {
+  sealImportDialog.value = null
+}
+
+const sealImportConfirmText = computed(() =>
+  sealImportDialog.value && sealImportDialog.value.decision === seals.SEAL_IMPORT_STATUS_EXPORT.ACCEPTED ? '確認採納' : '確認駁回'
+)
+const sealImportDialogTitle = computed(() => {
+  if (!sealImportDialog.value) return ''
+  const scope = sealImportDialog.value.row ? '單行' : '整批'
+  return `${scope}${sealImportDialog.value.decision === seals.SEAL_IMPORT_STATUS_EXPORT.ACCEPTED ? '採納' : '駁回'}`
+})
+const sealImportDialogMessage = computed(() => {
+  if (!sealImportDialog.value) return ''
+  const { batch, row, decision } = sealImportDialog.value
+  const verb = decision === seals.SEAL_IMPORT_STATUS_EXPORT.ACCEPTED ? '採納' : '駁回'
+  const count = row ? 1 : batch ? batch.rows.length : 0
+  const who = row ? sealImportSourceIdOf(row) : batch ? batch.key : ''
+  return `這將對「${who}」的 ${count} 條印章外部導入行全部${verb}，此操作不可撤銷。`
+})
+/** 弹窗内按钮的 `data-action`（**只用 `data-action`**，不带 `data-admin-action`）。 */
+const sealImportConfirmAction = computed(() => {
+  if (!sealImportDialog.value) return ''
+  return sealImportDialog.value.decision === seals.SEAL_IMPORT_STATUS_EXPORT.ACCEPTED
+    ? 'seal-import-confirm-accept'
+    : 'seal-import-confirm-reject'
+})
+const SEAL_IMPORT_CANCEL_ACTION = 'seal-import-cancel'
+/** 驳回理由上限（服务层单点 `MAX_SEAL_REVIEW_NOTE_LENGTH`；不在视图另立数值）。 */
+const SEAL_IMPORT_NOTE_MAX = seals.MAX_SEAL_REVIEW_NOTE_LENGTH
+
+async function confirmSealImport() {
+  const dialog = sealImportDialog.value
+  if (!dialog || sealImportBusy.value) return
+  const note = dialog.decision === seals.SEAL_IMPORT_STATUS_EXPORT.REJECTED ? sealImportNote.value : ''
+  sealImportBusy.value = true
+  try {
+    /* 服务层单点：按单行（`importId`）优先；否则按批次（`batchId`）。message 原文上屏。 */
+    const options = dialog.row
+      ? { importId: String(dialog.row.id || ''), decision: dialog.decision, note }
+      : { batchId: String((dialog.batch && dialog.batch.batchId) || ''), decision: dialog.decision, note }
+    const result = await seals.reviewSealImport(actor.value, options)
+    feedback.value = result.message
+    sealImportDialog.value = null
+    dataVersion.value += 1
+  } finally {
+    sealImportBusy.value = false
+  }
+}
+
 /** 我的提交（所有登录用户都能看到自己的记录）。 */
 const rows = computed(() => {
   void dataVersion.value
@@ -530,14 +635,16 @@ async function decide(row, decision) {
       </div>
     </section>
 
-    <!-- **待審導入批次審核區塊（印人批 2｜本单新增）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
+    <!-- **待審導入批次審核區塊（印人批 2 ＋ 印章批 3｜本单合并同屏）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
          采纳 / 驳回复用既有按钮形态与**二次确认体例（沿 §3.44.10 / W-78）**；不新开路由 / 专区。
-         钩子族新增**恰 1 个**取值 `person-import-review`（采纳 / 驳回共用，不复用既有字面值）。
-         粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现。 -->
-    <section v-if="canReviewImports" class="panel">
+         **两类导入行同屏**（印人导入 ＋ 印章导入），**共用同一钩子值** `person-import-review`
+         （采纳 / 驳回共用，不复用既有字面值，也不新增取值 ⇒ 仍恰 10 值 / 归并 9 类）。
+         粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现（两类同型）。 -->
+    <section v-if="canReviewImports || canReviewSealImports" class="panel">
       <div class="panel__head">
         <h2>待審導入批次（外部批量導入）</h2>
-        <span class="muted-hint">共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>
+        <span class="muted-hint">印人導入 共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>
+        <span class="muted-hint">印章導入 共 {{ sealImportRows.length }} 條 · {{ sealImportBatches.length }} 批</span>
       </div>
       <div class="panel__body">
         <div v-if="importBatches.length" class="batch-list">
@@ -625,7 +732,101 @@ async function decide(row, decision) {
         <p v-else-if="importNotice" class="notice review__notice" data-person-import-notice>
           {{ importNotice }}
         </p>
-        <p v-else class="muted-hint">當前沒有待審覈的外部導入批次。</p>
+
+        <!-- **印章導入（第二类｜同屏、共用同一钩子值 `person-import-review`）**：
+             待审源 ＝ `seals.listPendingSealImportsForAdmin`；采纳 / 驳回走 `seals.reviewSealImport`。 -->
+        <div v-if="sealImportBatches.length" class="batch-list" data-seal-import-list>
+          <article
+            v-for="batch in sealImportBatches"
+            :key="'seal:' + batch.key"
+            class="batch"
+            :data-seal-import-batch="batch.key"
+          >
+            <header class="batch__head">
+              <div class="batch__meta">
+                <strong class="batch__submitter">批次 {{ batch.batchId || '（無批次）' }}</strong>
+                <span class="chip chip--pending">共 {{ batch.rows.length }} 條</span>
+              </div>
+              <div class="review__ops">
+                <button
+                  class="btn btn--primary"
+                  type="button"
+                  data-admin-action="person-import-review"
+                  data-action="seal-import-accept"
+                  :data-seal-import-batch="batch.key"
+                  @click="askSealImport({ batch }, seals.SEAL_IMPORT_STATUS_EXPORT.ACCEPTED)"
+                >
+                  整批採納
+                </button>
+                <button
+                  class="btn btn--ghost"
+                  type="button"
+                  data-admin-action="person-import-review"
+                  data-action="seal-import-reject"
+                  :data-seal-import-batch="batch.key"
+                  @click="askSealImport({ batch }, seals.SEAL_IMPORT_STATUS_EXPORT.REJECTED)"
+                >
+                  整批駁回
+                </button>
+              </div>
+            </header>
+            <table class="list-table">
+              <thead>
+                <tr>
+                  <th>印章</th>
+                  <th>來源 id</th>
+                  <th>印面數</th>
+                  <th>導入人</th>
+                  <th>導入時間</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in batch.rows" :key="row.id">
+                  <td>{{ sealImportNameOf(row) || '（未命名）' }}</td>
+                  <td>{{ sealImportSourceIdOf(row) }}</td>
+                  <td>{{ sealImportFaceCountOf(row) }}</td>
+                  <td>{{ sealImportSubmitterOf(row) }}</td>
+                  <td>{{ formatDateTime(row.imported_at) }}</td>
+                  <td class="review__ops">
+                    <button
+                      class="btn btn--primary"
+                      type="button"
+                      data-admin-action="person-import-review"
+                      data-action="seal-import-accept"
+                      :data-seal-import-id="row.id"
+                      @click="askSealImport({ row }, seals.SEAL_IMPORT_STATUS_EXPORT.ACCEPTED)"
+                    >
+                      採納
+                    </button>
+                    <button
+                      class="btn btn--ghost"
+                      type="button"
+                      data-admin-action="person-import-review"
+                      data-action="seal-import-reject"
+                      :data-seal-import-id="row.id"
+                      @click="askSealImport({ row }, seals.SEAL_IMPORT_STATUS_EXPORT.REJECTED)"
+                    >
+                      駁回
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+        <p v-else-if="sealImportNotice" class="notice review__notice" data-seal-import-notice>
+          {{ sealImportNotice }}
+        </p>
+
+        <!-- **合并空态**：两类皆空且无拒绝理由时才显示（可读、繁體、不白屏）。 -->
+        <p
+          v-if="!importBatches.length && !sealImportBatches.length && !importNotice && !sealImportNotice"
+          class="muted-hint"
+          data-import-empty
+        >
+          當前沒有待審覈的印人 / 印章外部導入批次。
+        </p>
       </div>
     </section>
 
@@ -682,6 +883,34 @@ async function decide(row, decision) {
           maxlength="200"
           rows="3"
           data-person-import-note
+        ></textarea>
+      </div>
+    </ConfirmDialog>
+
+    <!-- **印章導入審核的二次确认（本单新增）**：显式、可取消、默认不通过；文案写明粒度 ＋ 条数；
+         驳回理由上限引服务层单点 `MAX_SEAL_REVIEW_NOTE_LENGTH`；弹窗按钮**只用 `data-action`**。 -->
+    <ConfirmDialog
+      v-if="sealImportDialog"
+      :title="sealImportDialogTitle"
+      :message="sealImportDialogMessage"
+      :confirm-text="sealImportConfirmText"
+      :confirm-action="sealImportConfirmAction"
+      :cancel-action="SEAL_IMPORT_CANCEL_ACTION"
+      @confirm="confirmSealImport"
+      @cancel="cancelSealImport"
+    >
+      <div
+        v-if="sealImportDialog.decision === seals.SEAL_IMPORT_STATUS_EXPORT.REJECTED"
+        class="batch__note"
+      >
+        <label class="batch__note-label" for="seal-import-note">駁回理由（可選，最多 {{ SEAL_IMPORT_NOTE_MAX }} 字）</label>
+        <textarea
+          id="seal-import-note"
+          v-model="sealImportNote"
+          class="batch__note-input"
+          :maxlength="SEAL_IMPORT_NOTE_MAX"
+          rows="3"
+          data-seal-import-note
         ></textarea>
       </div>
     </ConfirmDialog>
