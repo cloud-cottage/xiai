@@ -122,7 +122,7 @@ function sealClassDenial() {
       : SEAL_CLASS_MISSING_MESSAGE
   }
   if (!isKnownSealClass(value)) {
-    return `大類「${value}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），請重新選擇後再提交。`
+    return `大類「${value}」不在允許的 ${SEAL_CLASS_OPTIONS.length} 類之內（${SEAL_CLASS_OPTIONS.join('、')}），請重新選擇後再提交。`
   }
   return ''
 }
@@ -483,7 +483,7 @@ onBeforeUnmount(() => {
           <option v-for="item in faceContentOptions" :key="item" :value="item">{{ item }}</option>
         </select>
         <span class="field__hint">
-          印面內容固定 9 類（本框共 {{ faceContentOptions.length }} 項），只可選不可填；是廣場篩選維度。
+          印面內容固定 {{ faceContentOptions.length }} 類，只可選不可填；是廣場篩選維度。
         </span>
         <span v-if="!form.faceContent" class="field__hint" data-face-content-unselected="upload-seal">
           尚未選擇印面內容（必填）。
@@ -501,7 +501,7 @@ onBeforeUnmount(() => {
           <option v-for="item in faceStyleOptions" :key="item" :value="item">{{ item }}</option>
         </select>
         <span class="field__hint">
-          印面風格固定 23 類（本框共 {{ faceStyleOptions.length }} 項），只可選不可填；不選即不寫入該項。
+          印面風格固定 {{ faceStyleOptions.length }} 類，只可選不可填；不選即不寫入該項。
         </span>
         <span v-if="!FACE_STYLE_READY" class="field__hint" data-face-style-degraded="upload-seal">
           {{ FACE_STYLE_MISSING_MESSAGE }}
@@ -523,7 +523,7 @@ onBeforeUnmount(() => {
           <option v-for="item in sealClassOptions" :key="item" :value="item">{{ item }}</option>
         </select>
         <span class="field__hint">
-          大類固定 3 類（本框共 {{ sealClassOptions.length }} 項），只可選不可填（必填）；按朝代自動預填建議，可手動改選（手改後以你的選擇為準）。
+          大類固定 {{ sealClassOptions.length }} 類，只可選不可填（必填）；按朝代自動預填建議，可手動改選（手改後以你的選擇為準）。
         </span>
         <span v-if="!form.sealClass" class="field__hint" data-seal-class-unselected="upload-seal">
           尚未選擇大類（必填）。

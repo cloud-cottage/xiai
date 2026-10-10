@@ -2146,7 +2146,7 @@ function dynastyValueDenial(value) {
     ok: false,
     reason: 'INVALID_VALUE',
     message:
-      `朝代「${text}」不在允許的 15 類之內（${DYNASTY_OPTIONS.join('、')}），已拒絕寫入；` +
+      `朝代「${text}」不在允許的 ${DYNASTY_OPTIONS.length} 類之內（${DYNASTY_OPTIONS.join('、')}），已拒絕寫入；` +
       '既有行的舊值保留原樣、不受影響。'
   }
 }
@@ -2169,7 +2169,7 @@ function faceContentValueDenial(value) {
     ok: false,
     reason: 'INVALID_VALUE',
     message:
-      `印面內容「${text}」不在允許的 9 類之內（${FACE_CONTENT_OPTIONS.join('、')}），已拒絕寫入；` +
+      `印面內容「${text}」不在允許的 ${FACE_CONTENT_OPTIONS.length} 類之內（${FACE_CONTENT_OPTIONS.join('、')}），已拒絕寫入；` +
       '既有行的舊值保留原樣、不受影響。'
   }
 }
@@ -2187,7 +2187,7 @@ function faceStyleValueDenial(value) {
     ok: false,
     reason: 'INVALID_VALUE',
     message:
-      `印面風格「${text}」不在允許的 23 類之內（${FACE_STYLE_OPTIONS.join('、')}），已拒絕寫入；` +
+      `印面風格「${text}」不在允許的 ${FACE_STYLE_OPTIONS.length} 類之內（${FACE_STYLE_OPTIONS.join('、')}），已拒絕寫入；` +
       '既有行的舊值保留原樣、不受影響。'
   }
 }
@@ -2209,7 +2209,7 @@ function sealClassValueDenial(value) {
     ok: false,
     reason: 'INVALID_VALUE',
     message:
-      `大類「${text}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕寫入；` +
+      `大類「${text}」不在允許的 ${SEAL_CLASS_OPTIONS.length} 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕寫入；` +
       '既有行的舊值保留原樣、不受影響。'
   }
 }

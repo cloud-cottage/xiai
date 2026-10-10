@@ -2066,15 +2066,15 @@ onBeforeUnmount(() => {
               v-else-if="item.key === FACE_CONTENT_KEY"
               class="field__hint"
             >
-              【印面內容】固定 9 類（本框共 {{ faceContentOptions.length }} 項），只可選不可填；不填即不提交該項。
+              【印面內容】固定 {{ faceContentOptions.length }} 類，只可選不可填；不填即不提交該項。
               本印面當前展示值：{{ faceMarkableValue(formFace, FACE_CONTENT_KEY, formFace && formFace.seal_type) || '未著錄' }}。
             </span>
             <span v-else-if="item.key === FACE_STYLE_KEY" class="field__hint">
-              【印面風格】固定 23 類（本框共 {{ faceStyleOptions.length }} 項），只可選不可填；不填即不提交該項。
+              【印面風格】固定 {{ faceStyleOptions.length }} 類，只可選不可填；不填即不提交該項。
               本印面當前展示值：{{ faceMarkableValue(formFace, FACE_STYLE_KEY, formFace && formFace.face_style) || '未著錄' }}。
             </span>
             <span v-else-if="item.key === SEAL_CLASS_KEY" class="field__hint">
-              【大類】固定 3 類（本框共 {{ sealClassOptions.length }} 項），只可選不可填；不填即不提交該項。
+              【大類】固定 {{ sealClassOptions.length }} 類，只可選不可填；不填即不提交該項。
               本印面當前展示值：{{ faceMarkableValue(formFace, SEAL_CLASS_KEY, formFace && formFace.seal_class) || '未著錄' }}。
             </span>
             <span v-if="item.key === 'dynasty' && !DYNASTY_READY" class="field__hint" data-dynasty-degraded="correction">
