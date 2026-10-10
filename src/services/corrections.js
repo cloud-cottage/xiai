@@ -309,21 +309,21 @@ const FIELD_VALUE_DOMAINS = {
   seal_type: {
     accepts: (text) => isKnownFaceContent(text),
     denyMessage: (label, text) =>
-      `${label}「${text}」不在允許的 9 類之內（${FACE_CONTENT_OPTIONS.join('、')}），已拒絕提交；` +
+      `${label}「${text}」不在允許的 ${FACE_CONTENT_OPTIONS.length} 類之內（${FACE_CONTENT_OPTIONS.join('、')}），已拒絕提交；` +
       '請從給定選項中選擇。'
   },
   /* 【印面风格】（R-31）：真源＝`FACE_STYLE_OPTIONS`（23 值；新键 `face_style`）。 */
   face_style: {
     accepts: (text) => isKnownFaceStyle(text),
     denyMessage: (label, text) =>
-      `${label}「${text}」不在允許的 23 類之內（${FACE_STYLE_OPTIONS.join('、')}），已拒絕提交；` +
+      `${label}「${text}」不在允許的 ${FACE_STYLE_OPTIONS.length} 類之內（${FACE_STYLE_OPTIONS.join('、')}），已拒絕提交；` +
       '請從給定選項中選擇。'
   },
   /* 【大類】：真源＝`SEAL_CLASS_OPTIONS`（3 值；新键 `seal_class`，印面级）。 */
   seal_class: {
     accepts: (text) => isKnownSealClass(text),
     denyMessage: (label, text) =>
-      `${label}「${text}」不在允許的 3 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕提交；` +
+      `${label}「${text}」不在允許的 ${SEAL_CLASS_OPTIONS.length} 類之內（${SEAL_CLASS_OPTIONS.join('、')}），已拒絕提交；` +
       '請從給定選項中選擇。'
   },
   /* 【作者】（**person-model §4.2：自本模型起为引用型**）：载荷值是 `author_person_id`，
