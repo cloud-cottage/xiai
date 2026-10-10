@@ -929,15 +929,28 @@ function rowsOfReply(reply) {
  * **读**（**唯一读点**）：按等值条件读某集合的行。
  * 失败 ⇒ 抛错（由 `index.js` 统一转 `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。
  * `collection(` 只在本文件出现 ⇒ 静态判据仍成立。
+ * **分页护栏（本单 I-3 真因）**：真实 CloudBase 的 `.get()` **默认上限 100 行** —— 不显式
+ * `.limit()` 时 `where({batch_id}).get()` 只回该批**前 100 行**（**与状态无关**）⇒ 批内超过 100 行
+ * 时，处理完前 100 行后**每次调用读到的仍是这同一批已终态行**（循环里全 `skipped`）⇒
+ * `plan.writes` 恒空。故本读点接受 `options.limit`（显式 `.limit(n)`，n 由调用方给）。
+ * 注入式内存假体（离线自检）认不出 `.limit` ⇒ **原样读全部**（等价于不限量，**不构成降级**：
+ * 假体的行集本就是调用方可读到的全集）。**正确性口径 ＝ 调用方按 `status` 过滤目标行**
+ * （终态行不再进入读集 ⇒ **天然自愈分页**、可反复调用直至清空）；`.limit` 只是单次体量护栏。
  * @param {string} collection 集合名（`^xiai_`）
  * @param {object} match 等值条件
+ * @param {{limit?:number}} [options] 单次读取上限（平台护栏；缺省 / ≤0 ⇒ 不显式限量）
  * @returns {Promise<Array<object>>}
  */
-async function readRows(collection, match) {
+async function readRows(collection, match, options) {
   const db = resolveDb()
   const query = db.collection(collection)
   if (!query || typeof query.where !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
-  return rowsOfReply(await query.where(match).get())
+  let chain = query.where(match)
+  const limit = Number(options && options.limit)
+  if (Number.isFinite(limit) && limit > 0 && chain && typeof chain.limit === 'function') {
+    chain = chain.limit(Math.floor(limit))
+  }
+  return rowsOfReply(await chain.get())
 }
 
 /**
@@ -2232,6 +2245,172 @@ const SEAL_VALUE_DOMAIN_TARGETS = Object.freeze([
   Object.freeze({ collection: COLLECTIONS.faces, key: 'faces', field: 'seal_class', domain: SEAL_CLASS_OPTIONS })
 ])
 
+/* **本单 I-3（真因修复）**：待审导入行**单次读取上限** —— 平台分页护栏（CloudBase `.get()`
+   默认 100 行）。**正确性口径 ＝ 取行式按 `status = PENDING` 过滤**（终态行不再进入读集 ⇒
+   天然自愈分页、可反复调用直至清空）；本常量只是单次体量护栏。 */
+const IMPORT_REVIEW_PAGE_SIZE = 200
+/* **本单 I-2**：修复扫描（`status = ACCEPTED`）的单次读取上限（同护栏口径）。 */
+const IMPORT_REPAIR_SCAN_LIMIT = 1000
+/* **本单 I-2**：修复 op 的载荷键面（沿迁移 op 同型；`['dry_run']`；**零新增键面**）。 */
+const REPAIR_ALLOWED_KEYS = MIGRATE_ALLOWED_KEYS
+/* **本单 I-2**：修复通道逐集合面（集合 ＝ 导入集合；键 ＝ 幂等键字段；正式集合见 `formal`）。 */
+const IMPORT_REPAIR_TARGETS = Object.freeze([
+  Object.freeze({ key: 'person', imports: COLLECTIONS.personImports, formal: COLLECTIONS.persons, idKey: 'source_person_id', label: '印人' }),
+  Object.freeze({ key: 'item', imports: COLLECTIONS.itemImports, formal: COLLECTIONS.items, idKey: 'source_item_id', label: '印谱' }),
+  Object.freeze({ key: 'seal', imports: COLLECTIONS.sealImports, formal: COLLECTIONS.seals, idKey: 'source_seal_id', label: '印章' })
+])
+
+/**
+ * **印人编号分配**（`PR` ＋ 9 位流水，**跳过已占用**）—— `reviewPersonImport` 与
+ * `repairImportAcceptance` **同一套编号规则**（不另立第二套）。
+ * @param {Array<object>} persons 既有正式印人行
+ * @returns {string}
+ */
+function nextPersonCodeOf(persons) {
+  const rows = Array.isArray(persons) ? persons : []
+  let max = 0
+  rows.forEach((item) => {
+    const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
+    if (matched) max = Math.max(max, Number(matched[1]))
+  })
+  const taken = new Set(rows.map((item) => text(item && item.code)))
+  let index = max + 1
+  while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
+  return `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
+}
+
+/**
+ * 由**导入行**构造正式印人行 —— `reviewPersonImport` / `repairImportAcceptance` **同一套字段面**
+ * （值来自导入行，**不做任何转换改写**）。
+ * @param {object} row 导入行
+ * @param {{uid:string}} identity 服务端派生身份（落 `created_by`）
+ * @param {string} at ISO 时戳
+ * @param {string} code 已分配的正式编号
+ * @returns {object}
+ */
+function buildPersonDocFromImport(row, identity, at, code) {
+  return {
+    id: code,
+    code,
+    family_name: text(row.family_name),
+    given_name: text(row.given_name),
+    courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
+    art_names: Array.isArray(row.art_names) ? row.art_names : [],
+    alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
+    birth_year: row.birth_year === undefined ? null : row.birth_year,
+    death_year: row.death_year === undefined ? null : row.death_year,
+    years_lived: null,
+    birth_era_text: '',
+    death_era_text: '',
+    dynasty: '',
+    gender: '',
+    cbdb_id: text(row.cbdb_id),
+    card_id: '',
+    /* **person 六扩字段（值来自采纳的导入行；不做任何转换改写）**。 */
+    native_place: text(row.native_place),
+    biography: text(row.biography),
+    source: text(row.source),
+    source_id: text(row.source_id),
+    native_place_chs: text(row.native_place_chs),
+    biography_chs: text(row.biography_chs),
+    source_person_id: text(row.source_person_id), // **幂等键（溯源）**
+    proposal_id: '',
+    created_by: identity.uid,
+    created_at: at,
+    updated_at: at
+  }
+}
+
+/**
+ * 由**导入行**构造采纳落点（**正式印章行 ＋ 逐印面行**）—— `reviewSealImport` /
+ * `repairImportAcceptance` **同一套字段面与编号规则**（不另立第二套）。
+ *
+ * **影像引用逐条校验**（沿既有口径）：宣告了引用但解析不到 ⇒ `{ok:false}`；
+ * `kind=FACE` **无任何引用**亦 ⇒ `{ok:false}`（边款 `EDGE` 无引用则放行）。
+ * @param {object} row 印章导入行
+ * @param {Array<object>} seals 既有正式印章行（用于编号分配）
+ * @param {Array<object>} faces 既有印面行（用于 id 分配）
+ * @param {{uid:string}} identity 服务端派生身份
+ * @param {string} at ISO 时戳
+ * @returns {Promise<{ok:true, stampId:string, sealDoc:object, faceDocs:Array<object>}|{ok:false}>}
+ */
+async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
+  const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
+  const resolvedFaces = []
+  for (const face of faceDefs) {
+    const hasRef = text(face.image_sha256) !== '' || text(face.image_storage_key) !== ''
+    if (!hasRef) {
+      if (face.kind === 'FACE') return { ok: false }
+      resolvedFaces.push({ face, image: null })
+      continue
+    }
+    const image = await findSealImportImageRow(face)
+    if (!image) return { ok: false }
+    resolvedFaces.push({ face, image })
+  }
+  const stampId = nextSealStampIdOf(seals)
+  const serial = sealStampSerialOf(stampId)
+  const source = text(row && row.source)
+  const sealName = text(row && row.seal_name)
+  const sealDoc = {
+    /* **源側擴面 51 鍵整條落正式行**（E-3；`category` 逐字由下方平台別名覆蓋 ⇒ 見注）。 */
+    ...sealSourceFieldsOf(row),
+    sealGroupId: `g-${serial}`,
+    stamp_id: stampId,
+    id: stampId,
+    seal_name: sealName,
+    name: sealName,
+    transcription: text(row && row.transcription),
+    dynasty: text(row && row.dynasty),
+    seal_type: text(row && row.seal_type),
+    /* `category` 是**平台既有別名**（＝ `seal_type`，印面內容）；源側 `category`（印章 / 印譜）
+       只留導入行 ⇒ 不得让别名语义被覆盖（`normalizeSealRow` 读面亦按 `seal_type` 归一）。 */
+    category: text(row && row.seal_type),
+    seal_style: text(row && row.seal_style),
+    material: text(row && row.material),
+    shape: text(row && row.shape),
+    asset_kind: 'SEAL',
+    /* **同置**：採納 ⇒ 正式行 `review_status='APPROVED'`（与導入行 `status='ACCEPTED'` 同时推进）。 */
+    review_status: 'APPROVED',
+    author: text(row && row.author),
+    source,
+    source_seal_id: text(row && row.source_seal_id),
+    uploaded_by: identity.uid,
+    created_at: at,
+    updated_at: at
+  }
+  const taken = new Set((Array.isArray(faces) ? faces : []).map((item) => text(item && item.id)))
+  const faceDocs = []
+  for (const { face, image } of resolvedFaces) {
+    const faceId = nextFaceIdOf(stampId, face.kind, taken)
+    taken.add(faceId)
+    const isEdge = face.kind === 'EDGE'
+    faceDocs.push({
+      id: faceId,
+      sealId: stampId,
+      stamp_id: stampId,
+      kind: face.kind,
+      face_image_id: !isEdge && image ? text(image.id) : null,
+      edge_image_ids: isEdge && image ? [text(image.id)] : [],
+      seal_name: text(face.seal_name) || sealName,
+      dynasty: text(face.dynasty) || text(row && row.dynasty),
+      seal_type: text(face.seal_type),
+      face_style: text(face.face_style),
+      seal_class: text(face.seal_class),
+      author: text(face.author),
+      author_person_id: text(face.author_person_id),
+      transcription: text(face.transcription),
+      /* **影面新增鍵**（原样收；值域不封閉）。 */
+      image_source_kind: text(face.image_source_kind),
+      source,
+      uploaded_by: identity.uid,
+      created_at: at,
+      updated_at: at
+    })
+  }
+  return { ok: true, stampId, sealDoc, faceDocs }
+}
+
 const ADMIN_OPS = Object.freeze({
   /**
    * 审核勘误（**管理员写路径**；两处落盘：先公开脱敏投影、后私有状态）。
@@ -2607,15 +2786,30 @@ const ADMIN_OPS = Object.freeze({
     if (noteText.length > MAX_NOTE_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
     }
-    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。 */
+    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。
+       **本单 I-3（真因修复）**：批次路**按 `status = PENDING` 取行 ＋ 显式限量**
+       —— 旧式 `where({batch_id}).get()` 受平台默认上限 100 行所限，批内超过 100 行时
+       **处理完前 100 行后每次都读到同一批已终态行** ⇒ `plan.writes` 恒空。按 `PENDING`
+       取行 ⇒ 已审行不再进入读集 ⇒ **天然自愈分页，可反复调用直至清空**。
+       本批若**无待审行**（已全部处理完）⇒ 再只读一次本批（限量）以**如实报出 `skipped`**，
+       而不是把「做完了」伪装成 `NOT_FOUND`。 */
     let targets = []
+    let skippedSeed = []
     if (importId) {
       const found = await readPersonImportRow(importId)
       if (found) targets = [found.row]
     } else {
-      targets = await readRows(COLLECTIONS.personImports, { batch_id: batchId })
+      targets = await readRows(
+        COLLECTIONS.personImports,
+        { batch_id: batchId, status: PERSON_IMPORT_STATUS.PENDING },
+        { limit: IMPORT_REVIEW_PAGE_SIZE }
+      )
+      if (targets.length === 0) {
+        const done = await readRows(COLLECTIONS.personImports, { batch_id: batchId }, { limit: IMPORT_REVIEW_PAGE_SIZE })
+        skippedSeed = done.map((row) => text(row && row.id)).filter((id) => id !== '')
+      }
     }
-    if (targets.length === 0) {
+    if (targets.length === 0 && skippedSeed.length === 0) {
       return deny(REASONS.NOT_FOUND, `未找到匹配的外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
     }
     const accepted = decision === PERSON_IMPORT_STATUS.ACCEPTED
@@ -2626,7 +2820,7 @@ const ADMIN_OPS = Object.freeze({
     const writes = []
     const acceptedIds = []
     const rejectedIds = []
-    const skipped = []
+    const skipped = skippedSeed.slice()
     const failed = []
     let personsCache = null
     const personsOf = async () => {
@@ -2655,47 +2849,12 @@ const ADMIN_OPS = Object.freeze({
         continue
       }
       const persons = await personsOf()
+      /* **I-1 顺序（本单硬口径）**：**先落正式行**（按幂等键去重 ⇒ 重跑不产生重复行），
+         **后翻导入行状态**（`expectAtLeast:1`）—— 见下方 `writes` 压栈顺序。 */
       const existing = persons.find((item) => text(item && item.source_person_id) === sourceId)
       if (!existing) {
-        let max = 0
-        persons.forEach((item) => {
-          const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
-          if (matched) max = Math.max(max, Number(matched[1]))
-        })
-        const taken = new Set(persons.map((item) => text(item && item.code)))
-        let index = max + 1
-        while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
-        const code = `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
-        const person = {
-          id: code,
-          code,
-          family_name: text(row.family_name),
-          given_name: text(row.given_name),
-          courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
-          art_names: Array.isArray(row.art_names) ? row.art_names : [],
-          alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
-          birth_year: row.birth_year === undefined ? null : row.birth_year,
-          death_year: row.death_year === undefined ? null : row.death_year,
-          years_lived: null,
-          birth_era_text: '',
-          death_era_text: '',
-          dynasty: '',
-          gender: '',
-          cbdb_id: text(row.cbdb_id),
-          card_id: '',
-          /* **person 六扩字段（值来自采纳的导入行；不做任何转换改写）**。 */
-          native_place: text(row.native_place),
-          biography: text(row.biography),
-          source: text(row.source),
-          source_id: text(row.source_id),
-          native_place_chs: text(row.native_place_chs),
-          biography_chs: text(row.biography_chs),
-          source_person_id: sourceId, // **幂等键（溯源）**
-          proposal_id: '',
-          created_by: identity.uid,
-          created_at: at,
-          updated_at: at
-        }
+        const code = nextPersonCodeOf(persons)
+        const person = buildPersonDocFromImport(row, identity, at, code)
         persons.push(person)
         writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })
       }
@@ -2761,15 +2920,27 @@ const ADMIN_OPS = Object.freeze({
     if (noteText.length > MAX_NOTE_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
     }
-    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。 */
+    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。
+       **本单 I-3**：批次路**按 `status = PENDING` 取行 ＋ 显式限量**（同 person 通道口径；
+       旧式按 `batch_id` 取行受平台默认 100 行上限 ⇒ 批内 > 100 行时永远推进不了第 101 行）。
+       本批若无待审行 ⇒ 再只读一次本批（限量）以**如实报出 `skipped`**，不伪装成 `NOT_FOUND`。 */
     let targets = []
+    let skippedSeed = []
     if (importId) {
       const found = await readSealImportRow(importId)
       if (found) targets = [found.row]
     } else {
-      targets = await readRows(COLLECTIONS.sealImports, { batch_id: batchId })
+      targets = await readRows(
+        COLLECTIONS.sealImports,
+        { batch_id: batchId, status: SEAL_IMPORT_STATUS.PENDING },
+        { limit: IMPORT_REVIEW_PAGE_SIZE }
+      )
+      if (targets.length === 0) {
+        const done = await readRows(COLLECTIONS.sealImports, { batch_id: batchId }, { limit: IMPORT_REVIEW_PAGE_SIZE })
+        skippedSeed = done.map((row) => text(row && row.id)).filter((id) => id !== '')
+      }
     }
-    if (targets.length === 0) {
+    if (targets.length === 0 && skippedSeed.length === 0) {
       return deny(REASONS.NOT_FOUND, `未找到匹配的印章外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
     }
     const accepted = decision === SEAL_IMPORT_STATUS.ACCEPTED
@@ -2780,7 +2951,7 @@ const ADMIN_OPS = Object.freeze({
     const writes = []
     const acceptedIds = []
     const rejectedIds = []
-    const skipped = []
+    const skipped = skippedSeed.slice()
     const failed = []
     let sealsCache = null
     let facesCache = null
@@ -2814,96 +2985,22 @@ const ADMIN_OPS = Object.freeze({
         continue
       }
       const seals = await sealsOf()
+      /* **I-1 顺序（本单硬口径）**：**先落正式行**（印章 ＋ 印面；按 `(source_seal_id, source)`
+         幂等键去重 ⇒ 重跑不产生重复行），**后翻导入行状态**（`expectAtLeast:1`）。 */
       const existing = seals.find((item) => text(item && item.source_seal_id) === sourceSealId && text(item && item.source) === text(row && row.source))
       if (!existing) {
-        /* **影像引用校验**：逐条校验引用对象存在（缺失 ⇒ 该条拒绝 ＋ 零写入）。 */
-        const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
-        const resolvedFaces = []
-        let dangling = false
-        for (const face of faceDefs) {
-          const hasRef = text(face.image_sha256) !== '' || text(face.image_storage_key) !== ''
-          if (!hasRef) {
-            if (face.kind === 'FACE') {
-              dangling = true
-              break
-            }
-            resolvedFaces.push({ face, image: null })
-            continue
-          }
-          const image = await findSealImportImageRow(face)
-          if (!image) {
-            dangling = true
-            break
-          }
-          resolvedFaces.push({ face, image })
-        }
-        if (dangling) {
+        /* **影像引用逐条校验 ＋ 采纳落点构造**（与 `repairImportAcceptance` **同一套**构建函数）。 */
+        const built = await buildSealAcceptanceFromImport(row, seals, await facesOf(), identity, at)
+        if (!built.ok) {
           /* 该条失败：保持 PENDING 且零写入（不动 seals / faces、不改本行）。 */
           failed.push(rid)
           continue
         }
-        const stampId = nextSealStampIdOf(seals)
-        const serial = sealStampSerialOf(stampId)
-        const source = text(row && row.source)
-        const sealName = text(row && row.seal_name)
-        const sealDoc = {
-          /* **源側擴面 51 鍵整條落正式行**（E-3；`category` 逐字由下方平台別名覆蓋 ⇒ 見注）。 */
-          ...sealSourceFieldsOf(row),
-          sealGroupId: `g-${serial}`,
-          stamp_id: stampId,
-          id: stampId,
-          seal_name: sealName,
-          name: sealName,
-          transcription: text(row && row.transcription),
-          dynasty: text(row && row.dynasty),
-          seal_type: text(row && row.seal_type),
-          /* `category` 是**平台既有別名**（＝ `seal_type`，印面內容）；源側 `category`（印章 / 印譜）
-             只留導入行 ⇒ 不得让别名语义被覆盖（`normalizeSealRow` 读面亦按 `seal_type` 归一）。 */
-          category: text(row && row.seal_type),
-          seal_style: text(row && row.seal_style),
-          material: text(row && row.material),
-          shape: text(row && row.shape),
-          asset_kind: 'SEAL',
-          /* **同置**：採納 ⇒ 正式行 `review_status='APPROVED'`（与導入行 `status='ACCEPTED'` 同时推进）。 */
-          review_status: 'APPROVED',
-          author: text(row && row.author),
-          source,
-          source_seal_id: sourceSealId,
-          uploaded_by: identity.uid,
-          created_at: at,
-          updated_at: at
-        }
-        seals.push(sealDoc)
-        writes.push({ kind: 'set', collection: COLLECTIONS.seals, id: stampId, doc: sealDoc })
+        seals.push(built.sealDoc)
+        writes.push({ kind: 'set', collection: COLLECTIONS.seals, id: built.stampId, doc: built.sealDoc })
         const allFaces = await facesOf()
-        const taken = new Set(allFaces.map((item) => text(item && item.id)))
-        for (const { face, image } of resolvedFaces) {
-          const faceId = nextFaceIdOf(stampId, face.kind, taken)
-          taken.add(faceId)
-          const isEdge = face.kind === 'EDGE'
-          const faceDoc = {
-            id: faceId,
-            sealId: stampId,
-            stamp_id: stampId,
-            kind: face.kind,
-            face_image_id: !isEdge && image ? text(image.id) : null,
-            edge_image_ids: isEdge && image ? [text(image.id)] : [],
-            seal_name: text(face.seal_name) || sealName,
-            dynasty: text(face.dynasty) || text(row && row.dynasty),
-            seal_type: text(face.seal_type),
-            face_style: text(face.face_style),
-            seal_class: text(face.seal_class),
-            author: text(face.author),
-            author_person_id: text(face.author_person_id),
-            transcription: text(face.transcription),
-            /* **影面新增鍵**（原样收；值域不封閉）。 */
-            image_source_kind: text(face.image_source_kind),
-            source,
-            uploaded_by: identity.uid,
-            created_at: at,
-            updated_at: at
-          }
-          writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceId, doc: faceDoc })
+        for (const faceDoc of built.faceDocs) {
+          writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
           allFaces.push(faceDoc)
         }
       }
@@ -2969,15 +3066,27 @@ const ADMIN_OPS = Object.freeze({
     if (noteText.length > MAX_NOTE_LENGTH) {
       return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
     }
-    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。 */
+    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。
+       **本单 I-3**：批次路**按 `status = PENDING` 取行 ＋ 显式限量**（同 person / seal 通道口径；
+       旧式按 `batch_id` 取行受平台默认 100 行上限 ⇒ 批内 > 100 行时永远推进不了第 101 行）。
+       本批若无待审行 ⇒ 再只读一次本批（限量）以**如实报出 `skipped`**，不伪装成 `NOT_FOUND`。 */
     let targets = []
+    let skippedSeed = []
     if (importId) {
       const found = await readItemImportRow(importId)
       if (found) targets = [found.row]
     } else {
-      targets = await readRows(COLLECTIONS.itemImports, { batch_id: batchId })
+      targets = await readRows(
+        COLLECTIONS.itemImports,
+        { batch_id: batchId, status: ITEM_IMPORT_STATUS.PENDING },
+        { limit: IMPORT_REVIEW_PAGE_SIZE }
+      )
+      if (targets.length === 0) {
+        const done = await readRows(COLLECTIONS.itemImports, { batch_id: batchId }, { limit: IMPORT_REVIEW_PAGE_SIZE })
+        skippedSeed = done.map((row) => text(row && row.id)).filter((id) => id !== '')
+      }
     }
-    if (targets.length === 0) {
+    if (targets.length === 0 && skippedSeed.length === 0) {
       return deny(REASONS.NOT_FOUND, `未找到匹配的印谱外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
     }
     const accepted = decision === ITEM_IMPORT_STATUS.ACCEPTED
@@ -2988,7 +3097,7 @@ const ADMIN_OPS = Object.freeze({
     const writes = []
     const acceptedIds = []
     const rejectedIds = []
-    const skipped = []
+    const skipped = skippedSeed.slice()
     const failed = []
     let itemsCache = null
     const itemsOf = async () => {
@@ -3037,6 +3146,130 @@ const ADMIN_OPS = Object.freeze({
       failed,
       plan: { op: 'reviewItemImport', writes }
     }
+  },
+
+  /**
+   * **半采纳修复（幂等管理员 op｜本单 I-2）**：扫描三个导入集合中 `status = ACCEPTED` 而
+   * **其正式行不存在**的**孤儿行**（孤儿判据 ＝ 按各通道**幂等键**在正式集合里查不到行）
+   * ⇒ **补齐正式行**。
+   *
+   * 契约记录（逐条）：
+   *   · **孤儿判据（幂等键）**：person ⇒ `xiai_persons.source_person_id`；item ⇒
+   *     `xiai_items.source_item_id`；seal ⇒ `xiai_seals.source_seal_id` **＋ `source`**
+   *     （与采纳去重键逐字同口径）。**幂等键缺失**的导入行**不计为孤儿**（无键不可判定；
+   *     采纳路径本就不会把它置为终态）。
+   *   · **补齐口径 ＝ 沿用各通道现有构建函数的同一套字段面与编号规则**（不另立第二套）：
+   *     person ⇒ `buildPersonDocFromImport` ＋ `nextPersonCodeOf`；item ⇒ `itemBodyOf`；
+   *     seal ⇒ `buildSealAcceptanceFromImport`（**含影像引用逐条校验**：引用解析不到 ⇒
+   *     该条**不补**、**如实留在 `orphan` 计数里**）。
+   *   · **预演 `dry_run:true`（缺省）** ⇒ **零写入**，只吐权威清单：逐集合 `scanned`（读到的
+   *     `ACCEPTED` 行数）/ `orphan`（孤儿数）/ `samples`（≤5，含导入行号 ＋ 幂等键）。
+   *   · **执行 `dry_run:false`** ⇒ 逐孤儿产出正式行 `set`（**先正式行，与采纳路径同序**）。
+   *   · **幂等**：重放（库内已无孤儿）⇒ `orphan` 全 `0`、**零写入**、`idempotent:true`。
+   *   · **入参**：`{ dry_run?: boolean }`（缺省 `true`；键面封闭 ＝ `REPAIR_ALLOWED_KEYS`）。
+   *   · **回包（固定键面）**：`{ ok, op, dry_run, scanned:{person,item,seal}, orphan:{…},
+   *     changed:{…}, samples:[…], idempotent, plan? }`。
+   *   · **权限**：走既有管理员白名单门（缺 env ⇒ 结构化拒 ＋ 零写入；非白名单 ⇒ `FORBIDDEN`
+   *     ＋ 零写入）；**零新增 `reason` 字面值**；判定在写之前。
+   * @param {object} [payload] `{ dry_run?: boolean }`（缺省 ⇒ `{dry_run:true}`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, op:string, dry_run:boolean, scanned:object, orphan:object,
+   *          changed:object, samples:Array<object>, idempotent:boolean, plan?:object}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async repairImportAcceptance(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，写之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    const input = payload === undefined || payload === null ? {} : payload
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const unknown = Object.keys(input).filter((key) => REPAIR_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}；本次零寫入。`)
+    }
+    let dryRun = true
+    if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+      if (typeof input.dry_run !== 'boolean') {
+        return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+      }
+      dryRun = input.dry_run
+    }
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const scanned = { person: 0, item: 0, seal: 0 }
+    const orphan = { person: 0, item: 0, seal: 0 }
+    const changed = { person: 0, item: 0, seal: 0 }
+    const samples = []
+    const writes = []
+    const MAX_SAMPLES = 5
+    for (const target of IMPORT_REPAIR_TARGETS) {
+      /* ② 只读扫描：本集合 `ACCEPTED` 行（限量护栏）＋ 正式集合现有行（幂等键查存）。 */
+      const imports = await readRows(target.imports, { status: 'ACCEPTED' }, { limit: IMPORT_REPAIR_SCAN_LIMIT })
+      const formal = await readRows(target.formal, {})
+      scanned[target.key] = imports.length
+      const hasFormal = (row) => {
+        const key = text(row && row[target.idKey])
+        if (!key) return true
+        if (target.key === 'seal') {
+          return formal.some((item) => text(item && item.source_seal_id) === key && text(item && item.source) === text(row && row.source))
+        }
+        return formal.some((item) => text(item && item[target.idKey]) === key)
+      }
+      for (const row of imports) {
+        if (!text(row && row[target.idKey])) continue
+        if (hasFormal(row)) continue
+        orphan[target.key] += 1
+        if (samples.length < MAX_SAMPLES) {
+          samples.push({ collection: target.imports, import_id: text(row && row.id), key: text(row && row[target.idKey]), formal: target.formal })
+        }
+        if (dryRun) continue
+        if (target.key === 'person') {
+          const code = nextPersonCodeOf(formal)
+          const doc = buildPersonDocFromImport(row, identity, at, code)
+          formal.push(doc)
+          writes.push({ kind: 'set', collection: target.formal, id: code, doc })
+          changed[target.key] += 1
+          continue
+        }
+        if (target.key === 'item') {
+          const doc = itemBodyOf(row)
+          formal.push(doc)
+          writes.push({ kind: 'set', collection: target.formal, id: text(row && row.source_item_id), doc })
+          changed[target.key] += 1
+          continue
+        }
+        /* 印章通道：**同一套**构建函数（含影像引用校验）⇒ 解析不到引用的行**不补**。 */
+        const faces = await readRows(COLLECTIONS.faces, {})
+        const built = await buildSealAcceptanceFromImport(row, formal, faces, identity, at)
+        if (!built.ok) continue
+        formal.push(built.sealDoc)
+        writes.push({ kind: 'set', collection: target.formal, id: built.stampId, doc: built.sealDoc })
+        for (const faceDoc of built.faceDocs) {
+          faces.push(faceDoc)
+          writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
+        }
+        changed[target.key] += 1
+      }
+    }
+    const totalOrphan = orphan.person + orphan.item + orphan.seal
+    const result = {
+      ok: true,
+      op: 'repairImportAcceptance',
+      dry_run: dryRun,
+      scanned,
+      orphan,
+      changed,
+      samples,
+      idempotent: totalOrphan === 0
+    }
+    /* 只有「执行态且有写入」才产出落盘计划 ⇒ `dry_run` / 无孤儿 ⇒ **零写入**。 */
+    if (!dryRun && writes.length > 0) result.plan = { op: 'repairImportAcceptance', writes }
+    return result
   },
 
   /**
@@ -3253,37 +3486,56 @@ const ADMIN_OPS = Object.freeze({
  * 本单把「采信行 → 公开计数行」排成**确定序**，且两键皆**确定性 `_id` ＋ 幂等 upsert**
  * ⇒ 任一步在重试后可自愈（不会重复计数、不会产生第二行）；中途失败 ⇒ 抛错，由 `index.js`
  * 转 `STORAGE_UNAVAILABLE`（**不伪装成功、不伪装 `FORBIDDEN`**）。
+ *
+ * **本单 I-1（半采纳如实登记）**：任一步失败 ⇒ **立即中断、不再执行后续步骤**，并把
+ * **已成功步数 / 总步数 / 失败步序号**挂在抛出的错误上（`completedSteps` / `totalSteps` /
+ * `failedStep`）⇒ `index.js` 据此**如实报告**（**不得再声称「本次零寫入」**，除非确实零写入）。
  * @param {{collection?:string, doc?:object, writes?:Array<object>}} plan
- * @returns {Promise<string>} 首要文档标识；失败 ⇒ 抛错
+ * @returns {Promise<string>} 首要文档标识；失败 ⇒ 抛错（带进度信息）
  */
 async function persist(plan) {
   const db = resolveDb()
   if (plan && Array.isArray(plan.writes)) {
     let primary = ''
-    for (const step of plan.writes) {
-      if (step && step.kind === 'set') {
-        await db.collection(step.collection).doc(step.id).set(step.doc)
-        if (!primary) primary = String(step.id)
-        continue
-      }
-      if (step && step.kind === 'update') {
-        /* 按检索式 `update`（V3 管理员写面：私有行状态）；命中 0 行（并发改动 / 单号不存在）
-           ⇒ 抛错 ⇒ 由 `index.js` 转 `STORAGE_UNAVAILABLE`（**不伪装成功 / 不伪装 FORBIDDEN**）。 */
-        const result = await db.collection(step.collection).where(step.match).update(step.doc)
-        const updated = updatedCountOf(result)
-        if (typeof step.expectAtLeast === 'number' && updated !== null && updated < step.expectAtLeast) {
-          throw new Error(`update-matched-too-few:${updated}`)
+    const totalSteps = plan.writes.length
+    let completedSteps = 0
+    for (let index = 0; index < plan.writes.length; index += 1) {
+      const step = plan.writes[index]
+      try {
+        if (step && step.kind === 'set') {
+          await db.collection(step.collection).doc(step.id).set(step.doc)
+          if (!primary) primary = String(step.id)
+          completedSteps += 1
+          continue
         }
-        if (!primary) {
-          const hit = await db.collection(step.collection).where(step.match).get()
-          const rows = rowsOf(hit)
-          if (rows.length > 0) primary = text(rows[0]._id) || text(rows[0].id)
+        if (step && step.kind === 'update') {
+          /* 按检索式 `update`（V3 管理员写面：私有行状态）；命中 0 行（并发改动 / 单号不存在）
+             ⇒ 抛错 ⇒ 由 `index.js` 转 `STORAGE_UNAVAILABLE`（**不伪装成功 / 不伪装 FORBIDDEN**）。 */
+          const result = await db.collection(step.collection).where(step.match).update(step.doc)
+          const updated = updatedCountOf(result)
+          if (typeof step.expectAtLeast === 'number' && updated !== null && updated < step.expectAtLeast) {
+            throw new Error(`update-matched-too-few:${updated}`)
+          }
+          if (!primary) {
+            const hit = await db.collection(step.collection).where(step.match).get()
+            const rows = rowsOf(hit)
+            if (rows.length > 0) primary = text(rows[0]._id) || text(rows[0].id)
+          }
+          completedSteps += 1
+          continue
         }
-        continue
+        const result = await db.collection(step.collection).add(step.doc)
+        const id = result && (result.id || result._id || (result.data && result.data.id))
+        if (!primary) primary = id ? String(id) : ''
+        completedSteps += 1
+      } catch (error) {
+        const wrapped = new Error(`WRITE_STEP_FAILED:${index + 1}/${totalSteps}`)
+        wrapped.failedStep = index + 1
+        wrapped.totalSteps = totalSteps
+        wrapped.completedSteps = completedSteps
+        wrapped.cause = error
+        throw wrapped
       }
-      const result = await db.collection(step.collection).add(step.doc)
-      const id = result && (result.id || result._id || (result.data && result.data.id))
-      if (!primary) primary = id ? String(id) : ''
     }
     return primary
   }
@@ -3373,6 +3625,11 @@ module.exports = {
   DYNASTY_MIGRATION,
   /* 值域收斂面（本單 `migrateSealValueDomains`；供離線自檢直接斷言）。 */
   SEAL_VALUE_DOMAIN_TARGETS,
+  /* **本單 I-2 / I-3**：修復通道面與待審取行護欄（供離線自檢直接斷言）。 */
+  IMPORT_REVIEW_PAGE_SIZE,
+  IMPORT_REPAIR_SCAN_LIMIT,
+  REPAIR_ALLOWED_KEYS,
+  IMPORT_REPAIR_TARGETS,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,

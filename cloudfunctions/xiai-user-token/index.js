@@ -269,24 +269,46 @@ async function handleVerify(event, config, callContext) {
      **仅当 op 产出了落盘计划**（`submitCorrection` / `endorseCorrection` / `reviewCorrection` 有；
      `setInviteReward` 无 —— 站点配置键活在客户端，与管理员函数 Phase 1 同口径）。 */
   let docId = ''
-  if (opResult.plan) {
+  /* **本单 I-3（真因修复）**：`plan.writes` **为空** ⇒ 无写入可落（批内已全部处理完 / `dry_run`
+     / 无残留）⇒ **跳过 `persist`**、直接走成功回包。旧式无条件 `persist` 在空计划下返回空
+     `docId` ⇒ 反出 `STORAGE_UNAVAILABLE`「未回傳文檔標識…本次零寫入」—— 那是把「无事可做」
+     **谎报成「存储不可用」**（实测：批内前 100 行已终态时每次调用稳定 ≈2 s 返回此 deny）。 */
+  const planWrites = opResult.plan && Array.isArray(opResult.plan.writes) ? opResult.plan.writes.length : null
+  const shouldPersist = !!opResult.plan && (planWrites === null || planWrites > 0)
+  if (shouldPersist) {
     try {
       docId = await persist(opResult.plan)
     } catch (error) {
+      /* **本单 I-1（如实报告）**：任一步失败 ⇒ **不再继续后续步骤**（`persist` 已即断）；
+         回包按 `persist` 挂上的进度读数**如实报告**「失败步 ＋ 已发生写入」。
+         **不得再声称「本次零写入」** —— 除非确实零写入（`completedSteps === 0`）。 */
+      const failedStep = error && typeof error.failedStep === 'number' ? error.failedStep : 0
+      const totalSteps = error && typeof error.totalSteps === 'number' ? error.totalSteps : 0
+      const completedSteps = error && typeof error.completedSteps === 'number' ? error.completedSteps : 0
       audit({
         action: 'verify',
         outcome: REASONS.STORAGE_UNAVAILABLE,
         op,
         uid: identity.uid,
         stage: 'persist',
+        failedStep,
+        totalSteps,
+        completedSteps,
         detail: (error && error.message) || 'unknown',
         serverNow: now
       })
+      if (completedSteps > 0) {
+        return deny(
+          REASONS.STORAGE_UNAVAILABLE,
+          `寫入中斷：第 ${failedStep} / ${totalSteps} 步落盤失敗 ⇒ 已停止後續步驟；**已發生 ${completedSteps} 步寫入（未回退）**，本次**非零寫入**。請重放本操作（正式行按冪等鍵去重）以自愈。`
+        )
+      }
       return deny(REASONS.STORAGE_UNAVAILABLE, '用戶寫入服務的權威存儲不可用；本次零寫入。')
     }
     if (!docId) {
       audit({ action: 'verify', outcome: REASONS.STORAGE_UNAVAILABLE, op, uid: identity.uid, stage: 'persist-id', serverNow: now })
-      return deny(REASONS.STORAGE_UNAVAILABLE, '權威存儲未回傳文檔標識，無法確認寫入；本次零寫入。')
+      /* **本单 I-1**：走到这里 ⇒ 写入**已送出**（只是平台未回文档标识）⇒ **不得声称零写入**。 */
+      return deny(REASONS.STORAGE_UNAVAILABLE, '權威存儲未回傳文檔標識，無法確認寫入結果（該步寫入已送出、未回退）；請重放本操作以核對。')
     }
   }
   /* ⑥ 滑动续期：**只续期、不续权**（**仅令牌路** —— 会话路无令牌可续）；续期仍走完上面全部判定。 */
@@ -364,7 +386,8 @@ async function handleVerify(event, config, callContext) {
     response.renewedTtlSeconds = config.ttlSeconds
   }
   /* **遷移讀數面（additive 透傳｜**按 `op` 收窄**）**：`dry_run` / `scanned` / `changed` / `samples` /
-     `idempotent` **僅當 `op === 'migrateDynastyValues'` 且 `opResult` 確有該鍵時**才逐字疊進回包；
+     `idempotent` **僅當 `op === 'migrateDynastyValues'` / `'migrateSealValueDomains'` 且
+     `opResult` 確有該鍵時**才逐字疊進回包；
      **其餘任何 op 一律不透傳這 5 個鍵**（即使 `opResult` 意外帶有 —— 例如 `submitPersonImport` /
      `submitSealImport` / `registerArtifact` 的冪等路徑 `idempotent` 亦**一個都不外泄**）⇒ 既有回包**逐字不變**
      （序列化後亦不新增鍵）。**`plan` 是內部落盤計劃（內部面），不在白名單內 ⇒ 絕不外傳**。
@@ -372,6 +395,16 @@ async function handleVerify(event, config, callContext) {
   if (op === 'migrateDynastyValues' || op === 'migrateSealValueDomains') {
     const MIGRATION_READOUT_KEYS = ['dry_run', 'scanned', 'changed', 'samples', 'idempotent']
     for (const key of MIGRATION_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **修復讀數面（additive 透傳｜**按 `op` 收窄**｜本單 I-2）**：`dry_run` / `scanned` / `orphan` /
+     `changed` / `samples` / `idempotent` **僅當 `op === 'repairImportAcceptance'` 且 `opResult`
+     確有該鍵時**才逐字疊進回包；**其餘任何 op 一律不透傳這 6 個鍵**（含 `orphan` —— 連遷移 op
+     都不透傳）。既有字段一律不刪、不改。 */
+  if (op === 'repairImportAcceptance') {
+    const REPAIR_READOUT_KEYS = ['dry_run', 'scanned', 'orphan', 'changed', 'samples', 'idempotent']
+    for (const key of REPAIR_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
