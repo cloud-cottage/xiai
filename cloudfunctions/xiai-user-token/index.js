@@ -369,7 +369,7 @@ async function handleVerify(event, config, callContext) {
      `submitSealImport` / `registerArtifact` 的冪等路徑 `idempotent` 亦**一個都不外泄**）⇒ 既有回包**逐字不變**
      （序列化後亦不新增鍵）。**`plan` 是內部落盤計劃（內部面），不在白名單內 ⇒ 絕不外傳**。
      既有字段一律不刪、不改。 */
-  if (op === 'migrateDynastyValues') {
+  if (op === 'migrateDynastyValues' || op === 'migrateSealValueDomains') {
     const MIGRATION_READOUT_KEYS = ['dry_run', 'scanned', 'changed', 'samples', 'idempotent']
     for (const key of MIGRATION_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]

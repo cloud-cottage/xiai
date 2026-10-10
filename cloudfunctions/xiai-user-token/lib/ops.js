@@ -2220,6 +2220,18 @@ const OPS = Object.freeze({
 const MIGRATE_ALLOWED_KEYS = Object.freeze(['dry_run'])
 const DYNASTY_MIGRATION = Object.freeze({ '\u6218\u56fd': '戰國', '\u79e6\u6c49': '' })
 
+/* **值域收敛面（同族｜本单新增 op `migrateSealValueDomains`）**：逐 `(集合, 字段)` → **冻结真源**。
+   执行口径与 `migrateDynastyValues` 的 `秦汉 → ''` **同口径**：**只把真源外值清空为 `''`**；
+   真源内值**一字不动**；**不得臆测映射**（例：`清` 不得 → `清中期`）。
+   真源单点 ＝ `DYNASTY_OPTIONS` / `FACE_CONTENT_OPTIONS` / `FACE_STYLE_OPTIONS` / `SEAL_CLASS_OPTIONS`。 */
+const SEAL_VALUE_DOMAIN_TARGETS = Object.freeze([
+  Object.freeze({ collection: COLLECTIONS.seals, key: 'seals', field: 'dynasty', domain: DYNASTY_OPTIONS }),
+  Object.freeze({ collection: COLLECTIONS.seals, key: 'seals', field: 'seal_type', domain: FACE_CONTENT_OPTIONS }),
+  Object.freeze({ collection: COLLECTIONS.faces, key: 'faces', field: 'seal_type', domain: FACE_CONTENT_OPTIONS }),
+  Object.freeze({ collection: COLLECTIONS.faces, key: 'faces', field: 'face_style', domain: FACE_STYLE_OPTIONS }),
+  Object.freeze({ collection: COLLECTIONS.faces, key: 'faces', field: 'seal_class', domain: SEAL_CLASS_OPTIONS })
+])
+
 const ADMIN_OPS = Object.freeze({
   /**
    * 审核勘误（**管理员写路径**；两处落盘：先公开脱敏投影、后私有状态）。
@@ -3116,6 +3128,116 @@ const ADMIN_OPS = Object.freeze({
     /* 只有「执行态且有写入」才产出落盘计划 ⇒ `dry_run` / 无残留 ⇒ **零写入**。 */
     if (!dryRun && writes.length > 0) result.plan = { op: 'migrateDynastyValues', writes }
     return result
+  },
+
+  /**
+   * **一次性值域收敛（幂等管理员 op｜本单）**：把**真源外**的旧值收敛 —— `xiai_seals` 的
+   * `dynasty`（真源 ＝ `DYNASTY_OPTIONS` 15 类）与 `seal_type`（真源 ＝ `FACE_CONTENT_OPTIONS`
+   * 9 类）；`xiai_faces` 的 `seal_type`（9）／`face_style`（`FACE_STYLE_OPTIONS` 23 类）／
+   * `seal_class`（`SEAL_CLASS_OPTIONS` 3 类）。**只把真源外值清空为 `''`**（与 `migrateDynastyValues`
+   * 的 `秦汉 → ''` **同口径**）；**真源内值一字不动**；**不得臆测映射**（`清` 不得 → `清中期`）。
+   *
+   * 契约记录（逐条；沿 `migrateDynastyValues` 先例同型）：
+   *   · **预演 `dry_run:true`（缺省）** ⇒ **零写入**，只返回逐集合行数、**逐字段权威分布
+   *     `distinct`**（真源外旧值清单的唯一权威来源 —— **页面读数不作数**）与真源外命中数。
+   *   · **执行 `dry_run:false`** ⇒ 只把**真源外**值清空为 `''`（逐处一处 `update`）；真源内值零改动。
+   *   · **幂等**：重放（库内已无真源外值）⇒ `changed` 全 `0`、**零写入**、`idempotent:true`。
+   *   · **入参**：`{ dry_run?: boolean }`（缺省 `true`；键面封闭 ＝ `MIGRATE_ALLOWED_KEYS`）。
+   *   · **回包（固定键面）**：`{ ok, op, dry_run, scanned:{seals,faces,distinct:{[`<key>.<field>`]:
+   *     {total, empty, distinct, cleared}}}, changed:{[`<key>.<field>`]:number}, samples:[
+   *     {collection,field,id,from,to}], idempotent }`；**行数口径 ＝ 逐集合读取行数，命中口径 ＝
+   *     真源外值计数**（非 driver `updated` 猜测）。
+   *   · **权限**：走既有管理员白名单门（缺 env ⇒ 结构化拒 ＋ 零写入；非白名单 / 会话角色不足 ⇒
+   *     `FORBIDDEN` ＋ 零写入）；**零新增 `reason` 字面值**；判定在写之前。
+   * @param {object} [payload] `{ dry_run?: boolean }`（缺省 ⇒ `{dry_run:true}`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, op:string, dry_run:boolean, scanned:object, changed:object,
+   *          samples:Array<object>, idempotent:boolean, plan?:object}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async migrateSealValueDomains(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，写之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    const input = payload === undefined || payload === null ? {} : payload
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const unknown = Object.keys(input).filter((key) => MIGRATE_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}；本次零寫入。`)
+    }
+    /* `dry_run` 缺省 `true`（只讀預演）；给了就必须是布林。 */
+    let dryRun = true
+    if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+      if (typeof input.dry_run !== 'boolean') {
+        return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+      }
+      dryRun = input.dry_run
+    }
+    /* ② 只读扫描：逐集合**只读一次**（行数计入 `scanned`）；逐字段统计**权威分布**与真源外命中数。 */
+    const rowsByKey = {}
+    const scanned = { seals: 0, faces: 0, distinct: {} }
+    for (const target of SEAL_VALUE_DOMAIN_TARGETS) {
+      if (Object.prototype.hasOwnProperty.call(rowsByKey, target.key)) continue
+      const rows = await readRows(target.collection, {})
+      rowsByKey[target.key] = rows
+      scanned[target.key] = rows.length
+    }
+    const changed = {}
+    const samples = []
+    const writes = []
+    const MAX_SAMPLES = 5
+    for (const target of SEAL_VALUE_DOMAIN_TARGETS) {
+      const rows = rowsByKey[target.key]
+      const targetId = `${target.key}.${target.field}`
+      const distinct = {}
+      let empty = 0
+      let hits = 0
+      for (const row of rows) {
+        const from = text(row && row[target.field])
+        /* 空值不算「真源外旧值」，也不改（清空是**终态** ⇒ 重放必零改动）。 */
+        if (from === '') {
+          empty += 1
+          continue
+        }
+        distinct[from] = (distinct[from] || 0) + 1
+        /* **真源内值一字不动**（R-21「旧值不改写」在真源内的部分）。 */
+        if (target.domain.indexOf(from) !== -1) continue
+        hits += 1
+        const id = text(row && (row._id || row.id))
+        if (samples.length < MAX_SAMPLES) {
+          samples.push({ collection: target.collection, field: target.field, id, from, to: '' })
+        }
+        if (!dryRun && id) {
+          const patch = {}
+          patch[target.field] = ''
+          writes.push({
+            kind: 'update',
+            collection: target.collection,
+            match: { _id: id },
+            doc: patch,
+            expectAtLeast: 1
+          })
+        }
+      }
+      scanned.distinct[targetId] = { total: rows.length, empty, distinct, cleared: hits }
+      changed[targetId] = hits
+    }
+    const idempotent = Object.values(changed).every((value) => value === 0)
+    const result = {
+      ok: true,
+      op: 'migrateSealValueDomains',
+      dry_run: dryRun,
+      scanned,
+      changed,
+      samples,
+      idempotent
+    }
+    /* 只有「执行态且有写入」才产出落盘计划 ⇒ `dry_run` / 无残留 ⇒ **零写入**。 */
+    if (!dryRun && writes.length > 0) result.plan = { op: 'migrateSealValueDomains', writes }
+    return result
   }
 })
 
@@ -3249,6 +3371,8 @@ module.exports = {
   /* 一次性朝代值遷移面（§3.53.5；供離線自檢直接斷言）。 */
   MIGRATE_ALLOWED_KEYS,
   DYNASTY_MIGRATION,
+  /* 值域收斂面（本單 `migrateSealValueDomains`；供離線自檢直接斷言）。 */
+  SEAL_VALUE_DOMAIN_TARGETS,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,

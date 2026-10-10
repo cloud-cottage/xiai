@@ -32,10 +32,6 @@ const dataVersion = ref(0)
 /* 管理员专属「上传印章」按钮：以服务层判定为准（普通用户 / 游客为 false ⇒ 不渲染）。 */
 const canUploadSeal = computed(() => seals.canUploadSeal())
 
-const allSeals = computed(() => {
-  void dataVersion.value
-  return seals.listSeals()
-})
 const list = computed(() => {
   void dataVersion.value
   /* 参数名**逐字** `content` / `style` / `sealClass`（取代旧 `sealType`）；筛选**按印面聚合**由服务层实现。 */
@@ -60,9 +56,11 @@ function retryDataSource() {
    四维度＝① 朝代 `dynasty`（DYNASTY_OPTIONS 15 类）② 印面内容 `seal_type`
    （FACE_CONTENT_OPTIONS 9 类）③ 印面风格 `face_style`（FACE_STYLE_OPTIONS 23 类）
    ④ **大類 `seal_class`（SEAL_CLASS_OPTIONS 3 类，印面级、无回落）**。
-   值集口径统一为「**真源常量（规范顺序、在前）＋ 库内旧值（去重、追加于后）**」：
-   只列真源 ⇒ 旧值（`漢` / `吉語印` / 既有行的 face_style）筛不到；只列库内派生值 ⇒
-   真源里的空类无选项。**选项值一律不自造**，旧值只从已落盘数据里取。
+   值集口径 ＝ **只列真源常量**（规范顺序）——**不再 ∪ 库内派生值**、**不生成 `UNKNOWN`
+   一类占位项**（与 `UploadSealDialog.vue` / `SealDetailView.vue` 已废除 union 的形态
+   **逐字同口径**）。真源缺位 ⇒ 沿用既有**可读降级提示**（不自造第二套常量，也不拿
+   库内旧值冒充完整值集）。库内**真源外旧值**由**数据侧**一次性幂等迁移
+   （管理员 op `migrateSealValueDomains`）收敛 ⇒ 不再靠上屏面兜底。
    形制（`shape`）**不参与筛选**（印章级固定属性；规范明示不参与）。
    筛选**按印面聚合**由服务层实现，本页只传参。
    ============================================================================ */
@@ -83,32 +81,11 @@ const FILTER_DEGRADED = computed(() => {
     : ''
 })
 
-/** 库内旧值：印章视图模型上的镜像值 ＋ **每个印面自身**的值（去重）。 */
-function inStoreValues(pick) {
-  const out = []
-  allSeals.value.forEach((item) => {
-    const direct = pick(item)
-    if (direct) out.push(String(direct))
-    const faces = Array.isArray(item.faces) ? item.faces : []
-    faces.forEach((face) => {
-      const value = pick(face)
-      if (value) out.push(String(value))
-    })
-  })
-  return [...new Set(out)]
-}
-
-/** 真源（在前、保持规范顺序）＋ 库内旧值（去重、追加于后）。 */
-function unionOptions(listed, inStore) {
-  const seen = new Set(listed)
-  return [...listed, ...inStore.filter((value) => !seen.has(value))]
-}
-
-const dynasties = computed(() => unionOptions(DYNASTY_LISTED, inStoreValues((row) => row.dynasty)))
-const contents = computed(() => unionOptions(FACE_CONTENT_LISTED, inStoreValues((row) => row.seal_type)))
-const styles = computed(() => unionOptions(FACE_STYLE_LISTED, inStoreValues((row) => row.face_style)))
-/* 大類：真源 3 值在前 ＋ 库内旧值（印面级 `seal_class`，无回落）追加。 */
-const sealClasses = computed(() => unionOptions(SEAL_CLASS_LISTED, inStoreValues((row) => row.seal_class)))
+/* 四维度值集**只列真源**（旧值不外溢；库内真源外旧值走数据侧 `migrateSealValueDomains` 收敛）。 */
+const dynasties = computed(() => DYNASTY_LISTED)
+const contents = computed(() => FACE_CONTENT_LISTED)
+const styles = computed(() => FACE_STYLE_LISTED)
+const sealClasses = computed(() => SEAL_CLASS_LISTED)
 
 const pendingSeal = ref(null)
 const feedback = ref('')
