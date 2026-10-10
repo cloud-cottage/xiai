@@ -43,10 +43,33 @@ import {
   resolveAuthorName,
   sliceMetaOf as dataSliceMetaOf, // 切片元数据**确定性派生**（同 id 必同结果）——本服务不自写切位
   sliceWindowsOf as dataSliceWindowsOf, // 由元数据派生**逐块归一化窗口**（几何唯一真源）
+  /* **印章批 3（v1.55｜§3.55 ＋ §4.1.17）**：印章外部導入行的讀 / 寫 ＋ 冪等鍵 ＋ 影像引用讀面
+     ＋ 單寫者門 ＋ id 派生（既有實現，轉口復用）。 */
+  listSealImportRows,
+  saveSealImportRows,
+  sealImportBySourceKey,
+  sealBySourceKey,
+  imageRowByRef,
+  sealImportDirectWriteDenial,
+  nextSealStampId,
+  nextFaceId,
+  saveSealRows,
+  saveFaceRows,
   PermissionError
 } from '../data/db.js'
 import { currentUser } from '../data/session.js'
-import { FACE_KIND, SLICE_META_FIELD } from '../data/seed.js'
+import {
+  FACE_KIND,
+  SLICE_META_FIELD,
+  /* **印章批 3（v1.55｜§3.55 ＋ §4.1.17）**：印章導入行三態 / 鍵前綴 / 字段真源 / 指紋。 */
+  SEAL_IMPORT_STATUS,
+  SEAL_IMPORT_ID_PREFIX,
+  SEAL_IMPORT_SEAL_FIELDS,
+  SEAL_IMPORT_FACE_FIELDS,
+  emptySealImportFields,
+  emptySealImportFace,
+  sealImportFingerprint
+} from '../data/seed.js'
 import {
   IMAGE_LIMITS,
   STORED_MAX_BYTES,
@@ -79,6 +102,10 @@ import { digestOfRow, readViaOfRow } from './imageAuthority.js'
    复用印人检索的**唯一实现** `persons.searchPersons`（**不另造第二套同名逻辑**）；命中印人 ⇒
    该印人（`author_person_id`）名下的印章一并命中。 */
 import { searchPersons } from './persons.js'
+/* **印章批 3（v1.55）**：印章導入 / 採納 op 走**同一登錄令牌寫面門** `userWriteGate`
+   （與 `corrections` / `persons` **同一通道**：含令牌自愈 / dev·離線 與 雲端 兩形態 /
+   失敗零寫入 / 本機鏡像回寫）。 */
+import { userWriteGate } from './userWrite.js'
 
 export { FACE_KIND }
 
@@ -1224,3 +1251,500 @@ export async function uploadFaceImageSource(faceId, bitmap, options = {}) {
 
 /** 把逐块画布按原坐标拼回整图（拼接自证 / 导出；把数据层窗口的几何原样喂回去）。 */
 export { composeSliceTiles }
+
+/* ============================================================================
+   **印章批 3 前置（v1.55｜§3.55 ＋ §4.1.17）：印章外部批量導入通道 ＋ 管理員採納通道**
+   ----------------------------------------------------------------------------
+   · 導入（提交）＝ **外部批量導入通道**：經 `userWriteGate('submitSealImport', …)` 落
+     `xiai_seal_imports` 的 `PENDING` 行（**冪等鍵 `source` ＋ `source_seal_id`**；重複導入不改寫既有行）。
+   · 採納 / 駁回 ＝ **管理員**（登錄令牌 ＋ 手機號白名單，沿 §3.48；缺 env ⇒ 安全拒 ＋ 零寫入）。
+     `ACCEPTED` ⇒ **整條**冪等落 `xiai_seals`（印章級）＋ `xiai_faces`（印面級，含邊款 `kind=EDGE`），
+     且**同置** `review_status='APPROVED'`（按 `source` ＋ `source_seal_id` 冪等；**重複採納不改寫既有行**，
+     讀回比對，**不以 updated>=1 判成功** —— 沿 liwu 數據層硬口徑）；`REJECTED` ⇒ **零寫入**（僅導入行狀態）。
+   · **兩字段分列**：`imports.status` 與 `seals.review_status` **不是一個東西**（採納時兩者同時推進、
+     不得互相替代）；存量 `review_status` **逐字保留、不遷移、不改寫**。
+   · **逐條獨立**：失敗行**保持 `PENDING` 且零寫入**，成功行落庫；成功面**可重放且冪等**；不得半條落庫。
+   · **影像引用校驗**：採納時**逐條校驗引用對象存在**（缺失 ⇒ 該條拒絕 ＋ 零寫入）——
+     校驗**複用既有讀面** `imageRowByRef`（**不新增第二套讀法**）。
+   · **內容指紋僅作軟提示**：指紋相同**不得拒收**（只在返回體隨附疑似重複標記）。
+   · **零新增 `reason` 字面值**（一律沿用既有凍結表）。
+   寫面門**沿用**：與 `persons` / `corrections` **同一通道**（`userWriteGate`：含令牌自愈 /
+   `dev`·離線 與 雲端 兩形態 / 失敗零寫入 / 本機鏡像回寫）。雲端命中：
+   `submitSealImport` ∈ `xiai-user-token` 的 `OPS`；`reviewSealImport` ∈ 同函數 `ADMIN_OPS`
+   （登錄令牌 ＋ 手機號白名單）。兩 `index.js` 皆為 `hasOwnProperty` 動態派發 ⇒ **未動雲函數**。
+   · **未覆蓋（如實登記）**：`xiai_seal_imports` 尚待人工新建（雲控制台動作）⇒ **雲端落庫路徑不可達**；
+     故雲端形態端到端**當前不可驗**（依賴未建集合 / 未部署）。本機（dev / 離線）形態可驗。
+   ============================================================================ */
+
+/** 導入行三態（轉發真源 `seed.js::SEAL_IMPORT_STATUS`；單向、終態不回退）。 */
+export const SEAL_IMPORT_STATUS_EXPORT = SEAL_IMPORT_STATUS
+
+/** 導入單號 / 冪等鍵上限（服務層本地護欄；與印人導入同規格）。 */
+export const MAX_SEAL_IMPORT_ID_LENGTH = 128
+/** 駁回理由上限（與勘誤 / 印人導入同值 200 字）。 */
+export const MAX_SEAL_REVIEW_NOTE_LENGTH = 200
+
+function importNowIso() {
+  return new Date().toISOString()
+}
+
+function makeSealImportId() {
+  return `${SEAL_IMPORT_ID_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+/** 導入狀態歸一（舊 / 缺值 ⇒ `PENDING`）。 */
+export function normalizeSealImportStatus(status) {
+  const text = String(status || '').trim()
+  if (text === SEAL_IMPORT_STATUS.ACCEPTED || text === SEAL_IMPORT_STATUS.REJECTED) return text
+  return SEAL_IMPORT_STATUS.PENDING
+}
+
+/** 審核決定歸一：`ACCEPTED` / `REJECTED` 之外 ⇒ `''`（非法，調用方結構化拒絕）。 */
+function normalizeSealDecision(decision) {
+  const text = String(decision === null || decision === undefined ? '' : decision).trim()
+  return text === SEAL_IMPORT_STATUS.ACCEPTED || text === SEAL_IMPORT_STATUS.REJECTED ? text : ''
+}
+
+/** 文本歸一（缺值 ⇒ 空串；**不 trim 自由文本** —— 值逐字保留）。 */
+function importText(value) {
+  return String(value === undefined || value === null ? '' : value)
+}
+
+/**
+ * 歸一單印面 → `SEAL_IMPORT_FACE_FIELDS` 面（`kind` 默認 `FACE`、`image_bytes` 默認 `0`、其餘文本）。
+ * **邊款 `kind=EDGE` 須在列、不得排除**。
+ */
+export function normalizeSealImportFace(face) {
+  const f = face && typeof face === 'object' ? face : {}
+  const out = emptySealImportFace()
+  SEAL_IMPORT_FACE_FIELDS.forEach((key) => {
+    if (key === 'kind') {
+      out[key] = String(f.kind || '').trim() === FACE_KIND.EDGE ? FACE_KIND.EDGE : FACE_KIND.FACE
+      return
+    }
+    if (key === 'image_bytes') {
+      const n = Number(f.image_bytes)
+      out[key] = Number.isFinite(n) && n > 0 ? Math.round(n) : 0
+      return
+    }
+    out[key] = importText(f[key])
+  })
+  return out
+}
+
+/** 歸一印章級字段面 → `SEAL_IMPORT_SEAL_FIELDS`（值逐字保留；缺鍵 ⇒ 空串）。 */
+export function normalizeSealImportSealFields(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  const out = emptySealImportFields()
+  SEAL_IMPORT_SEAL_FIELDS.forEach((key) => {
+    out[key] = importText(src[key])
+  })
+  return out
+}
+
+/** 當前（或指定）賬號是否可審核印章外部導入批次 —— 供 `/my/corrections` 決定是否渲染採納 / 駁回。 */
+export function canReviewSealImports(actor) {
+  const who = actor || currentUser()
+  return who !== null && who !== undefined && who.role === 'admin'
+}
+
+/** 當前（或指定）賬號是否可提交印章外部導入行（任何登錄用戶）。 */
+export function canSubmitSealImport(actor) {
+  return (actor || currentUser()) !== null
+}
+
+/* --------------------------- 導入：提交（外部通道） --------------------------- */
+
+/**
+ * **提交印章外部導入行**（外部批量導入通道；任何登錄用戶。§3.55.3 / §3.55.5）。
+ *
+ * 判定順序（**全部在寫之前**，拒絕即零寫入）：① 登錄門 → ② 批次 / 冪等鍵（`source_seal_id`）形態 →
+ * ③ `faces[]` 至少 1 條（1..N，含邊款）→ ④ **冪等**（同 `source` ＋ `source_seal_id` 已有行 ⇒
+ * 原樣返回、**不改寫既有行**）→ ⑤ **寫面門**（`userWriteGate('submitSealImport', …)`）。
+ *
+ * **內容指紋僅作軟提示**：指紋與既有未駁回導入行相同 ⇒ 隨返回體給疑似重複標記（`suspect_duplicate`），
+ * **不構成拒收理由**（沿 §3.55.5）。
+ * @param {{batchId?:string, source?:string, sourceSealId?:string, payload?:object, faces?:Array<object>}} [options]
+ * @returns {Promise<{ok:true, row:object, authority:string, idempotent?:boolean, suspect_duplicate?:boolean,
+ *   duplicate_of?:string, message:string}|{ok:false, reason?:string, message:string}>}
+ */
+export async function submitSealImport({ batchId = '', source = '', sourceSealId = '', payload = {}, faces = [] } = {}) {
+  const user = currentUser()
+  if (!user) return { ok: false, message: '請先登錄後再提交印章外部導入行' }
+
+  const batch = String(batchId || '').trim()
+  if (batch.length > MAX_SEAL_IMPORT_ID_LENGTH) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `導入批次號超出上限（${MAX_SEAL_IMPORT_ID_LENGTH} 字）；本次零寫入。` }
+  }
+  const src = String(source || '').trim()
+  const sourceId = String(sourceSealId || '').trim()
+  if (!sourceId) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '缺少外部冪等鍵（source_seal_id）⇒ 拒絕導入；本次零寫入。' }
+  }
+  if (sourceId.length > MAX_SEAL_IMPORT_ID_LENGTH) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `外部冪等鍵超出上限（${MAX_SEAL_IMPORT_ID_LENGTH} 字）；本次零寫入。` }
+  }
+  const faceRows = Array.isArray(faces) ? faces.map(normalizeSealImportFace) : []
+  if (faceRows.length === 0) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE）；本次零寫入。' }
+  }
+  const sealFields = normalizeSealImportSealFields(payload)
+
+  /* **冪等**（§3.55.5）：同 `source` ＋ `source_seal_id` 已有導入行 ⇒ 原樣返回（不改寫既有行）。 */
+  const existing = sealImportBySourceKey(src, sourceId)
+  if (existing) {
+    return {
+      ok: true,
+      row: existing,
+      authority: 'LOCAL_IDEMPOTENT',
+      idempotent: true,
+      message: '該外部冪等鍵（source ＋ source_seal_id）已存在導入行 ⇒ 未改寫（冪等）。'
+    }
+  }
+
+  /* **內容指紋（軟提示）**：相同指紋**不得拒收** —— 只隨返回體給疑似重複標記。 */
+  const fingerprint = sealImportFingerprint(sealFields)
+  const duplicate = listSealImportRows().find(
+    (row) =>
+      String((row && row.content_fingerprint) || '') === fingerprint &&
+      normalizeSealImportStatus(row && row.status) !== SEAL_IMPORT_STATUS.REJECTED
+  )
+  const suspect = duplicate ? { suspect_duplicate: true, duplicate_of: String((duplicate && duplicate.id) || '') } : {}
+
+  const writePayload = {
+    batch_id: batch,
+    source: src,
+    source_seal_id: sourceId,
+    ...sealFields,
+    faces: faceRows
+  }
+  const gate = await userWriteGate('submitSealImport', writePayload)
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+
+  if (gate.mode === 'local-dev') {
+    const at = importNowIso()
+    const row = {
+      id: makeSealImportId(),
+      batch_id: batch,
+      source: src,
+      source_seal_id: sourceId,
+      status: SEAL_IMPORT_STATUS.PENDING,
+      ...sealFields,
+      faces: faceRows,
+      content_fingerprint: fingerprint,
+      imported_by: user.id, // **不透明 uid；零手機號**
+      imported_at: at,
+      reviewed_at: null,
+      reviewer_id: null,
+      review_note: ''
+    }
+    saveSealImportRows([...listSealImportRows(), row])
+    return {
+      ok: true,
+      row,
+      authority: 'LOCAL_DEV',
+      ...suspect,
+      message: '已提交印章外部導入行，待管理員審覈（dev / 離線形態，非正式寫入路徑）'
+    }
+  }
+
+  const serverRow = gate.row
+  if (!serverRow || typeof serverRow !== 'object') {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。' }
+  }
+  saveSealImportRows([...listSealImportRows(), serverRow])
+  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, ...suspect, message: '已提交印章外部導入行，待管理員審覈' }
+}
+
+/* --------------------------- 導入：讀面（管理員） --------------------------- */
+
+/**
+ * **管理員可見的待審印章外部導入行**（全部用戶的 `PENDING`）。
+ * 非管理員 ⇒ **結構化拒絕**（`FORBIDDEN`；不以空集冒充拒絕）。
+ * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:string, message:string}}
+ */
+export function listPendingSealImportsForAdmin(actor) {
+  const who = actor || currentUser()
+  if (!canReviewSealImports(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的印章外部導入批次' }
+  }
+  const rows = listSealImportRows()
+    .filter((row) => normalizeSealImportStatus(row && row.status) === SEAL_IMPORT_STATUS.PENDING)
+    .sort((a, b) => String(b.imported_at).localeCompare(String(a.imported_at)))
+  return { ok: true, rows }
+}
+
+/* --------------------------- 導入：採納 / 駁回（管理員） --------------------------- */
+
+/** 影像引用存在性判讀（**複用既有讀面** `imageRowByRef`，不新增第二套讀法）。 */
+function importFaceImageRow(face) {
+  const sha = String((face && face.image_sha256) || '').trim()
+  const key = String((face && face.image_storage_key) || '').trim()
+  if (!sha && !key) return { hasRef: false, row: null }
+  return { hasRef: true, row: imageRowByRef({ image_sha256: sha, image_storage_key: key }) }
+}
+
+/**
+ * 由導入行**構造**整條正式印章產物（印章行 ＋ 印面行）；**先校驗、後派生** ⇒ 拒絕即零寫入、不落半條。
+ *
+ * 影像引用校驗（§3.55.6）：**逐條**校驗引用對象存在 —— 宣告了引用卻解析不到 ⇒ 該條拒絕；
+ * `kind=FACE` 的印面**必須**有可解析的影像引用（沿用既有「印面圖必填」口徑）。
+ * @returns {{ok:true, seal:object, faceRows:Array<object>}|{ok:false, reason:string, message:string}}
+ */
+function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
+  const faceDefs = Array.isArray(importRow && importRow.faces) ? importRow.faces : []
+  const resolved = []
+  for (const raw of faceDefs) {
+    const face = normalizeSealImportFace(raw)
+    const probe = importFaceImageRow(face)
+    if (probe.hasRef && !probe.row) {
+      return {
+        ok: false,
+        reason: 'NOT_FOUND',
+        message:
+          `印面影像引用缺失（sha256=${String(face.image_sha256 || '') || '（空）'} / ` +
+          `key=${String(face.image_storage_key || '') || '（空）'}）⇒ 未採納；本行保持 PENDING。`
+      }
+    }
+    if (!probe.hasRef && face.kind === FACE_KIND.FACE) {
+      return { ok: false, reason: 'MISSING_REQUIRED', message: '印面（kind=FACE）缺少影像引用 ⇒ 未採納；本行保持 PENDING。' }
+    }
+    resolved.push({ face, image: probe.row })
+  }
+
+  const stampId = nextSealStampId(seals)
+  const serialMatch = /^XA(\d{9})$/.exec(stampId)
+  const source = String((importRow && importRow.source) || '')
+  const sealName = String((importRow && importRow.seal_name) || '')
+  const seal = {
+    sealGroupId: `g-${serialMatch ? serialMatch[1] : stampId}`,
+    stamp_id: stampId, // 兼容別名（既落盤視圖按它定位），勿刪
+    id: stampId, // §4.1.1 規範字段名
+    seal_name: sealName,
+    name: sealName, // 兼容別名（＝印文）
+    transcription: String((importRow && importRow.transcription) || ''),
+    dynasty: String((importRow && importRow.dynasty) || ''),
+    seal_type: String((importRow && importRow.seal_type) || ''),
+    category: String((importRow && importRow.seal_type) || ''),
+    seal_style: String((importRow && importRow.seal_style) || ''),
+    material: String((importRow && importRow.material) || ''),
+    shape: String((importRow && importRow.shape) || ''),
+    asset_kind: 'SEAL',
+    /* **同置**：採納 ⇒ 正式行 `review_status='APPROVED'`（與導入行 `status='ACCEPTED'` **同時推進**）。 */
+    review_status: 'APPROVED',
+    author: String((importRow && importRow.author) || ''),
+    /* **冪等鍵溯源**：`source` ＋ `source_seal_id` 落正式行 ⇒ 重複採納可讀回、不改寫既有行。 */
+    source,
+    source_seal_id: String((importRow && importRow.source_seal_id) || ''),
+    uploaded_by: actor && actor.id ? actor.id : '',
+    created_at: at,
+    updated_at: at
+  }
+
+  const taken = new Set(takenFaceIds)
+  const faceRows = []
+  resolved.forEach(({ face, image }) => {
+    const faceId = nextFaceId(stampId, face.kind, taken)
+    taken.add(faceId)
+    const isEdge = face.kind === FACE_KIND.EDGE
+    faceRows.push({
+      id: faceId,
+      sealId: stampId,
+      stamp_id: stampId, // 兼容別名，勿刪
+      kind: face.kind,
+      face_image_id: !isEdge && image ? image.id : null,
+      edge_image_ids: isEdge && image ? [image.id] : [],
+      seal_name: face.seal_name || sealName,
+      dynasty: face.dynasty || String((importRow && importRow.dynasty) || ''),
+      seal_type: face.seal_type,
+      face_style: face.face_style,
+      seal_class: face.seal_class,
+      author: face.author,
+      author_person_id: face.author_person_id,
+      transcription: face.transcription,
+      source,
+      uploaded_by: actor && actor.id ? actor.id : '',
+      created_at: at,
+      updated_at: at
+    })
+  })
+  return { ok: true, seal, faceRows }
+}
+
+/**
+ * **本地採納 / 駁回判定（不經寫面門）**：供 `reviewSealImport` 過門後回寫本機鏡像 /
+ * 在 dev·離線 形態作**本地權威**。
+ *
+ * 採納粒度：按批次（`batchId`）或按單行（`importId`）二選一（**兩個入口都實現**，沿 W-84 擬案）。
+ * **逐條獨立**：失敗行保持 `PENDING` 且零寫入；成功行落庫；成功面**可重放且冪等**；不落半條。
+ * @returns {{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[],
+ *   failed?:Array<object>, rows?:Array<object>, reason?:string, message:string}}
+ */
+function applySealImportDecision(who, { batchId = '', importId = '', decision = '', note = '' } = {}) {
+  const rawNote = note === null || note === undefined ? '' : note
+  if (typeof rawNote !== 'string') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '駁回理由必須是文字；本次零寫入。' }
+  }
+  const noteText = rawNote.trim()
+  if (noteText.length > MAX_SEAL_REVIEW_NOTE_LENGTH) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `駁回理由不得超過 ${MAX_SEAL_REVIEW_NOTE_LENGTH} 字；本次零寫入。` }
+  }
+  const batch = String(batchId || '').trim()
+  const single = String(importId || '').trim()
+  if (!batch && !single) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '缺少導入批次號（batch_id）或導入行號（import_id）⇒ 拒絕審覈；本次零寫入。' }
+  }
+  const normalized = normalizeSealDecision(decision)
+  if (!normalized) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message:
+        `審覈決定「${String(decision === null || decision === undefined ? '' : decision)}」不在允許的 2 類之內` +
+        '（ACCEPTED 採納 / REJECTED 駁回）；本次零寫入。'
+    }
+  }
+  const accepted = normalized === SEAL_IMPORT_STATUS.ACCEPTED
+  const at = importNowIso()
+  const imports = listSealImportRows()
+  /* 選目標：單行優先（指定 `importId`）；否則全批次內的行。 */
+  const targets = imports.filter((row) => {
+    if (!row) return false
+    if (single) return String(row.id || '') === single
+    return String(row.batch_id || '') === batch
+  })
+  if (targets.length === 0) {
+    return { ok: false, reason: 'NOT_FOUND', message: '未找到匹配的印章外部導入行（批次 / 單行）；本次零寫入。' }
+  }
+
+  const acceptedIds = []
+  const rejectedIds = []
+  const skipped = []
+  const failed = []
+  const nextSeals = listSealRows().slice()
+  const nextFaces = listFaceRows().slice()
+  const takenFaceIds = new Set(nextFaces.map((row) => String((row && row.id) || '')))
+  const decidedById = new Map()
+
+  targets.forEach((row) => {
+    const rid = String((row && row.id) || '')
+    const current = normalizeSealImportStatus(row && row.status)
+    if (current !== SEAL_IMPORT_STATUS.PENDING) {
+      /* 終態不回退：已審行**跳過**（冪等重放 / 部分失敗場景均不改寫既有終態）。 */
+      skipped.push(rid)
+      return
+    }
+    if (!accepted) {
+      rejectedIds.push(rid)
+      decidedById.set(rid, {
+        ...row,
+        status: SEAL_IMPORT_STATUS.REJECTED,
+        reviewed_at: at,
+        reviewer_id: who.id,
+        review_note: noteText !== '' ? noteText : row.review_note || ''
+      })
+      return
+    }
+    /* **ACCEPTED**：按 `source` ＋ `source_seal_id` 冪等落 `xiai_seals` ＋ `xiai_faces`。 */
+    const sourceId = String((row && row.source_seal_id) || '').trim()
+    if (!sourceId) {
+      failed.push({ id: rid, reason: 'MISSING_REQUIRED', message: '該導入行缺少冪等鍵（source_seal_id）⇒ 未採納；本行保持 PENDING。' })
+      return
+    }
+    const existingSeal =
+      /* 讀回比對既有正式行（**冪等鍵查詢面單點** `sealBySourceKey`）。 */
+      sealBySourceKey(String((row && row.source) || ''), sourceId) ||
+      /* 同批內先前條目已構造但尚未落盤的同行 ⇒ 亦算命中（不生成第二枚；批次內冪等）。 */
+      nextSeals.find(
+        (item) =>
+          String((item && item.source_seal_id) || '') === sourceId &&
+          String((item && item.source) || '') === String((row && row.source) || '')
+      ) ||
+      null
+    if (!existingSeal) {
+      const built = buildAcceptedSeal(row, nextSeals, takenFaceIds, who, at)
+      if (!built.ok) {
+        /* 失敗行：**保持 PENDING 且零寫入**（不動 seals / faces、不改本行）。 */
+        failed.push({ id: rid, reason: built.reason, message: built.message })
+        return
+      }
+      nextSeals.push(built.seal)
+      built.faceRows.forEach((faceRow) => {
+        nextFaces.push(faceRow)
+        takenFaceIds.add(String(faceRow.id))
+      })
+    }
+    acceptedIds.push(rid)
+    decidedById.set(rid, {
+      ...row,
+      status: SEAL_IMPORT_STATUS.ACCEPTED,
+      reviewed_at: at,
+      reviewer_id: who.id,
+      review_note: row.review_note || ''
+    })
+  })
+
+  /* **成功面**：先落採納產物（冪等）—— 再落導入行狀態；兩者都在本地（dev / 離線 ＝ 本地權威）。 */
+  if (acceptedIds.length > 0) {
+    saveSealRows(nextSeals)
+    saveFaceRows(nextFaces)
+  }
+  if (decidedById.size > 0) {
+    saveSealImportRows(
+      imports.map((row) => {
+        const id = String((row && row.id) || '')
+        return decidedById.has(id) ? decidedById.get(id) : row
+      })
+    )
+  }
+  return {
+    ok: true,
+    accepted,
+    accepted_ids: acceptedIds,
+    rejected_ids: rejectedIds,
+    skipped,
+    failed,
+    rows: targets.map((row) => decidedById.get(String((row && row.id) || '')) || row),
+    message: accepted
+      ? `已採納 ${acceptedIds.length} 條印章外部導入行並冪等整條落正式印章（失敗 ${failed.length} / 跳過 ${skipped.length}）`
+      : `已駁回 ${rejectedIds.length} 條印章外部導入行（跳過 ${skipped.length}）`
+  }
+}
+
+/**
+ * **審核印章外部導入行（採納 / 駁回）**（管理員；§3.55.4 / §3.55.5）。
+ *
+ * 判定順序（**全部在寫之前**）：① 管理員門（非管理員 ⇒ `FORBIDDEN` ＋ 零寫入）→
+ * ② 經登錄令牌寫面門 `userWriteGate('reviewSealImport', …)`（缺 env ⇒ 安全拒 ＋ 零寫入）。
+ * `ACCEPTED` ⇒ 冪等整條落 `xiai_seals` ＋ `xiai_faces`（按 `source` ＋ `source_seal_id`）；
+ * `REJECTED` ⇒ 零寫入。**兩個入口都實現**：按批次（`batchId`）與按單行（`importId`）。
+ * @param {{id?:string, role?:string}|null} actor 管理員
+ * @param {{batchId?:string, importId?:string, decision?:string, note?:string}} [options]
+ * @returns {Promise<{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[],
+ *   skipped?:string[], failed?:Array<object>, rows?:Array<object>, reason?:string, message:string}>}
+ */
+export async function reviewSealImport(actor, options = {}) {
+  const who = actor || currentUser()
+  if (!canReviewSealImports(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈印章外部導入批次' }
+  }
+  const gate = await userWriteGate('reviewSealImport', {
+    batch_id: String((options && options.batchId) || ''),
+    import_id: String((options && options.importId) || ''),
+    decision: String((options && options.decision) || ''),
+    note: String((options && options.note) || '')
+  })
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* 本機鏡像（dev / 離線 ＝ 本地權威；雲端 ＝ 服務端權威後的本機鏡像）。 */
+  return applySealImportDecision(who, options)
+}
+
+/** 單寫者門轉發（供視圖 / 自檢直調；`xiai_seal_imports` 不開放任何直寫入口，含管理員直寫）。 */
+export function sealImportSingleWriterDenial(collectionKey) {
+  return sealImportDirectWriteDenial(collectionKey)
+}
+
+/** 導入行提交人展示 uid（**零手機號**；此處只回 uid，避免第二套名表）。 */
+export function sealImportSubmitterId(row) {
+  return String((row && row.imported_by) || '')
+}

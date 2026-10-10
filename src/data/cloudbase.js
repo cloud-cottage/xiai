@@ -59,7 +59,10 @@ export const CLOUD_COLLECTIONS = Object.freeze({
   personProposals: 'xiai_person_proposals',
   /* **印人批 2 前置（v1.54｜§3.54.14 / §4.1.16）**：外部批量导入暂存/ PENDING 集合
      （单写者；只经外部导入通道与采纳路径写）。本机镜像键见 `data/db.js` 的 `person-imports`。 */
-  personImports: 'xiai_person_imports'
+  personImports: 'xiai_person_imports',
+  /* **印章批 3（v1.55｜§3.55.2 / §4.1.17）**：印章外部批量導入暂存 / PENDING 集合
+     （单写者；只经管理员采纳路径 / 外部導入通道写）。本机镜像键见 `data/db.js` 的 `seal-imports`。 */
+  sealImports: 'xiai_seal_imports'
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */
@@ -446,7 +449,11 @@ export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze([
   'personProposals',
   /* **印人批 2 前置（v1.54）**：`personImports` 亦为**待人工新建**的集合 ——
      集合未建立 / 尚未接线时云端恒 0 行；若判可疑会让整站回落本地种子 ⇒ 一律恒走诚实空态。 */
-  'personImports'
+  'personImports',
+  /* **印章批 3（v1.55）**：`sealImports` 亦为**待人工新建**的集合（云控制台动作）——
+     集合未建立 / 尚未接线时云端恒 0 行（本机镜像可能已有采纳 / 导入行）；若判可疑会让
+     整站回落本地种子 ⇒ 一律恒走诚实空态。 */
+  'sealImports'
 ])
 
 /**
@@ -812,6 +819,72 @@ export function normalizePersonImportRow(doc, options = {}) {
   }
 }
 
+/**
+ * **印章外部批量導入行**（`xiai_seal_imports` → 本機 `seal-imports` 行形狀；印章批 3 §3.55.3 / §4.1.17）。
+ * 歸一（只做空值 / 數組 / 整數歸一，**不做業務值改寫、不做繁簡轉換**）：
+ *   · `id` / `batch_id` / `source` / `source_seal_id` / 時間戳 / `content_fingerprint` ⇒ 文本；
+ *   · 印章級字段（`seal_name` / `dynasty` / `seal_type` / `seal_style` / `face_style` /
+ *     `seal_class` / `material` / `shape` / `author` / `author_person_id` / `transcription`）⇒ 文本；
+ *   · `faces[]` ⇒ 印面數組（**1..N**；`kind` 缺鍵 ⇒ `FACE`；含邊款 `EDGE`）；
+ *     每印面 ＝ 印面級字段 ＋ 影像引用（`image_storage_key` / `image_sha256` 為鍵 / 摘要引用；
+ *     `image_bytes` 整數、`image_mime` 文本 —— **不塞二進制**）；
+ *   · `status` **缺鍵 ⇒ `PENDING`**（恰三態；顯式給了別的值則逐字保留）；
+ *   · `imported_by` / `reviewer_id` 是**不透明 uid**（**零手機號**）。
+ * **不產出任何派生顯示名**。
+ */
+export function normalizeSealImportRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const id = text(firstOf(row.id, row._id))
+  const faces = Array.isArray(row.faces)
+    ? row.faces.map((face) => {
+        const f = face && typeof face === 'object' ? face : {}
+        return {
+          ...f,
+          kind: text(firstOf(f.kind, 'FACE')),
+          seal_name: text(f.seal_name),
+          dynasty: text(f.dynasty),
+          seal_type: text(f.seal_type),
+          face_style: text(f.face_style),
+          seal_class: text(f.seal_class),
+          author: text(f.author),
+          author_person_id: text(f.author_person_id),
+          transcription: text(f.transcription),
+          image_storage_key: text(f.image_storage_key),
+          image_sha256: text(f.image_sha256),
+          image_bytes: intOrNull(f.image_bytes),
+          image_mime: text(f.image_mime)
+        }
+      })
+    : []
+  return {
+    ...row,
+    _id: text(row._id),
+    id,
+    batch_id: text(row.batch_id),
+    source: text(row.source),
+    source_seal_id: text(row.source_seal_id),
+    status: text(firstOf(row.status, 'PENDING')),
+    seal_name: text(row.seal_name),
+    dynasty: text(row.dynasty),
+    seal_type: text(row.seal_type),
+    seal_style: text(row.seal_style),
+    face_style: text(row.face_style),
+    seal_class: text(row.seal_class),
+    material: text(row.material),
+    shape: text(row.shape),
+    author: text(row.author),
+    author_person_id: text(row.author_person_id),
+    transcription: text(row.transcription),
+    content_fingerprint: text(row.content_fingerprint),
+    faces,
+    imported_by: text(row.imported_by),
+    imported_at: text(row.imported_at),
+    reviewed_at: text(row.reviewed_at),
+    reviewer_id: text(row.reviewer_id),
+    review_note: text(row.review_note)
+  }
+}
+
 const NORMALIZERS = Object.freeze({
   seals: normalizeSealRow,
   faces: normalizeFaceRow,
@@ -820,7 +893,8 @@ const NORMALIZERS = Object.freeze({
   correctionSummaries: normalizeCorrectionSummaryRow,
   persons: normalizePersonRow,
   personProposals: normalizePersonProposalRow,
-  personImports: normalizePersonImportRow
+  personImports: normalizePersonImportRow,
+  sealImports: normalizeSealImportRow
 })
 
 /* ---------------------------------------------------------------------------

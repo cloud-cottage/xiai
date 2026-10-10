@@ -67,7 +67,14 @@ const COLLECTIONS = Object.freeze({
   personProposals: 'xiai_person_proposals',
   /* **印人批 2 前置（v1.54｜§3.54.14 / §4.1.16）**：外部批量导入暂存 / PENDING 集合
      （单写者；只经外部导入通道与采纳路径写；不开放任何直写入口）。 */
-  personImports: 'xiai_person_imports'
+  personImports: 'xiai_person_imports',
+  /* **印章批 3（v1.55｜§3.55 ＋ §4.1.17）**：印章外部批量導入暫存集合（單寫者；只經外部導入
+     通道與採納路徑寫；不開放任何直寫入口），以及**既有正式落點** `seals` / `faces`（採納整條落）
+     與影像讀面 `images`（採納時逐條校驗引用對象存在）。 */
+  sealImports: 'xiai_seal_imports',
+  seals: 'xiai_seals',
+  faces: 'xiai_faces',
+  images: 'xiai_images'
 })
 
 /** 勘误三态（与 `src/services/corrections.js::CORRECTION_STATUS` **逐字同值**）。 */
@@ -104,6 +111,51 @@ const PERSON_IMPORT_STATUS = Object.freeze({
 
 /** 外部导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
 const PERSON_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
+
+/* **印章批 3（v1.55｜§3.55 ＋ §4.1.17）**：印章外部批量導入審核通道（管理员写面）。
+   与 `src/data/seed.js` / `src/services/seals.js` / `xiai-user-token/lib/ops.js` 的冻结面**逐字同值**。 */
+
+/** 印章導入行三态（与 `src/services/seals.js::SEAL_IMPORT_STATUS_EXPORT` / `seed.js::SEAL_IMPORT_STATUS` 逐字同值）。 */
+const SEAL_IMPORT_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+})
+
+/** 印章编号前缀（与 `src/data/db.js::SEAL_STAMP_ID_PREFIX` 逐字同值）。 */
+const SEAL_STAMP_ID_PREFIX = 'XA'
+
+/** 印章導入行**印章級字段面**（逐字沿 `src/data/seed.js::SEAL_IMPORT_SEAL_FIELDS`；不另立第二套）。 */
+const SEAL_IMPORT_SEAL_FIELDS = Object.freeze([
+  'seal_name',
+  'dynasty',
+  'seal_type',
+  'seal_style',
+  'material',
+  'shape',
+  'author',
+  'transcription'
+])
+
+/** 印章導入行**印面級字段面**（每印面；含影像引用键 / 摘要；边款 `kind=EDGE` 须在列）。 */
+const SEAL_IMPORT_FACE_FIELDS = Object.freeze([
+  'kind',
+  'seal_name',
+  'dynasty',
+  'seal_type',
+  'face_style',
+  'seal_class',
+  'author',
+  'author_person_id',
+  'transcription',
+  'image_storage_key',
+  'image_sha256',
+  'image_bytes',
+  'image_mime'
+])
+
+/** 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
+const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
 
 /** 印人编号前缀（与 `src/data/seed.js::PERSON_CODE_PREFIX` 逐字同值）。 */
 const PERSON_CODE_PREFIX = 'PR'
@@ -426,6 +478,102 @@ async function readPersonImportRow(importId) {
   const byDoc = await collection.doc(id).get()
   const rowsByDoc = rowsOf(byDoc)
   if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
+  return null
+}
+
+/* ---------------------------------------------------------------------------
+   **印章批 3（v1.55）**：印章導入行读点 ＋ 归一面 ＋ 幂等落行派生（与用户函数 / 前端逐字同构）
+   --------------------------------------------------------------------------- */
+
+/** **印章導入行读点（§3.55.3；只读）**：按业务键 `id` / 文档 `_id` 兜底读导入行。 */
+async function readSealImportRow(importId) {
+  const id = text(importId)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.sealImports)
+  const byId = await collection.where({ id }).get()
+  const rowsById = rowsOf(byId)
+  if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
+  const byDoc = await collection.doc(id).get()
+  const rowsByDoc = rowsOf(byDoc)
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
+  return null
+}
+
+/** 归一刻章级字段面（逐键取 `SEAL_IMPORT_SEAL_FIELDS`；缺值 ⇒ 空串）。 */
+function pickSealImportSealFields(payload) {
+  const out = {}
+  SEAL_IMPORT_SEAL_FIELDS.forEach((key) => {
+    out[key] = text(payload === undefined || payload === null ? '' : payload[key])
+  })
+  return out
+}
+
+/** 归一单印面（`kind` 默认 `FACE`；`image_bytes` 默认 `0`；其余文本）。 */
+function normalizeSealImportFace(face) {
+  const f = face && typeof face === 'object' ? face : {}
+  const out = {}
+  SEAL_IMPORT_FACE_FIELDS.forEach((key) => {
+    if (key === 'kind') {
+      out[key] = text(f.kind) === 'EDGE' ? 'EDGE' : 'FACE'
+      return
+    }
+    if (key === 'image_bytes') {
+      const n = Number(f.image_bytes)
+      out[key] = Number.isFinite(n) && n > 0 ? Math.round(n) : 0
+      return
+    }
+    out[key] = text(f[key])
+  })
+  return out
+}
+
+/** 印章序号（`XA` ＋ 9 位；用于派生印面 id 的 `<序号>` 位）。 */
+function sealStampSerialOf(stampId) {
+  const matched = new RegExp(`^${SEAL_STAMP_ID_PREFIX}(\\d{9})$`).exec(text(stampId))
+  if (matched) return matched[1]
+  return text(stampId).replace(/[^0-9A-Za-z]/g, '')
+}
+
+/** 下一印章编号：`XA` ＋ 9 位序号，**跳过已占用**（与 `db.js::nextSealStampId` 同口径）。 */
+function nextSealStampIdOf(rows) {
+  let max = 0
+  ;(Array.isArray(rows) ? rows : []).forEach((row) => {
+    const matched = new RegExp(`^${SEAL_STAMP_ID_PREFIX}(\\d{9})$`).exec(text(row && row.stamp_id))
+    if (matched) max = Math.max(max, Number(matched[1]))
+  })
+  const taken = new Set((Array.isArray(rows) ? rows : []).map((row) => text(row && row.stamp_id)))
+  let index = max + 1
+  while (taken.has(`${SEAL_STAMP_ID_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
+  return `${SEAL_STAMP_ID_PREFIX}${String(index).padStart(9, '0')}`
+}
+
+/** 印面 id：`fc-<印章序号>-<f|e><n>`（同类递增，冲突则继续挑；与 `db.js::nextFaceId` 同口径）。 */
+function nextFaceIdOf(stampId, kind, taken) {
+  const letter = text(kind) === 'EDGE' ? 'e' : 'f'
+  const serial = sealStampSerialOf(stampId)
+  let index = 1
+  while (taken.has(`fc-${serial}-${letter}${index}`)) index += 1
+  return `fc-${serial}-${letter}${index}`
+}
+
+/**
+ * **影像引用存在性读点（§3.55.6｜复用既有 `xiai_images` 集合；只读）**：
+ * 按（摘要 / 内容寻址键）查引用对象；命中 ⇒ 回该行，否则 ⇒ `null`（缺失 ⇒ 采纳时该条拒绝）。
+ */
+async function findSealImportImageRow(face) {
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.images)
+  const sha = text(face && face.image_sha256)
+  const key = text(face && face.image_storage_key)
+  if (sha) {
+    const rows = rowsOf(await collection.where({ sha256: sha }).get())
+    if (rows.length > 0) return rows[0]
+  }
+  if (key) {
+    const rows = rowsOf(await collection.where({ storage_key: key }).get())
+    if (rows.length > 0) return rows[0]
+  }
   return null
 }
 
@@ -853,6 +1001,207 @@ const OPS = Object.freeze({
       failed,
       plan: { op: 'reviewPersonImport', writes }
     }
+  },
+
+  /**
+   * **審核印章外部導入行（採納 / 駁回；§3.55.4 / §3.55.5）**：① 載荷鍵面 → ② 批次 / 單行 / 决定值域 /
+   * 理由长度 → ③ 審核人身份（服务端派生）→ ④ 讀導入行（批次或單行；只讀）→
+   * **採納** ⇒ 對每條 `PENDING` 行按 `source` ＋ `source_seal_id` **冪等**整條落
+   * `xiai_seals` ＋ `xiai_faces`（`review_status='APPROVED'`；重複採納**不改寫既有行**）；
+   * **採納時逐條校驗影像引用對象存在**（缺失 ⇒ 該條拒絕 ＋ 零寫入；`kind=FACE` 無引用亦拒）；
+   * **駁回** ⇒ **零寫入**（僅導入行狀態）。三態單向、終態不回退。reason 一律沿用既有凍結字面值。
+   * **落庫鍵集與 `xiai-user-token` 的同名 op 逐字对齐**。
+   * @param {object} payload 载荷（允许键见 `SEAL_IMPORT_REVIEW_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份（唯一来源）
+   * @param {number} nowSeconds 服务端时钟（秒；本函数唯一时源）
+   */
+  async reviewSealImport(payload, identity, nowSeconds) {
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => SEAL_IMPORT_REVIEW_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const batchId = text(payload.batch_id)
+    const importId = text(payload.import_id)
+    if (!batchId && !importId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少導入批次號（batch_id）或導入行號（import_id）⇒ 拒絕審覈；本次零寫入。')
+    }
+    const rawDecision = text(payload.decision)
+    const decision = LEGACY_DECISION[rawDecision] || rawDecision
+    if (DECISIONS.indexOf(decision) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `審覈決定「${rawDecision || '（空）'}」不在允許的 2 類之內（ACCEPTED 採納 / REJECTED 駁回）⇒ 拒絕寫入；本次零寫入。`
+      )
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '駁回理由必須是文字 ⇒ 拒絕審覈；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `駁回理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕審覈；本次零寫入。`)
+    }
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的審核人身份；本次零寫入。')
+    }
+    /* ④ 读导入行（批次或单行；**只读** —— 不是写）。 */
+    let targets = []
+    if (importId) {
+      const found = await readSealImportRow(importId)
+      if (found) targets = [found.row]
+    } else {
+      targets = rowsOf(await resolveDb().collection(COLLECTIONS.sealImports).where({ batch_id: batchId }).get())
+    }
+    if (targets.length === 0) {
+      return deny(REASONS.NOT_FOUND, `未找到匹配的印章外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
+    }
+    const accepted = decision === SEAL_IMPORT_STATUS.ACCEPTED
+    const at = new Date(Math.floor(Number(nowSeconds)) * 1000).toISOString()
+    const writes = []
+    const acceptedIds = []
+    const rejectedIds = []
+    const skipped = []
+    const failed = []
+    let sealsCache = null
+    let facesCache = null
+    const sealsOf = async () => {
+      if (sealsCache === null) sealsCache = rowsOf(await resolveDb().collection(COLLECTIONS.seals).get())
+      return sealsCache
+    }
+    const facesOf = async () => {
+      if (facesCache === null) facesCache = rowsOf(await resolveDb().collection(COLLECTIONS.faces).get())
+      return facesCache
+    }
+    for (const row of targets) {
+      const rid = text(row && row.id)
+      const current = text(row && row.status) || SEAL_IMPORT_STATUS.PENDING
+      const privatePatch = { status: decision, reviewed_at: at, reviewer_id: identity.uid }
+      if (!accepted && noteText !== '') privatePatch.review_note = noteText
+      /* 终态不回退：已审行**跳过**（幂等重放场景不改写既有终态）。 */
+      if (current !== SEAL_IMPORT_STATUS.PENDING) {
+        skipped.push(rid)
+        continue
+      }
+      if (!accepted) {
+        writes.push({ collection: COLLECTIONS.sealImports, action: 'update', match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
+        rejectedIds.push(rid)
+        continue
+      }
+      const sourceSealId = text(row && row.source_seal_id)
+      if (!sourceSealId) {
+        /* 幂等键缺失 ⇒ **该行失败、保持 PENDING 且零写入**（不动正式行、不改本行）。 */
+        failed.push(rid)
+        continue
+      }
+      const seals = await sealsOf()
+      const existing = seals.find((item) => text(item && item.source_seal_id) === sourceSealId && text(item && item.source) === text(row && row.source))
+      if (!existing) {
+        /* **影像引用校验**：逐条校验引用对象存在（缺失 ⇒ 该条拒绝 ＋ 零写入）。 */
+        const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
+        const resolvedFaces = []
+        let dangling = false
+        for (const face of faceDefs) {
+          const hasRef = text(face.image_sha256) !== '' || text(face.image_storage_key) !== ''
+          if (!hasRef) {
+            if (face.kind === 'FACE') {
+              dangling = true
+              break
+            }
+            resolvedFaces.push({ face, image: null })
+            continue
+          }
+          const image = await findSealImportImageRow(face)
+          if (!image) {
+            dangling = true
+            break
+          }
+          resolvedFaces.push({ face, image })
+        }
+        if (dangling) {
+          /* 该条失败：保持 PENDING 且零写入（不动 seals / faces、不改本行）。 */
+          failed.push(rid)
+          continue
+        }
+        const stampId = nextSealStampIdOf(seals)
+        const serial = sealStampSerialOf(stampId)
+        const source = text(row && row.source)
+        const sealName = text(row && row.seal_name)
+        const sealDoc = {
+          sealGroupId: `g-${serial}`,
+          stamp_id: stampId,
+          id: stampId,
+          seal_name: sealName,
+          name: sealName,
+          transcription: text(row && row.transcription),
+          dynasty: text(row && row.dynasty),
+          seal_type: text(row && row.seal_type),
+          category: text(row && row.seal_type),
+          seal_style: text(row && row.seal_style),
+          material: text(row && row.material),
+          shape: text(row && row.shape),
+          asset_kind: 'SEAL',
+          /* **同置**：採納 ⇒ 正式行 `review_status='APPROVED'`（与导入行 `status='ACCEPTED'` 同时推进）。 */
+          review_status: 'APPROVED',
+          author: text(row && row.author),
+          source,
+          source_seal_id: sourceSealId,
+          uploaded_by: identity.uid,
+          created_at: at,
+          updated_at: at
+        }
+        seals.push(sealDoc)
+        writes.push({ collection: COLLECTIONS.seals, action: 'set', id: stampId, doc: sealDoc })
+        const allFaces = await facesOf()
+        const taken = new Set(allFaces.map((item) => text(item && item.id)))
+        for (const { face, image } of resolvedFaces) {
+          const faceId = nextFaceIdOf(stampId, face.kind, taken)
+          taken.add(faceId)
+          const isEdge = face.kind === 'EDGE'
+          const faceDoc = {
+            id: faceId,
+            sealId: stampId,
+            stamp_id: stampId,
+            kind: face.kind,
+            face_image_id: !isEdge && image ? text(image.id) : null,
+            edge_image_ids: isEdge && image ? [text(image.id)] : [],
+            seal_name: text(face.seal_name) || sealName,
+            dynasty: text(face.dynasty) || text(row && row.dynasty),
+            seal_type: text(face.seal_type),
+            face_style: text(face.face_style),
+            seal_class: text(face.seal_class),
+            author: text(face.author),
+            author_person_id: text(face.author_person_id),
+            transcription: text(face.transcription),
+            source,
+            uploaded_by: identity.uid,
+            created_at: at,
+            updated_at: at
+          }
+          writes.push({ collection: COLLECTIONS.faces, action: 'set', id: faceId, doc: faceDoc })
+          allFaces.push(faceDoc)
+        }
+      }
+      writes.push({ collection: COLLECTIONS.sealImports, action: 'update', match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
+      acceptedIds.push(rid)
+    }
+    return {
+      ok: true,
+      op: 'reviewSealImport',
+      accepted,
+      accepted_ids: acceptedIds,
+      rejected_ids: rejectedIds,
+      skipped,
+      failed,
+      plan: { op: 'reviewSealImport', writes }
+    }
   }
 })
 
@@ -912,12 +1261,18 @@ module.exports = {
   /* 外部批量導入審核面（批 2 前置 §3.54.14 / §3.54.15；供离线自检直接断言）。 */
   PERSON_IMPORT_REVIEW_ALLOWED_KEYS,
   PERSON_IMPORT_STATUS,
+  /* 印章外部批量導入審核面（批 3 前置 §3.55.5 / §4.1.17；供离线自检直接断言）。 */
+  SEAL_IMPORT_REVIEW_ALLOWED_KEYS,
+  SEAL_IMPORT_STATUS,
+  SEAL_IMPORT_SEAL_FIELDS,
+  SEAL_IMPORT_FACE_FIELDS,
   OPS,
   setOpsDbProvider,
   opsDbInjected,
   resolveDb,
   readCorrectionRow,
   readPersonImportRow,
+  readSealImportRow,
   readRoleRow,
   IDENTITY_SOURCES,
   isSessionIdentity,

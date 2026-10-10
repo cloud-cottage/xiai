@@ -15,6 +15,9 @@
 
 /* **身份标识（uid）单点**：`src/data/uid.js`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。 */
 import { uidOf } from './uid.js'
+/* **印章批 3（v1.55｜§3.55.5）**：内容指紋（導入行「疑似重複」軟提示用）的雜湊实现
+   —— 复用既有 `assetmeta.js::sha256Hex`（自带、同步、跨环境），**不另造第二把尺子**。 */
+import { sha256Hex } from './assetmeta.js'
 
 /**
  * 玺爱新增字段：斐萃 seals 表中无对应列，属平台自建口径。
@@ -859,4 +862,143 @@ export function emptyPersonImportPayload() {
     else out[key] = ''
   })
   return out
+}
+
+/* ============================================================================
+   **印章批 3 前置增量：印章外部批量導入通道（v1.55｜§3.55 ＋ §4.1.17）**
+   ----------------------------------------------------------------------------
+   外部批量導入先落暫存集合 `xiai_seal_imports` 的 `PENDING` 行；管理員採納
+   （`PENDING → ACCEPTED`）⇒ **整條**冪等落 `xiai_seals`（印章級）＋ `xiai_faces`（印面級，
+   含邊款 `kind=EDGE`），且**同置** `review_status='APPROVED'`（按 `source` ＋ `source_seal_id`
+   冪等；重複採納**不改寫既有行**）；`REJECTED` ⇒ **零寫入**。本集合**單寫者**
+   （不開放任何直寫入口，含管理員直寫）。
+   **本常量區只落「集合名 / 字段真源 / 三態枚舉 / 鍵前綴」**；讀寫、冪等鍵、直寫門在
+   `data/db.js`；雲側讀面在 `data/cloudbase.js`；寫通道在 `services/seals.js` ＋ 雲函數。
+   本增量**零新增 `reason` 字面值**（值域 / 形態校驗一律沿用既有凍結表）；
+   `[data-admin-action]` **不新增**（與印人導入區塊共用同一鈎子值；見 §3.55.8）。
+   印章級 / 印面級字段**逐字沿用既有 `xiai_seals` / `xiai_faces` 口徑，不另立第二套**。
+   ============================================================================ */
+
+/** 印章外部批量導入暫存集合名（`xiai_` 前綴；逐字，雲控制台新建的集合須與此逐字一致）。 */
+export const XIAI_SEAL_IMPORTS_COLLECTION = 'xiai_seal_imports'
+
+/** 印章導入行文檔鍵前綴（確定性 / 可讀）。 */
+export const SEAL_IMPORT_ID_PREFIX = 'si-'
+
+/** 印章導入行三態（**恰三態、單向、終態不回退**；與提案 / 印人導入三態逐字同形）。 */
+export const SEAL_IMPORT_STATUS = {
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED'
+}
+
+/**
+ * **導入行行級元數據字段（§3.55.3 / §4.1.17）**：行主鍵 / 批次 / 來源 / 冪等鍵 / 狀態 /
+ * 導入與審核留痕 / 內容指紋（軟提示）。身份類鍵（`imported_by` / `reviewer_id`）
+ * **一律落不透明 uid、零手機號**（沿 §3.49）。
+ */
+export const SEAL_IMPORT_ROW_FIELDS = [
+  'id',
+  'batch_id',
+  'source',
+  'source_seal_id',
+  'status',
+  'imported_by',
+  'imported_at',
+  'reviewed_at',
+  'reviewer_id',
+  'review_note',
+  /* **內容指紋（軟提示）**：印章級標識字段的規範化串雜湊；**只作「疑似重複」軟提示**，
+     **不構成拒收理由**（明文：指紋不構成拒收理由；沿 §3.55.5）。 */
+  'content_fingerprint'
+]
+
+/**
+ * **導入行印章級字段（逐字沿既有 `xiai_seals` 口徑；不另立第二套字段名 / 第二套枚舉）**。
+ * 即既有印章實體會寫的鍵面（`SEAL_INSERT_INPUT_FIELDS` 的規範名 ＋ `transcription`）
+ * —— 落正式行时由採納路徑按同名字段映射（沿 §4.1.2 / §4.3）。
+ * **【印面風格】`face_style` /【大類】`seal_class` / 作者引用 `author_person_id` 屬
+ * **印面級**（canonical 真源在印面行，見 §4.3 表下注 v1.50 / §3.54.7）⇒ 只在 `faces[]` 面，
+ * **不在印章級**（不得在印章行存鏡像 ⇒ 避免雙寫漂移）。
+ */
+export const SEAL_IMPORT_SEAL_FIELDS = [
+  'seal_name',
+  'dynasty',
+  'seal_type',
+  'seal_style',
+  'material',
+  'shape',
+  'author',
+  'transcription'
+]
+
+/**
+ * **導入行印面級字段（每印面；含影像鍵 / 摘要引用）** —— `kind` ∈ `FACE_KIND`
+ * （`FACE` / `EDGE`；**邊款 `kind=EDGE` 須在列，不得排除**）。
+ * 影像二進制**不在此面**（只存鍵 / 摘要引用；沿 §3.55.6 影像先行）。
+ */
+export const SEAL_IMPORT_FACE_FIELDS = [
+  'kind',
+  'seal_name',
+  'dynasty',
+  'seal_type',
+  'face_style',
+  'seal_class',
+  'author',
+  'author_person_id',
+  'transcription',
+  'image_storage_key',
+  'image_sha256',
+  'image_bytes',
+  'image_mime'
+]
+
+/** 影像引用鍵面（每印面；**（鍵 / 摘要）二元組** —— 導入行只存引用、不存二進制）。 */
+export const SEAL_IMPORT_IMAGE_REF_FIELDS = ['image_storage_key', 'image_sha256', 'image_bytes', 'image_mime']
+
+/**
+ * **導入行字段真源（全集；恰一處定義點）** ＝ 行級元數據 ＋ 印章級 ＋ 印面數組 `faces`。
+ * **不得在別處另立第二套同義字段**（沿「真值函數是唯一尺子」精神）。
+ */
+export const SEAL_IMPORT_FIELDS = [...SEAL_IMPORT_ROW_FIELDS, ...SEAL_IMPORT_SEAL_FIELDS, 'faces']
+
+/**
+ * 導入行「值的默認」（印章級）：**一律空串**（缺省不設特值）。
+ * @returns {object} 空印章級字段面（**不含 `id` / `status` / 身份 / 時間戳**）
+ */
+export function emptySealImportFields() {
+  const out = {}
+  SEAL_IMPORT_SEAL_FIELDS.forEach((key) => {
+    out[key] = ''
+  })
+  return out
+}
+
+/**
+ * 導入行「單印面值的默認」：`kind` 默認 `FACE`、`image_bytes` 默認 `0`、其餘空串。
+ * @returns {object} 空印面字段面
+ */
+export function emptySealImportFace() {
+  const out = {}
+  SEAL_IMPORT_FACE_FIELDS.forEach((key) => {
+    if (key === 'kind') out[key] = FACE_KIND.FACE
+    else if (key === 'image_bytes') out[key] = 0
+    else out[key] = ''
+  })
+  return out
+}
+
+/**
+ * **導入行內容指紋（純函數；§3.55.5 軟提示用）**：印章級標識字段的**規範化串雜湊**
+ * （逐字段 `trim` 後以 `\u0001` 連接、取 `sha256`）。
+ * **只作「疑似重複」軟提示、交管理員裁；明文：指紋不構成拒收理由**（沿 §3.55.5）。
+ * @param {object} fields 印章級字段面（導入行 / 正式印章行均可）
+ * @returns {string} 64 位小寫十六進制指紋
+ */
+export function sealImportFingerprint(fields) {
+  const src = fields && typeof fields === 'object' ? fields : {}
+  const normalized = SEAL_IMPORT_SEAL_FIELDS.map((key) =>
+    String(src[key] === undefined || src[key] === null ? '' : src[key]).trim()
+  ).join('\u0001')
+  return sha256Hex(normalized)
 }

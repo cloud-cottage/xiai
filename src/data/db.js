@@ -1789,6 +1789,113 @@ export function personImportBySourceId(sourcePersonId) {
   )
 }
 
+/* ---------------------------------------------------------------------------
+   **印章批 3 前置（v1.55｜§3.55 ＋ §4.1.17）：印章外部批量導入行 ＋ 單寫者門**
+   ---------------------------------------------------------------------------
+   · `xiai_seal_imports` 的**本機鏡像**（鍵 `seal-imports`）：只經「外部批量導入」通道與
+     管理員採納路徑寫 —— 低層讀取 / 寫入助手**僅供該通道調用**，**不開放任何直寫入口**；
+   · 冪等鍵 ＝ `source` ＋ `source_seal_id`（採納落 `xiai_seals` 時按它冪等；
+     重複採納**不改寫既有行**）；
+   · **直寫門**：任何繞過導入通道 / 採納路徑的直寫（含**管理員直寫**）一律
+     `FORBIDDEN` ＋ **零寫入**（沿 §3.55.4 / §3.55.5 / §3.55.10）。
+   --------------------------------------------------------------------------- */
+
+/** 印章外部導入行本機集合鍵（真實鍵名 `xiai:v1:seal-imports`）。 */
+const SEAL_IMPORT_COLLECTION_KEY = 'seal-imports'
+
+/** 讀印章外部導入行（云模式 ⇒ 云端快照；否則本機）。 */
+export function listSealImportRows() {
+  return readCollection(SEAL_IMPORT_COLLECTION_KEY, [])
+}
+
+/** 寫印章外部導入行（**僅外部導入通道與管理員採納路徑調用**；低層無直寫入口）。 */
+export function saveSealImportRows(rows) {
+  return writeCollection(SEAL_IMPORT_COLLECTION_KEY, rows)
+}
+
+/**
+ * **印章導入集合的單寫者面（硬要求｜§3.55.4 / §3.55.5 / §3.55.10）**：`xiai_seal_imports`
+ * **只經管理員採納路徑 / 外部導入通道寫** —— **不開放任何直寫入口**（**含管理員直寫**）。
+ * 任何試圖「直接寫本集合」的入口經本門 ⇒ `FORBIDDEN` ＋ **零寫入**。
+ * 返回值恆為 `null`（該鍵不屬單寫者集合，交由既有讀寫路徑）或結構化拒絕對象。
+ * @param {string} collectionKey 集合鍵（`seal-imports`）
+ * @returns {null|{ok:false, reason:'FORBIDDEN', message:string}} 放行 ⇒ `null`
+ */
+export function sealImportDirectWriteDenial(collectionKey) {
+  const key = collectionKey === null || collectionKey === undefined ? '' : String(collectionKey).trim()
+  if (key === SEAL_IMPORT_COLLECTION_KEY) {
+    return {
+      ok: false,
+      reason: 'FORBIDDEN',
+      message:
+        `集合（${key}）為單寫者：只經管理員採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
+        '（含管理員直寫）⇒ 已拒絕；本次零寫入。'
+    }
+  }
+  return null
+}
+
+/** 冪等鍵归一：`{ source, sourceSealId }`（`source` 可空，`source_seal_id` 必有）。 */
+function sealSourceKeyOf(source, sourceSealId) {
+  const s = source === null || source === undefined ? '' : String(source).trim()
+  const sid = sourceSealId === null || sourceSealId === undefined ? '' : String(sourceSealId).trim()
+  return { source: s, sourceSealId: sid }
+}
+
+/** 按 `source` ＋ `source_seal_id` 取導入行（幂等 / 去重用；未命中 ⇒ `null`）。 */
+export function sealImportBySourceKey(source, sourceSealId) {
+  const { source: s, sourceSealId: sid } = sealSourceKeyOf(source, sourceSealId)
+  if (!sid) return null
+  return (
+    listSealImportRows().find(
+      (row) =>
+        row &&
+        String(row.source_seal_id || '') === sid &&
+        String(row.source || '') === s
+    ) || null
+  )
+}
+
+/** 按 `source` ＋ `source_seal_id` 取已採納的正式印章行（採納冪等鍵；未命中 ⇒ `null`）。 */
+export function sealBySourceKey(source, sourceSealId) {
+  const { source: s, sourceSealId: sid } = sealSourceKeyOf(source, sourceSealId)
+  if (!sid) return null
+  return (
+    listSealRows().find(
+      (row) =>
+        row &&
+        String(row.source_seal_id || '') === sid &&
+        String(row.source || '') === s
+    ) || null
+  )
+}
+
+/**
+ * **影像引用存在性讀面（§3.55.6｜复用既有影像讀面、不新增第二套讀法）**：
+ * 在**既有** `images` 讀面（`listImageRows`，即 `xiai_images`）中按（摘要 / 內容尋址鍵）
+ * 查引用對象；命中 ⇒ 回該行，否則 ⇒ `null`（缺引用 ⇒ 採納時該條拒絕 ＋ 零寫入）。
+ * @param {{image_sha256?:string, image_storage_key?:string}} ref 影像引用（鍵 / 摘要）
+ * @returns {object|null}
+ */
+export function imageRowByRef(ref) {
+  const r = ref && typeof ref === 'object' ? ref : {}
+  const sha = String(r.image_sha256 === undefined || r.image_sha256 === null ? '' : r.image_sha256).trim()
+  const key = String(r.image_storage_key === undefined || r.image_storage_key === null ? '' : r.image_storage_key).trim()
+  if (!sha && !key) return null
+  return (
+    listImageRows().find(
+      (row) =>
+        row &&
+        ((sha && String(row.sha256 || '') === sha) || (key && String(row.storage_key || '') === key))
+    ) || null
+  )
+}
+
+/* **採納路徑複用既有 id 派生（既有實現，非第二套）**：印章編號（`XA` ＋ 9 位零填充）與
+   印面編號（`<stampId>-<FACE|EDGE><序>`）的派生真源仍在下方既有函數（本處只把它們導出，
+   **不另寫一份**）。 */
+export { nextSealStampId, nextFaceId }
+
 /** 取数组首非空文本（`字` / `号` 等数组的取首值口径）。 */
 function firstTextOf(list) {
   if (!Array.isArray(list)) return ''
