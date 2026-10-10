@@ -464,7 +464,7 @@ onBeforeUnmount(() => {
           <option v-for="item in dynastyOptions" :key="item" :value="item">{{ item }}</option>
         </select>
         <span class="field__hint">
-          朝代固定 15 類（本框共 {{ dynastyOptions.length }} 項），只可選不可填。
+          朝代固定 {{ dynastyOptions.length }} 類，只可選不可填。
         </span>
         <span v-if="!form.dynasty" class="field__hint" data-dynasty-unselected="upload-seal">
           尚未選擇朝代（必填）。
