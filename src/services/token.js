@@ -256,7 +256,7 @@ export function createTokenChannel(profile) {
       }
       if (result.identity && typeof result.identity.uid === 'string') state.uid = result.identity.uid
       state.lastReason = ''
-      return {
+      const envelope = {
         ok: true,
         mode: TOKEN_MODES.CLOUD,
         op: typeof result.op === 'string' ? result.op : trimmed(op),
@@ -284,6 +284,29 @@ export function createTokenChannel(profile) {
         renewals: state.renewals,
         message: ''
       }
+      /* **只读行面（additive 透传｜**按 `op` 收窄**｜E-3）**：`rows` / `count` **仅当
+         `op === 'pullImportRows'` 且云函数回包（`result`）确有该键时**才逐字叠进出参；
+         服务端未回 ⇒ 本键**缺席**（调用方读到 `undefined`），**不得默认成 `[]` / `0`**。
+         其余任何 op 一律不出现这 2 个键（既有回包逐字不变）。 */
+      if (trimmed(op) === 'pullImportRows') {
+        const PULL_READOUT_KEYS = ['rows', 'count']
+        for (const key of PULL_READOUT_KEYS) {
+          if (Object.prototype.hasOwnProperty.call(result, key)) envelope[key] = result[key]
+        }
+      }
+      /* **審核計數面（additive 透传｜**按 `op` 收窄**｜E-4）**：`accepted_ids` / `rejected_ids` /
+         `skipped` / `failed` / `done` / `remaining` **仅当 `op` ∈ 三 review op 且云函数回包确有该键时**
+         才逐字透传给服务层（`{seals,persons,items}.js` 与视图循环推进据此报数 / 推进）；
+         **键名 / 值逐字不改写、不编造分组、不派生假读数**（`remaining` 读失败时云函数**不放该键**
+         ⇒ 这里同样缺席 ⇒ 调用方读到 `undefined`，**绝不填 `0` 冒充**）。
+         其余任何 op 一律不出现这 6 个键（既有回包逐字不变）—— 与云函数 `index.js` 的收窄面**逐条同形**。 */
+      if (trimmed(op) === 'reviewPersonImport' || trimmed(op) === 'reviewSealImport' || trimmed(op) === 'reviewItemImport') {
+        const IMPORT_REVIEW_READOUT_KEYS = ['accepted_ids', 'rejected_ids', 'skipped', 'failed', 'done', 'remaining']
+        for (const key of IMPORT_REVIEW_READOUT_KEYS) {
+          if (Object.prototype.hasOwnProperty.call(result, key)) envelope[key] = result[key]
+        }
+      }
+      return envelope
     }
     if (result && result.ok === false && typeof result.reason === 'string' && typeof result.message === 'string') {
       /* **服务端结构化拒绝原样透传**（`reason` / `message` 一个都不改写）。 */
