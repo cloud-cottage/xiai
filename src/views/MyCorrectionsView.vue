@@ -11,26 +11,98 @@
  * 数据层对越权写另有独立拒绝，不因界面变化而放宽。
  */
 
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { corrections, persons, points, seals, items } from '../services/index.js'
 import { currentUser } from '../data/session.js'
-/* **E-2（阶段乙｜2026-10-12）**：本机面判据的**唯一真源** —— 外部批量导入＝本机专属面，
-   生产（cloudbase 数据源）不渲染「待審導入批次」区块（DOM 零命中，不以 CSS 隐藏冒充）。
-   `writeFaceMode()` 只认「有云写入面 ⇒ cloud / 无 ⇒ local-dev」；`cloudbase` 生产构建下
-   `cloudBaseConfigured()` 为真 ⇒ 恒 `cloud` ⇒ 本区块不渲染。**不自造第二套判据、不读
-   `import.meta.env` 字面键。** */
-import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
+/* **形態①（K-乙-4｜2026-10-12｜更正 R-2）**：本机面判据的**唯一真源** —— 外部批量导入＝
+   本机专属面，判据是**本机构建开关** `VITE_XIAI_LOCAL_IMPORT_FACE`（字面取键；值 ∈ {'1','true'}），
+   **不再**用 `writeFaceMode() === local-dev`：那样本机站既看不到云端的包、采纳也落不了云
+   （与 R-4「采纳后正式行仍落云端」冲突）。
+   生产构建（无该开关）⇒ `isLocalImportFace()` 恒 false ⇒「待審導入批次」区块**不渲染**
+   （DOM 零命中，不以 CSS 隐藏冒充）**且不發任何取行請求**。**不自造第二套判据、不在本文件读 env。** */
+import { isLocalImportFace } from '../data/writeFaceMode.js'
 import { statusLabel, formatDateTime } from '../utils/format.js'
 
 /* 任何一次审核 / 提交后 +1，使下面的派生读数重算。 */
 const dataVersion = ref(0)
 const feedback = ref('')
-/* **E-2**：本机面（`local-dev`）才渲染「待審導入批次」区块的关键子条件。 */
-const isLocalImportFace = computed(() => writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV)
 /* **E-4**：循環審核期間的進度讀數（`已處理 N · 剩餘 M`）；空串 ⇒ 不顯示。 */
 const importReviewProgress = ref('')
+
+/* ============================================================================
+   **E-3 取行（本機面｜K-乙-4｜2026-10-12｜形態①）—— 數據源切到「取回結果（僅內存）」
+   ----------------------------------------------------------------------------
+   本機面（`isLocalImportFace()` ⇒ true）下，三個待審導入列表的數據源**不再**是雲快照 /
+   本機鏡像，而是 `pullImportRows` 取回的結果：
+     · **僅內存**（本文件的 `ref`；**禁** localStorage / IndexedDB —— R-8：3,679 行 ≈16 MB
+       > 配額，且 `storage.writeKey` 的 catch 會靜默吞掉）；
+     · **刷新即重取**（掛載時取一次；見 `onMounted`）；
+     · **審後刷新**（三處審核循環結束後**重新取行**，**不再**靠 `dataVersion` 重讀舊快照）；
+     · **未取完如實上屏**「已取 N 條（可能還有更多）」，**不得報成全部**。
+   生產面（`isLocalImportFace()` ⇒ false）：**零取行**（不發請求、不進內存）＋ 區塊不渲染
+   ⇒ 與改前**零回歸**。
+   ============================================================================ */
+const localImportLoading = ref(false)
+const localImportPulled = ref(false)
+/** 三族待審導入行（取回結果；**僅內存**）。 */
+const localImportRowsByFamily = ref({ persons: [], seals: [], items: [] })
+/** 逐族「可能還有更多」（該輪取滿 ⇒ 如實標；**不得報成全部**）。 */
+const localImportMaybeMoreByFamily = ref({ persons: false, seals: false, items: false })
+/** 取行降級 / 未取完的可讀文案（正常路徑為空串）。 */
+const localImportPullNotice = ref('')
+
+const LOCAL_IMPORT_FAMILY_LABELS = { persons: '印人導入', seals: '印章導入', items: '印谱導入' }
+
+/**
+ * **重新取行**（本機面；僅內存）。三族並行；任一族的失敗**如實上屏**（不靜默、不以空集冒充）。
+ */
+async function refreshLocalImportRows() {
+  if (!isLocalImportFace()) {
+    localImportRowsByFamily.value = { persons: [], seals: [], items: [] }
+    localImportMaybeMoreByFamily.value = { persons: false, seals: false, items: false }
+    localImportPullNotice.value = ''
+    localImportPulled.value = false
+    return
+  }
+  localImportLoading.value = true
+  try {
+    /* 待審面 ⇒ 逐族取 `PENDING`（`status` 空串不落鍵；非空才落 —— 雲側鍵面封閉）。 */
+    const responses = await Promise.all([
+      persons.pullPersonImportRows(actor.value, { status: 'PENDING' }),
+      seals.pullSealImportRows(actor.value, { status: 'PENDING' }),
+      items.pullItemImportRows(actor.value, { status: 'PENDING' })
+    ])
+    const families = ['persons', 'seals', 'items']
+    const rowsByFamily = { persons: [], seals: [], items: [] }
+    const maybeMoreByFamily = { persons: false, seals: false, items: false }
+    const parts = []
+    families.forEach((family, index) => {
+      const result = responses[index]
+      if (result && result.ok === true) {
+        rowsByFamily[family] = Array.isArray(result.rows) ? result.rows : []
+        maybeMoreByFamily[family] = result.maybeMore === true
+        if (maybeMoreByFamily[family]) {
+          parts.push(`${LOCAL_IMPORT_FAMILY_LABELS[family]} 已取 ${rowsByFamily[family].length} 條（可能還有更多）`)
+        }
+        return
+      }
+      parts.push(`${LOCAL_IMPORT_FAMILY_LABELS[family]}：${(result && result.message) || '取行失敗'}`)
+    })
+    localImportRowsByFamily.value = rowsByFamily
+    localImportMaybeMoreByFamily.value = maybeMoreByFamily
+    localImportPullNotice.value = parts.join('；')
+    localImportPulled.value = true
+  } finally {
+    localImportLoading.value = false
+  }
+}
+
+/* 刷新即重取（R-8：僅內存 ⇒ 不持久化、不緩存）。 */
+onMounted(() => {
+  void refreshLocalImportRows()
+})
 
 /* ============================================================================
    **V3 撤除「校驗碼彈窗」**（2026-10-04）
@@ -116,8 +188,14 @@ const importResult = computed(() => {
   void dataVersion.value
   return persons.listPendingPersonImportsForAdmin(actor.value)
 })
-const importRows = computed(() => (importResult.value.ok ? importResult.value.rows : []))
-const importNotice = computed(() => (importResult.value.ok ? '' : importResult.value.message))
+/* **形態①**：本機面 ⇒ 數據源 ＝ E-3 取回結果（僅內存；見 `refreshLocalImportRows`）；
+   公網面 ⇒ 既有服務層讀面**逐字不變**。 */
+const importRows = computed(() =>
+  isLocalImportFace() ? localImportRowsByFamily.value.persons : importResult.value.ok ? importResult.value.rows : []
+)
+const importNotice = computed(() =>
+  isLocalImportFace() ? '' : importResult.value.ok ? '' : importResult.value.message
+)
 /** 按批次（`batch_id`）分组（视图层分组；单批内逐条采纳仍保留）。 */
 const importBatches = computed(() => {
   const groups = new Map()
@@ -232,6 +310,8 @@ async function confirmImport() {
     const outcome = await runImportReviewLoop(persons.reviewPersonImport, options)
     feedback.value = outcome.message
     importDialog.value = null
+    /* **形態①**：審核循環結束 ⇒ **重新取行**（內存刷新）；**不**靠雲快照 / `dataVersion` 重讀舊數據。 */
+    if (isLocalImportFace()) await refreshLocalImportRows()
     dataVersion.value += 1
   } finally {
     importBusy.value = false
@@ -254,8 +334,12 @@ const sealImportResult = computed(() => {
   void dataVersion.value
   return seals.listPendingSealImportsForAdmin(actor.value)
 })
-const sealImportRows = computed(() => (sealImportResult.value.ok ? sealImportResult.value.rows : []))
-const sealImportNotice = computed(() => (sealImportResult.value.ok ? '' : sealImportResult.value.message))
+const sealImportRows = computed(() =>
+  isLocalImportFace() ? localImportRowsByFamily.value.seals : sealImportResult.value.ok ? sealImportResult.value.rows : []
+)
+const sealImportNotice = computed(() =>
+  isLocalImportFace() ? '' : sealImportResult.value.ok ? '' : sealImportResult.value.message
+)
 /** 按批次（`batch_id`）分组（视图层分组；单批内逐条采纳仍保留，与印人导入同型）。 */
 const sealImportBatches = computed(() => {
   const groups = new Map()
@@ -337,6 +421,8 @@ async function confirmSealImport() {
     const outcome = await runImportReviewLoop(seals.reviewSealImport, options)
     feedback.value = outcome.message
     sealImportDialog.value = null
+    /* **形態①**：審核循環結束 ⇒ **重新取行**（內存刷新）；**不**靠雲快照 / `dataVersion` 重讀舊數據。 */
+    if (isLocalImportFace()) await refreshLocalImportRows()
     dataVersion.value += 1
   } finally {
     sealImportBusy.value = false
@@ -362,8 +448,12 @@ const itemImportResult = computed(() => {
   void dataVersion.value
   return items.listPendingItemImportsForAdmin(actor.value)
 })
-const itemImportRows = computed(() => (itemImportResult.value.ok ? itemImportResult.value.rows : []))
-const itemImportNotice = computed(() => (itemImportResult.value.ok ? '' : itemImportResult.value.message))
+const itemImportRows = computed(() =>
+  isLocalImportFace() ? localImportRowsByFamily.value.items : itemImportResult.value.ok ? itemImportResult.value.rows : []
+)
+const itemImportNotice = computed(() =>
+  isLocalImportFace() ? '' : itemImportResult.value.ok ? '' : itemImportResult.value.message
+)
 /** 按批次（`batch_id`）分组（视图层分组；单批内逐条采纳仍保留，与印人 / 印章导入同型）。 */
 const itemImportBatches = computed(() => {
   const groups = new Map()
@@ -456,6 +546,8 @@ async function confirmItemImport() {
     const outcome = await runImportReviewLoop(items.reviewItemImport, options)
     feedback.value = outcome.message
     itemImportDialog.value = null
+    /* **形態①**：審核循環結束 ⇒ **重新取行**（內存刷新）；**不**靠雲快照 / `dataVersion` 重讀舊數據。 */
+    if (isLocalImportFace()) await refreshLocalImportRows()
     dataVersion.value += 1
   } finally {
     itemImportBusy.value = false
@@ -630,7 +722,7 @@ async function decide(row, decision) {
     <p v-if="feedback" class="notice review__notice" data-review-feedback>{{ feedback }}</p>
     <!-- **E-4**：循環審核進度（`已處理 N · 剩餘 M`）；僅本機面且循環進行中才顯示。 -->
     <p
-      v-if="isLocalImportFace && importReviewProgress"
+      v-if="isLocalImportFace() && importReviewProgress"
       class="notice review__notice"
       data-import-review-progress
     >{{ importReviewProgress }}</p>
@@ -814,7 +906,7 @@ async function decide(row, decision) {
          **三类导入行同屏**（印人导入 ＋ 印章导入 ＋ 印谱导入），**共用同一钩子值** `person-import-review`
          （采纳 / 驳回共用，不复用既有字面值，也不新增取值 ⇒ 取值集合不增）。
          粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现（三类同型）。 -->
-    <section v-if="isLocalImportFace && (canReviewImports || canReviewSealImports || canReviewItemImports)" class="panel">
+    <section v-if="isLocalImportFace() && (canReviewImports || canReviewSealImports || canReviewItemImports)" class="panel">
       <div class="panel__head">
         <h2>待審導入批次（外部批量導入）</h2>
         <span class="muted-hint">印人導入 共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>
@@ -822,6 +914,23 @@ async function decide(row, decision) {
         <span class="muted-hint">印谱導入 共 {{ itemImportRows.length }} 條 · {{ itemImportBatches.length }} 批</span>
       </div>
       <div class="panel__body">
+        <!-- **形態①（E-3 取行）**：本機面下三族待審行來自 `pullImportRows` 取回結果（**僅內存**）。
+             未取完時如實上屏「已取 N 條（可能還有更多）」；取行失敗如實上屏（**不靜默、不以空集冒充**）。
+             「重新取行」＝ 手動刷新（刷新即重取；不持久化）。 -->
+        <p v-if="localImportPullNotice" class="notice review__notice" data-import-pull-notice>
+          {{ localImportPullNotice }}
+        </p>
+        <div class="review__ops">
+          <button
+            class="btn btn--ghost"
+            type="button"
+            data-import-pull-refresh
+            :disabled="localImportLoading"
+            @click="refreshLocalImportRows"
+          >
+            {{ localImportLoading ? '取行中…' : '重新取行' }}
+          </button>
+        </div>
         <div v-if="importBatches.length" class="batch-list">
           <article
             v-for="batch in importBatches"
@@ -1091,9 +1200,9 @@ async function decide(row, decision) {
           {{ itemImportNotice }}
         </p>
 
-        <!-- **合并空态**：三类皆空且无拒绝理由时才显示（可读、繁體、不白屏）。 -->
+        <!-- **合并空态**：三类皆空、无提示文案、且**取行已落定**（非取行中）时才显示（可读、繁體、不白屏）。 -->
         <p
-          v-if="!importBatches.length && !sealImportBatches.length && !itemImportBatches.length && !importNotice && !sealImportNotice && !itemImportNotice"
+          v-if="localImportPulled && !localImportLoading && !importBatches.length && !sealImportBatches.length && !itemImportBatches.length && !importNotice && !sealImportNotice && !itemImportNotice && !localImportPullNotice"
           class="muted-hint"
           data-import-empty
         >

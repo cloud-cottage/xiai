@@ -79,6 +79,59 @@ export function writeFaceModeLabel() {
     : '本機寫入形態（dev / 離線；**非正式寫入路徑**）'
 }
 
+/* ============================================================================
+   **本機導入面开关（本機構建開關｜K-乙-4｜2026-10-12｜形态①）**
+   ----------------------------------------------------------------------------
+   口径（Kevin 已裁定，逐字落成机制）：**「云数据源 ＋ 本机构建开关 ＋ E-3 取行（仅内存）」**。
+
+   为什么**不再**用 `writeFaceMode() === local-dev` 当「本机面」判据（更正 R-2）：
+   本机站若跑**本地数据源**（`local-dev`），则 ① **云读面已撤三族导入集合 ⇒ 本机镜像为空
+   ⇒ 看不到云端的导入包**；② **采纳也落不了云**（`local-dev` 的写面门放行但**不发请求**）
+   ⇒ 与 R-4「采纳后正式行仍落云端」冲突。
+
+   ⇒ 本机面判据**独立**成 `isLocalImportFace()`：读 `.env.local` 一类**不入库**的本机构建配置
+   `VITE_XIAI_LOCAL_IMPORT_FACE`（值 ∈ `{'1','true'}` ⇒ 本机面；**生产构建无该变量 ⇒ 公网面**）。
+
+   ⚠️ **本仓既有陷阱（不得改写）**：取法必须是**字面** `import.meta.env.VITE_XIAI_LOCAL_IMPORT_FACE`
+   —— 先 `const env = import.meta.env` 再用别名取键**不会**被 Vite 静态替换（构建后仍是运行时读，
+   生产包里恒 `undefined` ⇒ 开关失效）。
+
+   · `writeFaceMode()` **保留不动**（它是「写入口降级形态」的判据；**其它面不得据本函数改判**）；
+   · 本函数**同步、零 I/O、可测**（注入缝与 `setWriteFaceModeOverride` 同族）。
+   ============================================================================ */
+
+/** 本機導入面开关的值域（**封闭两值**；其余值 ⇒ `false`）。 */
+export const LOCAL_IMPORT_FACE_VALUES = Object.freeze(['1', 'true'])
+
+/** 本機導入面注入缝（`null` ＝ 未覆盖 ⇒ 按本机构建开关判定；仅供离线自检 / 宿主）。 */
+let localImportFaceOverride = null
+
+/**
+ * **是否为本机面**（本机专属導入面的**唯一判据来源**；页面 / 服务不得各自判断）。
+ *
+ * 判据 ＝ 本机构建开关 `VITE_XIAI_LOCAL_IMPORT_FACE`（**字面取键**，见上陷阱注）：
+ * 值 ∈ `{'1','true'}` ⇒ `true`；未定义 / 其余值（含生产构建无该变量）⇒ `false`。
+ * @returns {boolean}
+ */
+export function isLocalImportFace() {
+  if (localImportFaceOverride !== null) return localImportFaceOverride
+  /* **字面取键**（换写法即失效 —— Vite 只静态替换字面写法）。 */
+  const raw = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_XIAI_LOCAL_IMPORT_FACE : ''
+  const value = typeof raw === 'string' ? raw.trim() : ''
+  return LOCAL_IMPORT_FACE_VALUES.indexOf(value) !== -1
+}
+
+/**
+ * **注入缝**（离线自检 / 宿主显式指定本机面；同族于 `setWriteFaceModeOverride`）。
+ * 传非 `true` / `false` ⇒ 清除覆盖，回到「按本机构建开关判定」。
+ * @param {boolean|null} value
+ * @returns {boolean} 覆盖后的判据读数
+ */
+export function setLocalImportFaceOverride(value) {
+  localImportFaceOverride = value === true || value === false ? value : null
+  return isLocalImportFace()
+}
+
 /* ---------------------------------------------------------------------------
    清单式标注（**8 个裸 save*Rows ＋ 6 个 drive 裸写入口 ＋ 10 个管理员写入口**）
    --------------------------------------------------------------------------- */

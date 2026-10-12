@@ -369,6 +369,96 @@ export function listPendingItemImportsForAdmin(actor) {
   return itemPendingReadVerdict(rows, cloudBaseConfigured(), cloudBaseStatus())
 }
 
+/* ------------------------------ E-3 取行（本機面｜只讀、僅內存） ------------------------------ */
+
+/* ============================================================================
+   **E-3 取行（本機面｜K-乙-4｜2026-10-12｜形态①）**：雲端待審導入行**單向取回**，**僅駐內存**
+   ----------------------------------------------------------------------------
+   與 `persons.js` / `seals.js` 的取行口**同一形态**（同一 op、同一门、同一失败形态）；差别只有
+   `collection` 字面（**逐字** `itemImports`）。
+   · 判据：经 `userWriteGate('pullImportRows', …)`（**同一通道**：令牌自愈 / dev·離線 与云 两形态）。
+   · **只讀**：雲函數側不產出 `plan` ⇒ 零寫入；本層**不寫任何本地集合**（**無** localStorage /
+     IndexedDB 落點 —— R-8）。
+   · **分頁**：單次 `limit` ≤ 1000；逐輪按行 `id` 去重（有效新行為 0 ⇒ 停），最多 10 輪；
+     取滿 ⇒ 如實標 `maybeMore: true`（**不得報成全部**）。
+   · `rows` / `count` 鍵名**逐字凍結**；`rows` 缺席 ⇒ `STORAGE_UNAVAILABLE`（不臆造空集）。
+   ============================================================================ */
+
+/** 本機面取行的集合鍵（**逐字**；雲函數值域恰三選一）。 */
+export const ITEM_IMPORT_COLLECTION_KEY = 'itemImports'
+
+/** 取行單次上限（沿雲側硬上限 `IMPORT_REPAIR_SCAN_LIMIT` ＝ 1000）。 */
+export const PULL_IMPORT_ROWS_LIMIT = 1000
+
+/** 取行輪數上限（護欄；見上「分頁」注 —— 無偏移面時第 2 輪即停）。 */
+const PULL_IMPORT_ROWS_MAX_ROUNDS = 10
+
+/**
+ * 取行門回包的結構化判讀（**只認 `ok` / `rows`**；不改寫真因、不編造假讀數）。
+ * @returns {null|{ok:false, reason:string, message:string}} `null` ＝ 放行
+ */
+function pullItemImportRowsDenial(gate) {
+  if (!gate || typeof gate !== 'object') {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '取行回傳形狀不可辨識；本次零讀取。' }
+  }
+  if (gate.ok !== true) {
+    return { ok: false, reason: gate.reason || 'STORAGE_UNAVAILABLE', message: gate.message || '取行被拒；本次零讀取。' }
+  }
+  if (gate.mode === WRITE_FACE_MODES.LOCAL_DEV) {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '本機寫入形態下無服務端可讀（取行需雲數據源）；本次零讀取。' }
+  }
+  if (!Array.isArray(gate.rows)) {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回包未帶取行結果（rows）；本次零讀取。' }
+  }
+  return null
+}
+
+/**
+ * **取回印谱外部導入行（本機面｜只讀、僅內存）**。
+ *
+ * 載荷鍵面**封閉**（雲側恰認 `batch_id` / `collection` / `status` / `limit`）：`status` 只在
+ * **非空**時落鍵（送空串會被雲側判 `INVALID_VALUE`）；`limit` 恒为 1 〜 1000 的整數。
+ * @param {{id?:string, role?:string}|null} actor 管理員
+ * @param {{batchId?:string, status?:string, limit?:number}} [options]
+ * @returns {Promise<{ok:true, rows:Array<object>, count:number, maybeMore:boolean, limit:number, collection:string}
+ *   |{ok:false, reason:string, message:string}>}
+ */
+export async function pullItemImportRows(actor, options = {}) {
+  const who = actor || currentUser()
+  if (!canReviewItemImports(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以取回全部用戶的印谱外部導入批次' }
+  }
+  const batch = String((options && options.batchId) || '').trim()
+  const statusText = String((options && options.status) || '').trim()
+  const requested =
+    options && options.limit !== undefined && options.limit !== null ? Number(options.limit) : PULL_IMPORT_ROWS_LIMIT
+  const limit =
+    Number.isInteger(requested) && requested > 0 ? Math.min(requested, PULL_IMPORT_ROWS_LIMIT) : PULL_IMPORT_ROWS_LIMIT
+  const seen = new Set()
+  const rows = []
+  let full = false
+  for (let round = 0; round < PULL_IMPORT_ROWS_MAX_ROUNDS; round += 1) {
+    const payload = { collection: ITEM_IMPORT_COLLECTION_KEY, batch_id: batch, limit }
+    if (statusText) payload.status = statusText
+    const gate = await userWriteGate('pullImportRows', payload)
+    const denial = pullItemImportRowsDenial(gate)
+    if (denial) return denial
+    const page = gate.rows
+    let fresh = 0
+    page.forEach((row) => {
+      const id = String((row && (row.id || row._id)) || '')
+      if (id && seen.has(id)) return
+      if (id) seen.add(id)
+      rows.push(row)
+      fresh += 1
+    })
+    full = page.length >= limit
+    /* 未取滿 ⇒ 已取完；取滿 ⇒ 可能还有更多（故如實標 `maybeMore`）；有效新行為 0 ⇒ 再取無益 ⇒ 停。 */
+    if (!full || fresh === 0) break
+  }
+  return { ok: true, rows, count: rows.length, maybeMore: full, limit, collection: ITEM_IMPORT_COLLECTION_KEY }
+}
+
 /* ------------------------------ 導入：采纳 / 驳回（管理员） ------------------------------ */
 
 /* ============================================================================
