@@ -60,17 +60,15 @@ export const CLOUD_COLLECTIONS = Object.freeze({
   /* 印人提案 / 审核行集合（提交＝登录用户、采纳 / 驳回＝管理员）。本机镜像键见
      `data/db.js` 的 `person-proposals`。 */
   personProposals: 'xiai_person_proposals',
-  /* **印人批 2 前置（v1.54｜§3.54.14 / §4.1.16）**：外部批量导入暂存/ PENDING 集合
-     （单写者；只经外部导入通道与采纳路径写）。本机镜像键见 `data/db.js` 的 `person-imports`。 */
-  personImports: 'xiai_person_imports',
-  /* **印章批 3（v1.55｜§3.55.2 / §4.1.17）**：印章外部批量導入暂存 / PENDING 集合
-     （单写者；只经管理员采纳路径 / 外部導入通道写）。本机镜像键见 `data/db.js` 的 `seal-imports`。 */
-  sealImports: 'xiai_seal_imports',
-  /* **item 通道切片 A（v1.61）**：正式印谱（`xiai_items`，canonical；只经采纳路径产生）
-     与印谱外部批量導入暂存 / PENDING 集合（`xiai_item_imports`；单写者）。
-     本机镜像键见 `data/db.js` 的 `items` / `item-imports`（异名者经 `CLOUD_KEY_OF_LOCAL` 翻译）。 */
-  items: 'xiai_items',
-  itemImports: 'xiai_item_imports'
+  /* **item 通道切片 A（v1.61）**：正式印谱（`xiai_items`，canonical；只经采纳路径产生）。
+     本机镜像键见 `data/db.js` 的 `items`（**恰好同名**，不经 `CLOUD_KEY_OF_LOCAL` 翻译）。 */
+  items: 'xiai_items'
+  /* **阶段乙（2026-10-12）撤出三族导入集合**：`personImports` / `sealImports` / `itemImports`
+     已自本表**移除**（连同 `db.js::CLOUD_KEY_OF_LOCAL` 的三条映射）—— 外部批量导入的
+     「包 / 導入行 / 待審導入批次」＝**本機專屬面**（真源 `docs/local-only-import-plan-2026-10-12.md`
+     R-1 / R-3②）：`xiai.plus`（公網面）不可見、不可讀；撤出后这三族本机镜像键走既有本地实现
+     （`db.js::readCollection` 的 `off` 分支），**行为一字不改**，未新增任何回落分支。
+     三族的云函数侧只读/写通道（阶段甲复用）另单处理，**不在本表**。 */
 })
 
 /** 本层接管的本地集合键（其余键**一字不动**，仍走 `data/db.js` 既有本地实现）。 */

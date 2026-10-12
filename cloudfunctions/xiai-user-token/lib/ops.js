@@ -2260,6 +2260,124 @@ const IMPORT_REPAIR_TARGETS = Object.freeze([
   Object.freeze({ key: 'seal', imports: COLLECTIONS.sealImports, formal: COLLECTIONS.seals, idKey: 'source_seal_id', label: '印章' })
 ])
 
+/* ---------------------------------------------------------------------------
+   **E-3 / E-4（外部批量導入＝本機專屬面｜本單｜階段乙）**
+   ---------------------------------------------------------------------------
+   E-3：只讀取行通道 op `pullImportRows` —— 把**雲端**三族導入行**單向取回本機**
+   （階段甲復用於存量搬遷；階段乙用於「雲端包 → 本機審」）。
+   硬口徑（逐條）：
+     · **只讀**：本 op **不產出 `plan`** ⇒ `index.js` 的落盤分支不觸發 ⇒ **零寫入**；
+     · **管理員白名單門**（沿 `adminWhitelistDenial`；缺 `XIAI_ADMIN_PHONE` ⇒ 結構化拒絕）；
+     · **載荷鍵面封閉** ＝ `PULL_IMPORT_ROWS_ALLOWED_KEYS`
+       （`{batch_id, collection, status, limit}`；未登記鍵 ⇒ `INVALID_FIELD` ＋ 零寫入）；
+     · **集合三選一**：`collection` ∈ `{personImports, sealImports, itemImports}`（值域封閉）；
+       未給 `collection` 時由 `batch_id` 前綴推斷（推不出 ⇒ `INVALID_VALUE` ＋ 零寫入）；
+     · **狀態值域**（可選）：`PENDING` / `ACCEPTED` / `REJECTED`（值域外 ⇒ `INVALID_VALUE`）；
+     · **單次上限**：`limit` ∈ `[1, IMPORT_REPAIR_SCAN_LIMIT]` 的整數（缺省 ⇒
+       `IMPORT_REVIEW_PAGE_SIZE`）—— **顯式 `.limit()`** 以避開平台默認 100 行上限；
+     · **不返回身份字段**：行內**任何 `…phone…` 鍵一律剝除**（`user_phone` 一類零出現）；
+       不透明 uid（如 `imported_by`）**原樣保留**；
+     · 成功回包**恰四鍵** `{ok:true, op:'pullImportRows', rows:[…], count:N}`；
+       失敗形態恒為恰 3 鍵；`reason` ∈ 既有凍結表（**新增字面值 0**）。
+   E-4：`index.js` 的包封收窄分支按 `op` 只對三 review op 透出
+   `accepted_ids / rejected_ids / skipped / failed / done / remaining`；其中 `remaining` 由
+   本文件的 `countRemainingImportPending`（**只讀、帶顯式 limit**）供給。
+   --------------------------------------------------------------------------- */
+
+/** `pullImportRows` 載荷允許鍵（**封閉鍵面**；身份類鍵一律拒）。 */
+const PULL_IMPORT_ROWS_ALLOWED_KEYS = Object.freeze(['batch_id', 'collection', 'status', 'limit'])
+
+/** 集合鍵（前端字面） → 集合名（`^xiai_`）**三選一**（值域封閉）。 */
+const PULL_IMPORT_COLLECTION_KEYS = Object.freeze({
+  personImports: COLLECTIONS.personImports,
+  sealImports: COLLECTIONS.sealImports,
+  itemImports: COLLECTIONS.itemImports
+})
+
+/** 由 `batch_id` 前綴推斷導入集合（**後備路**；大小寫不敏感；推不出 ⇒ `''`）。 */
+const PULL_IMPORT_BATCH_PREFIXES = Object.freeze([
+  Object.freeze({ prefix: 'person', key: 'personImports' }),
+  Object.freeze({ prefix: 'pi-', key: 'personImports' }),
+  Object.freeze({ prefix: 'seal', key: 'sealImports' }),
+  Object.freeze({ prefix: 'si-', key: 'sealImports' }),
+  Object.freeze({ prefix: 'item', key: 'itemImports' }),
+  Object.freeze({ prefix: 'ii-', key: 'itemImports' })
+])
+
+/** 導入行狀態值域（三族逐字同值：`PENDING` / `ACCEPTED` / `REJECTED`）。 */
+const PULL_IMPORT_STATUS_VALUES = Object.freeze(['PENDING', 'ACCEPTED', 'REJECTED'])
+
+/** 單次取行缺省上限（沿待審取行護欄 `IMPORT_REVIEW_PAGE_SIZE`）。 */
+const PULL_IMPORT_DEFAULT_LIMIT = IMPORT_REVIEW_PAGE_SIZE
+
+/** 單次取行硬上限（沿修復掃描護欄 `IMPORT_REPAIR_SCAN_LIMIT`；防無界）。 */
+const PULL_IMPORT_MAX_LIMIT = IMPORT_REPAIR_SCAN_LIMIT
+
+/**
+ * 剝除導入行內**身份 / 手機號類**鍵（遞歸；鍵名凡含 `phone`（不分大小寫）一律剝除；
+ * **不透明 uid 鍵**（如 `imported_by`）**原樣保留**）。深度護欄 8 層（防病態結構）。
+ * @param {*} value
+ * @param {number} [depth]
+ * @returns {*}
+ */
+function stripImportIdentityFields(value, depth) {
+  const level = typeof depth === 'number' ? depth : 0
+  if (level > 8 || value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map((item) => stripImportIdentityFields(item, level + 1))
+  const out = {}
+  Object.keys(value).forEach((key) => {
+    if (/phone/i.test(key)) return
+    out[key] = stripImportIdentityFields(value[key], level + 1)
+  })
+  return out
+}
+
+/**
+ * 由 `batch_id` 前綴推斷導入集合（**後備路**；大小寫不敏感；推不出 ⇒ 空串）。
+ * @param {string} batchId
+ * @returns {string} 集合名（`^xiai_`）或 `''`
+ */
+function importCollectionOfBatchPrefix(batchId) {
+  const id = text(batchId).toLowerCase()
+  if (!id) return ''
+  for (const item of PULL_IMPORT_BATCH_PREFIXES) {
+    if (id.indexOf(item.prefix) === 0) return PULL_IMPORT_COLLECTION_KEYS[item.key]
+  }
+  return ''
+}
+
+/** 三 review op → 導入集合（供包封收窄讀「剩餘待審」）。 */
+const IMPORT_REVIEW_COLLECTION_BY_OP = Object.freeze({
+  reviewPersonImport: COLLECTIONS.personImports,
+  reviewSealImport: COLLECTIONS.sealImports,
+  reviewItemImport: COLLECTIONS.itemImports
+})
+
+/**
+ * **E-4 包封收窄讀點（只讀）**：該 `op` 對應導入集合（給了 `batch_id` ⇒ 限該批；未給 ⇒ 整集合）
+ * 的**剩餘待審（`PENDING`）條數** —— 供 `index.js` 在**落盤之後**再讀一次
+ * （**顯式 `.limit(IMPORT_REVIEW_PAGE_SIZE)`**，沿待審取行護欄）。
+ *
+ * **讀失敗 ⇒ 返回 `null`**（由 `index.js` **不放該鍵** —— **不得填 0 冒充**、
+ * 不得把「讀不到」當 0）；未知 `op` ⇒ 亦 `null`。
+ * @param {string} op
+ * @param {string} batchId
+ * @returns {Promise<number|null>}
+ */
+async function countRemainingImportPending(op, batchId) {
+  const collection = IMPORT_REVIEW_COLLECTION_BY_OP[text(op)]
+  if (!collection) return null
+  const batch = text(batchId)
+  /* 三族 `PENDING` 字面值逐字同值（`PERSON_IMPORT_STATUS` / `SEAL_IMPORT_STATUS` / `ITEM_IMPORT_STATUS`）。 */
+  const match = batch ? { batch_id: batch, status: 'PENDING' } : { status: 'PENDING' }
+  try {
+    const rows = await readRows(collection, match, { limit: IMPORT_REVIEW_PAGE_SIZE })
+    return rows.length
+  } catch {
+    return null
+  }
+}
+
 /**
  * **印人编号分配**（`PR` ＋ 9 位流水，**跳过已占用**）—— `reviewPersonImport` 与
  * `repairImportAcceptance` **同一套编号规则**（不另立第二套）。
@@ -3471,6 +3589,99 @@ const ADMIN_OPS = Object.freeze({
     /* 只有「执行态且有写入」才产出落盘计划 ⇒ `dry_run` / 无残留 ⇒ **零写入**。 */
     if (!dryRun && writes.length > 0) result.plan = { op: 'migrateSealValueDomains', writes }
     return result
+  },
+
+  /**
+   * **E-3 只讀取行（本單新增 op｜`pullImportRows`）**：把**雲端**三族導入行（待審 / 終態）
+   * **單向取回本機** —— 階段甲復用於存量搬遷，階段乙用於「雲端包 → 本機審」。
+   *
+   * 順序（**全部判定在任何讀之前；本 op 零寫入** —— 不產出 `plan` ⇒ `index.js` 的落盤分支
+   * 不觸發、`docId` 恒空）：
+   *   ① 管理員白名單門（缺 `XIAI_ADMIN_PHONE` ⇒ `STORAGE_UNAVAILABLE`；非白名單 / 會話角色不足
+   *      ⇒ `FORBIDDEN`；**恆零寫入**）；
+   *   ② 載荷形態 / 鍵面（封閉 `PULL_IMPORT_ROWS_ALLOWED_KEYS`；未登記鍵 ⇒ `INVALID_FIELD`）；
+   *   ③ 集合判定：`collection` 值域封閉三選一；未給 ⇒ 由 `batch_id` 前綴推斷；兩者皆不成
+   *      ⇒ `INVALID_VALUE`（**不猜集合**）；
+   *   ④ 狀態值域（可選）與 `limit` 形態 / 範圍（**值域外 ⇒ `INVALID_VALUE` ＋ 零寫入**）；
+   *   ⑤ **只讀**讀行（顯式 `.limit()`；失敗 ⇒ 拋錯 ⇒ `index.js` 轉 `STORAGE_UNAVAILABLE`，
+   *      **絕不偽裝 `FORBIDDEN`**）；
+   *   ⑥ 逐行**剝除身份 / 手機號類鍵**（`…phone…` 零出現；不透明 uid 原樣）⇒ 回
+   *      `{ok:true, op:'pullImportRows', rows:[…], count:N}`（**恰四鍵**、**無 `plan`**）。
+   * @param {object} payload 載荷（允許鍵見 `PULL_IMPORT_ROWS_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服務端派生**的身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, op:string, rows:Array<object>, count:number}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async pullImportRows(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，任何读之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    /* ② 載荷鍵面（封閉；未登記鍵 ⇒ `INVALID_FIELD` ＋ 零寫入）。 */
+    const unknown = Object.keys(payload).filter((key) => PULL_IMPORT_ROWS_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const batchId = text(payload.batch_id)
+    const collectionKey = text(payload.collection)
+    /* ③ 集合判定（三選一；未給 ⇒ 由 `batch_id` 前綴推斷；**推不出不猜**）。 */
+    let collection = ''
+    if (collectionKey) {
+      if (!Object.prototype.hasOwnProperty.call(PULL_IMPORT_COLLECTION_KEYS, collectionKey)) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `導入集合（collection）值域外：${collectionKey}（僅允許 personImports / sealImports / itemImports）；本次零寫入。`
+        )
+      }
+      collection = PULL_IMPORT_COLLECTION_KEYS[collectionKey]
+    } else {
+      collection = importCollectionOfBatchPrefix(batchId)
+      if (!collection) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          '無法判定導入集合：請提供 collection（personImports / sealImports / itemImports）或可識別前綴的 batch_id；本次零寫入。'
+        )
+      }
+    }
+    /* ④a 狀態值域（可選；值域外 ⇒ `INVALID_VALUE` ＋ 零寫入）。 */
+    let status = ''
+    if (payload.status !== undefined && payload.status !== null) {
+      status = text(payload.status)
+      if (PULL_IMPORT_STATUS_VALUES.indexOf(status) === -1) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `導入行狀態（status）值域外：${status || '（空）'}（僅允許 PENDING / ACCEPTED / REJECTED）；本次零寫入。`
+        )
+      }
+    }
+    /* ④b 單次上限（可選；**整數 1 〜 硬上限**；缺省 ⇒ 待審取行護欄值）。 */
+    let limit = PULL_IMPORT_DEFAULT_LIMIT
+    if (payload.limit !== undefined && payload.limit !== null) {
+      const requested = payload.limit
+      if (typeof requested !== 'number' || !Number.isInteger(requested) || requested <= 0 || requested > PULL_IMPORT_MAX_LIMIT) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `單次取行上限（limit）必須是 1 〜 ${PULL_IMPORT_MAX_LIMIT} 之間的整數；本次零寫入。`
+        )
+      }
+      limit = requested
+    }
+    /* ⑤ 只讀讀行（顯式 `.limit()`；空 `match` ⇒ 整集合，沿 `migrateSealValueDomains` 同型讀法）。 */
+    const match = {}
+    if (batchId) match.batch_id = batchId
+    if (status) match.status = status
+    const rows = await readRows(collection, match, { limit })
+    /* ⑥ 逐行剝除身份 / 手機號類鍵（`user_phone` 一類零出現；不透明 uid 原樣）。 */
+    const safeRows = rows.map((row) => stripImportIdentityFields(row))
+    return { ok: true, op: 'pullImportRows', rows: safeRows, count: safeRows.length }
   }
 })
 
@@ -3630,6 +3841,18 @@ module.exports = {
   IMPORT_REPAIR_SCAN_LIMIT,
   REPAIR_ALLOWED_KEYS,
   IMPORT_REPAIR_TARGETS,
+  /* **本單 E-3 / E-4**：只讀取行通道面（`pullImportRows`）與包封收窄讀點
+     （供離線自檢直接斷言）。 */
+  PULL_IMPORT_ROWS_ALLOWED_KEYS,
+  PULL_IMPORT_COLLECTION_KEYS,
+  PULL_IMPORT_BATCH_PREFIXES,
+  PULL_IMPORT_STATUS_VALUES,
+  PULL_IMPORT_DEFAULT_LIMIT,
+  PULL_IMPORT_MAX_LIMIT,
+  IMPORT_REVIEW_COLLECTION_BY_OP,
+  stripImportIdentityFields,
+  importCollectionOfBatchPrefix,
+  countRemainingImportPending,
   OPS,
   ADMIN_OPS,
   setOpsDbProvider,

@@ -141,7 +141,7 @@ check('A8', 'X4 導入行字段全集 ＝ 行级 11 ＋ 本体 22 ＝ 33', 33, s
 check('A9', 'X8 云端 `ITEM_BODY_FIELDS` ≡ 前端（逐字同值）', seed.ITEM_BODY_FIELDS, userOps.ITEM_BODY_FIELDS)
 check('A10', 'X8 云端封闭键面恰 25（batch_id / source / raw_json ＋ 22）', 25, userOps.ITEM_IMPORT_ALLOWED_KEYS.length)
 check('A10b', 'X8 封闭键面 ≡ {batch_id, source, raw_json} ∪ 本体 22', ['batch_id', 'source', 'raw_json', ...BODY_22].slice().sort(), userOps.ITEM_IMPORT_ALLOWED_KEYS.slice().sort())
-check('A11', 'X7 `CLOUD_COLLECTIONS` 登记 items / itemImports（逐字）', { items: 'xiai_items', itemImports: 'xiai_item_imports' }, { items: cloudbase.CLOUD_COLLECTIONS.items, itemImports: cloudbase.CLOUD_COLLECTIONS.itemImports })
+check('A11', 'X7/v1.67 `CLOUD_COLLECTIONS` 登记 items（逐字）；`itemImports` **已撤出**（階段乙：三族導入＝本機專屬面）', { items: 'xiai_items', itemImportsPresent: false }, { items: cloudbase.CLOUD_COLLECTIONS.items, itemImportsPresent: Object.prototype.hasOwnProperty.call(cloudbase.CLOUD_COLLECTIONS, 'itemImports') })
 check('A12', 'X7 `STORAGE_KEYS` 登记 items / item-imports（逐字）', { items: 'items', itemImports: 'item-imports' }, { items: storage.STORAGE_KEYS.items, itemImports: storage.STORAGE_KEYS.itemImports })
 check('A13', 'X5 繁体为正（`title` / `title_other` / `abstract` 正字段 ⊕ 简体 `*_chs` 副字段同在）',
   { t: true, to: true, ab: true, tc: true, toc: true, abc: true },
@@ -332,8 +332,11 @@ console.log(JSON.stringify({ section: 'D', title: '读面（X7）' }))
 
   /* 异名键翻译在位（`item-imports` ↔ `itemImports`）。 */
   const dbSrc = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
-  check('D2', '异名键翻译在位：`CLOUD_KEY_OF_LOCAL` 含 `item-imports` → `itemImports`', true, dbSrc.includes("'item-imports': 'itemImports'"))
-  check('D2b', '翻译目标逐字 ∈ `CLOUD_COLLECTION_KEYS`（真源）', true, cloudbase.CLOUD_COLLECTION_KEYS.includes('itemImports'))
+  /* **v1.67（階段乙）**：三族導入集合連同映射**撤出雲讀面** ⇒ 本段尺**翻轉**為「不在位」，
+     並各配一條**正對照 canary**（把該項插回 ⇒ 同一謂詞必命中），證明尺子非恆綠、亦非恆紅。 */
+  check('D2', 'v1.67 撤映射：`CLOUD_KEY_OF_LOCAL` **不含** `item-imports` → `itemImports`', false, dbSrc.includes("'item-imports': 'itemImports'"))
+  check('D2c', 'D2 正對照 canary：把該映射插回 ⇒ 同一謂詞必命中（尺子有效）', true, dbSrc.replace('const CLOUD_KEY_OF_LOCAL = Object.freeze({', "const CLOUD_KEY_OF_LOCAL = Object.freeze({\n  'item-imports': 'itemImports',").includes("'item-imports': 'itemImports'"))
+  check('D2b', 'v1.67：`itemImports` **不在** `CLOUD_COLLECTION_KEYS`；`items` 仍在（正對照）', { itemImportsIn: false, itemsIn: true }, { itemImportsIn: cloudbase.CLOUD_COLLECTION_KEYS.includes('itemImports'), itemsIn: cloudbase.CLOUD_COLLECTION_KEYS.includes('items') })
 
   /* 云 failed ＋ 零行 ⇒ 降级文案（ok:false）；off 不降级。 */
   const degraded = items.itemPendingReadVerdict([], true, { state: 'failed', reason: 'TIMEOUT', message: '雲端逾時' })
@@ -373,7 +376,12 @@ console.log(JSON.stringify({ section: 'G', title: '单写者门 / 云函数键�
   check('G2c', '云函数派发面仍为 `hasOwnProperty` 动态派发（未动 index.js）', true, idxSrc.includes('hasOwnProperty.call(OPS, op)') && idxSrc.includes('hasOwnProperty.call(ADMIN_OPS, op)'))
 
   check('G3', '`STORAGE_KEYS` 键总数 ＝ 27（v1.61：25 → 27，新增 items / itemImports）', 27, Object.keys(storage.STORAGE_KEYS).length)
-  check('G3b', '`CLOUD_COLLECTIONS` 键总数 ＝ 11（v1.61：9 → 11）', 11, cloudbase.CLOUD_COLLECTION_KEYS.length)
+  check('G3b', '`CLOUD_COLLECTIONS` 键总数 ＝ 8（v1.67：11 → 8，階段乙撤三族導入雲鍵）', 8, cloudbase.CLOUD_COLLECTION_KEYS.length)
+  /* **負向斷言 ＋ 正對照**：三族導入雲鍵逐條不得殘留；同一尺對「插回」必命中。 */
+  const IMPORT_CLOUD_KEYS = ['xiai_person_imports', 'xiai_seal_imports', 'xiai_item_imports']
+  const cloudKeyValues = Object.values(cloudbase.CLOUD_COLLECTIONS)
+  check('G3c', 'v1.67：三族導入雲鍵（xiai_person_imports / xiai_seal_imports / xiai_item_imports）逐條**不在** `CLOUD_COLLECTIONS`', [], IMPORT_CLOUD_KEYS.filter((k) => cloudKeyValues.includes(k)))
+  check('G3d', 'G3c 正對照 canary：把 `xiai_seal_imports` 插回 ⇒ 同一尺必命中', ['xiai_seal_imports'], ['xiai_seal_imports'].concat(cloudKeyValues).filter((k) => !cloudKeyValues.includes(k)))
 
   /* reason 零新增（观测面：本套件已触发的拒绝 reason 全部 ∈ 既有冻结表）。 */
   check('G4', '观测到的 `reason` 字面值全部 ∈ 既有凍結表（零新增）', [], [...new Set(OBSERVED_REASONS)].filter((r) => FROZEN_REASONS.indexOf(r) === -1))

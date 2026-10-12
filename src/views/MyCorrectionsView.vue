@@ -16,11 +16,21 @@ import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { corrections, persons, points, seals, items } from '../services/index.js'
 import { currentUser } from '../data/session.js'
+/* **E-2（阶段乙｜2026-10-12）**：本机面判据的**唯一真源** —— 外部批量导入＝本机专属面，
+   生产（cloudbase 数据源）不渲染「待審導入批次」区块（DOM 零命中，不以 CSS 隐藏冒充）。
+   `writeFaceMode()` 只认「有云写入面 ⇒ cloud / 无 ⇒ local-dev」；`cloudbase` 生产构建下
+   `cloudBaseConfigured()` 为真 ⇒ 恒 `cloud` ⇒ 本区块不渲染。**不自造第二套判据、不读
+   `import.meta.env` 字面键。** */
+import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 import { statusLabel, formatDateTime } from '../utils/format.js'
 
 /* 任何一次审核 / 提交后 +1，使下面的派生读数重算。 */
 const dataVersion = ref(0)
 const feedback = ref('')
+/* **E-2**：本机面（`local-dev`）才渲染「待審導入批次」区块的关键子条件。 */
+const isLocalImportFace = computed(() => writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV)
+/* **E-4**：循環審核期間的進度讀數（`已處理 N · 剩餘 M`）；空串 ⇒ 不顯示。 */
+const importReviewProgress = ref('')
 
 /* ============================================================================
    **V3 撤除「校驗碼彈窗」**（2026-10-04）
@@ -170,18 +180,57 @@ const importConfirmAction = computed(() => {
 })
 const IMPORT_CANCEL_ACTION = 'person-import-cancel'
 
+/* **E-4（阶段乙｜2026-10-12）**：整批 / 單行審核的**循環推進**（≤5 輪、≤60 s 預算）。
+   每輪只認**回包**的權威計數（鍵名逐字凍結：`accepted_ids` / `rejected_ids` / `skipped` /
+   `failed` / `done` / `remaining`）—— 服務層已把雲端回包透傳（本機面下即本機權威回包，同一條路）。
+   逐輪上屏「已處理 N · 剩餘 M」，並令本機鏡像就地更新（落盤由服務層承擔 ⇒ 此處只 `dataVersion += 1`
+   觸發重算）。`remaining === 0` ⇒ 顯示該輪 `message` 原文；到達預算 ⇒ 如實報「剩餘 N，可續」。 */
+const IMPORT_REVIEW_MAX_ROUNDS = 5
+const IMPORT_REVIEW_BUDGET_MS = 60000
+
+async function runImportReviewLoop(reviewFn, options) {
+  const deadline = Date.now() + IMPORT_REVIEW_BUDGET_MS
+  let processed = 0
+  let remaining = null
+  let message = ''
+  let ok = true
+  importReviewProgress.value = ''
+  for (let round = 0; round < IMPORT_REVIEW_MAX_ROUNDS; round += 1) {
+    const result = await reviewFn(actor.value, options)
+    if (!result || result.ok !== true) {
+      ok = false
+      message = (result && result.message) || message
+      if (result && Number.isFinite(Number(result.remaining))) remaining = Number(result.remaining)
+      break
+    }
+    processed +=
+      (Array.isArray(result.accepted_ids) ? result.accepted_ids.length : 0) +
+      (Array.isArray(result.rejected_ids) ? result.rejected_ids.length : 0)
+    remaining = result.remaining === undefined || result.remaining === null ? null : Number(result.remaining)
+    if (result.message) message = result.message
+    importReviewProgress.value = `已處理 ${processed} · 剩餘 ${remaining === null ? '—' : remaining}`
+    dataVersion.value += 1
+    if (remaining === null || remaining <= 0) break
+    if (Date.now() >= deadline) break
+  }
+  if (ok && remaining !== null && remaining > 0) {
+    message = `${message}（已達本次循環預算，剩餘 ${remaining} 條；可再次點擊續審）`
+  }
+  return { ok, message, remaining }
+}
+
 async function confirmImport() {
   const dialog = importDialog.value
   if (!dialog || importBusy.value) return
   const note = dialog.decision === persons.PERSON_IMPORT_STATUS_EXPORT.REJECTED ? importNote.value : ''
   importBusy.value = true
   try {
-    /* 两个入口：按单行（`importId`）优先；否则按批次（`batchId`）。服务层 message 原文上屏。 */
+    /* 两个入口：按单行（`importId`）优先；否则按批次（`batchId`）。回包 `message` 原文上屏。 */
     const options = dialog.row
       ? { importId: String(dialog.row.id || ''), decision: dialog.decision, note }
       : { batchId: String((dialog.batch && dialog.batch.batchId) || ''), decision: dialog.decision, note }
-    const result = await persons.reviewPersonImport(actor.value, options)
-    feedback.value = result.message
+    const outcome = await runImportReviewLoop(persons.reviewPersonImport, options)
+    feedback.value = outcome.message
     importDialog.value = null
     dataVersion.value += 1
   } finally {
@@ -281,12 +330,12 @@ async function confirmSealImport() {
   const note = dialog.decision === seals.SEAL_IMPORT_STATUS_EXPORT.REJECTED ? sealImportNote.value : ''
   sealImportBusy.value = true
   try {
-    /* 服务层单点：按单行（`importId`）优先；否则按批次（`batchId`）。message 原文上屏。 */
+    /* 服务层单点：按单行（`importId`）优先；否则按批次（`batchId`）。回包 `message` 原文上屏。 */
     const options = dialog.row
       ? { importId: String(dialog.row.id || ''), decision: dialog.decision, note }
       : { batchId: String((dialog.batch && dialog.batch.batchId) || ''), decision: dialog.decision, note }
-    const result = await seals.reviewSealImport(actor.value, options)
-    feedback.value = result.message
+    const outcome = await runImportReviewLoop(seals.reviewSealImport, options)
+    feedback.value = outcome.message
     sealImportDialog.value = null
     dataVersion.value += 1
   } finally {
@@ -400,12 +449,12 @@ async function confirmItemImport() {
   const note = dialog.decision === items.ITEM_IMPORT_STATUS_EXPORT.REJECTED ? itemImportNote.value : ''
   itemImportBusy.value = true
   try {
-    /* 服务层单点：按单行（`importId`）优先；否则按批次（`batchId`）。message 原文上屏。 */
+    /* 服务层单点：按单行（`importId`）优先；否则按批次（`batchId`）。回包 `message` 原文上屏。 */
     const options = dialog.row
       ? { importId: String(dialog.row.id || ''), decision: dialog.decision, note }
       : { batchId: String((dialog.batch && dialog.batch.batchId) || ''), decision: dialog.decision, note }
-    const result = await items.reviewItemImport(actor.value, options)
-    feedback.value = result.message
+    const outcome = await runImportReviewLoop(items.reviewItemImport, options)
+    feedback.value = outcome.message
     itemImportDialog.value = null
     dataVersion.value += 1
   } finally {
@@ -579,6 +628,12 @@ async function decide(row, decision) {
     </div>
 
     <p v-if="feedback" class="notice review__notice" data-review-feedback>{{ feedback }}</p>
+    <!-- **E-4**：循環審核進度（`已處理 N · 剩餘 M`）；僅本機面且循環進行中才顯示。 -->
+    <p
+      v-if="isLocalImportFace && importReviewProgress"
+      class="notice review__notice"
+      data-import-review-progress
+    >{{ importReviewProgress }}</p>
 
     <section v-if="canReview" class="panel">
       <div class="panel__head">
@@ -759,7 +814,7 @@ async function decide(row, decision) {
          **三类导入行同屏**（印人导入 ＋ 印章导入 ＋ 印谱导入），**共用同一钩子值** `person-import-review`
          （采纳 / 驳回共用，不复用既有字面值，也不新增取值 ⇒ 取值集合不增）。
          粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现（三类同型）。 -->
-    <section v-if="canReviewImports || canReviewSealImports || canReviewItemImports" class="panel">
+    <section v-if="isLocalImportFace && (canReviewImports || canReviewSealImports || canReviewItemImports)" class="panel">
       <div class="panel__head">
         <h2>待審導入批次（外部批量導入）</h2>
         <span class="muted-hint">印人導入 共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>

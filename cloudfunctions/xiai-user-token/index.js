@@ -44,7 +44,7 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
-const { OPS, ADMIN_OPS, persist, readRoleRow } = require('./lib/ops.js')
+const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
@@ -407,6 +407,35 @@ async function handleVerify(event, config, callContext) {
     for (const key of REPAIR_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
+  }
+  /* **只讀取行面（additive 透傳｜**按 `op` 收窄**｜本單 E-3）**：`rows` / `count` **僅當
+     `op === 'pullImportRows'` 且 `opResult` 確有該鍵時**才逐字疊進回包；**其餘任何 op 一律
+     不透傳這 2 個鍵**。既有字段一律不刪、不改。 */
+  if (op === 'pullImportRows') {
+    const PULL_READOUT_KEYS = ['rows', 'count']
+    for (const key of PULL_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **審核計數面（additive 透傳｜**按 `op` 收窄**｜本單 E-4）**：`accepted_ids` / `rejected_ids` /
+     `skipped` / `failed`（op 原值逐字）＋ `done`（＝ `accepted_ids.length + rejected_ids.length`）
+     ＋ `remaining`（該批 / 該集合**落盤後**剩餘 `PENDING` 條數；由 `lib/ops.js`
+     `countRemainingImportPending` **再讀一次**且帶顯式 limit 供給）**僅當 `op` ∈ 三 review op 時**
+     才疊進回包；**其餘任何 op 一律不得出現這 6 個鍵**（既有回包逐字不變）。
+     **`remaining` 讀失敗 ⇒ 不放該鍵**（**不得填 0 冒充**、不得把「讀不到」當 0；`done` 只由回包
+     数组派生、不需要再讀）。**`plan` 是內部落盤計劃（內部面）⇒ 絕不外傳**。 */
+  if (op === 'reviewPersonImport' || op === 'reviewSealImport' || op === 'reviewItemImport') {
+    const IMPORT_REVIEW_READOUT_KEYS = ['accepted_ids', 'rejected_ids', 'skipped', 'failed']
+    for (const key of IMPORT_REVIEW_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+    const acceptedIds = Array.isArray(opResult.accepted_ids) ? opResult.accepted_ids : []
+    const rejectedIds = Array.isArray(opResult.rejected_ids) ? opResult.rejected_ids : []
+    response.done = acceptedIds.length + rejectedIds.length
+    const reviewPayload = event && typeof event.payload === 'object' && event.payload !== null ? event.payload : {}
+    const remaining = await countRemainingImportPending(op, reviewPayload.batch_id)
+    /* 讀失敗（`null`）⇒ **不放該鍵**（不得填 0 冒充）。 */
+    if (remaining !== null) response.remaining = remaining
   }
   return response
 }

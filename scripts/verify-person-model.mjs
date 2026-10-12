@@ -414,11 +414,15 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
    ========================================================================== */
 {
   const dbSrcZ = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
-  /* **真源期望表**（v1.61 起 **6 條**：切片 A 新增 `'item-imports': 'itemImports'`）。 */
+  /* **真源期望表**（**v1.67 起恰 3 條**：階段乙把三族導入集合連同映射撤出雲讀面 ——
+     `person-imports` / `seal-imports` / `item-imports` 三條登出，見規範 §3.63 ／ §3.57.2 修訂注）。 */
   const MAP = {
     'corrections-public': 'correctionsPublic',
     'correction-summaries': 'correctionSummaries',
-    'person-proposals': 'personProposals',
+    'person-proposals': 'personProposals'
+  }
+  /* 撤出的三條（**負向斷言**用；與上面的尺共用同一個 `entry()`）。 */
+  const WITHDRAWN_MAP = {
     'person-imports': 'personImports',
     'seal-imports': 'sealImports',
     'item-imports': 'itemImports'
@@ -432,17 +436,19 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     return [...body.matchAll(/'([^']+)'\s*:\s*'([^']+)'/g)].map((m) => [m[1], m[2]])
   }
   const sortByKey = (pairs) => pairs.slice().sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-  check('Z1', 'Z1 靜態：`CLOUD_KEY_OF_LOCAL` 恰 6 條異名映射（逐字：corrections-public→correctionsPublic / correction-summaries→correctionSummaries / person-proposals→personProposals / person-imports→personImports / seal-imports→sealImports / item-imports→itemImports）', 6,
+  check('Z1', 'Z1 靜態（v1.67）：`CLOUD_KEY_OF_LOCAL` 恰 3 條異名映射（逐字：corrections-public→correctionsPublic / correction-summaries→correctionSummaries / person-proposals→personProposals）', 3,
     Object.entries(MAP).filter(([l, c]) => dbSrcZ.includes(entry(l, c))).length)
-  /* **嚴格等值（本單補）**：真表**條目總數恰 6** —— 多一條雜項映射、或漏登記一條，皆攔。 */
-  check('Z1b', 'Z1 嚴格等值：`CLOUD_KEY_OF_LOCAL` 真表條目總數**恰 6**（非範圍、非子集、不比大小）', 6, mapPairsOf(dbSrcZ).length)
-  check('Z1c', 'Z1 逐對對拍：真源 6 條映射 ≡ 期望表（鍵→值逐字，含 `item-imports` → `itemImports`）', sortByKey(Object.entries(MAP)), sortByKey(mapPairsOf(dbSrcZ)))
+  /* **嚴格等值**：真表**條目總數恰 3** —— 多一條雜項映射、或漏登記一條，皆攔。 */
+  check('Z1b', 'Z1 嚴格等值（v1.67）：`CLOUD_KEY_OF_LOCAL` 真表條目總數**恰 3**（非範圍、非子集、不比大小）', 3, mapPairsOf(dbSrcZ).length)
+  check('Z1c', 'Z1 逐對對拍（v1.67）：真源 3 條映射 ≡ 期望表（鍵→值逐字）', sortByKey(Object.entries(MAP)), sortByKey(mapPairsOf(dbSrcZ)))
+  /* **負向斷言（v1.67 新增）**：撤出的三條導入映射逐條**不得**殘留（同一把尺）。 */
+  check('Z1d', 'Z1 負向（v1.67）：撤出的三族導入映射（person-imports / seal-imports / item-imports）逐條**不在**真表', [], Object.entries(WITHDRAWN_MAP).filter(([l, c]) => dbSrcZ.includes(entry(l, c))))
   check('Z2', 'Z2 靜態：`readCollection` 經 `cloudKeyOfLocal(key)` 取雲鍵餵 `cloudBaseReadOf`', true,
     /const cloudKey = cloudKeyOfLocal\(key\)[\s\S]{0,200}cloudBaseReadOf\(cloudKey\)/.test(dbSrcZ))
   check('Z3', 'Z3 靜態：覆蓋層按「雲鍵 ＋ 本機鍵」雙參調用', true, dbSrcZ.includes('withLocalOverlay(cloudKey, cloud.rows, key)'))
   check('Z4', 'Z4 靜態：本機鏡像讀 / 種子指紋用 `localKey`（不再拿雲鍵讀本機）', true,
     /function withLocalOverlay\(key, cloudRows, localKey = key\)/.test(dbSrcZ) && dbSrcZ.includes('const local = readKey(localKey)'))
-  check('Z5', 'Z5 行為：6 個映射目標逐字 ∈ `CLOUD_COLLECTION_KEYS`（真源）', [],
+  check('Z5', 'Z5 行為（v1.67）：3 個映射目標逐字 ∈ `CLOUD_COLLECTION_KEYS`（真源）', [],
     Object.values(MAP).filter((k) => !cloudbase.CLOUD_COLLECTION_KEYS.includes(k)))
   check('Z6', 'Z6 行為：連字符鏡像鍵**既非**雲鍵（真因坐實：`person-imports` ∉ 雲鍵面）', false,
     cloudbase.CLOUD_COLLECTION_KEYS.includes('person-imports'))
@@ -456,13 +462,14 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     { ok: zRes.ok, rows: zRes.ok ? zRes.rows.length : -1 })
   check('Z8', 'Z8 靜態：導入讀面具「不靜默」降級分支（`importReadDegradedMessage`）', true,
     readFileSync(path.join(ROOT, 'src/services/persons.js'), 'utf8').includes('function importReadDegradedMessage'))
-  /* 負對照 canary：刪掉 `person-imports` 映射 ⇒ 嚴格等值尺變 5（會紅）。 */
-  const mutatedZ = dbSrcZ.replace(`  ${entry('person-imports', 'personImports')},\n`, '')
-  check('Z9', 'Z9 負對照 canary：刪掉一條映射（`person-imports`）⇒ 嚴格等值尺變 5（必紅）', 5,
+  /* 負對照 canary：刪掉一條**在位**映射（`person-proposals`）⇒ 嚴格等值尺變 2（會紅）。
+     （v1.67：原 canary 打的是已撤出的 `person-imports`，該行已不存在 ⇒ 換到在位行，尺子口徑不變。） */
+  const mutatedZ = dbSrcZ.replace(`  ${entry('person-proposals', 'personProposals')}\n`, '')
+  check('Z9', 'Z9 負對照 canary（v1.67）：刪掉一條在位映射（`person-proposals`）⇒ 嚴格等值尺變 2（必紅）', 2,
     mapPairsOf(mutatedZ).length)
-  /* 負對照 canary：真表**多**一條（雜項映射）⇒ 嚴格等值尺變 7（會紅）。 */
-  const mutatedZPlus = dbSrcZ.replace(`  ${entry('item-imports', 'itemImports')}\n`, `  ${entry('item-imports', 'itemImports')},\n  'ghost-key': 'ghostKey'\n`)
-  check('Z9b', 'Z9b 負對照 canary：真表多一條雜項映射（`ghost-key`）⇒ 嚴格等值尺變 7（必紅）', 7,
+  /* 負對照 canary：真表**多**一條（雜項映射）⇒ 嚴格等值尺變 4（會紅）。 */
+  const mutatedZPlus = dbSrcZ.replace(`  ${entry('person-proposals', 'personProposals')}\n`, `  ${entry('person-proposals', 'personProposals')},\n  'ghost-key': 'ghostKey'\n`)
+  check('Z9b', 'Z9b 負對照 canary（v1.67）：真表多一條雜項映射（`ghost-key`）⇒ 嚴格等值尺變 4（必紅）', 4,
     mapPairsOf(mutatedZPlus).length)
 }
 
@@ -486,10 +493,11 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
   const uncovered = cloudKeys.filter((k) => !localMirrorValues.has(k) && !mappedCloudKeys.has(k))
   check('W1', 'AC-522 可達性：`CLOUD_COLLECTIONS` 每個雲鍵被「同名本機鏡像鍵」或「`CLOUD_KEY_OF_LOCAL` 值集」覆蓋',
     [], uncovered)
-  check('W2', 'AC-522 **必須覆蓋新集合**：`items` / `itemImports` 均被覆蓋', [],
-    ['items', 'itemImports'].filter((k) => !cloudKeys.includes(k) || uncovered.includes(k)))
-  check('W2b', 'AC-522 覆蓋面讀數（雲鍵數 / 本機鏡像值 / 異名映射目標）',
-    { cloudKeys: 11, localHasItems: true, mappedHasItemImports: true, mappedHasItems: false },
+  check('W2', 'AC-522/v1.67：`items` 必須被覆蓋；三族導入雲鍵（personImports / sealImports / itemImports）**必須不在雲鍵面**', { uncoveredItems: [], leftoverImportKeys: [] },
+    { uncoveredItems: ['items'].filter((k) => !cloudKeys.includes(k) || uncovered.includes(k)),
+      leftoverImportKeys: ['personImports', 'sealImports', 'itemImports'].filter((k) => cloudKeys.includes(k)) })
+  check('W2b', 'AC-522 覆蓋面讀數（v1.67：雲鍵 8 / 本機鏡像值 / 異名映射目標）',
+    { cloudKeys: 8, localHasItems: true, mappedHasItemImports: false, mappedHasItems: false },
     { cloudKeys: cloudKeys.length, localHasItems: localMirrorValues.has('items'), mappedHasItemImports: mappedCloudKeys.has('itemImports'), mappedHasItems: mappedCloudKeys.has('items') })
   /* 負對照 canary：注入一個兩表皆未覆蓋的雲鍵 ⇒ 尺必報紅（證明非恆綠）。 */
   const mutated = cloudKeys.concat(['ghostCloudKey'])
@@ -518,19 +526,19 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
   /* 本區塊自持兩把尺子（上游 W 段的同名常量是塊作用域，不跨界引用）。 */
   const localMirrorValues2 = new Set(Object.values(storageW2.STORAGE_KEYS))
   const mappedCloudKeys2 = new Set(pairs2.map((pair) => pair[1]))
-  check('W4', 'AC-522（本單）：擴面不改集合面 —— `CLOUD_COLLECTIONS` 仍恰 11 鍵、異名映射仍恰 6 條',
-    { cloudKeys: 11, mappings: 6 },
+  check('W4', 'AC-522（v1.67）：階段乙撤三族導入 ⇒ `CLOUD_COLLECTIONS` 恰 8 鍵、異名映射恰 3 條',
+    { cloudKeys: 8, mappings: 3 },
     { cloudKeys: cloudbaseW2.CLOUD_COLLECTION_KEYS.length, mappings: pairs2.length })
-  check('W5', 'AC-522（本單）：印章導入通道兩鍵三處逐字在位（本機鏡像 / 映射值 / 雲鍵）',
-    { mirror: 'seal-imports', mapped: 'sealImports', cloud: 'xiai_seal_imports' },
+  check('W5', 'AC-522（v1.67）：印章導入**本機鏡像鍵仍在**（`seal-imports`）；映射值與雲鍵**均不在位**（階段乙撤出雲讀面）',
+    { mirror: 'seal-imports', mappedPresent: false, cloudPresent: false },
     {
       mirror: String(storageW2.STORAGE_KEYS.sealImports),
-      mapped: String(mapOf2['seal-imports']),
-      cloud: String(cloudbaseW2.CLOUD_COLLECTIONS.sealImports)
+      mappedPresent: Object.prototype.hasOwnProperty.call(mapOf2, 'seal-imports'),
+      cloudPresent: Object.prototype.hasOwnProperty.call(cloudbaseW2.CLOUD_COLLECTIONS, 'sealImports')
     })
-  check('W6', 'AC-522（本單）：印章導入雲鍵被覆蓋（映射值 ∈ 雲鍵面；不靠同名）',
-    { inCloudKeys: true, sameName: false },
-    { inCloudKeys: cloudbaseW2.CLOUD_COLLECTION_KEYS.includes(mapOf2['seal-imports']), sameName: 'seal-imports' === mapOf2['seal-imports'] })
+  check('W6', 'AC-522（v1.67）：印章導入雲鍵**不在**雲鍵面、映射值亦不在位（階段乙撤出；不靠同名）',
+    { inCloudKeys: false, mappedPresent: false },
+    { inCloudKeys: cloudbaseW2.CLOUD_COLLECTION_KEYS.includes(mapOf2['seal-imports']), mappedPresent: Object.prototype.hasOwnProperty.call(mapOf2, 'seal-imports') })
   /* 負對照：本單若新開集合而未登記 ⇒ 尺必紅。 */
   const injected = cloudbaseW2.CLOUD_COLLECTION_KEYS.concat(['xiai_seal_source_fields'])
   check('W7', 'AC-522 負對照（本單）：新增集合未同批登記 ⇒ 可達性尺必報紅', ['xiai_seal_source_fields'],

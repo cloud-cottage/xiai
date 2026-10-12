@@ -266,23 +266,20 @@ const OVERLAY_COLLECTION_KEYS = CLOUD_COLLECTION_KEYS
  * **本机镜像键 → 云集合键**（仅**两处键名不同**者登记；同名的直用）。
  *
  * 为什么需要这张表：云读面（`cloudBaseReadOf`）与覆盖层（`OVERLAY_COLLECTION_KEYS`）认的都是
- * **云集合键**（`CLOUD_COLLECTIONS` 的驼峰名，如 `personImports`），而数据层各读入口是按
- * **本机镜像键**（`STORAGE_KEYS` 的值，如 `person-imports`）调用 `readCollection` 的。
- * `seals` / `faces` / `images` / `persons` 两组键**恰好同名** ⇒ 一直正常；其余 5 个集合
- * 早年取的是连字符镜像名，与驼峰云键**对不上** ⇒ `cloudBaseReadOf` 恒判 `off` ⇒ 云快照里的行
- * **永远读不回来**（线上实据：云有 570 行 `xiai_person_imports`，UI 却显示 0）。
+ * **云集合键**（`CLOUD_COLLECTIONS` 的驼峰名，如 `personProposals`），而数据层各读入口是按
+ * **本机镜像键**（`STORAGE_KEYS` 的值，如 `person-proposals`）调用 `readCollection` 的。
+ * 两键同名的集合直用；异名者经 `cloudKeyOfLocal` 翻译。
+ *
+ * **阶段乙（2026-10-12）**：三族导入集合（`person-imports` / `seal-imports` / `item-imports`）
+ * 连同其云键一并**撤出云读面**（见 `cloudbase.js::CLOUD_COLLECTIONS` 尾注）⇒ 本表**只余 3 条**
+ * 异名映射。撤出后这三族的本机镜像键经本表**原样返回**（不再翻译）⇒ `cloudBaseReadOf` 恒判
+ * `off` ⇒ `readCollection` 走既有本地实现（`readKey`），**行为一字不改**、未新增回落分支。
  * 未登记的键原样返回 ⇒ 非接管集合（`users` / `corrections` / …）行为一字未变。
  */
 const CLOUD_KEY_OF_LOCAL = Object.freeze({
   'corrections-public': 'correctionsPublic',
   'correction-summaries': 'correctionSummaries',
-  'person-proposals': 'personProposals',
-  'person-imports': 'personImports',
-  'seal-imports': 'sealImports',
-  /* **item 通道切片 A（v1.61）**：`items` 两键**恰好同名**（`STORAGE_KEYS.items` ＝ `items`
-     ＝ 云键），**不入本表**（AC-522 可達性由同名覆蓋）；`item-imports` ↔ `itemImports` **异名**
-     ⇒ 必须登记（否则云快照里的 `xiai_item_imports` 行永远读不回来 —— 570 行事故同型）。 */
-  'item-imports': 'itemImports'
+  'person-proposals': 'personProposals'
 })
 
 /** 本机镜像键 → 云集合键（未登记 / 翻译后仍非云键 ⇒ 原样返回）。 */

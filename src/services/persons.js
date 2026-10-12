@@ -50,6 +50,9 @@ import { PERSON_PROPOSAL_STATUS, emptyPersonFields, PERSON_IMPORT_STATUS, PERSON
    （`xiai-user-token` 的 `verify`）。**身份由服务端从令牌派生**，载荷里的身份类键由服务端拒。 */
 import { userWriteGate } from './userWrite.js'
 import { cloudBaseConfigured, cloudBaseStatus } from '../data/cloudbase.js'
+/* **E-4/E-5（阶段乙｜2026-10-12）**：写面形态真源（`local-dev` ⇒ 本机面 ＝ 本机权威；
+   `cloud` ⇒ 只认服务端回包）。**不自造第二套判据**。 */
+import { WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 
 /** 印人提案三态（转发真源 `seed.js::PERSON_PROPOSAL_STATUS`；单向、终态不回退）。 */
 export const PERSON_STATUS = PERSON_PROPOSAL_STATUS
@@ -766,12 +769,91 @@ function importReadDegradedMessage() {
 
 /* ------------------------------ 导入：采纳 / 驳回（管理员） ------------------------------ */
 
+/* ============================================================================
+   **E-4 / E-5（阶段乙｜2026-10-12）**：审核＝**回包真值 ＋ 循环推进**；本机镜像写入**不得静默**
+   ----------------------------------------------------------------------------
+   · E-4：服务端按 `op` 收窄透传顶层键 `accepted_ids` / `rejected_ids` / `skipped` / `failed` /
+     `done` / `remaining`（**键名逐字冻结，不改名**）。云端模式下**只认回包**报数，
+     **不得**再用本机全量判定冒充对外读数；到达 `remaining == 0` 即该批处理完毕。
+   · E-5：本机镜像写入**只落本批行**（只改动回包权威给出的那一批行）⇒ 写后**回读校验**
+     （比条数 ＋ JSON 长度）；不一致 ⇒ 结构化 `STORAGE_UNAVAILABLE` ＋ 如实上屏，
+     **本次写入结果以服务端回包为准**（`storage.js` 是全工程唯一落点，**本单不改它**）。
+   ============================================================================ */
+
+/** **E-5**：本机镜像写入失败的结构化拒绝（**不得静默**）。 */
+const IMPORT_MIRROR_WRITE_FAILED = Object.freeze({
+  ok: false,
+  reason: 'STORAGE_UNAVAILABLE',
+  message: '本機鏡像寫入未生效（可能超出瀏覽器儲存配額）；本次寫入結果以服務端回包為準。'
+})
+
+/**
+ * **E-5**：写本机镜像并**回读校验**（只落本批行 ⇒ 逐轮只改动回包权威给出的那一批行）。
+ * 读回比较「**条数 ＋ JSON 长度**」；一致 ⇒ `null`（放行）；不一致 ⇒ 结构化拒绝。
+ * 读写仍经数据层单点（`savePersonImportRows` / `listPersonImportRows` ⇒ 底层 `readKey`），
+ * **不自立第二处存储访问**（R-25）。
+ * @param {Array<object>} nextRows 合并后的镜像行（仅本批行被改动；其余行**原样**）
+ * @returns {null|{ok:false, reason:'STORAGE_UNAVAILABLE', message:string}}
+ */
+function personImportMirrorWriteDenial(nextRows) {
+  const rows = Array.isArray(nextRows) ? nextRows : []
+  const expectedCount = rows.length
+  const expectedLength = JSON.stringify(rows).length
+  savePersonImportRows(rows)
+  const back = listPersonImportRows()
+  if (Array.isArray(back) && back.length === expectedCount && JSON.stringify(back).length === expectedLength) return null
+  return { ...IMPORT_MIRROR_WRITE_FAILED }
+}
+
+/**
+ * **E-4**：服务端回包读数（键名逐字冻结）。
+ * 回包可能落在门的**顶层**或 `value` 容器（管道透传槽）—— 两处都认（**不改键名、不臆造**）；
+ * 缺席 ⇒ `hasAny:false`（调用方**如实回报、不虚构计数**）。
+ */
+function personImportReviewEnvelopeOf(gate) {
+  const top = gate && typeof gate === 'object' ? gate : {}
+  const value = top.value && typeof top.value === 'object' && !Array.isArray(top.value) ? top.value : {}
+  const KEYS = ['accepted_ids', 'rejected_ids', 'skipped', 'failed', 'done', 'remaining']
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
+  const pick = (key) => (has(top, key) ? top[key] : has(value, key) ? value[key] : undefined)
+  const asIds = (v) => (Array.isArray(v) ? v.map((item) => String(item)) : [])
+  const asNum = (v) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+  return {
+    hasAny: KEYS.some((key) => has(top, key) || has(value, key)),
+    serverMessage: String(top.message || value.message || '').trim(),
+    accepted_ids: asIds(pick('accepted_ids')),
+    rejected_ids: asIds(pick('rejected_ids')),
+    skipped: asIds(pick('skipped')),
+    failed: Array.isArray(pick('failed')) ? pick('failed') : [],
+    done: asNum(pick('done')),
+    remaining: asNum(pick('remaining'))
+  }
+}
+
+/** **E-4**：云端模式下由回包权威 id **就地更新**本机镜像（终态不回退；只改本批行）。 */
+function syncPersonImportMirrorFromEnvelope(who, env) {
+  const decided = new Map()
+  env.accepted_ids.forEach((id) => decided.set(id, PERSON_IMPORT_STATUS.ACCEPTED))
+  env.rejected_ids.forEach((id) => decided.set(id, PERSON_IMPORT_STATUS.REJECTED))
+  if (decided.size === 0) return { ok: true, rows: [] }
+  const at = nowIso()
+  const next = listPersonImportRows().map((row) => {
+    const id = String((row && row.id) || '')
+    if (!decided.has(id)) return row
+    if (String((row && row.status) || PERSON_IMPORT_STATUS.PENDING) !== PERSON_IMPORT_STATUS.PENDING) return row
+    return { ...row, status: decided.get(id), reviewed_at: at, reviewer_id: (who && who.id) || '' }
+  })
+  const denial = personImportMirrorWriteDenial(next)
+  if (denial) return denial
+  return { ok: true, rows: next.filter((row) => decided.has(String((row && row.id) || ''))) }
+}
+
 /**
  * **本地采纳 / 驳回判定（不經写面门）**：供 `reviewPersonImport` 过门后回写本机镜像 /
  * 在 dev·離線 形态作**本地权威**。
  * 采纳粒度：按批次（`batchId`）或按单行（`importId`）二选一（**两个入口都实现**）。
  * **部分失败**：失败行保持 `PENDING` 且零写入；成功行落库；成功面**可重放且幂等**。
- * @returns {{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[], failed?:Array<object>, rows?:Array<object>, reason?:string, message:string}}
+ * @returns {{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[], failed?:Array<object>, done?:number, remaining?:number, rows?:Array<object>, reason?:string, message:string}}
  */
 function applyPersonImportDecision(who, { batchId = '', importId = '', decision = '', note = '' } = {}) {
   const rawNote = note === null || note === undefined ? '' : note
@@ -856,15 +938,28 @@ function applyPersonImportDecision(who, { batchId = '', importId = '', decision 
     })
   })
 
-  /* **成功面**：先落采纳产物（幂等）—— 再落导入行状态；两者都在本地（dev / 離線 ＝ 本地权威）。 */
+  /* **成功面**：先落采纳产物（冪等）—— 再落导入行状态；两者都在本地（dev / 離線 ＝ 本地权威）。 */
   if (acceptedIds.length > 0) savePersonRows(nextPersons)
+  const done = acceptedIds.length + rejectedIds.length
+  /* **剩余（E-4）**：本批（或該單行）内**仍为 `PENDING`** 的行数 —— 失败行保持 `PENDING`
+     ⇒ 如实计入「剩餘」（视图据此循环推进，**不虚报整批已完成**）。 */
+  const remaining = targets.filter((row) => {
+    const id = String((row && row.id) || '')
+    if (decidedById.has(id)) return false
+    return String((row && row.status) || PERSON_IMPORT_STATUS.PENDING) === PERSON_IMPORT_STATUS.PENDING
+  }).length
+  const resultRows = targets.map((row) => decidedById.get(String(row.id || '')) || row)
   if (decidedById.size > 0) {
-    savePersonImportRows(imports.map((row) => {
+    /* **E-5**：只改本批行 ＋ 写后**回读校验**；未生效 ⇒ 结构化 `STORAGE_UNAVAILABLE`
+       （**不得静默**），但仍如实回报本批计数供上屏。 */
+    const denial = personImportMirrorWriteDenial(imports.map((row) => {
       const id = String((row && row.id) || '')
       return decidedById.has(id) ? decidedById.get(id) : row
     }))
+    if (denial) {
+      return { ...denial, accepted, accepted_ids: acceptedIds, rejected_ids: rejectedIds, skipped, failed, rows: resultRows, done, remaining }
+    }
   }
-  const done = acceptedIds.length + rejectedIds.length
   return {
     ok: true,
     accepted,
@@ -872,7 +967,9 @@ function applyPersonImportDecision(who, { batchId = '', importId = '', decision 
     rejected_ids: rejectedIds,
     skipped,
     failed,
-    rows: targets.map((row) => decidedById.get(String(row.id || '')) || row),
+    done,
+    remaining,
+    rows: resultRows,
     message: accepted
       ? `已採納 ${acceptedIds.length} 條外部導入行並冪等生成正式印人（失敗 ${failed.length} / 跳過 ${skipped.length}）`
       : `已駁回 ${rejectedIds.length} 條外部導入行（跳過 ${skipped.length}）`
@@ -886,9 +983,15 @@ function applyPersonImportDecision(who, { batchId = '', importId = '', decision 
  * ② 经登录令牌写面门 `userWriteGate('reviewPersonImport', …)`（缺 env ⇒ 安全拒 ＋ 零写入）。
  * `ACCEPTED` ⇒ 幂等落 `xiai_persons`（按 `source_person_id`）；`REJECTED` ⇒ 零写入。
  * **两个入口都实现**：按批次（`batchId`）与按单行（`importId`）。
+ *
+ * **E-4（阶段乙｜2026-10-12）**：按**写面形态**分派 ——
+ *   · `local-dev`（本机面）⇒ **本机权威**：`applyPersonImportDecision`（本机一次处理完整批）；
+ *   · `cloud`（公网面）⇒ **只认服务端回包**：把 `accepted_ids` / `rejected_ids` / `skipped` /
+ *     `failed` / `done` / `remaining` **逐字透传**给调用方，并由回包权威 id **就地更新**本机镜像；
+ *     **不再**用本机全量判定当对外报数（那是「假成功」的病根）。
  * @param {{id?:string, role?:string}|null} actor 管理员
  * @param {{batchId?:string, importId?:string, decision?:string, note?:string}} [options]
- * @returns {Promise<{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[], failed?:Array<object>, rows?:Array<object>, reason?:string, message:string}>}
+ * @returns {Promise<{ok:boolean, accepted?:boolean, accepted_ids?:string[], rejected_ids?:string[], skipped?:string[], failed?:Array<object>, done?:number, remaining?:number|null, rows?:Array<object>, reason?:string, message:string}>}
  */
 export async function reviewPersonImport(actor, options = {}) {
   const who = actor || currentUser()
@@ -902,8 +1005,33 @@ export async function reviewPersonImport(actor, options = {}) {
     note: String((options && options.note) || '')
   })
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
-  /* 本機鏡像（dev / 離線 ＝ 本地權威；雲端 ＝ 服務端權威後的本機鏡像）。 */
-  return applyPersonImportDecision(who, options)
+  /* **本机面（local-dev）**：本机即权威 ⇒ 走本机判定（一次处理完整批；`done` / `remaining` 如实回报）。 */
+  if (gate.mode === WRITE_FACE_MODES.LOCAL_DEV) {
+    return applyPersonImportDecision(who, options)
+  }
+  /* **公网面（cloud）**：**只认服务端回包**（本机镜像只做映射，**不重算对外读数**）。 */
+  const accepted = String((options && options.decision) || '') === PERSON_IMPORT_STATUS.ACCEPTED
+  const env = personImportReviewEnvelopeOf(gate)
+  const sync = syncPersonImportMirrorFromEnvelope(who, env)
+  if (!sync.ok) {
+    /* **E-5**：本机镜像未生效 ⇒ **不得静默**；仍带回归包权威计数供上屏。 */
+    return { ...sync, accepted, accepted_ids: env.accepted_ids, rejected_ids: env.rejected_ids, skipped: env.skipped, failed: env.failed, done: env.done, remaining: env.remaining }
+  }
+  const tail = env.remaining === null ? '' : ` / 剩餘 ${env.remaining}`
+  return {
+    ok: true,
+    accepted,
+    accepted_ids: env.accepted_ids,
+    rejected_ids: env.rejected_ids,
+    skipped: env.skipped,
+    failed: env.failed,
+    done: env.done,
+    remaining: env.remaining,
+    rows: sync.rows,
+    message: env.serverMessage || (accepted
+      ? `已採納 ${env.accepted_ids.length} 條外部導入行（失敗 ${env.failed.length} / 跳過 ${env.skipped.length}${tail}）`
+      : `已駁回 ${env.rejected_ids.length} 條外部導入行（跳過 ${env.skipped.length}${tail}）`)
+  }
 }
 
 /** 单写者门转发（供视图 / 自检直调；两集合均不开放直写入口）。 */
