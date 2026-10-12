@@ -23,7 +23,7 @@ import { currentUser } from '../data/session.js'
    生产构建（无该开关）⇒ `isLocalImportFace()` 恒 false ⇒「待審導入批次」区块**不渲染**
    （DOM 零命中，不以 CSS 隐藏冒充）**且不發任何取行請求**。**不自造第二套判据、不在本文件读 env。** */
 import { isLocalImportFace } from '../data/writeFaceMode.js'
-import { statusLabel, formatDateTime } from '../utils/format.js'
+import { statusLabel, formatDateTime, importReviewFeedbackText } from '../utils/format.js'
 
 /* 任何一次审核 / 提交后 +1，使下面的派生读数重算。 */
 const dataVersion = ref(0)
@@ -262,37 +262,78 @@ const IMPORT_CANCEL_ACTION = 'person-import-cancel'
    每輪只認**回包**的權威計數（鍵名逐字凍結：`accepted_ids` / `rejected_ids` / `skipped` /
    `failed` / `done` / `remaining`）—— 服務層已把雲端回包透傳（本機面下即本機權威回包，同一條路）。
    逐輪上屏「已處理 N · 剩餘 M」，並令本機鏡像就地更新（落盤由服務層承擔 ⇒ 此處只 `dataVersion += 1`
-   觸發重算）。`remaining === 0` ⇒ 顯示該輪 `message` 原文；到達預算 ⇒ 如實報「剩餘 N，可續」。 */
+   觸發重算）。
+   **F-1（2026-10-12｜本單修）**：終態反饋**改累計口徑** —— 逐輪把 `accepted_ids.length` /
+   `rejected_ids.length` 累加（**只由回包陣列長度派生**，不另立真源）、並記**實際完成**（`ok === true`）
+   的調用次數；終態文案交純函式 `importReviewFeedbackText`（`src/utils/format.js`）拼裝 ⇒
+   `本輪共{採納|駁回} {n} 條（共 {rounds} 次調用）` ＋（未收斂時）`；剩餘 {remaining} 條，可再次點擊續審。`
+   動詞隨 `options.decision`（**不寫死「駁回」**）；`remaining` 缺席 ⇒ **不填 0**（不寫「剩餘」一句）。
+   任一輪 `ok !== true` ⇒ **即時中斷**、該輪 `reason` / `message` **原文上屏**（真因不吞）、
+   **該輪條數不計入累計**、**不報成成功**。
+   **F-2（2026-10-12｜本單修）**：**入口分叉**（視圖層判定，**不新增參數到服務層**；判定用
+   `options.importId` 非空）——「單行」入口一次只決定**一行**，跑滿 5 輪就是拿同一行去服務端
+   反覆打（服務端逐輪 `skipped` 1 ⇒ 4 次無謂往返 ＋ 文案「共 5 次調用；跳過 4」對「只駁一行」
+   屬誤導）、且「剩餘 N 條，可再次點擊續審」不是單行入口的語義 ⇒ 單行改為**恰 1 次調用**
+   （`maxRounds === 1`）＋ 終態**不附**剩餘一句（向純函式傳 `remaining: null`，**不填 0**）。
+   整批入口（`batchId`）**一字不改**（≤5 輪 / ≤60 s 預算 / 累計口徑 / 真因回補 / 剩餘提示）。 */
 const IMPORT_REVIEW_MAX_ROUNDS = 5
 const IMPORT_REVIEW_BUDGET_MS = 60000
+/** 單行入口的循環上限（**恰 1 次調用**；F-2）。 */
+const IMPORT_REVIEW_SINGLE_ROW_ROUNDS = 1
 
 async function runImportReviewLoop(reviewFn, options) {
+  /* **F-2 入口分叉**（逐字照口徑）：非空 `importId` ⇒ 單行；否則 ⇒ 整批。 */
+  const singleRow = !!(options && options.importId)
+  const maxRounds = singleRow ? IMPORT_REVIEW_SINGLE_ROW_ROUNDS : IMPORT_REVIEW_MAX_ROUNDS
   const deadline = Date.now() + IMPORT_REVIEW_BUDGET_MS
   let processed = 0
+  let rounds = 0
+  let skippedCount = 0
+  let failedCount = 0
   let remaining = null
   let message = ''
+  let serverMessage = ''
   let ok = true
   importReviewProgress.value = ''
-  for (let round = 0; round < IMPORT_REVIEW_MAX_ROUNDS; round += 1) {
+  for (let round = 0; round < maxRounds; round += 1) {
     const result = await reviewFn(actor.value, options)
     if (!result || result.ok !== true) {
       ok = false
+      /* **F-1**：失敗 / 中斷輪 ⇒ 照舊**即時中斷**；該輪原文上屏；**該輪條數不入累計**、不報成成功。 */
       message = (result && result.message) || message
       if (result && Number.isFinite(Number(result.remaining))) remaining = Number(result.remaining)
       break
     }
+    rounds += 1
     processed +=
       (Array.isArray(result.accepted_ids) ? result.accepted_ids.length : 0) +
       (Array.isArray(result.rejected_ids) ? result.rejected_ids.length : 0)
+    /* **F-1 補（真因累計）**：逐輪（僅 `ok === true`）累加回包 `skipped` / `failed` 的**陣列長度**
+       （**唯一真源**；不得由 `done` / `remaining` 推）⇒ 多輪下 `rounds > 1` 時由純函式回補
+       「失敗 N · 跳過 M」。失敗 / 中斷輪不入累計（見上 `break` 分支）。 */
+    skippedCount += Array.isArray(result.skipped) ? result.skipped.length : 0
+    failedCount += Array.isArray(result.failed) ? result.failed.length : 0
     remaining = result.remaining === undefined || result.remaining === null ? null : Number(result.remaining)
-    if (result.message) message = result.message
+    if (result.message) serverMessage = result.message
     importReviewProgress.value = `已處理 ${processed} · 剩餘 ${remaining === null ? '—' : remaining}`
     dataVersion.value += 1
     if (remaining === null || remaining <= 0) break
     if (Date.now() >= deadline) break
   }
-  if (ok && remaining !== null && remaining > 0) {
-    message = `${message}（已達本次循環預算，剩餘 ${remaining} 條；可再次點擊續審）`
+  if (ok) {
+    /* **F-1**：**累計**口徑（非末輪）；動詞隨 `options.decision`；服務端 `message` 與**真因累計**
+       由純函式按規則處置（單輪原文自帶失敗/跳過 ⇒ 不重複報；多輪補回）。
+       **F-2**：單行入口 ⇒ `remaining` 傳 `null`（**不附**「剩餘 N 條，可再次點擊續審」；
+       **不填 0**）；整批入口 ⇒ 照舊傳真實 `remaining`。 */
+    message = importReviewFeedbackText({
+      decision: options && options.decision,
+      count: processed,
+      rounds,
+      remaining: singleRow ? null : remaining,
+      serverMessage,
+      skippedCount,
+      failedCount
+    })
   }
   return { ok, message, remaining }
 }
