@@ -159,3 +159,22 @@
 - **工具陷阱（實測 2026-10-12）**：`cloudbase fn invoke --json` 回來的 `RetMsg.token` **在輸出裡只有 13 字元**
   （真令牌為兩段 base64url＋`.`），拿去 `action:'verify'` 恒 `TOKEN_MALFORMED` ⇒ **不得用 CLI invoke 做令牌往返 / op 真機驗證**。
 - **P-1 不變**：線上 3,079 行 `PENDING` 印章導入行，待鏈路修完後處置（終態不可回退）。
+
+### 7.7 上線與複檢（2026-10-12 21:2x CST｜前端口徑已定 ⇒ 前後端一併上線）
+
+**上線動作**：`git push origin main`（`124c3bf..43f82e4`）⇒ Vercel 聯動；雲函數已於 20:53:55 先上（見 §7.4）。
+
+**複檢讀數（實測）**：
+
+| 判據 | 讀數 |
+|---|---|
+| 線上入口換版（推送即上線） | `assets/index-uuwkS9Nk.js` → **`assets/index-B717HeqN.js`**（約 45 s；輪詢 3 次命中） |
+| 線上入口 ≡ 本地同一入口 | `sha256 c9fd2a4101ad76d52edae7db18efbe29def51ebacb9772d22e39ae76a9782af0` **逐字節一致** |
+| 生產包內本機面開關痕跡 | `VITE_XIAI_LOCAL_IMPORT_FACE` **0 命中**（構建期常量；公網面恒 false） |
+| R-3① 公網面零命中 | 生產站 `/my/corrections`（管理員已登錄、新構建）：`h2` 無「待審導入批次」項；`[data-import-pull-refresh]` / `[data-import-pull-notice]` / `[data-seal-import-id]` **均 0** |
+| R-3③ 本機面完整可用 | 本機站 `http://127.0.0.1:5163/my/corrections`（雲數據源）：區塊**渲染**；「印章導入 共 1000 條 · 1 批」；notice「印章導入 **已取 1000 條（可能還有更多）**」；`pullImportRows` 真走雲（`tcb-api` 資源條目在位） |
+| R-6 / R-8 本地落盤 | 本機站 `localStorage` **無** `xiai:v1:{person,seal,item}-imports` 任一鍵（取回行僅駐內存） |
+
+**仍然待辦**：
+- **P-1 處置（未動）**：線上 `xiai_seal_imports` 批次 `seal_20261010_01` 的 **3,079 行 `PENDING`** —— 上線後**公網面已不可見、不可審**；要處理只能在本機站（已實測可取 1000 條/輪；駁回一輪後再取即為下一批 PENDING）。**終態不可回退 ⇒ 等 Kevin 定處置方式**。
+- **P-3 真機 E2E（部分達成）**：本機面「取行 → 上屏 → 如實標 maybeMore」已實測；**「整批駁回 → `remaining == 0` 收斂」尚未實測**（需一次真實駁回，屬生產終態寫入 ⇒ 等 Kevin 授權）。
