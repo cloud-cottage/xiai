@@ -117,3 +117,45 @@
 **三禁（寫進每份 brief）**：① 不部署（`fn deploy` / `fn code update` / `fn config update` 一律不跑）；
 ② 不 `git add/commit/push`（單一推送者 ＝ 派單方 Zang）；③ 不動生產數據（庫 / 桶都不寫）。
 另禁破壞性 git：`checkout` / `restore` / `stash` / `reset` / `clean`。
+
+---
+
+## 7. v2 追補（2026-10-12 21:0x CST）：形態更正 ＋ 雲函數已上線
+
+### 7.1 Kevin 本輪裁定（逐字）
+- **形態**：**「①云数据源 ＋ 本机构建开关 ＋ E-3 取行（仅内存）—— 本机可审、采纳落云」**。
+- **上線節奏**：**「云函数先上，前端等形态定了一并推」**。
+
+### 7.2 更正 R-2（**取代 §1 的「本地數據源 ⇒ 本機面」字面**）
+- **本機面判據 ＝ 本機構建開關**（`.env.local` 一類**不入庫**的本機構建配置；擬名
+  `VITE_XIAI_LOCAL_IMPORT_FACE`，取法必須是**字面** `import.meta.env.VITE_XIAI_LOCAL_IMPORT_FACE`
+  —— 本倉既有陷阱：先 `const env = import.meta.env` 再取鍵**不會**被 Vite 靜態替換）。
+- **本機站跑「雲數據源」**（可寫雲、可落正式行），**不再**用 `writeFaceMode() === local-dev` 作本機面判據：
+  該形態下本機站既看不到雲端的包、採納也落不了雲（寫面門放行但不發請求）⇒ 與 R-4 衝突。
+- **公網面（生產構建，無該開關）**：不渲染「待審導入批次」區塊 ＋ 三族導入集合不在雲讀面（E-1 已完成）。
+
+### 7.3 新增 R-8 / R-9
+- **R-8（本機面數據只駐內存）**：待審導入行由 `pullImportRows` 分頁取回後**只放內存**（不落
+  localStorage / IndexedDB），刷新即重取；理由 ＝ 3,679 行 ≈16 MB > 配額（實測 ≥6 MB 即拋），
+  而 `storage.writeKey` 的 `catch` 會**靜默吞掉**寫入失敗。
+- **R-9（審核仍走既有 review op）**：本機面審核＝用雲數據源走服務端（R-4 落正式行）；界面只認
+  **回包真值** ＋ 循環推進至 `remaining == 0`（每次調用上限 200 行的分片由前端循環吸收，不是語義）。
+
+### 7.4 上線記錄（實測，2026-10-12）
+- **雲函數 `xiai-user-token` 已上線**：`fn code update --deployMode zip`（乾淨目錄，只含 index.js /
+  package.json / README.md / lib/）；`fn list` 修改時間 **2026-09-30 22:42:24 → 2026-10-12 20:53:55**；
+  `fn code download` 回下載 **7 個文件與倉內逐字節一致（SAME）**。
+- **前端未推**（等形態①落地一併推）；生產站此刻 ＝ **舊前端 ＋ 新函數**（新 op 與新計數對舊前端向後兼容）。
+
+### 7.5 派單記錄追加
+| 單 | 角色 | 文件集 | 要點 |
+|---|---|---|---|
+| K-乙-3 | Kong | `src/services/token.js` | 修跨層契約縫：`gate()` 按 op 收窄透傳 8 個新鍵（現狀：白名單式重建對象 ⇒ 新鍵被靜默丟棄） |
+| K-乙-4 | Kong | `src/data/**`、`src/services/{seals,persons,items}.js`、`src/views/MyCorrectionsView.vue` | 形態①落地：判據換本機構建開關 ＋ 接 E-3（分頁取行、僅內存，待審列表數據源切到取回結果） |
+| J-乙-2 | Jing | `docs/**` | 以追加注承載 R-2 更正 ＋ R-8 / R-9（不刪舊行） |
+
+### 7.6 待辦（本件登記）
+- **P-3 真機 E2E（阻塞在前端未推）**：前端上線後在生產站實測 —— 本機面取行（`pullImportRows`）＋ 整批駁回循環推進至 `remaining == 0`。
+- **工具陷阱（實測 2026-10-12）**：`cloudbase fn invoke --json` 回來的 `RetMsg.token` **在輸出裡只有 13 字元**
+  （真令牌為兩段 base64url＋`.`），拿去 `action:'verify'` 恒 `TOKEN_MALFORMED` ⇒ **不得用 CLI invoke 做令牌往返 / op 真機驗證**。
+- **P-1 不變**：線上 3,079 行 `PENDING` 印章導入行，待鏈路修完後處置（終態不可回退）。
