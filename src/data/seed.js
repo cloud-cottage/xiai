@@ -283,7 +283,7 @@ export const SEED_IMAGES = [
  *     如 `戰國` / `明` / `清` / `近現代` **保留原样并登记**，不归一、不猜）。
  */
 export const DYNASTY_OPTIONS = [
-  '春秋',
+  '商周暨春秋',
   '戰國',
   '秦',
   '漢',
@@ -396,7 +396,7 @@ export function isKnownSealClass(value) {
 
 /**
  * **大類建议值（按朝代预填的唯一真源）**：分段覆盖 `DYNASTY_OPTIONS` 全 15 类——
- *   - 春秋〜宋元（春秋 / 戰國 / 秦 / 漢 / 魏晉 / 隋唐 / 宋元）⇒ `古璽`；
+ *   - 商周暨春秋〜宋元（商周暨春秋 / 戰國 / 秦 / 漢 / 魏晉 / 隋唐 / 宋元）⇒ `古璽`；
  *   - 明早中期〜民國（明早中期 / 晚明 / 清初 / 清中期 / 晚清 / 民國）⇒ `流派印`；
  *   - 新中國 / 當代 ⇒ `雜項`。
  *
@@ -404,7 +404,7 @@ export function isKnownSealClass(value) {
  * 未知 / 空朝代 ⇒ 空串（**不猜**）。视图层**不得**另写第二套映射。
  */
 export const SEAL_CLASS_SUGGESTIONS = [
-  { seal_class: '古璽', dynasties: ['春秋', '戰國', '秦', '漢', '魏晉', '隋唐', '宋元'] },
+  { seal_class: '古璽', dynasties: ['商周暨春秋', '戰國', '秦', '漢', '魏晉', '隋唐', '宋元'] },
   { seal_class: '流派印', dynasties: ['明早中期', '晚明', '清初', '清中期', '晚清', '民國'] },
   { seal_class: '雜項', dynasties: ['新中國', '當代'] }
 ]

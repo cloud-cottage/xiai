@@ -249,7 +249,7 @@ const MARKABLE_FIELDS = Object.freeze({
    本处是服务端副本，由 `scripts/verify-admin-review-op.mjs` 的 `D4` **逐字断言相等**（不让副本漂移）。
    --------------------------------------------------------------------------- */
 const DYNASTY_OPTIONS = Object.freeze([
-  '春秋',
+  '商周暨春秋',
   '戰國',
   '秦',
   '漢',

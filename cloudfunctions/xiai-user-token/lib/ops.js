@@ -486,7 +486,7 @@ const DECISIONS = Object.freeze(['ACCEPTED', 'REJECTED'])
 
 /* 采纳值域真源副本（真源 ＝ `src/data/seed.js`；与管理员函数 `VALUE_DOMAINS` 逐字同值）。 */
 const DYNASTY_OPTIONS = Object.freeze([
-  '春秋',
+  '商周暨春秋',
   '戰國',
   '秦',
   '漢',

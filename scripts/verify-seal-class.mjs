@@ -8,7 +8,7 @@
  *       ＋ **零写入**（逐字段快照取证）；**判定在写之前**。运行时经**服务端采纳门**取证：
  *       用户函数 `xiai-user-token` ＋ 管理函数 `xiai-admin-token` 的 `reviewCorrection`。
  *   (b) **多印面聚合筛**：多印面、**任一命中即命中**（R-34 口型）—— 经服务层 `listSeals` 取证。
- *   (c) **上传预填**：朝代 ⇒ 建议值 **7/6/2** 全覆盖（春秋〜宋元 ⇒ 古璽、明早中期〜民國 ⇒ 流派印、
+ *   (c) **上传预填**：朝代 ⇒ 建议值 **7/6/2** 全覆盖（商周暨春秋〜宋元 ⇒ 古璽、明早中期〜民國 ⇒ 流派印、
  *       新中國/當代 ⇒ 雜項）；**不锁死**（手改值优先）—— 视图层静态接线。
  *   (d) **勘误面**：`MARKABLE_FIELDS` 含 `seal_class` ⇒「大類」；两函数值域副本含 `seal_class`；
  *       前端 `FIELD_VALUE_DOMAINS` 接 `seal_class`（静态 ＋ 运行时）。
@@ -316,7 +316,7 @@ console.log(JSON.stringify({ section: 'c', title: '上传预填：朝代 ⇒ 建
     雜項: suggestions.find((s) => s.seal_class === '雜項').dynasties.length
   }
   check('c2', '分段计数 ＝ 7/6/2', { 古璽: 7, 流派印: 6, 雜項: 2 }, counts)
-  check('c2b', '春秋〜宋元 ⇒ 古璽', ['古璽', '古璽', '古璽', '古璽', '古璽', '古璽', '古璽'], ['春秋', '戰國', '秦', '漢', '魏晉', '隋唐', '宋元'].map(seed.suggestSealClass))
+  check('c2b', '商周暨春秋〜宋元 ⇒ 古璽', ['古璽', '古璽', '古璽', '古璽', '古璽', '古璽', '古璽'], ['商周暨春秋', '戰國', '秦', '漢', '魏晉', '隋唐', '宋元'].map(seed.suggestSealClass))
   check('c2c', '明早中期〜民國 ⇒ 流派印', ['流派印', '流派印', '流派印', '流派印', '流派印', '流派印'], ['明早中期', '晚明', '清初', '清中期', '晚清', '民國'].map(seed.suggestSealClass))
   check('c2d', '新中國 / 當代 ⇒ 雜項', ['雜項', '雜項'], ['新中國', '當代'].map(seed.suggestSealClass))
   check('c2e', '未知 / 空朝代 ⇒ 空串（不猜、不回落）', ['', '', ''], ['', null, '先秦'].map(seed.suggestSealClass))
