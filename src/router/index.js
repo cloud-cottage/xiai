@@ -8,6 +8,8 @@ import { isLoggedIn } from '../data/session.js'
  * 不设 `requiresAuth`）。
  * ＋ **Slice M1 新增两条**：`/styles`（【印風匯覽】，title 逐字 `印風匯覽`）与
  * `/persons`（【印家匯徵】，title 逐字 `印家匯徵`）—— 两条**均不设 `requiresAuth`（公开可达）**。
+ * ＋ **本單新增一条**：`/connect`（【連接斐萃】，title 逐字 `連接斐萃`）—— 站內取一次性授權碼；
+ * 同样**不设 `requiresAuth`**（未登錄可直达，页内给登录引导）；**不是 `/admin` 类路由**。
  * 侧边栏删去的三个条目（`我的勘誤記錄` / `我的實物照片` / `積分中心`）**其路由与视图一律保留**
  * （顶部弹出菜单 AppHeader.vue 仍在用）。**本条改版不动其余任何路由与末条兜底**。
  *
@@ -78,6 +80,15 @@ const routes = [
     name: 'persons',
     component: () => import('../views/PersonIndexView.vue'),
     meta: { title: '印家匯徵' }
+  },
+  /* **本单新增（斐萃换身份）**：`/connect` ＝ 站内取一次性授权码页。
+     **不新增 `/admin` 类路由**（仓规禁）；本页 `requiresAuth` 不设 ⇒ 未登錄也可直达，
+     由页内给登录引导（服务端另有独立拒绝面，两处互不替代）。 */
+  {
+    path: '/connect',
+    name: 'connect-feicui',
+    component: () => import('../views/ConnectFeicuiView.vue'),
+    meta: { title: '連接斐萃' }
   },
   {
     path: '/:pathMatch(.*)*',

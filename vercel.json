@@ -14,7 +14,7 @@
       "destination": "/xiai/index.html"
     },
     {
-      "source": "/((?!assets/|yinyuan/|xiai/).*)",
+      "source": "/((?!assets/|yinyuan/|xiai/|api/).*)",
       "destination": "/xiai/index.html"
     }
   ]

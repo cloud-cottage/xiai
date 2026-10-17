@@ -29,8 +29,11 @@ import * as persons from './persons.js'
 /* **印谱（item）门面（v1.61 新增｜item 通道切片 A）**：外部批量導入的提交 / 待審讀面 /
    採納·駁回。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as items from './items.js'
+/* **「連接斐萃」门面（本单新增）**：站内换取**一次性授权码**（斐萃桌面端换身份）。
+   页面与组件仍**只**经本门面访问数据。 */
+import * as feicui from './feicui.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui }
 export default services

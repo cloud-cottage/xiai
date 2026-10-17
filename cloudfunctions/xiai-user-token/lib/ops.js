@@ -40,6 +40,8 @@ const { tiffToPng } = require('./tiffToPng.js')
 /* **V6-a**：调用者**平台会话身份**判权（additive）。`IDENTITY_SOURCES` 是身份来源标记的
    **单一定义点**（既有令牌路取值 `SERVER_TOKEN` 逐字沿用；会话路为 `SESSION`）。 */
 const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsable, setAuthApiChannelProvider } = require('./sessionAuthority.js')
+/* **本单新增（斐萃换身份）**：一次性授权码的**纯函数面**（码表 / 生成 / 行形；零 SDK 零 IO）。 */
+const feicuiCode = require('./feicuiCode.js')
 
 /* ---------------------------------------------------------------------------
    **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器 —— **本单修正**：自两 `index.js` **迁回本文件**
@@ -89,6 +91,9 @@ const COLLECTIONS = Object.freeze({
   correctionsPublic: 'xiai_corrections_public',
   /* **V6-a 新增**：平台会话身份 → 角色（服务器私有；判权读点，见 `readRoleRow`）。 */
   roles: 'xiai_roles',
+  /* **本单新增（斐萃换身份）**：一次性授权码行（`_id` ＝ 码本身；服务端签发、服务端核销 ⇒
+     集合权限 **PRIVATE**，前端零直读零直写；核销在 `api/auth/feicui-exchange.js`，不在本函数）。 */
+  feicuiCodes: 'xiai_feicui_codes',
   /* **印人（person-model §2 / §3）**：正式印人（canonical；**只经采纳路径写**）＋ 提案 / 审核行。 */
   persons: 'xiai_persons',
   personProposals: 'xiai_person_proposals',
@@ -1423,6 +1428,12 @@ function buildProjection(row, decision, at, correctionId) {
 }
 
 /* ---------------------------------------------------------------------------
+   **本单新增（斐萃换身份）**：一次性授权码的**载荷封闭键面** —— **恰空集**。
+   码 / uid / role / 时戳一律服务端产出 ⇒ 前端**没有任何合法键**可传；任何键 ⇒ `INVALID_FIELD`。
+   --------------------------------------------------------------------------- */
+const FEICUI_CODE_ALLOWED_KEYS = Object.freeze([])
+
+/* ---------------------------------------------------------------------------
    op 注册面（每个 op 只**产出落盘计划**，落库在 `persist()`）
    --------------------------------------------------------------------------- */
 
@@ -2213,6 +2224,91 @@ const OPS = Object.freeze({
       op: 'submitItemImport',
       row,
       plan: { writes: [{ kind: 'add', collection: COLLECTIONS.itemImports, doc: row }] }
+    }
+  },
+
+  /* -------------------------------------------------------------------------
+     **【本单新增】斐萃（feicui）桌面端换身份 · 一次性授权码**
+     -------------------------------------------------------------------------
+     背景：斐萃本地电脑版（PyWebView）要调 yinyuan2026 的读面 API，而 `YINYUAN_API_KEY`
+     只能待在**斐萃服务端**（绝不随分发包下发）⇒ 斐萃服务端需要一把**可靠的 uid**。
+     通道：用户在**玺爱站内**点「連接斐萃」⇒ 本 op 签发一枚**一次性**短码 ⇒ 用户把码交给
+     斐萃客户端 ⇒ 斐萃服务端带自己的 key 调 `POST /api/auth/feicui-exchange` 换回 `{uid, role}`。
+
+     硬口径（逐条）：
+       · **身份只取服务端派生值**：`identity` 由 `index.js` 经 **auth API 通道**（`resolveSessionAuthority`）
+         得到；本 op **只认 `identity_source === 'SESSION'`**（令牌路 `SERVER_TOKEN` 一律不认 ⇒
+         不把「V3 待退令牌」变成第二条换身份通道）；**`payload` 里任何身份类键 ⇒ `INVALID_FIELD`**；
+       · **载荷键面封闭且为空**（`FEICUI_CODE_ALLOWED_KEYS` ＝ `[]`）：码、uid、role、时戳全由服务端产出；
+       · **一次性**：行形 `{_id:<code>, uid, role, issued_at, expires_at, used_at, used_by}`，
+         `used_at` / `used_by` 初值 `null`；核销由服务端路由**条件更新**完成（**不在本 op**）；
+       · **TTL 10 分钟**（`feicuiCode.DEFAULT_TTL_SECONDS` ＝ 600）；时戳一律 ISO 8601（UTC）；
+       · **回包不含 uid、不含令牌**：只回 `{code, expires_at, issued_at, ttl_seconds}` ——
+         码本身在**已登录用户自己的浏览器**里出现（该用户本就知道自己的 uid），而**码**是交给
+         斐萃一侧的唯一凭据；本 op **不把 uid 交给任何非玺爱前端面**；
+       · **撞码**：先按 `_id` 读一次（存在 ⇒ 重试，上限 `MAX_COLLISION_RETRIES`）；
+         仍撞 ⇒ `STORAGE_UNAVAILABLE`（**不静默覆盖他人未用的码**）。
+     * @param {object|undefined} payload **必须为空**（`{}` / 省略）
+     * @param {{uid:string, role:string, identity_source:string}} identity 服务端派生的会话身份
+     * @returns {Promise<{ok:true, op:string, row:object, plan:object}|{ok:false, reason:string, message:string}>}
+     */
+  async issueFeicuiCode(payload, identity) {
+    /* ① 载荷面：封闭且为空（未登记键 ⇒ `INVALID_FIELD` ＋ 零写入）。 */
+    if (payload !== undefined && payload !== null) {
+      if (typeof payload !== 'object' || Array.isArray(payload)) {
+        return deny(REASONS.INVALID_FIELD, '授權碼簽發不接受任何載荷（請省略 payload）；本次零寫入。')
+      }
+      const unknown = Object.keys(payload).filter((key) => FEICUI_CODE_ALLOWED_KEYS.indexOf(key) === -1)
+      if (unknown.length > 0) {
+        const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+        const hint =
+          identityKeys.length > 0
+            ? `其中身份類欄位（${identityKeys.join('、')}）由服務端派生，一律不採信前端自稱`
+            : '如實報回，不靜默丟鍵'
+        return deny(REASONS.INVALID_FIELD, `載荷含未登記欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+      }
+    }
+    /* ② 身份面：**只认平台会话身份**（auth API 派生）；缺失 / 令牌路 / 匿名 ⇒ 结构化拒绝。 */
+    if (!isSessionIdentity(identity) || !identityUsable(identity)) {
+      return deny(
+        REASONS.FORBIDDEN,
+        '僅已在璽愛站內登錄的用戶可以產生授權碼（未取得可驗證的平台會話身份）；本次零寫入。'
+      )
+    }
+    const uid = text(identity.uid)
+    const role = text(identity.role) || ROLE.USER
+    if (!uid || uid.length > 128 || /\s/.test(uid)) {
+      return deny(REASONS.FORBIDDEN, '平台會話身份不可用（uid 形態不合）；本次零寫入。')
+    }
+    /* ③ 码面：生成 ⇒ 撞码重试（**先读后写**，绝不覆盖既有行）。 */
+    const nowMs = Date.now()
+    let chosen = ''
+    for (let attempt = 0; attempt <= feicuiCode.MAX_COLLISION_RETRIES; attempt += 1) {
+      const candidate = feicuiCode.generateCode()
+      const existing = await readRows(COLLECTIONS.feicuiCodes, { _id: candidate })
+      if (existing.length === 0) {
+        chosen = candidate
+        break
+      }
+    }
+    if (!chosen) {
+      return deny(REASONS.STORAGE_UNAVAILABLE, '授權碼生成暫時失敗（碰撞重試用盡）；本次零寫入。')
+    }
+    const row = feicuiCode.buildRow({ code: chosen, uid, role, nowMs })
+    if (!row) {
+      return deny(REASONS.STORAGE_UNAVAILABLE, '授權碼組裝失敗（內部形狀不合）；本次零寫入。')
+    }
+    return {
+      ok: true,
+      op: 'issueFeicuiCode',
+      /* **回给前端的最小面**：只有码与有效期 —— **无 uid、无 role、无任何令牌**。 */
+      row: {
+        code: row._id,
+        issued_at: row.issued_at,
+        expires_at: row.expires_at,
+        ttl_seconds: feicuiCode.DEFAULT_TTL_SECONDS
+      },
+      plan: { writes: [{ kind: 'set', collection: COLLECTIONS.feicuiCodes, id: row._id, doc: row }] }
     }
   }
 })
@@ -3682,7 +3778,7 @@ const ADMIN_OPS = Object.freeze({
     /* ⑥ 逐行剝除身份 / 手機號類鍵（`user_phone` 一類零出現；不透明 uid 原樣）。 */
     const safeRows = rows.map((row) => stripImportIdentityFields(row))
     return { ok: true, op: 'pullImportRows', rows: safeRows, count: safeRows.length }
-  }
+  },
 })
 
 /**
@@ -3759,6 +3855,9 @@ module.exports = {
   COLLECTIONS,
   MARKABLE_FIELDS,
   ALLOWED_KEYS,
+  /* **本单新增**：斐萃授权码载荷封闭键面（恰空集）＋ 码面纯函数（离线自检按同一真源断言）。 */
+  FEICUI_CODE_ALLOWED_KEYS,
+  feicuiCode,
   ENDORSE_ALLOWED_KEYS,
   IDENTITY_KEYS,
   MAX_TEXT_LENGTH,
