@@ -61,6 +61,33 @@ cloudbase functions:deploy xiai-user-token --force
 （**本函数有依赖** `@cloudbase/node-sdk`，与 P1 的零依赖声明不同 ⇒ 已在报告登记）、
 以及上表 5 个 `envVariables`（**该文件含密钥 ⇒ 不入仓、不进交付目录**）。
 
+## 斐萃（feicui）令牌 —— 管理员签发面（本单改造）
+
+斐萃（本地電腦版）要调 yinyuan2026 的读面，而 `YINYUAN_API_KEY` **只许待在 xiai 侧**。
+斐萃改持一枚**璽愛签发的 HMAC 令牌**，打本站转发路由 `GET /api/feicui/v1/<path>`。
+
+| 环境变量 | 必填 | 说明 |
+|---|---|---|
+| `FEICUI_TOKEN_SECRET` | ✔ | 令牌签名密钥（HMAC-SHA256；**缺失 ⇒ 签不出、验不过**，fail-closed） |
+| `FEICUI_TOKEN_KID` | ✗ | 当前密钥号（缺省 `k1`）；轮换时改值 |
+| `FEICUI_TOKEN_PREVIOUS_SECRET` / `FEICUI_TOKEN_PREVIOUS_KID` | ✗ | 平滑轮换期：旧 kid 仍可验，新签只用当前 kid |
+
+**op**：`issueFeicuiToken`（登记在 `ADMIN_OPS`，**仅管理员**；会话路看 `xiai_roles.role==='admin'`，
+令牌路看 `XIAI_ADMIN_PHONE` 白名单；两路都 fail-closed）。
+
+```
+{action:'verify', op:'issueFeicuiToken', payload:{target, role?, ttl_seconds?}}
+  target      = 11 位手机号（服务端按 `uidOf` 派生 `u-`＋sha256 前 16 位）或既有 uid
+  role        = user | admin（缺省 user）
+  ttl_seconds = 300 … 7776000（缺省 2592000 ＝ 30 天；越界 ⇒ INVALID_VALUE，不夹取）
+→ {ok:true, row:{token, uid, role, kid, jti, iat, exp, expires_at, ttl_seconds}}   （**零落盘**，无 plan）
+→ {ok:false, reason, message}   （FORBIDDEN / INVALID_FIELD / INVALID_VALUE / MISSING_REQUIRED / STORAGE_UNAVAILABLE）
+```
+
+**令牌形态**：`v1.<base64url(payload)>.<base64url(HMAC-SHA256)>`，payload 恰 7 键
+`{v, uid, role, jti, iat, exp, kid}`；服务端**验签即确权、不存任何令牌状态**。
+**禁用 / 轮换**：见 `config/README.md`（`jti` 进吊销名单＝单枚失效；换密钥＝全体失效）。
+
 ## 边界（本单未做，如实登记）
 
 - **读面未迁移**：`xiai_corrections` 的读仍走本机 localStorage（云端行只在写入后由服务端回传做本地镜像）。

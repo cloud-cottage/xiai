@@ -105,8 +105,8 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
             <button type="button" @click="go('my-corrections')">我的勘誤記錄</button>
             <button type="button" @click="go('my-photos')">我的實物照片</button>
             <button type="button" @click="go('points')">積分中心</button>
-            <!-- **本单新增**：連接斐萃（站内取一次性授权码；普通用户入口，非管理员按钮）。 -->
-            <button type="button" data-entry="connect-feicui" @click="go('connect-feicui')">連接斐萃</button>
+            <!-- **本单改造**：斐萃令牌（管理员签发；入口对已登录用户可见，页内与**服务端**双重判管理员）。 -->
+            <button type="button" data-entry="connect-feicui" @click="go('connect-feicui')">斐萃令牌</button>
             <button type="button" @click="signOut">退出登錄</button>
           </template>
         </div>

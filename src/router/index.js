@@ -81,14 +81,14 @@ const routes = [
     component: () => import('../views/PersonIndexView.vue'),
     meta: { title: '印家匯徵' }
   },
-  /* **本单新增（斐萃换身份）**：`/connect` ＝ 站内取一次性授权码页。
+  /* **本单改造（斐萃令牌）**：`/connect` ＝ 管理员签发 HMAC 令牌页（`api/feicui/v1/*` 转发面用它确权）。
      **不新增 `/admin` 类路由**（仓规禁）；本页 `requiresAuth` 不设 ⇒ 未登錄也可直达，
-     由页内给登录引导（服务端另有独立拒绝面，两处互不替代）。 */
+     由页内给登录 / 权限说明（服务端 op 另有独立的管理员门，两处互不替代）。 */
   {
     path: '/connect',
     name: 'connect-feicui',
     component: () => import('../views/ConnectFeicuiView.vue'),
-    meta: { title: '連接斐萃' }
+    meta: { title: '斐萃令牌' }
   },
   {
     path: '/:pathMatch(.*)*',
