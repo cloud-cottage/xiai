@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-19T07:05:09.638Z",
+  "generated_at": "2026-10-19T07:17:23.035Z",
   "mode": "submit",
   "env": "liwu-d8gek6jjdab1d087c",
   "ndjson": "/Users/kevin/bistro/feicui/local-private/datasrc/sealbank/out/xiai_imports_sealbank_placeholder.ndjson",
@@ -20,15 +20,15 @@
     }
   },
   "baseline": {
-    "sealbank_rows_before": 1,
+    "sealbank_rows_before": 100,
     "sealbank_rows_after": 100
   },
   "summary": {
-    "ok": 99,
-    "skipped": 1,
+    "ok": 0,
+    "skipped": 100,
     "rejected": 0,
     "error": 0,
-    "writes": 99
+    "writes": 0
   },
   "results": [
     {
@@ -49,11 +49,11 @@
       "source_seal_id": "1592-004",
       "seal_name": "南宮僊史",
       "dynasty": "晚明",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0d500d40d61421d5fe5",
-      "business_id": "si-mvewrp7n-3a86nw",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 3,
@@ -61,11 +61,11 @@
       "source_seal_id": "1622-002",
       "seal_name": "張炳樊印",
       "dynasty": "晚明",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0d603cf7fe776a106cc",
-      "business_id": "si-mvewrpui-kwn74u",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 4,
@@ -73,11 +73,11 @@
       "source_seal_id": "1661-023",
       "seal_name": "豈為功名始讀書",
       "dynasty": "清初",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0d700d735c136ce9f7d",
-      "business_id": "si-mvewrqhh-oxl7o6",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 5,
@@ -85,11 +85,11 @@
       "source_seal_id": "1693-005",
       "seal_name": "耽道說禮杖義依仁",
       "dynasty": "清初",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0d700d9b4711bb8fd90",
-      "business_id": "si-mvewrr42-q5gxp2",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 6,
@@ -97,11 +97,11 @@
       "source_seal_id": "1718-002",
       "seal_name": "柴門老樹村",
       "dynasty": "清初",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0d800d40da63ae63dea",
-      "business_id": "si-mvewrrqm-h2gq2h",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 7,
@@ -109,11 +109,11 @@
       "source_seal_id": "1730-020",
       "seal_name": "擊十黃卷軸",
       "dynasty": "清初",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0d900d9b48b320e10fc",
-      "business_id": "si-mvewrse0-676x14",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 8,
@@ -121,11 +121,11 @@
       "source_seal_id": "1739-009",
       "seal_name": "名教中有樂地",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0da03cf800a4b047d36",
-      "business_id": "si-mvewrt0f-p8335k",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 9,
@@ -133,11 +133,11 @@
       "source_seal_id": "1752-005",
       "seal_name": "山舟",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0db03cf8013580f2482",
-      "business_id": "si-mvewrtmh-653o4r",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 10,
@@ -145,11 +145,11 @@
       "source_seal_id": "1758-006",
       "seal_name": "芝里",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0db00d7360642b74eaf",
-      "business_id": "si-mvewru8w-w20vys",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 11,
@@ -157,11 +157,11 @@
       "source_seal_id": "1761-002",
       "seal_name": "許松之印",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0dc00d9b4b64d76bedb",
-      "business_id": "si-mvewruvs-o1hwss",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 12,
@@ -169,11 +169,11 @@
       "source_seal_id": "1764-008",
       "seal_name": "汪憲",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0dd03cf80287b55b5ce",
-      "business_id": "si-mvewrvia-xi4j5q",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 13,
@@ -181,11 +181,11 @@
       "source_seal_id": "1772-009",
       "seal_name": "越智隆印",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0de00d736225159be17",
-      "business_id": "si-mvewrw4u-g6gi1f",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 14,
@@ -193,11 +193,11 @@
       "source_seal_id": "1778-015",
       "seal_name": "蓼陽茨室",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0df03cf80335b6509ea",
-      "business_id": "si-mvewrwrh-tmjinn",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 15,
@@ -205,11 +205,11 @@
       "source_seal_id": "1780-039",
       "seal_name": "馬武",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0df00d7363a4eae80c6",
-      "business_id": "si-mvewrxem-p7xwku",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 16,
@@ -217,11 +217,11 @@
       "source_seal_id": "1784-023",
       "seal_name": "浸雲",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0e000d73643308b7421",
-      "business_id": "si-mvewry0x-7rka43",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 17,
@@ -229,11 +229,11 @@
       "source_seal_id": "1788-024",
       "seal_name": "金石癖",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0e100d9b51e613409bc",
-      "business_id": "si-mvewryn0-z185v9",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 18,
@@ -241,11 +241,11 @@
       "source_seal_id": "1791-038",
       "seal_name": "橘籍之印",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0e203cf804a210dda34",
-      "business_id": "si-mvewrza4-xp9ypg",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 19,
@@ -253,11 +253,11 @@
       "source_seal_id": "1794-002",
       "seal_name": "不為俗情所染方能說法度人",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0e303cf80554d845719",
-      "business_id": "si-mvewrzwa-bb2up0",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 20,
@@ -265,11 +265,11 @@
       "source_seal_id": "1797-027",
       "seal_name": "幾生修得到梅華",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0e300d40eb01dcecf0b",
-      "business_id": "si-mvews0ig-2gxych",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 21,
@@ -277,11 +277,11 @@
       "source_seal_id": "1799-041",
       "seal_name": "一苑有華春晝永",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0e400d7368e7f3fe38c",
-      "business_id": "si-mvews14w-uyo9h2",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 22,
@@ -289,11 +289,11 @@
       "source_seal_id": "1801-008",
       "seal_name": "新篁里",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0e500d9b58117b259bc",
-      "business_id": "si-mvews1rl-tvnxcl",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 23,
@@ -301,11 +301,11 @@
       "source_seal_id": "1803-034",
       "seal_name": "濃華野館",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0e603cf81067a7b6d30",
-      "business_id": "si-mvews2dn-lrguxk",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 24,
@@ -313,11 +313,11 @@
       "source_seal_id": "1805-050",
       "seal_name": "小檀欒室",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0e700d736b1685b0f23",
-      "business_id": "si-mvews2zr-5tsmce",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 25,
@@ -325,11 +325,11 @@
       "source_seal_id": "1807-038",
       "seal_name": "張福熙",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0e800d9b5bf2e8f5f56",
-      "business_id": "si-mvews3lw-lj7l6i",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 26,
@@ -337,11 +337,11 @@
       "source_seal_id": "1811-028",
       "seal_name": "蘇畫印",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0e800d736cb2f9431c4",
-      "business_id": "si-mvews48e-i03ayz",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 27,
@@ -349,11 +349,11 @@
       "source_seal_id": "1815-013",
       "seal_name": "三十六峰草堂",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0e903cf8a481cdeaec4",
-      "business_id": "si-mvews4ty-nhqd6g",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 28,
@@ -361,11 +361,11 @@
       "source_seal_id": "1818-030",
       "seal_name": "孫泰來印",
       "dynasty": "清中期",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0ea00d40ff43019e196",
-      "business_id": "si-mvews5gn-fc3q2z",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 29,
@@ -373,11 +373,11 @@
       "source_seal_id": "1822-014",
       "seal_name": "許乃濟印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0eb00d736ed01a962c0",
-      "business_id": "si-mvews63c-c0r4ox",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 30,
@@ -385,11 +385,11 @@
       "source_seal_id": "1825-026",
       "seal_name": "止亭",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0ec03cf8a65169e57a1",
-      "business_id": "si-mvews6pp-pcjfe7",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 31,
@@ -397,11 +397,11 @@
       "source_seal_id": "1828-027",
       "seal_name": "斗寅之印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0ec00d4102a6de073ac",
-      "business_id": "si-mvews7bz-mniobe",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 32,
@@ -409,11 +409,11 @@
       "source_seal_id": "1830-047",
       "seal_name": "仁龢陳氏",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0ed00d4103752123dbc",
-      "business_id": "si-mvews7xq-ljgnfb",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 33,
@@ -421,11 +421,11 @@
       "source_seal_id": "1833-012",
       "seal_name": "白溪聽香主人姚奉之印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0ee03cf8a7a60a192de",
-      "business_id": "si-mvews8kn-ngrg4y",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 34,
@@ -433,11 +433,11 @@
       "source_seal_id": "1835-014",
       "seal_name": "味梅行館",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0ef00d9b625365238c5",
-      "business_id": "si-mvews96u-sv9kba",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 35,
@@ -445,11 +445,11 @@
       "source_seal_id": "1837-031",
       "seal_name": "建卿印信",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0f000d4105b62937404",
-      "business_id": "si-mvews9t3-7m7nwb",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 36,
@@ -457,11 +457,11 @@
       "source_seal_id": "1840-011",
       "seal_name": "錢唐高學治書畫印記",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0f003cf8a9242a29706",
-      "business_id": "si-mvewsaer-vp09v3",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 37,
@@ -469,11 +469,11 @@
       "source_seal_id": "1841-032",
       "seal_name": "學半堂",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0f100d4107213b46de2",
-      "business_id": "si-mvewsb1h-cl9qgw",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 38,
@@ -481,11 +481,11 @@
       "source_seal_id": "1843-072",
       "seal_name": "張熊之印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0f200d7374e2f956685",
-      "business_id": "si-mvewsbo7-tnzq74",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 39,
@@ -493,11 +493,11 @@
       "source_seal_id": "1845-008",
       "seal_name": "我周旋室",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0f300d4108963fe0ad4",
-      "business_id": "si-mvewsca2-105srm",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 40,
@@ -505,11 +505,11 @@
       "source_seal_id": "1848-027",
       "seal_name": "臞□",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0f403cf8aad6116bd9a",
-      "business_id": "si-mvewscw2-te4mi0",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 41,
@@ -517,11 +517,11 @@
       "source_seal_id": "1850-066",
       "seal_name": "神妙欲到秋豪顛",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0f400d7377535e65331",
-      "business_id": "si-mvewsdig-9uyxkz",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 42,
@@ -529,11 +529,11 @@
       "source_seal_id": "1852-005",
       "seal_name": "郭承勳印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0f500d410af5661e4b8",
-      "business_id": "si-mvewse4l-q2bnlz",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 43,
@@ -541,11 +541,11 @@
       "source_seal_id": "1854-041",
       "seal_name": "稚禾隸古",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0f600d9b6963b4189b4",
-      "business_id": "si-mvewseqj-dblqdk",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 44,
@@ -553,11 +553,11 @@
       "source_seal_id": "1855-044",
       "seal_name": "范守知",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c0f700d410c01ba14895",
-      "business_id": "si-mvewsfcf-nef4u9",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 45,
@@ -565,11 +565,11 @@
       "source_seal_id": "1856-032",
       "seal_name": "可久長室之節",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0f800d7379f2398c01c",
-      "business_id": "si-mvewsfym-n13ne4",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 46,
@@ -577,11 +577,11 @@
       "source_seal_id": "1857-020",
       "seal_name": "橫雲山民",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0f800d737a70a30544e",
-      "business_id": "si-mvewsgkp-zgixq9",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 47,
@@ -589,11 +589,11 @@
       "source_seal_id": "1858-113",
       "seal_name": "根復",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0f903cf8ad12e74e40d",
-      "business_id": "si-mvewsh6n-o5fza5",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 48,
@@ -601,11 +601,11 @@
       "source_seal_id": "1858-028",
       "seal_name": "仲海書畫",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0fa03cf8ad54286807d",
-      "business_id": "si-mvewshsw-8gj00r",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 49,
@@ -613,11 +613,11 @@
       "source_seal_id": "1858-082",
       "seal_name": "汪硯山所得金石文字",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0fb00d737c340497e8a",
-      "business_id": "si-mvewsifa-7rmh26",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 50,
@@ -625,11 +625,11 @@
       "source_seal_id": "1859-133",
       "seal_name": "蓋平姚正鏞印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0fc00d737cc34e72d6f",
-      "business_id": "si-mvewsj1a-pkt24a",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 51,
@@ -637,11 +637,11 @@
       "source_seal_id": "1859-183",
       "seal_name": "仲陶手斠",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0fc03cf8aea54417f34",
-      "business_id": "si-mvewsjox-1cmme1",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 52,
@@ -649,11 +649,11 @@
       "source_seal_id": "1859-233",
       "seal_name": "陳寶晉印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c0fe00d9b707518cffa1",
-      "business_id": "si-mvewskji-52pil8",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 53,
@@ -661,11 +661,11 @@
       "source_seal_id": "1859-057",
       "seal_name": "姚中聲父",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c0ff00d7383022869dbc",
-      "business_id": "si-mvewslgt-rkt77a",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 54,
@@ -673,11 +673,11 @@
       "source_seal_id": "1860-131",
       "seal_name": "汲庵",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c0ff03cf8b0279a86791",
-      "business_id": "si-mvewsm3a-ptwuy5",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 55,
@@ -685,11 +685,11 @@
       "source_seal_id": "1860-066",
       "seal_name": "汪鋆",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c10000d411a957e9bda8",
-      "business_id": "si-mvewsmpb-bhsivm",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 56,
@@ -697,11 +697,11 @@
       "source_seal_id": "1862-107",
       "seal_name": "江湜持正",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c10100d9b73855437bf5",
-      "business_id": "si-mvewsnbe-beor21",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 57,
@@ -709,11 +709,11 @@
       "source_seal_id": "1862-084",
       "seal_name": "俛仰未能弭尋念非但一",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c10200d738565c5e43ae",
-      "business_id": "si-mvewsnyk-trsetv",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 58,
@@ -721,11 +721,11 @@
       "source_seal_id": "1863-029",
       "seal_name": "金恭仁",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c10300d738660eff6acd",
-      "business_id": "si-mvewsol3-diiuqq",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 59,
@@ -733,11 +733,11 @@
       "source_seal_id": "1864-024",
       "seal_name": "竹深處",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c10403cf8b4e59f1ff50",
-      "business_id": "si-mvewsp7j-4tkh0v",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 60,
@@ -745,11 +745,11 @@
       "source_seal_id": "1865-025",
       "seal_name": "順天傅氏長恩閣藏書",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c10400d9b76e55191880",
-      "business_id": "si-mvewspui-6rbeya",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 61,
@@ -757,11 +757,11 @@
       "source_seal_id": "1866-031",
       "seal_name": "竟山所得金石",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c10500d9b7751e412561",
-      "business_id": "si-mvewsqgq-r0qmug",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 62,
@@ -769,11 +769,11 @@
       "source_seal_id": "1868-002",
       "seal_name": "滄浪漁人",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c10603cf8b69247cc21a",
-      "business_id": "si-mvewsr36-ot0o78",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 63,
@@ -781,11 +781,11 @@
       "source_seal_id": "1870-016",
       "seal_name": "保謙私印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c10703cf8b6f6e816979",
-      "business_id": "si-mvewsrpn-rnuolu",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 64,
@@ -793,11 +793,11 @@
       "source_seal_id": "1871-064",
       "seal_name": "陳恭哲",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c10800d9b796668d0c63",
-      "business_id": "si-mvewssbo-oe0omw",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 65,
@@ -805,11 +805,11 @@
       "source_seal_id": "1874-036",
       "seal_name": "王亦曾號鶴琴長壽印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c10800d738bd023cc763",
-      "business_id": "si-mvewssxw-5tydys",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 66,
@@ -817,11 +817,11 @@
       "source_seal_id": "1876-034",
       "seal_name": "子寬又號傑之",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c10903cf8b9009215a7e",
-      "business_id": "si-mvewstjl-5rr9f4",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 67,
@@ -829,11 +829,11 @@
       "source_seal_id": "1878-005",
       "seal_name": "徐三庚印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c10a00d412272dfe5a24",
-      "business_id": "si-mvewsu5u-70aktn",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 68,
@@ -841,11 +841,11 @@
       "source_seal_id": "1880-064",
       "seal_name": "東震谿堂",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c10b00d9b7bb4f8abc72",
-      "business_id": "si-mvewsus4-gdrcr4",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 69,
@@ -853,11 +853,11 @@
       "source_seal_id": "1882-030",
       "seal_name": "春蚓秋蛇",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c10c00d9b7c86e71f933",
-      "business_id": "si-mvewsved-lz5b0g",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 70,
@@ -865,11 +865,11 @@
       "source_seal_id": "1883-103",
       "seal_name": "嶺上白雲",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c10c00d738e70e9f002f",
-      "business_id": "si-mvewsw11-s8srwr",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 71,
@@ -877,11 +877,11 @@
       "source_seal_id": "1883-096",
       "seal_name": "誼庭吟草",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c10d00d4125423960ac4",
-      "business_id": "si-mvewswnj-inq1ft",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 72,
@@ -889,11 +889,11 @@
       "source_seal_id": "1884-097",
       "seal_name": "蔥玉手鈔",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c10e00d7397704833d52",
-      "business_id": "si-mvewsxah-f4tjlz",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 73,
@@ -901,11 +901,11 @@
       "source_seal_id": "1885-026",
       "seal_name": "家在九峰三泖間",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c10f00d41268536be402",
-      "business_id": "si-mvewsxwq-mjd1ni",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 74,
@@ -913,11 +913,11 @@
       "source_seal_id": "1886-029",
       "seal_name": "傷心男子",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c11003cf8bc373912553",
-      "business_id": "si-mvewsyjj-4s1svf",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 75,
@@ -925,11 +925,11 @@
       "source_seal_id": "1887-048",
       "seal_name": "獨山莫棠",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c11000d412897d4a8397",
-      "business_id": "si-mvewsz62-udxmpd",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 76,
@@ -937,11 +937,11 @@
       "source_seal_id": "1888-044",
       "seal_name": "韜盦",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11100d9b8162ef62668",
-      "business_id": "si-mvewszsf-6nglle",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 77,
@@ -949,11 +949,11 @@
       "source_seal_id": "1888-099",
       "seal_name": "吳文伯",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c11200d739af361374a1",
-      "business_id": "si-mvewt0eo-p9xq4u",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 78,
@@ -961,11 +961,11 @@
       "source_seal_id": "1889-091",
       "seal_name": "竹素園",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c11300d739b92b93a62e",
-      "business_id": "si-mvewt116-osso9e",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 79,
@@ -973,11 +973,11 @@
       "source_seal_id": "1890-064",
       "seal_name": "山農",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c11403cf8bdd13f32491",
-      "business_id": "si-mvewt1n7-eokxiy",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 80,
@@ -985,11 +985,11 @@
       "source_seal_id": "1891-039",
       "seal_name": "臣頤",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c11400d739c47d8e0785",
-      "business_id": "si-mvewt298-d8lnd6",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 81,
@@ -997,11 +997,11 @@
       "source_seal_id": "1891-094",
       "seal_name": "鞠存",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11500d9b84d1d219f9d",
-      "business_id": "si-mvewt2v7-l3linf",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 82,
@@ -1009,11 +1009,11 @@
       "source_seal_id": "1892-066",
       "seal_name": "叔喬",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11600d9b8582091d9ef",
-      "business_id": "si-mvewt3hh-1k4fl7",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 83,
@@ -1021,11 +1021,11 @@
       "source_seal_id": "1893-046",
       "seal_name": "陳三立",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11700d9b86428f0c981",
-      "business_id": "si-mvewt43o-qu1g46",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 84,
@@ -1033,11 +1033,11 @@
       "source_seal_id": "1894-059",
       "seal_name": "十萬卷書堂",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11800d9b8763046435b",
-      "business_id": "si-mvewt4pp-ad87jz",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 85,
@@ -1045,11 +1045,11 @@
       "source_seal_id": "1895-053",
       "seal_name": "周渭寫生",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c11800d412ec4658c5fc",
-      "business_id": "si-mvewt5bo-4o5hyl",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 86,
@@ -1057,11 +1057,11 @@
       "source_seal_id": "1896-035",
       "seal_name": "陶文沖五十以後書",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c11900d73a04382568b9",
-      "business_id": "si-mvewt5xs-q8scl4",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 87,
@@ -1069,11 +1069,11 @@
       "source_seal_id": "1896-094",
       "seal_name": "耗壯心遣餘年",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11a00d9b88f71b8fae5",
-      "business_id": "si-mvewt6j7-kmggoe",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 88,
@@ -1081,11 +1081,11 @@
       "source_seal_id": "1897-065",
       "seal_name": "孝昭章",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11b00d9b89a34c99db9",
-      "business_id": "si-mvewt7h4-ro3s0p",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 89,
@@ -1093,11 +1093,11 @@
       "source_seal_id": "1898-047",
       "seal_name": "潘",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11c00d9b8a7389b520b",
-      "business_id": "si-mvewt849-x33ttl",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 90,
@@ -1105,11 +1105,11 @@
       "source_seal_id": "1899-042",
       "seal_name": "榆庭",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c11d03cf8c9827016963",
-      "business_id": "si-mvewt8qa-zvtn9a",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 91,
@@ -1117,11 +1117,11 @@
       "source_seal_id": "1900-032",
       "seal_name": "竹洞農",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c11e00d9b8c37571eed7",
-      "business_id": "si-mvewt9eh-6kcdbd",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 92,
@@ -1129,11 +1129,11 @@
       "source_seal_id": "1901-055",
       "seal_name": "海東舊尹氏",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c11e03cf8cae15cee2fe",
-      "business_id": "si-mvewta00-rn2yyg",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 93,
@@ -1141,11 +1141,11 @@
       "source_seal_id": "1902-159",
       "seal_name": "畝東亭",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c11f00d4133a1750dacc",
-      "business_id": "si-mvewtan7-jlhbwc",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 94,
@@ -1153,11 +1153,11 @@
       "source_seal_id": "1902-076",
       "seal_name": "縣榻山房藏書印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c12003cf8cc06bbdb2bd",
-      "business_id": "si-mvewtb94-wz4m6s",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 95,
@@ -1165,11 +1165,11 @@
       "source_seal_id": "1903-045",
       "seal_name": "季瑩",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c12103cf8cc93e8defa7",
-      "business_id": "si-mvewtbvl-eo32bo",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 96,
@@ -1177,11 +1177,11 @@
       "source_seal_id": "1904-070",
       "seal_name": "原名暠甲辰更名大年",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "73fb96896ad5c12200d73a9508c73f0f",
-      "business_id": "si-mvewtci2-4hbe4h",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 97,
@@ -1189,11 +1189,11 @@
       "source_seal_id": "1907-017",
       "seal_name": "蒲華詩書畫印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c12203cf8cda114d325a",
-      "business_id": "si-mvewtd3v-u6pn7c",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 98,
@@ -1201,11 +1201,11 @@
       "source_seal_id": "1909-100",
       "seal_name": "法自然",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "42eeed266ad5c12300d9b9503751ab36",
-      "business_id": "si-mvewtdpx-80i4av",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 99,
@@ -1213,11 +1213,11 @@
       "source_seal_id": "1910-107",
       "seal_name": "執金吾印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "a2453f646ad5c12403cf8cf320f05dfb",
-      "business_id": "si-mvewtebk-uqz6ca",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     },
     {
       "n": 100,
@@ -1225,11 +1225,11 @@
       "source_seal_id": "1910-164",
       "seal_name": "沈成伯氏祕笈之印",
       "dynasty": "晚清",
-      "result": "ok",
+      "result": "skipped",
       "doc_id": "664ca7f56ad5c12500d413c651e41cda",
-      "business_id": "si-mvewtf5q-7cyngx",
+      "business_id": null,
       "reason": null,
-      "message": ""
+      "message": "幂等键已存在 ⇒ 跳过（未改写既有行）"
     }
   ]
 }
