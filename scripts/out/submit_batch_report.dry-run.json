@@ -1,0 +1,95 @@
+{
+  "generated_at": "2026-10-19T07:02:45.024Z",
+  "mode": "dry-run",
+  "env": "liwu-d8gek6jjdab1d087c",
+  "ndjson": "/Users/kevin/bistro/feicui/local-private/datasrc/sealbank/out/xiai_imports_sealbank_placeholder.ndjson",
+  "total_source_rows": 5529,
+  "params": {
+    "limit": 5,
+    "offset": 0,
+    "stride": 1105,
+    "delay_ms": 400
+  },
+  "identity": {
+    "phone_masked": "166****1656",
+    "uid_masked": "u-91c…b59d",
+    "proof": {
+      "method": "uid-readback",
+      "scanned": 570,
+      "hits": 570
+    }
+  },
+  "baseline": {
+    "sealbank_rows_before": 0,
+    "sealbank_rows_after": null
+  },
+  "summary": {
+    "ok": 5,
+    "skipped": 0,
+    "rejected": 0,
+    "error": 0,
+    "writes": 0
+  },
+  "results": [
+    {
+      "n": 1,
+      "index": 0,
+      "source_seal_id": "1268-001",
+      "seal_name": "魯郡吾氏",
+      "dynasty": "宋元",
+      "result": "ok",
+      "doc_id": "dry-1",
+      "business_id": "si-mvewq9nf-xcf1d1",
+      "reason": null,
+      "message": "dry-run：门全过、写入被假体截留（零落盘）"
+    },
+    {
+      "n": 2,
+      "index": 1105,
+      "source_seal_id": "1799-046",
+      "seal_name": "汪珍印信",
+      "dynasty": "清中期",
+      "result": "ok",
+      "doc_id": "dry-2",
+      "business_id": "si-mvewqa6m-szruqy",
+      "reason": null,
+      "message": "dry-run：门全过、写入被假体截留（零落盘）"
+    },
+    {
+      "n": 3,
+      "index": 2210,
+      "source_seal_id": "1851-024",
+      "seal_name": "胡震伯恐",
+      "dynasty": "晚清",
+      "result": "ok",
+      "doc_id": "dry-3",
+      "business_id": "si-mvewqaph-rfdqnq",
+      "reason": null,
+      "message": "dry-run：门全过、写入被假体截留（零落盘）"
+    },
+    {
+      "n": 4,
+      "index": 3315,
+      "source_seal_id": "1866-006",
+      "seal_name": "小漁",
+      "dynasty": "晚清",
+      "result": "ok",
+      "doc_id": "dry-4",
+      "business_id": "si-mvewqb8p-9pli9t",
+      "reason": null,
+      "message": "dry-run：门全过、写入被假体截留（零落盘）"
+    },
+    {
+      "n": 5,
+      "index": 4420,
+      "source_seal_id": "1892-029",
+      "seal_name": "鳴堅白齋",
+      "dynasty": "晚清",
+      "result": "ok",
+      "doc_id": "dry-5",
+      "business_id": "si-mvewqbry-tm1ij2",
+      "reason": null,
+      "message": "dry-run：门全过、写入被假体截留（零落盘）"
+    }
+  ]
+}
