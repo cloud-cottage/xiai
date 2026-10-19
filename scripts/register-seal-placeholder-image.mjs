@@ -122,7 +122,8 @@ try {
 const app = tcb.init({ env: envId })
 const db = app.database()
 try {
-  const res = await db.collection(COLLECTION).doc(doc._id).set(doc)
+  const { _id: _ignored, ...fields } = doc // CloudBase 禁止 set 载荷携带 _id（报「不能更新_id的值」）；_id 由 doc() 指定
+  const res = await db.collection(COLLECTION).doc(doc._id).set(fields)
   /* **写后回读**（外部写入必须回读核验；不拿「调用成功」当「落盘成功」）。 */
   const readBack = await db.collection(COLLECTION).where({ storage_key: SEAL_PLACEHOLDER_IMAGE.key }).get()
   const rows = (readBack && readBack.data) || []
