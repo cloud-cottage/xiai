@@ -912,6 +912,63 @@ export const SEAL_IMPORT_IMAGE_STATUS = {
 }
 
 /**
+ * **占位图（影像例外｜仅 feicui/sealbank 来源可引用）**
+ * ---------------------------------------------------------------------------
+ * 用途：sealbank（真微印網）《篆刻年歷》书版索引 5,529 条**源侧无图**（缩图恒不可得，原始图需扣點）。
+ * 「无图」若走 `image_status=source_no_image ＋ faces=[]`，则**印面行根本不存在**（详情页没有印面块、
+ * 也没法在印面上挂勘误）。占位图模式保住「一个印面」这一事实：faces[0].kind=FACE 指向**同一张**
+ * 已登记的公共占位图（米白宣纸底 ＋ 朱红印章边框 ＋ 竖排「待补充」），行级 `image_status=present`。
+ *
+ * 硬口径（两侧同值同判：本文件 ／ `cloudfunctions/xiai-user-token/lib/ops.js`）：
+ *   · **仅 sealbank 家族来源**（`isSealBankSource`：来源标签含 `sealbank`）可引用本键；
+ *     其余来源引用本键 ⇒ 拒（`sealPlaceholderRefDenial`；提交门与采纳门各判一次）；
+ *   · 本键**不是**内容寻址键（不匹配 `IMAGE_OBJECT_KEY_PATTERN`）⇒ `cloudBaseObjectKeyOf` 对它
+ *     一律回空串、**不得**因此放宽通用判据；展示走**仓内随包资产** `SEAL_PLACEHOLDER_IMAGE.asset_url`；
+ *   · 影像行 `storage='bundled'`（**不是** `server`）：云端无此对象，登记行只作引用落点；
+ *   · `sha256` / `bytes` / `mime` / 宽高为**资产字节真值**（`scripts/verify-seal-placeholder.mjs`
+ *     每次重算比对；换图必须同时改这里与资产文件）。
+ */
+export const SEAL_PLACEHOLDER_IMAGE_KEY = 'placeholder/seal-no-image'
+
+/** 占位图登记面（`xiai_images` 行 ＝ 本对象去掉 `asset_url` ＋ 行级元数据；见 register 脚本）。 */
+export const SEAL_PLACEHOLDER_IMAGE = Object.freeze({
+  key: SEAL_PLACEHOLDER_IMAGE_KEY,
+  id: 'img-placeholder-seal-no-image',
+  sha256: '18d94039af1b1d4289b60fb6ef527323e05bc739b41229081c94702407de329c',
+  bytes: 23357,
+  mime: 'image/jpeg',
+  width: 512,
+  height: 512,
+  /* 随包资产：`public/placeholders/seal-no-image.jpg`（Vite 原样拷到站点根）。 */
+  asset_url: '/placeholders/seal-no-image.jpg',
+  /* **刻意不是** `server`：内容寻址判据（`cloudBaseObjectKeyOf`）不认它，也不会拼出假对象键。 */
+  storage: 'bundled',
+  /* 唯一允许引用本键的来源家族（值域外一律拒）。 */
+  source_scope: 'sealbank'
+})
+
+/** 来源标签是否属 sealbank（feicui）家族 —— 占位图例外的**唯一**判据。 */
+export function isSealBankSource(source) {
+  return /sealbank/i.test(String(source === undefined || source === null ? '' : source))
+}
+
+/**
+ * 占位图引用**来源门**（纯函数；提交门与采纳门共用）。
+ * @param {string} source 导入行来源标签
+ * @param {Array<object>} faces 归一后的印面数组
+ * @returns {null|string} 违规 ⇒ 可读拒因；合规 ⇒ `null`
+ */
+export function sealPlaceholderRefDenial(source, faces) {
+  const list = Array.isArray(faces) ? faces : []
+  const hit = list.some(
+    (face) => String((face && face.image_storage_key) || '').trim() === SEAL_PLACEHOLDER_IMAGE_KEY
+  )
+  if (!hit) return null
+  if (isSealBankSource(source)) return null
+  return `占位圖（${SEAL_PLACEHOLDER_IMAGE_KEY}）僅限 sealbank（feicui）來源的導入行引用 ⇒ 拒絕；本次零寫入。`
+}
+
+/**
  * **導入行行級元數據字段（§3.55.3 / §4.1.17）**：行主鍵 / 批次 / 來源 / 冪等鍵 / 狀態 /
  * 導入與審核留痕 / 內容指紋（軟提示）。身份類鍵（`imported_by` / `reviewer_id`）
  * **一律落不透明 uid、零手機號**（沿 §3.49）。

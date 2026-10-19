@@ -345,6 +345,71 @@ const SEAL_IMPORT_IMAGE_STATUS = Object.freeze({
   SOURCE_NO_IMAGE: 'source_no_image'
 })
 
+/**
+ * **占位圖（影像例外｜僅 feicui/sealbank 來源可引用）** —— 与
+ * `src/data/seed.js::SEAL_PLACEHOLDER_IMAGE_KEY` / `SEAL_PLACEHOLDER_IMAGE` **逐字同值**
+ * （云函数独立部署、不能 import 前端源；两处任一改动必须同时改，`scripts/verify-seal-placeholder.mjs`
+ * 会断言两侧同值）。
+ *
+ * 为什么需要：sealbank（真微印網）書版索引 5,529 條源側無圖。走 `source_no_image ＋ faces=[]` ⇒
+ * **印面行不存在**；占位圖模式讓 faces[0] 指向同一張已登記的公共佔位圖，保住「一個印面」。
+ *
+ * 硬口徑：
+ *   · **僅 sealbank 家族來源**（`isSealBankSource`：來源標籤含 `sealbank`）可引用本鍵；其餘來源 ⇒ 拒
+ *     （提交門 `submitSealImport` 與採納門 `buildSealAcceptanceFromImport` **各判一次**）；
+ *   · 本鍵**不是**內容尋址鍵（不符 `^xiai/images/<hh>/<sha>.png|webp$`）⇒ 客戶端 `cloudBaseObjectKeyOf`
+ *     對它回空串；**不得**為此放寬通用判據（通用影像行的內容尋址校驗一字不改）；
+ *   · 登記行的 `sha256` 必須 ≡ 下表（採納時按面校驗：佔位鍵 ＋ 摘要不符 ⇒ 拒，防「同名換圖」）。
+ */
+const SEAL_PLACEHOLDER_IMAGE_KEY = 'placeholder/seal-no-image'
+
+const SEAL_PLACEHOLDER_IMAGE = Object.freeze({
+  key: SEAL_PLACEHOLDER_IMAGE_KEY,
+  id: 'img-placeholder-seal-no-image',
+  sha256: '18d94039af1b1d4289b60fb6ef527323e05bc739b41229081c94702407de329c',
+  bytes: 23357,
+  mime: 'image/jpeg',
+  width: 512,
+  height: 512,
+  storage: 'bundled',
+  source_scope: 'sealbank'
+})
+
+/** 來源標籤是否屬 sealbank（feicui）家族 —— 佔位圖例外的**唯一**判據（与 seed.js 同判）。 */
+function isSealBankSource(source) {
+  return /sealbank/i.test(text(source))
+}
+
+/**
+ * 佔位圖引用**來源門**：任一印面 `image_storage_key === 佔位鍵` 且來源非 sealbank ⇒ 違規。
+ * @returns {null|string} 違規 ⇒ 可讀拒因；合規 / 無佔位引用 ⇒ `null`
+ */
+function sealPlaceholderRefDenial(source, faces) {
+  const list = Array.isArray(faces) ? faces : []
+  const hit = list.some((face) => text(face && face.image_storage_key) === SEAL_PLACEHOLDER_IMAGE_KEY)
+  if (!hit) return null
+  if (isSealBankSource(source)) return null
+  return `佔位圖（${SEAL_PLACEHOLDER_IMAGE_KEY}）僅限 sealbank（feicui）來源的導入行引用；本次零寫入。`
+}
+
+/**
+ * 佔位圖引用**摘要門**（採納時）：指向佔位鍵者，其 `image_sha256`（若宣告）必須 ≡ 登記摘要；
+ * 解析到的影像行也必須是登記行（同鍵同摘要）。防「佔位鍵 + 換圖」與「佔位鍵 + 空摘要」混用。
+ * @returns {null|string}
+ */
+function sealPlaceholderDigestDenial(face, image) {
+  if (text(face && face.image_storage_key) !== SEAL_PLACEHOLDER_IMAGE_KEY) return null
+  const declared = text(face && face.image_sha256)
+  if (declared && declared !== SEAL_PLACEHOLDER_IMAGE.sha256) {
+    return `佔位圖摘要不符（宣告 ${declared} ≠ 登記 ${SEAL_PLACEHOLDER_IMAGE.sha256}）⇒ 拒絕採納；本次零寫入。`
+  }
+  const rowSha = text(image && image.sha256)
+  if (rowSha && rowSha !== SEAL_PLACEHOLDER_IMAGE.sha256) {
+    return `影像行的摘要與佔位圖登記值不符（${rowSha}）⇒ 拒絕採納；本次零寫入。`
+  }
+  return null
+}
+
 /** 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
 const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
 
@@ -2113,6 +2178,10 @@ const OPS = Object.freeze({
       return deny(REASONS.INVALID_VALUE, 'image_status 只允許 present / source_no_image（缺省視為 present）⇒ 拒絕導入；本次零寫入。')
     }
     const faces = Array.isArray(payload.faces) ? payload.faces.map(normalizeSealImportFace) : []
+    /* **佔位圖來源門**（本單新增｜影像例外）：佔位鍵僅 sealbank（feicui）家族可引用；
+       其餘來源引用 ⇒ `INVALID_VALUE` ＋ 零寫入。**通用影像引用校驗一字未改**（本門只認這一個鍵）。 */
+    const placeholderDenial = sealPlaceholderRefDenial(payload.source, faces)
+    if (placeholderDenial) return deny(REASONS.INVALID_VALUE, placeholderDenial)
     if (faces.length === 0 && imageStatus !== SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE) {
       return deny(
         REASONS.MISSING_REQUIRED,
@@ -2464,6 +2533,10 @@ function buildPersonDocFromImport(row, identity, at, code) {
  */
 async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
   const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
+  /* **佔位圖來源門 ＋ 摘要門**（本單新增｜影像例外；與提交門同判）：
+     佔位鍵僅 sealbank（feicui）家族可引用；指向佔位鍵者其摘要必須 ≡ 登記摘要。 */
+  const placeholderDenial = sealPlaceholderRefDenial(text(row && row.source), faceDefs)
+  if (placeholderDenial) return { ok: false, reason: REASONS.INVALID_VALUE }
   const resolvedFaces = []
   for (const face of faceDefs) {
     const hasRef = text(face.image_sha256) !== '' || text(face.image_storage_key) !== ''
@@ -2474,6 +2547,8 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
     }
     const image = await findSealImportImageRow(face)
     if (!image) return { ok: false }
+    const digestDenial = sealPlaceholderDigestDenial(face, image)
+    if (digestDenial) return { ok: false, reason: REASONS.INVALID_VALUE }
     resolvedFaces.push({ face, image })
   }
   const stampId = nextSealStampIdOf(seals)
@@ -3930,6 +4005,10 @@ module.exports = {
   SEAL_IMPORT_REVIEW_ALLOWED_KEYS,
   SEAL_IMPORT_STATUS,
   SEAL_IMPORT_IMAGE_STATUS,
+  /* **佔位圖（影像例外｜本單新增；供離線自檢直接斷言兩側同值 / 直接跑採納門）**。 */
+  SEAL_PLACEHOLDER_IMAGE_KEY,
+  SEAL_PLACEHOLDER_IMAGE,
+  buildSealAcceptanceFromImport,
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,

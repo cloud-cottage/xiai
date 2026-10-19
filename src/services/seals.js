@@ -76,7 +76,12 @@ import {
   emptySealImportFields,
   emptySealImportFace,
   emptySealImportSourceFields,
-  sealImportFingerprint
+  sealImportFingerprint,
+  /* **佔位圖（影像例外｜本單新增）**：佔位鍵 / 登記面 / 來源判據 / 來源門（提交門與採納門共用）。 */
+  SEAL_PLACEHOLDER_IMAGE_KEY,
+  SEAL_PLACEHOLDER_IMAGE,
+  isSealBankSource,
+  sealPlaceholderRefDenial
 } from '../data/seed.js'
 import {
   IMAGE_LIMITS,
@@ -104,6 +109,9 @@ import {
   retryCloudBaseHydration
 } from '../data/cloudbase.js'
 import { bytesToDataUrl } from '../data/assetmeta.js'
+/* **占位圖（本單新增｜影像例外）**：`placeholder/seal-no-image` 的字节只在**随包资产**里；
+   判据（登记键）与字节读取收口在 `sealPlaceholderAsset.js`，本层只消费。 */
+import { isSealPlaceholderImageRow, loadSealPlaceholderBytes } from './sealPlaceholderAsset.js'
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：行級分流判據的唯一真源在 `imageAuthority.js`
    （行內有 digest 且二進制在服務端權威庫 ⇒ `digest`；否則 ⇒ `local`）。本層只消費，不自立第二把尺子。 */
 import { digestOfRow, readViaOfRow } from './imageAuthority.js'
@@ -707,6 +715,21 @@ export async function loadImageDataUrl(imageId) {
   const meta = listImageRows().find((row) => row.id === imageId) || null
   /* **就緒門檻（M1）**：行查不到 ＋ 讀取面未落定 ⇒ **非終態**（「還沒讀到」不是「沒有這張圖」）。 */
   if (!meta && imageRowsUnsettled()) return imageRowsPendingReadout({ meta: null })
+  /* **占位圖（本單新增｜影像例外）**：`placeholder/seal-no-image` 不是内容寻址键（云端桶无此对象），
+     其字节来源＝**仓内随包资产**（零转码）。**只在登记键上命中** ⇒ 不触碰通用内容寻址判据。 */
+  if (isSealPlaceholderImageRow(meta)) {
+    const bundled = await loadSealPlaceholderBytes()
+    if (!bundled.ok) return { ok: false, message: bundled.message, meta }
+    return {
+      ok: true,
+      dataUrl: bytesToDataUrl(bundled.bytes, bundled.mime),
+      bytes: bundled.bytes,
+      mime: bundled.mime,
+      transcoded: false,
+      meta,
+      message: ''
+    }
+  }
   /* **CloudBase 讀取面（v1）**：雲端行 ⇒ 取**已遷的展示件**（PNG / WebP，mapping.md §3
      的 `storage_key`）的**臨時鏈接** ⇒ 整件字節 ⇒ dataURL。**零轉碼、零切塊**：
      交出去的就是遷移時那一份字節（容器按字節如實判定，不採信自稱值）。 */
@@ -762,6 +785,22 @@ export async function loadStoredImage(imageId) {
   const row = listImageRows().find((item) => item.id === imageId) || null
   /* **就緒門檻（M1）**：同上 —— 未落定 ⇒ 非終態讀數（不冒充「本機沒有」）。 */
   if (!row && imageRowsUnsettled()) return imageRowsPendingReadout({ row: null })
+  /* **占位圖（本單新增｜影像例外）**：同上 —— 交出随包资产字节，面别如实登记
+     `displayOnly + source:'bundled_placeholder'`（**不是**原图、**不是**云对象）。 */
+  if (isSealPlaceholderImageRow(row)) {
+    const bundled = await loadSealPlaceholderBytes()
+    if (!bundled.ok) return { ok: false, message: bundled.message, row }
+    return {
+      ok: true,
+      bytes: bundled.bytes,
+      mime: bundled.mime,
+      sha256: String((row && row.sha256) || ''),
+      row,
+      displayOnly: true,
+      source: 'bundled_placeholder',
+      message: ''
+    }
+  }
   /* **CloudBase 讀取面（v1）**：雲端行 ⇒ 交出**已遷的展示件整件字節**。
      面别如实登记（不冒充）：這**不是** TIFF 存儲件，也**不是**權威庫的「原字節面」；
      `mime` 一律**按字節如實**判定（不採信行上自稱值）。 */
@@ -1476,6 +1515,10 @@ export async function submitSealImport({
     return { ok: false, reason: 'INVALID_VALUE', message: 'image_status 只允許 present / source_no_image（缺省視為 present）；本次零寫入。' }
   }
   const faceRows = Array.isArray(faces) ? faces.map(normalizeSealImportFace) : []
+  /* **佔位圖來源門**（本單新增｜影像例外）：佔位鍵僅 sealbank（feicui）家族可引用；
+     其餘來源 ⇒ `INVALID_VALUE` ＋ 零寫入。通用影像引用校驗一字未改（本門只認這一個鍵）。 */
+  const placeholderDenial = sealPlaceholderRefDenial(src || payloadObj.source, faceRows)
+  if (placeholderDenial) return { ok: false, reason: 'INVALID_VALUE', message: placeholderDenial }
   if (faceRows.length === 0 && imageStatus !== SEAL_IMPORT_IMAGE_STATUS.SOURCE_NO_IMAGE) {
     return {
       ok: false,
@@ -1743,6 +1786,12 @@ function sealSourceFieldsOf(row) {
  */
 function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
   const faceDefs = Array.isArray(importRow && importRow.faces) ? importRow.faces : []
+  /* **佔位圖來源門 ＋ 摘要門**（本單新增｜影像例外；與雲函數 `ops.js` 同判）：
+     佔位鍵僅 sealbank（feicui）家族可引用；指向佔位鍵者其摘要必須 ≡ 登記摘要。 */
+  const placeholderDenial = sealPlaceholderRefDenial(String((importRow && importRow.source) || ''), faceDefs)
+  if (placeholderDenial) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `${placeholderDenial}本行保持 PENDING。` }
+  }
   const resolved = []
   for (const raw of faceDefs) {
     const face = normalizeSealImportFace(raw)
@@ -1754,6 +1803,17 @@ function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
         message:
           `印面影像引用缺失（sha256=${String(face.image_sha256 || '') || '（空）'} / ` +
           `key=${String(face.image_storage_key || '') || '（空）'}）⇒ 未採納；本行保持 PENDING。`
+      }
+    }
+    if (String(face.image_storage_key || '') === SEAL_PLACEHOLDER_IMAGE_KEY) {
+      const declared = String(face.image_sha256 || '')
+      const rowSha = String((probe.row && probe.row.sha256) || '')
+      if ((declared && declared !== SEAL_PLACEHOLDER_IMAGE.sha256) || (rowSha && rowSha !== SEAL_PLACEHOLDER_IMAGE.sha256)) {
+        return {
+          ok: false,
+          reason: 'INVALID_VALUE',
+          message: `佔位圖摘要與登記值不符（宣告 ${declared || '（空）'} / 行 ${rowSha || '（空）'}）⇒ 未採納；本行保持 PENDING。`
+        }
       }
     }
     if (!probe.hasRef && face.kind === FACE_KIND.FACE) {
