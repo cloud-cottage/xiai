@@ -1418,6 +1418,8 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="panel__body">
+        <!-- 印面級識別編碼：該印面缺 `fid`（歷史/異常行）⇒ 整行不渲染（不佔位、不回落 `face.id`）。 -->
+        <p v-if="face.fid" class="detail__id" :data-face-code="face.fid">編號 {{ face.fid }}</p>
         <h3 class="face-block__sub">固定屬性</h3>
         <dl class="detail__fixed">
           <div>
