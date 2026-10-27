@@ -220,8 +220,15 @@ check('M5e', '行 `_id` 与 `sealGroupId` 逐字不变（§4「其余字段一�
   { ids: sealRows.map((r) => r._id), groups: sealRows.map((r) => r.sealGroupId) })
 const publicRows = db._rows(C.correctionsPublic)
 check('M5f', '公开投影 `sealId` ＝ 新 sid（§4 键族）', [], publicRows.filter((row) => !codeId.SID_PATTERN.test(row.sealId)).map((row) => row._id))
-check('M5g', '公开投影行内另一别名 `stamp_id` 按 §4「其余字段一字不动」保持原值（冲突点，已登记）',
-  ['1', '1', '1', '1', '1', '1'], publicRows.map((row) => row.stamp_id))
+/* M5g（2026-10-27 合法过期）：口径件 §4 裁决 `xiai_corrections_public` 行内 `sealId`
+   **与 `stamp_id` 两键同改** ⇒ 旧期望「`stamp_id` 保持原值 `1`」作废，改为新 sid。 */
+const SID_ONE = codeId.encodeSealCode(1).code
+check('M5g', '公开投影行内别名 `stamp_id` ＝ 新 sid（§4 两键同改，旧值 `1` 已作废）',
+  [SID_ONE, SID_ONE, SID_ONE, SID_ONE, SID_ONE, SID_ONE], publicRows.map((row) => row.stamp_id))
+check('M5g2', '公开投影行内 `sealId` 与 `stamp_id` **两键相等**（§4 同改一致性）', [],
+  publicRows.filter((row) => row.sealId !== row.stamp_id).map((row) => row._id))
+check('M5g3', '改前旧值「1」在结果里**命中 0**（旧码零残留）', [],
+  publicRows.filter((row) => row.sealId === '1' || row.stamp_id === '1').map((row) => row._id))
 
 /* ---------------------------------------------------------------- M6 重放幂等 */
 const afterRun = fullSnapshot()

@@ -5,8 +5,9 @@
  * 本脚本**只新增、不改动任何既有 `scripts/**`**。红 ⇒ exit 1。
  *
  * 覆盖：
- *   C1 两副本**逐字节相同**（`src/utils/codeId.js` vs `cloudfunctions/xiai-user-token/lib/codeId.js`）
- *   C2 双端可载形态：两份都**不含 `export` / `import` 语句**；CJS `require` 拿到 API；
+ *   C1 **三副本**逐字节相同（`src/utils/codeId.js` / `cloudfunctions/xiai-user-token/lib/codeId.js`
+ *      / `cloudfunctions/xiai-admin-token/lib/codeId.js`（2026-10-27 第三份，admin-token 同改发 sid））
+ *   C2 三端可载形态：三份都**不含 `export` / `import` 语句**；CJS `require` 拿到 API；
  *      纯脚本形态（模拟浏览器 ESM 副作用导入：`node:vm` 无 `module` 的上下文）⇒ `globalThis.__XIAI_CODE_ID__`
  *   C3 字母表恰 22、逐字正确、无重复、**不含 I / L / O / U**；`SID_PATTERN` 展开恰为这 22 字母
  *   C4 已知向量：`1 → AAAAB`、`22 → AAABA`、`5153631 → ZZZZZ`、`1 → 00000001`、`99999999 → 99999999`
@@ -15,16 +16,21 @@
  *   C7 越界结构化拒绝：`0 / −1 / 1.5 / 非数字 / SID_MAX / SID_MAX+1 / FID_MAX / FID_MAX+1`
  *   C8 形态门：`I / L / O / U`、数字、长度不符、`00000000` 一律拒绝（**零纠错映射**）
  *   C9 `reason` 字面值**零新增**（只许 `INVALID_VALUE` / `INVALID_FIELD` / `NOT_FOUND`）
+ *   N  **负例注入（临时副本；跑完删）**：① 字母表改 21 位 ② 迁移 `mapping` 少一行
+ *      ⇒ 同一条判据必须**转红**（`false`），并各带正对照（真源 ⇒ 绿）证明探针能分真假。
+ *      注入只在 `os.tmpdir()` 下的临时副本里造，**禁改 `src/**` / `cloudfunctions/**`**。
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import vm from 'node:vm'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
 const ROOT = process.cwd()
 const FRONT = path.join(ROOT, 'src/utils/codeId.js')
 const SERVER = path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/codeId.js')
+const ADMIN = path.join(ROOT, 'cloudfunctions/xiai-admin-token/lib/codeId.js')
 
 const results = []
 function check(id, title, expected, actual) {
@@ -33,11 +39,12 @@ function check(id, title, expected, actual) {
   return pass
 }
 
-/* ---------------------------------------------------------------- C1 双副本 */
+/* ---------------------------------------------------------------- C1 三副本 */
 const frontBytes = readFileSync(FRONT)
 const serverBytes = readFileSync(SERVER)
-check('C1a', '两副本逐字节相同（byte-length 相等）', frontBytes.length, serverBytes.length)
-check('C1b', '两副本逐字节相同（Buffer.compare === 0）', 0, Buffer.compare(frontBytes, serverBytes))
+const adminBytes = readFileSync(ADMIN)
+check('C1a', '三副本逐字节相同（byte-length 两两相等）', [frontBytes.length, frontBytes.length], [serverBytes.length, adminBytes.length])
+check('C1b', '三副本逐字节相同（与 `src/utils/codeId.js` 的 Buffer.compare 均为 0）', [0, 0], [Buffer.compare(frontBytes, serverBytes), Buffer.compare(frontBytes, adminBytes)])
 
 /* ---------------------------------------------------------------- C2 双端可载 */
 const source = serverBytes.toString('utf8')
@@ -46,6 +53,8 @@ check('C2b', '双副本不含 `import ` 语句', 0, (source.match(/^\s*import\s/
 
 const requireFromRoot = createRequire(path.join(ROOT, 'package.json'))
 const api = requireFromRoot('./cloudfunctions/xiai-user-token/lib/codeId.js')
+const adminApi = requireFromRoot('./cloudfunctions/xiai-admin-token/lib/codeId.js')
+check('C1c', '第三份副本（admin-token）`require()` 可载且 API 表面 ＝ 云函数副本', Object.keys(api), Object.keys(adminApi))
 check('C2c', '云函数副本 `require()` 直接给出 4 个纯函数', ['function', 'function', 'function', 'function'], [
   typeof api.encodeSealCode,
   typeof api.decodeSealCode,
@@ -187,6 +196,107 @@ check('C8c', 'fid 形态门：9 位 / 含字母一律拒绝', [], [
 })
 const ALLOWED_REASONS = ['INVALID_VALUE', 'INVALID_FIELD', 'NOT_FOUND']
 check('C9', 'reason 字面值零新增', [], [...reasonsSeen].filter((r) => ALLOWED_REASONS.indexOf(r) === -1))
+
+/* ---------------------------------------------------------------- N 负例注入（临时副本；跑完删） */
+console.log(JSON.stringify({ section: 'N', title: '负例注入：① 字母表 21 位 ② 迁移 mapping 少一行（临时副本，必红）' }))
+const NEG_TMP_ROOT = mkdtempSync(path.join(os.tmpdir(), 'xiai-codeid-neg-'))
+
+/* ① 把字母表改成 21 位：**复制前端真源到临时副本**（禁改 `src/**` / `cloudfunctions/**`），
+   只削掉末位 `Z` ⇒ 同一条 C3 判据必须转红。 */
+const ALPHABET_LINE = "const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ'"
+const mutatedSource = readFileSync(FRONT, 'utf8').replace(ALPHABET_LINE, "const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXY'")
+const mutatedPath = path.join(NEG_TMP_ROOT, 'codeId.alphabet21.js')
+writeFileSync(mutatedPath, mutatedSource)
+const mutatedApi = requireFromRoot(mutatedPath)
+const c3Verdict = (mod) =>
+  !!mod &&
+  mod.CODE_ALPHABET.length === 22 &&
+  mod.CODE_ALPHABET === EXPECTED_ALPHABET &&
+  new Set(mod.CODE_ALPHABET.split('')).size === 22 &&
+  [...'ILOU'].every((ch) => !mod.CODE_ALPHABET.includes(ch)) &&
+  mod.SID_PATTERN.source === '^[A-HJ-KM-NP-TV-Z]{5}$'
+check('N1a', '注入体自证：临时副本字母表恰 21 位（注入真的生效）', 21, mutatedApi.CODE_ALPHABET.length)
+check('N1p', '正对照：真源副本过同一条 C3 判据（绿）', true, c3Verdict(api))
+check('N1', '负例注入①（必红）：字母表改 21 位 ⇒ 同一条 C3 判据转红（actual 必须为 false）', false, c3Verdict(mutatedApi))
+
+/* ② 把迁移 `mapping` 少一行：先用**内存假体 DB**（零网零库）跑真干跑拿到完整 `mapping`，
+   再在**临时副本**上抽掉一行 ⇒ 同一条完整性判据必须转红。 */
+const negOps = requireFromRoot('./cloudfunctions/xiai-user-token/lib/ops.js')
+function makeNegDb(seed) {
+  const store = new Map()
+  Object.keys(seed).forEach((name) => {
+    const table = new Map()
+    seed[name].forEach((row) => table.set(row._id, { ...row }))
+    store.set(name, table)
+  })
+  const matches = (row, match) => Object.keys(match).every((key) => row[key] === match[key])
+  return {
+    collection(name) {
+      if (!store.has(name)) store.set(name, new Map())
+      const rows = store.get(name)
+      return {
+        where(match) {
+          const chain = {
+            limit: () => chain,
+            get: async () => ({ data: [...rows.values()].filter((row) => matches(row, match)).map((row) => ({ ...row })) }),
+            update: async (doc) => {
+              let updated = 0
+              for (const row of rows.values()) {
+                if (matches(row, match)) {
+                  Object.assign(row, doc)
+                  updated += 1
+                }
+              }
+              return { updated }
+            }
+          }
+          return chain
+        },
+        doc(id) {
+          return {
+            get: async () => (rows.has(id) ? { data: [{ ...rows.get(id) }] } : { data: [] }),
+            set: async (doc) => {
+              rows.set(id, { ...doc, _id: id })
+              return { updated: 1 }
+            }
+          }
+        },
+        async add(doc) {
+          const id = doc._id || `neg-${rows.size + 1}`
+          rows.set(id, { ...doc, _id: id })
+          return { id }
+        }
+      }
+    }
+  }
+}
+const NC = negOps.COLLECTIONS
+const negDb = makeNegDb({
+  [NC.seals]: [1, 2, 3].map((n) => ({ _id: `seal-${n}`, stamp_id: String(n), id: String(n), seal_name: `印${n}`, sealGroupId: `g-${n}`, dynasty: '戰國' })),
+  [NC.faces]: [1, 2, 3].map((n) => ({ _id: `fc-fx${n}-FACE`, id: `fc-fx${n}-FACE`, stamp_id: String(n), sealId: String(n), kind: 'FACE', seal_name: `印${n}`, face_style: '白文' })),
+  [NC.images]: [],
+  [NC.corrections]: [],
+  [NC.correctionsPublic]: []
+})
+negOps.setOpsDbProvider(() => negDb)
+const NEG_PHONE = String(process.env.XIAI_ADMIN_PHONE || '13900000000').trim()
+const negDry = await negOps.ADMIN_OPS.migrateCodeNumbers(
+  { dry_run: true },
+  { uid: 'u-admin', phone: NEG_PHONE, identity_source: 'SERVER_TOKEN' },
+  { adminPhone: NEG_PHONE, nowSeconds: Math.floor(Date.now() / 1000) }
+)
+const realMapping = (negDry && negDry.mapping) || { seals: [], faces: [] }
+const brokenMapping = { seals: realMapping.seals.slice(0, -1), faces: realMapping.faces }
+const mappingVerdict = (mapping) =>
+  !!mapping && Array.isArray(mapping.seals) && Array.isArray(mapping.faces) && mapping.seals.length === 3 && mapping.faces.length === 3
+check('N2a', '真干跑（内存假体 DB）产出完整 mapping ＝ 3 印 ＋ 3 面', { seals: 3, faces: 3 }, { seals: realMapping.seals.length, faces: realMapping.faces.length })
+check('N2b', '注入体自证：临时副本 mapping 恰少 1 行（3 → 2）', [3, 2], [realMapping.seals.length, brokenMapping.seals.length])
+check('N2p', '正对照：完整 mapping 过同一条完整性判据（绿）', true, mappingVerdict(realMapping))
+check('N2', '负例注入②（必红）：迁移 mapping 少一行 ⇒ 同一条完整性判据转红（actual 必须为 false）', false, mappingVerdict(brokenMapping))
+
+/* 清场：临时副本跑完即删（`src/**` / `cloudfunctions/**` 全程只读）。 */
+rmSync(NEG_TMP_ROOT, { recursive: true, force: true })
+check('N3', '临时副本已删除（跑完清场）', false, existsSync(NEG_TMP_ROOT))
 
 /* ---------------------------------------------------------------- 汇总 */
 const failed = results.filter((r) => !r.pass)

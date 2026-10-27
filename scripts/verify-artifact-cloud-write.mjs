@@ -521,11 +521,27 @@ const TOUCHED = [
 const fromReasonTable = Object.values(require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/config.js')).REASONS)
 check('C1', '配置面 REASONS 取值 ⊆ 既有冻结表（**新增 reason 字面值 0**）', [], fromReasonTable.filter((item) => FROZEN_REASONS.indexOf(item) === -1))
 
-/* **与 HEAD 逐文件对照**：本单改动的文件**不得新增任何 `reason` 字面值**（读 `git show`，只读）。 */
+/* **与 HEAD 逐文件对照**：本单改动的文件**不得新增任何 `reason` 字面值**（读 `git show`，只读）。
+   对照基准走**仓内 `git show HEAD:<file>`，`cwd` 固定到仓根 `ROOT`（＋ `-C ROOT` 双保险）**；
+   git 不可用 / 非 git 目录 / safe.directory 拒绝 ⇒ **不在断言之前崩**：退回直接读工作区文件，
+   并由 C1d 机械登记（回退发生 ⇒ C1d 转红，不静默放行、不把对照变成「自己比自己」）。 */
 const { execFileSync } = await import('node:child_process')
 const literalPattern = /reason:\s*'([A-Z_]+)'/g
 const literalsOf = (text) => [...text.matchAll(literalPattern)].map((matched) => matched[1])
-const headTextOf = (rel) => execFileSync('git', ['show', `HEAD:${rel}`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+const gitFallbacks = []
+const headTextOf = (rel) => {
+  try {
+    return execFileSync('git', ['-C', ROOT, 'show', `HEAD:${rel}`], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  } catch (err) {
+    gitFallbacks.push(rel)
+    return readFileSync(path.join(ROOT, rel), 'utf8')
+  }
+}
 const newLiterals = {}
 for (const rel of TOUCHED) {
   const before = literalsOf(headTextOf(rel))
@@ -534,6 +550,7 @@ for (const rel of TOUCHED) {
 }
 check('C1b', '本单改动文件**未新增任何 `reason:` 字面值**（与 HEAD 逐文件对照）', {}, newLiterals)
 check('C1c', '对照判据正对照（HEAD 版本的被检文件里确有命中）', true, literalsOf(headTextOf('src/services/imageAuthority.js')).length > 0)
+check('C1d', 'git 对照基准可用（仓内 `git show HEAD:<file>`、cwd 固定仓根；未走工作区回退）', [], gitFallbacks)
 
 const opsSource = readFileSync(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/ops.js'), 'utf8')
 const collectionHits = []
@@ -543,9 +560,12 @@ for (const rel of ['cloudfunctions/xiai-user-token/index.js', 'cloudfunctions/xi
 check('C2', '持久化路径仍恰 1 处（`collection(` 只在 `lib/ops.js`）', [], collectionHits)
 check('C2b', '正对照：`lib/ops.js` 自身命中 `collection(`', true, /collection\(/.test(opsSource))
 const opStart = opsSource.indexOf('async registerArtifact(')
-const opEnd = opsSource.indexOf('\n  }\n})', opStart)
+/* 切片锚点（2026-10-27 修夹具缺口）：**只切到 `registerArtifact` 自身方法尾 `\n  },`**。
+   旧锚点 `\n  }\n})` 落在**整个 `OPS` 对象的收尾**上 ⇒ 切片吞进其后所有方法（其中确有 `plan:`）
+   ⇒ 断言假红。**期望值 `[false, true]` 一字未动**，只修切片边界。 */
+const opEnd = opsSource.indexOf('\n  },', opStart)
 const opBody = opStart >= 0 && opEnd > opStart ? opsSource.slice(opStart, opEnd) : ''
-check('C3', '新 op 本体（切片）不含任何落盘计划（`plan:` 命中 0）', [false, true], [opBody.includes('plan:'), opBody.includes('readArtifactBytes')])
+check('C3', '新 op 本体（切片）不含任何落盘计划（`plan:` 命中 0）｜切片锚点＝`registerArtifact` 方法尾 `\\n  },`', [false, true], [opBody.includes('plan:'), opBody.includes('readArtifactBytes')])
 
 const dbSource = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
 check('C4', '行 `storage_key` 由权威方回包决定（A 路空串不变 / B 路 ＝ 对象键）', true, /storage_key: authority \? String\(authority\.storageKey \|\| ''\) : assetBlobKey\(assetId\)/.test(dbSource))
