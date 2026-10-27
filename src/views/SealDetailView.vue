@@ -1391,7 +1391,6 @@ onBeforeUnmount(() => {
             {{ faceLabel(face) }}
           </span>
           <span class="face-block__name">{{ corrections.resolveSealDisplayName(face) }}</span>
-          <span class="face-block__id">{{ face.id }}</span>
         </h2>
         <div class="face-block__admin-actions">
           <button
@@ -2225,11 +2224,6 @@ onBeforeUnmount(() => {
 .face-block__name {
   font-size: var(--t-lg);
   color: var(--c-text);
-}
-
-.face-block__id {
-  color: var(--c-text-muted);
-  font-size: var(--t-xs);
 }
 
 /* 管理员按钮组（编辑固定属性 / 重新上传印面图）：同一行右对齐。 */
