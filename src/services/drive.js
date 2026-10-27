@@ -25,6 +25,9 @@
 
 import { listSealRows, listFaceRows, primaryFaceIn } from '../data/db.js'
 import { currentUser } from '../data/session.js'
+/* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
+   雙端同段代碼 ⇒ 前端只能**副作用導入**、API 掛 `globalThis.__XIAI_CODE_ID__`。 */
+import '../utils/codeId.js'
 import {
   readSeallists,
   writeSeallistRows,
@@ -116,8 +119,18 @@ function fold(text) {
    ============================================================================ */
 
 function sealBriefOf(sealId) {
-  const id = fold(sealId)
-  const seal = listSealRows().find((row) => row.id === id || row.stamp_id === id) || null
+  const raw = fold(sealId)
+  /* **§8.6 就地重算（读面兜底）**：先按原值查；查不到且是**旧形态** ⇒ 换算成新 `sid` 再查一次
+     （纯函数、幂等；新形态换算恒 `null` ⇒ 零开销、零行为变化）。原值命中 ⇒ 返回值**逐字不变**；
+     换算命中 ⇒ 回新 `sid`（分享投影 `resolveShare` / 夹内清单 `listFolderItems` 的引用值随之收口）。 */
+  const sid = oldSealRefToSid(raw)
+  const seals = listSealRows()
+  let id = raw
+  let seal = seals.find((row) => row.id === raw || row.stamp_id === raw) || null
+  if (!seal && sid) {
+    seal = seals.find((row) => row.id === sid || row.stamp_id === sid) || null
+    if (seal) id = sid
+  }
   if (!seal) return { seal_id: id, seal_name: '', image_id: '', found: false }
   const stampId = seal.id || seal.stamp_id || id
   const faces = listFaceRows().filter((row) => (row.sealId || row.stamp_id) === stampId)
@@ -128,6 +141,82 @@ function sealBriefOf(sealId) {
     image_id: primary && primary.face_image_id ? String(primary.face_image_id) : '',
     found: true
   }
+}
+
+/* ============================================================================
+   §8.6 本地引用就地重算（**窄單補未落項**｜口徑件 §8.6）
+   ----------------------------------------------------------------------------
+   · 背景：云端 `stamp_id` 已按 R-5 重编为 `sid`，本机镜像里既有的引用行
+     （`seallist-items.seal_id`）仍是**旧形态**（纯数字 `"N"` / `XA0000000N`）⇒ 不换算就是孤儿
+     （分享链 `/s/<code>` 与「我的雲盤」清单破图 / 找不到）。
+   · **纯函数、不需映射表**：发号顺序 ＝ 旧号数值升序 ⇒ `旧 "N"` → `seal_no = N` →
+     `sid = encodeSealCode(N)` —— 与云端 `migrateCodeNumbers` 共用**同一编码器**。
+   · **只纠正引用值、一字不动其它字段**：不删行、不换命名空间、**不清库**；
+     已是新形态 ⇒ **零动作**（幂等，重放 changed 恒 0）。
+   · 落点 ＝ **启动引导**（`services/bootstrap.js::bootstrapSession`）；分享投影
+     `resolveShare` 与夹内清单 `listFolderItems` 皆由引用行现场派生 ⇒ 引用行收口即整条链收口
+     （`shares` 行本身**不持印章引用**，字段面 ＝ `{id, seallist_id, code, owner_user_id, …}`）。
+   ============================================================================ */
+
+/** 旧形态印章引用（三种历史形态，与 `data/db.js::legacySealSerialOf` 同一套识别）。 */
+const OLD_SEAL_REF_NUMERIC = /^(\d{1,12})$/
+const OLD_SEAL_REF_XA = /^XA(\d{9})$/
+const OLD_SEAL_REF_XAI = /^XAI-(\d+)$/
+
+/**
+ * **旧引用 → 新 `sid`（§8.6 纯函数）**：旧号 N ⇒ `seal_no = N` ⇒ `sid = encodeSealCode(N)`。
+ * @param {unknown} value 引用原值（`seallist-items.seal_id` 等）
+ * @returns {string|null} 新 `sid`；**已是新形态 / 认不出 / 号域越界 ⇒ `null`（零动作）**
+ */
+export function oldSealRefToSid(value) {
+  const CODE_ID = globalThis.__XIAI_CODE_ID__ || {}
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return null
+  /* 已是新形态（5 位 22 字母）⇒ 幂等零动作。 */
+  if (CODE_ID.SID_PATTERN && CODE_ID.SID_PATTERN.test(raw)) return null
+  const numeric = OLD_SEAL_REF_NUMERIC.exec(raw)
+  const xa = OLD_SEAL_REF_XA.exec(raw)
+  const xai = OLD_SEAL_REF_XAI.exec(raw)
+  const no = numeric ? Number(numeric[1]) : xa ? Number(xa[1]) : xai ? Number(xai[1]) : null
+  if (no === null || !Number.isInteger(no) || no < 1) return null
+  if (typeof CODE_ID.encodeSealCode !== 'function') return null
+  const encoded = CODE_ID.encodeSealCode(no)
+  return encoded && encoded.ok ? encoded.code : null
+}
+
+/**
+ * **启动引导的就地换算**：读 `seallist-items` 全量，把旧形态 `seal_id` 就地换成新 `sid`。
+ * 幂等（重放 ⇒ `changed: 0`、零写入）；撞对（同夹内已存在指向同一印章的新形态行）⇒ **跳过该行**
+ * （保留原行、不删行、不合并 —— 重复对会让整批写被数据层唯一性校验拒掉，故判在写之前）。
+ * @returns {{ok:boolean, changed:number, conflicts:number, total:number, reason?:string, message?:string}}
+ */
+export function reconcileLocalSealRefs() {
+  const items = readSeallistItems()
+  if (!items.ok) return { ok: false, changed: 0, conflicts: 0, total: 0, reason: items.reason, message: items.message }
+  const pairOf = (row) => `${row.seallist_id}\u0000${row.seal_id}`
+  const seen = new Set(items.rows.map(pairOf))
+  let changed = 0
+  let conflicts = 0
+  const next = items.rows.map((row) => {
+    const sid = oldSealRefToSid(row.seal_id)
+    if (!sid || sid === row.seal_id) return row
+    const pair = `${row.seallist_id}\u0000${sid}`
+    if (seen.has(pair)) {
+      conflicts += 1
+      return row
+    }
+    seen.delete(pairOf(row))
+    seen.add(pair)
+    changed += 1
+    return { ...row, seal_id: sid }
+  })
+  if (changed > 0) {
+    const write = writeSeallistItemRows(next)
+    if (!write.ok) {
+      return { ok: false, changed: 0, conflicts, total: items.rows.length, reason: write.reason, message: write.message }
+    }
+  }
+  return { ok: true, changed, conflicts, total: items.rows.length }
 }
 
 /* ============================================================================

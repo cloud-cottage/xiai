@@ -2771,8 +2771,9 @@ const ADMIN_OPS = Object.freeze({
    *   · **入参** `{ dry_run?: boolean }`（**缺省 `true`**；键面 ＝ `MIGRATE_ALLOWED_KEYS`，封闭）。
    *   · **改写面恰五个键族**：`xiai_seals.stamp_id`（＋新增 `seal_no` / `sid`）、
    *     `xiai_faces.stamp_id` / `sealId`（＋新增 `face_no` / `fid`）、`xiai_images.stamp_id`、
-   *     `xiai_corrections.sealId` / `stamp_id`、`xiai_corrections_public.sealId`。
-   *     **其余字段一字不动** —— `faceId`、影像 `_id`、行 `_id`、`seal_name`、`sealGroupId` … 逐字保留。
+   *     `xiai_corrections.sealId` / `stamp_id`、`xiai_corrections_public.sealId` / `stamp_id`
+   *     （**公开投影行两键同改** —— 口径件 §4 裁决：只改一个会让 §6.6「旧码命中 0」判负）。
+   *   · **其余字段一字不动** —— `faceId`、影像 `_id`、行 `_id`、`seal_name`、`sealGroupId` … 逐字保留。
    *   · **发号顺序（一经分派即固定）**：印章按旧 `stamp_id` 数值升序（`"1"`…`"79"` ⇒ `seal_no` 1…79）；
    *     印面按「所属印章号 ＋ 同类序号（FACE 在前、EDGE 在后）」升序 ⇒ `face_no` 1…79。
    *     **已有号的行不重新发号**（幂等：只补缺号行）。
@@ -3031,18 +3032,22 @@ const ADMIN_OPS = Object.freeze({
       }
     }
 
-    /* ⑨ 公开投影行（键族：`sealId` → 新 sid；按 §4「恰五个键族」**只改 `sealId`**，
-          行上另一别名 `stamp_id` 依 §4「其余字段一字不动」保持原值 —— 冲突点已在交付报告登记）。 */
+    /* ⑨ 公开投影行（键族：`sealId` **与** `stamp_id` **两键同改** —— 口径件 §4 裁决：
+          该集合行同时带两个键，只改一个会让 §6.6「旧码命中 0」判负 ⇒ 两键一并改写为新 sid；
+          `faceId` 等其余字段仍一字不动）。 */
     for (const row of publics) {
-      const sid = resolveSealSid(row && row.sealId)
+      const sid = resolveSealSid(row && (row.sealId || row.stamp_id))
       if (!sid) {
         skipped.corrections_public += 1
         continue
       }
-      if (text(row && row.sealId) !== sid) {
+      const doc = {}
+      if (text(row && row.sealId) !== sid) doc.sealId = sid
+      if (text(row && row.stamp_id) !== sid) doc.stamp_id = sid
+      if (Object.keys(doc).length > 0) {
         rewritten.corrections_public += 1
-        pushSample(COLLECTIONS.correctionsPublic, rowId(row), { sealId: row && row.sealId }, { sealId: sid })
-        writes.push({ kind: 'update', collection: COLLECTIONS.correctionsPublic, match: { _id: rowId(row) }, doc: { sealId: sid }, expectAtLeast: 1 })
+        pushSample(COLLECTIONS.correctionsPublic, rowId(row), { sealId: row && row.sealId, stamp_id: row && row.stamp_id }, doc)
+        writes.push({ kind: 'update', collection: COLLECTIONS.correctionsPublic, match: { _id: rowId(row) }, doc, expectAtLeast: 1 })
       } else {
         skipped.corrections_public += 1
       }

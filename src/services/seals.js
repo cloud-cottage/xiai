@@ -51,8 +51,12 @@ import {
   sealBySourceKey,
   imageRowByRef,
   sealImportDirectWriteDenial,
-  nextSealStampId,
   nextFaceId,
+  /* **識別編碼四鍵（窄單補未落項）**：導入採納的本機鏡像行也要補 `seal_no` / `sid` / `face_no` / `fid`
+     ⇒ 號源規劃**複用數據層單點**（`reserveSealNo` / `planFaceNumbers`，不自寫第二套）。
+     （原導入的 `nextSealStampId` 已被 `reserveSealNo` ＋ `encodeSealCode` 取代 ⇒ 不再導入。） */
+  reserveSealNo,
+  planFaceNumbers,
   saveSealRows,
   saveFaceRows,
   PermissionError
@@ -1829,9 +1833,19 @@ function sealSourceFieldsOf(row) {
  *
  * 影像引用校驗（§3.55.6）：**逐條**校驗引用對象存在 —— 宣告了引用卻解析不到 ⇒ 該條拒絕；
  * `kind=FACE` 的印面**必須**有可解析的影像引用（沿用既有「印面圖必填」口徑）。
+ *
+ * **識別編碼四鍵（口徑件 §3｜R-5，窄單補未落項）**：本函數補齊 `seal_no` / `sid`（印章行）與
+ * `face_no` / `fid`（印面行）—— 號源一律走**數據層單點**（`reserveSealNo` / `planFaceNumbers`），
+ * `sid` / `fid` 由號**恆重算**（`CODE_ID` 純函數）；號域越界 ⇒ 結構化拒絕 ＋ **零寫入**。
+ * @param {object} importRow 導入行
+ * @param {Array<object>} seals 既有正式印章行（含同批先前已構造的行 ⇒ 號不重複）
+ * @param {Array<object>} faces 既有印面行（含同批先前已構造的行 ⇒ `face_no` 不重複）
+ * @param {Set<string>} takenFaceIds 已佔用的印面內部 id
+ * @param {{id:string}} actor 審核人
+ * @param {string} at ISO 時戳
  * @returns {{ok:true, seal:object, faceRows:Array<object>}|{ok:false, reason:string, message:string}}
  */
-function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
+function buildAcceptedSeal(importRow, seals, faces, takenFaceIds, actor, at) {
   const faceDefs = Array.isArray(importRow && importRow.faces) ? importRow.faces : []
   /* **佔位圖來源門 ＋ 摘要門**（本單新增｜影像例外；與雲函數 `ops.js` 同判）：
      佔位鍵僅 sealbank（feicui）家族可引用；指向佔位鍵者其摘要必須 ≡ 登記摘要。 */
@@ -1869,13 +1883,25 @@ function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
     resolved.push({ face, image: probe.row })
   }
 
-  const stampId = nextSealStampId(seals)
+  /* **識別編碼（口徑件 §3｜R-2 / R-5）**：`seal_no` 由**數據層號源單點** `reserveSealNo` 認領
+     （既有 `seal_no` 與可識別舊序號取最大 ＋1、撞號順延）；`sid` ＝ `encodeSealCode(seal_no)`
+     **恆重算**；`stamp_id` 的值 **＝ `sid`**（舊 `XA…` / 純數字形態不再產生）。
+     號域越界 ⇒ 結構化拒絕 ＋ **零寫入**（判定在任何寫入之前）。 */
+  const sealNo = reserveSealNo(seals, null)
+  const sealCode = CODE_ID.encodeSealCode ? CODE_ID.encodeSealCode(sealNo) : { ok: false }
+  if (!sealCode.ok) {
+    return { ok: false, reason: 'INVALID_VALUE', message: `印章自增號越界（seal_no=${sealNo}）⇒ 未採納；本行保持 PENDING。` }
+  }
+  const stampId = sealCode.code
   const serialMatch = /^XA(\d{9})$/.exec(stampId)
   const source = String((importRow && importRow.source) || '')
   const sealName = String((importRow && importRow.seal_name) || '')
   const seal = {
     /* **源側擴面 51 鍵整條落正式行**（E-3）；`category` 之別名語義見下（平台既有口徑不改）。 */
     ...sealSourceFieldsOf(importRow),
+    /* **識別編碼（§3｜R-5）**：`seal_no` ＝ 權威自增號（本機號源單點認領）；`sid` ＝ 由其恆重算。 */
+    seal_no: sealNo,
+    sid: stampId,
     sealGroupId: `g-${serialMatch ? serialMatch[1] : stampId}`,
     stamp_id: stampId, // 兼容別名（既落盤視圖按它定位），勿刪
     id: stampId, // §4.1.1 規範字段名
@@ -1904,14 +1930,29 @@ function buildAcceptedSeal(importRow, seals, takenFaceIds, actor, at) {
 
   const taken = new Set(takenFaceIds)
   const faceRows = []
-  resolved.forEach(({ face, image }) => {
+  /* **識別編碼（印面側｜§3）**：**寫之前**一次算清本批要落的 `face_no`（撞號順延、號域越界
+     ⇒ 結構化拒絕 ＋ 零寫入），`fid` 由 `face_no` **恆重算**。規劃基數 ＝ `faces`
+     （**含同批先前已構造的印面行** —— 調用方逐條把 `faceRows` 追加進同一批數組）⇒ 不重號、不空洞。 */
+  const plannedFaceNos = planFaceNumbers(faces, null, resolved.length)
+  if (!plannedFaceNos.ok) {
+    return {
+      ok: false,
+      reason: plannedFaceNos.reason || 'INVALID_VALUE',
+      message: `${plannedFaceNos.message || '印面自增號規劃失敗'} ⇒ 未採納；本行保持 PENDING。`
+    }
+  }
+  resolved.forEach(({ face, image }, faceIndex) => {
     const faceId = nextFaceId(stampId, face.kind, taken)
     taken.add(faceId)
     const isEdge = face.kind === FACE_KIND.EDGE
+    const faceNo = plannedFaceNos.nos[faceIndex]
     faceRows.push({
       id: faceId,
       sealId: stampId,
       stamp_id: stampId, // 兼容別名，勿刪
+      /* **識別編碼（§3｜R-5）**：`face_no` ＝ 權威自增號；`fid` ＝ 由其恆重算（8 位十進制）。 */
+      face_no: faceNo,
+      fid: CODE_ID.encodeFaceCode(faceNo).code,
       kind: face.kind,
       face_image_id: !isEdge && image ? image.id : null,
       edge_image_ids: isEdge && image ? [image.id] : [],
@@ -2104,7 +2145,7 @@ function applySealImportDecision(who, { batchId = '', importId = '', decision = 
       ) ||
       null
     if (!existingSeal) {
-      const built = buildAcceptedSeal(row, nextSeals, takenFaceIds, who, at)
+      const built = buildAcceptedSeal(row, nextSeals, nextFaces, takenFaceIds, who, at)
       if (!built.ok) {
         /* 失敗行：**保持 PENDING 且零寫入**（不動 seals / faces、不改本行）。 */
         failed.push({ id: rid, reason: built.reason, message: built.message })

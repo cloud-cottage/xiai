@@ -20,6 +20,10 @@
  */
 
 const { REASONS, deny, normalizePhone } = require('./config.js')
+/* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`、
+   `xiai-user-token/lib/codeId.js` **三副本逐字节相同**（`cmp` 自证；R-7 要求 admin 侧也落一份）。
+   本文件只 `require` 它（纯函数、零 SDK、零存储）。 */
+const codeId = require('./codeId.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；标记 / 可用判据单点自 `sessionAuthority.js`。 */
 const { IDENTITY_SOURCES, isSessionIdentity, identitySourceOf, identityUsable, setAuthApiChannelProvider } = require('./sessionAuthority.js')
 
@@ -620,17 +624,43 @@ function sealStampSerialOf(stampId) {
   return text(stampId).replace(/[^0-9A-Za-z]/g, '')
 }
 
-/** 下一印章编号：`XA` ＋ 9 位序号，**跳过已占用**（与 `db.js::nextSealStampId` 同口径）。 */
+/**
+ * 下一印章编号 —— **R-5 / R-7 起 ＝ `sid`**（定长 5 位 base-22，由 `seal_no` 重算）。
+ * ⚠️ **本函数原发 `XA` ＋ 9 位序号**，与口径件 R-5「`stamp_id` 的值改为 sid」冲突 ⇒ **R-7 同批改发 `sid`**
+ * （与 `db.js::nextSealStampId`、`xiai-user-token/lib/ops.js` 同口径；改前形态只作**旧号识别**，不再产出）。
+ * 号序（**只读取号、不改写任何既有行**，与 `migrateCodeNumbers` 的换算同一套）：
+ *   ① 既有 `seal_no`；② 可识别的旧序号（纯数字 `"N"` / `XA`＋9 位 / `XAI-N`）；③ 由既有 `stamp_id` 反解的 sid
+ * 三者取最大值 ＋1，再**跳过已被占用的 `stamp_id`** ⇒ 与既有行不重号、幂等可重放。
+ * 号域越界 ⇒ `encodeSealCode` 结构化拒绝 ⇒ 返回 `''`（**不回绕、不截断**），由调用方拒绝该条（零写入）。
+ */
 function nextSealStampIdOf(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const taken = new Set()
   let max = 0
-  ;(Array.isArray(rows) ? rows : []).forEach((row) => {
-    const matched = new RegExp(`^${SEAL_STAMP_ID_PREFIX}(\\d{9})$`).exec(text(row && row.stamp_id))
+  list.forEach((row) => {
+    const own = Number(row && row.seal_no)
+    if (Number.isInteger(own) && own > max) max = own
+    const raw = text(row && row.stamp_id)
+    if (raw) taken.add(raw)
+    const numeric = /^(\d{1,12})$/.exec(raw)
+    if (numeric) max = Math.max(max, Number(numeric[1]))
+    const matched = new RegExp(`^${SEAL_STAMP_ID_PREFIX}(\\d{9})$`).exec(raw)
     if (matched) max = Math.max(max, Number(matched[1]))
+    const legacy = /^XAI-(\d+)$/.exec(raw)
+    if (legacy) max = Math.max(max, Number(legacy[1]))
+    const decoded = codeId.decodeSealCode(raw)
+    if (decoded.ok) max = Math.max(max, decoded.no)
   })
-  const taken = new Set((Array.isArray(rows) ? rows : []).map((row) => text(row && row.stamp_id)))
-  let index = max + 1
-  while (taken.has(`${SEAL_STAMP_ID_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
-  return `${SEAL_STAMP_ID_PREFIX}${String(index).padStart(9, '0')}`
+  let no = max + 1
+  for (;;) {
+    const encoded = codeId.encodeSealCode(no)
+    if (!encoded.ok) return '' // 号域越界：结构化拒绝由调用方兜（不静默回绕）
+    if (taken.has(encoded.code)) {
+      no += 1
+      continue
+    }
+    return encoded.code
+  }
 }
 
 /** 印面 id：`fc-<印章序号>-<f|e><n>`（同类递增，冲突则继续挑；与 `db.js::nextFaceId` 同口径）。 */
@@ -1216,6 +1246,12 @@ const OPS = Object.freeze({
           continue
         }
         const stampId = nextSealStampIdOf(seals)
+        /* **R-5 / R-7**：取不到号（号域越界 ⇒ 返回 `''`）⇒ 该条失败、保持 PENDING 且零写入，
+           **不落空 `stamp_id`**（`stamp_id` 恒 ＝ `sid`，旧 `XA…` 形态不再产出）。 */
+        if (!stampId) {
+          failed.push(rid)
+          continue
+        }
         const serial = sealStampSerialOf(stampId)
         const source = text(row && row.source)
         const sealName = text(row && row.seal_name)

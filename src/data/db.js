@@ -2005,8 +2005,10 @@ export function imageRowByRef(ref) {
 /* **採納路徑複用既有 id 派生（既有實現，非第二套）**：印章編號（**R-5 起 ＝ `sid`**，
    5 位 base-22，由 `seal_no` 重算）與印面編號（`<stampId>-<FACE|EDGE><序>`；`stampSerial`
    對 5 位字母輸入的退化形態**已登記為允許並存**）的派生真源仍在下方既有函數
-   （本處只把它們導出，**不另寫一份**）。 */
-export { nextSealStampId, nextFaceId }
+   （本處只把它們導出，**不另寫一份**）。
+   **補未落項（窄單）**：導入採納的本機鏡像路徑（`services/seals.js::buildAcceptedSeal`）
+   需要**同一件**的號源規劃 ⇒ 一併導出 `reserveSealNo` / `planFaceNumbers`（仍不另寫第二套）。 */
+export { nextSealStampId, nextFaceId, reserveSealNo, planFaceNumbers }
 
 /** 取数组首非空文本（`字` / `号` 等数组的取首值口径）。 */
 function firstTextOf(list) {
