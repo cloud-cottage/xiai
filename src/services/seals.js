@@ -57,6 +57,11 @@ import {
   saveFaceRows,
   PermissionError
 } from '../data/db.js'
+/* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
+   該文件是**雙端同段代碼**（不寫 `export`，見其文件頭「雙端可載紀律」）⇒ 前端只能**副作用導入**、
+   API 掛 `globalThis.__XIAI_CODE_ID__`。 */
+import '../utils/codeId.js'
+const CODE_ID = globalThis.__XIAI_CODE_ID__ || {}
 import { currentUser } from '../data/session.js'
 import {
   FACE_KIND,
@@ -385,6 +390,48 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
 
 export function getSealById(stampId) {
   return listSeals().find((seal) => seal.stamp_id === stampId) || null
+}
+
+/**
+ * **按識別編碼精確查**（口径件 §5；本單新增的唯一精確入口）。
+ *
+ * · **判型**：首字符為數字 ⇒ `fid`（8 位）；否則 ⇒ `sid`（5 位字母）。解碼失敗 ⇒
+ *   `{ok:false, reason:'INVALID_VALUE', message}`（**不解碼成功就絕不進入任何模糊路徑**）。
+ * · **匹配**：decode ⇒ 按 `no` **精確等值**匹配（`seal_no` / `face_no`，或等值 `stamp_id` / `fid`）。
+ *   **只做等值比較**：**不回落關鍵詞 `q`、不做子串 / 近似 / 模糊匹配**。
+ * · **查無** ⇒ `{ok:false, reason:'NOT_FOUND', message:'查無此印'}`（上屏即「查無此印」空態）。
+ * · 旧纯数字 / 旧 `XA…` 码在此**天然解码失败**（R-6：旧码不受理，不加任何兼容分支）。
+ * @param {string} raw 識別編碼（可含小寫 / 前後空白；內部歸一大寫）
+ * @returns {{ok:true, seal:object, face:object|null, code:string}
+ *          |{ok:false, reason:'INVALID_VALUE'|'NOT_FOUND', message:string}}
+ */
+export function findSealByCode(raw) {
+  const input = String(raw === undefined || raw === null ? '' : raw).trim().toUpperCase()
+  if (!input) return { ok: false, reason: 'INVALID_VALUE', message: '請輸入識別編碼。' }
+  if (typeof CODE_ID.decodeSealCode !== 'function') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '識別編碼模塊未就緒，請稍後重試。' }
+  }
+  const first = input.charAt(0)
+  const isDigitFirst = first >= '0' && first <= '9'
+  const decoded = isDigitFirst ? CODE_ID.decodeFaceCode(input) : CODE_ID.decodeSealCode(input)
+  if (!decoded.ok) return { ok: false, reason: decoded.reason, message: decoded.message }
+  if (isDigitFirst) {
+    const face =
+      listFaceRows().find(
+        (row) => Number(row && row.face_no) === decoded.no || String((row && row.fid) || '') === input
+      ) || null
+    if (!face) return { ok: false, reason: 'NOT_FOUND', message: '查無此印' }
+    const sealId = String((face && (face.stamp_id || face.sealId)) || '')
+    const seal = listSealRows().find((row) => String((row && row.stamp_id) || '') === sealId) || null
+    if (!seal) return { ok: false, reason: 'NOT_FOUND', message: '查無此印' }
+    return { ok: true, seal, face, code: input }
+  }
+  const seal =
+    listSealRows().find(
+      (row) => Number(row && row.seal_no) === decoded.no || String((row && row.stamp_id) || '') === input
+    ) || null
+  if (!seal) return { ok: false, reason: 'NOT_FOUND', message: '查無此印' }
+  return { ok: true, seal, face: null, code: input }
 }
 
 export function listImagesByStamp(stampId) {

@@ -35,6 +35,9 @@
 
 const crypto = require('crypto')
 const { REASONS, deny, normalizePhone, isPhoneLike, uidOf } = require('./config.js')
+/* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`
+   **逐字节相同**（`scripts/verify-code-id.mjs` 机械断言）；本文件只经它编 / 解码，不自写第二套。 */
+const codeId = require('./codeId.js')
 /* 展示件轉碼器（本單新增；純 JS 零新依賴 —— node:zlib ＋ 自寫 CRC32）。 */
 const { tiffToPng } = require('./tiffToPng.js')
 /* **V6-a**：调用者**平台会话身份**判权（additive）。`IDENTITY_SOURCES` 是身份来源标记的
@@ -130,7 +133,21 @@ const MARKABLE_FIELDS = Object.freeze({
 })
 
 /** 勘误提交载荷允许键（**固定属性 / 身份类键都不在其中**）。 */
-const ALLOWED_KEYS = Object.freeze(['faceId', 'sealId', 'stampId', 'field', 'value', 'basis'])
+const ALLOWED_KEYS = Object.freeze([
+  'faceId',
+  'sealId',
+  'stampId',
+  'field',
+  'value',
+  'basis',
+  /* **识别编码四键（口径件 §3｜本单登记）**：`seal_no` / `sid` / `face_no` / `fid` 由**服务端先落盘**
+     （计数器发号 ＋ 按 `no` 重算），**前端后发**；登记进封闭面只是为了让「服务端已产出的回显键」
+     不被 `INVALID_FIELD` 误伤 —— 本 op **不读不写**它们（落盘行由服务端自己构造，载荷值一律不采信）。 */
+  'seal_no',
+  'sid',
+  'face_no',
+  'fid'
+])
 
 /** 采信载荷允许键（**封闭键面**：`['faceId','sealId','stampId','field','value']`；身份类键一律拒）。 */
 const ENDORSE_ALLOWED_KEYS = Object.freeze(['faceId', 'sealId', 'stampId', 'field', 'value'])
@@ -1246,7 +1263,12 @@ function sealStampSerialOf(stampId) {
   return text(stampId).replace(/[^0-9A-Za-z]/g, '')
 }
 
-/** 下一印章编号：`XA` ＋ 9 位序号，**跳过已占用**（与 `db.js::nextSealStampId` 同口径）。 */
+/**
+ * 下一印章编号（**R-5 前的旧实现**）：`XA` ＋ 9 位序号，**跳过已占用**。
+ * ⚠️ **已退出采纳主路**：R-5 起新印章 `stamp_id` ＝ `sid`（`issueCodeNumber` 发号 ＋
+ * `codeId.encodeSealCode` 重算，见 `buildSealAcceptanceFromImport`）；本函数只保留作
+ * **旧号识别**参考、**不再产出新值**。`db.js::nextSealStampId` 已同改为发 `sid`
+ * （两处口径已不再相同 —— 如实登记，勿再按「同口径」断言）。 */
 function nextSealStampIdOf(rows) {
   let max = 0
   ;(Array.isArray(rows) ? rows : []).forEach((row) => {
@@ -1448,6 +1470,110 @@ function rowsOf(result) {
   if (result && Array.isArray(result.data)) return result.data
   if (result && result.data && typeof result.data === 'object') return [result.data]
   return []
+}
+
+/* ---------------------------------------------------------------------------
+   **识别编码号源（口径件 §3｜R-2）**：`xiai_counters`（`_id` ∈ `seal` / `face`，文档含 `seq`）。
+   · **服务端专用集合**：**不进** `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`
+     （客户端零读面），也**不进**本文件的 `COLLECTIONS`（那是既有 13 个集合的读写面登记表；
+     号源只由下面 `issueCodeNumber` 一处读写，单点即审计点）。
+   · 号域上限沿编码器容量（`codeId.SID_MAX - 1` / `codeId.FID_MAX - 1`）⇒ 越界结构化拒绝。
+   --------------------------------------------------------------------------- */
+const COUNTERS_COLLECTION = 'xiai_counters'
+const COUNTER_IDS = Object.freeze({ seal: 'seal', face: 'face' })
+const COUNTER_CAPACITY = Object.freeze({ seal: codeId.SID_MAX - 1, face: codeId.FID_MAX - 1 })
+const COUNTER_MAX_ATTEMPTS = 8
+
+/**
+ * **原子发号（唯一号源）**：按 `_id` 认领计数文档的下一个号。
+ *
+ * 实现口径 ＝ **单文档条件更新（CAS）＋ SDK 原子自增算子 `db.command.inc(1)`**：
+ *   ① `readRows(COUNTERS_COLLECTION, {_id})` 读当前 `seq`（与本文件其它读点同一入口）；
+ *   ② 文档不存在 ⇒ `add({_id, seq: 1})`（`_id` 冲突 ＝ 并发建行 ⇒ 重读重试）；
+ *   ③ 文档存在 ⇒ `where({_id, seq: 当前值}).update({seq: db.command.inc(1)})`
+ *      —— 过滤条件**锁住旧值** ⇒ 单文档原子更新下恰一路认领成功；`updated === 1` ⇒ 号 ＝ 旧值+1；
+ *      `updated === 0`（并发抢先）⇒ 重读重试；**`updated` 读不出（null）⇒ 一律按失败重读**
+ *      （宁可留下空洞，也**绝不把同一个号发给两路** —— AC §6.4「无重号」优先）。
+ *
+ * 为什么不用「`_.inc(1)` ＋ 读回新值」：`@cloudbase/node-sdk` 的 `update()` 回包**只含 `updated`
+ * 计数、不含自增后的新值**（本仓既有 `updatedCountOf` 只读 `updated` 即为实据）⇒ 必须读回；
+ * 而读回与另一路的 `inc` 交错会把同一个号发给两路 ⇒ 违反 AC §6.4。故取 CAS：
+ * 认领成功与否由**服务端单文档更新**裁决，号由「被锁住的旧值 + 1」确定性得出，**无重号**。
+ *
+ * @param {'seal'|'face'} kind 号别
+ * @returns {Promise<{ok:true, no:number}|{ok:false, reason:string, message:string}>}
+ */
+async function issueCodeNumber(kind) {
+  const id = COUNTER_IDS[kind]
+  if (!id) return deny(REASONS.INVALID_VALUE, `未知的識別編號發號類別：${String(kind)}；本次零寫入。`)
+  const capacity = COUNTER_CAPACITY[kind]
+  const db = resolveDb()
+  for (let attempt = 0; attempt < COUNTER_MAX_ATTEMPTS; attempt += 1) {
+    const rows = await readRows(COUNTERS_COLLECTION, { _id: id })
+    if (rows.length === 0) {
+      /* 首次发号：以**既有行的最大号**播种（迁移后 `seq` ＝ 已分配总数 ⇒ 采纳从 N+1 起），
+         避免计数器与既有 `seal_no` / `face_no` 分裂出重号。 */
+      let base = 0
+      if (kind === 'seal') {
+        const seals = await readRows(COLLECTIONS.seals, {}, { limit: 1000 })
+        seals.forEach((row) => {
+          const own = Number(row && row.seal_no)
+          if (Number.isInteger(own) && own > base) base = own
+        })
+      } else {
+        const faces = await readRows(COLLECTIONS.faces, {}, { limit: 1000 })
+        faces.forEach((row) => {
+          const own = Number(row && row.face_no)
+          if (Number.isInteger(own) && own > base) base = own
+        })
+      }
+      if (base >= capacity) {
+        return deny(REASONS.INVALID_VALUE, `識別編碼號源已達容量上限（${capacity}）；本次零寫入。`)
+      }
+      try {
+        await db.collection(COUNTERS_COLLECTION).add({ _id: id, seq: base, updated_at: text(new Date().toISOString()) })
+      } catch (error) {
+        continue /* 并发建行冲突 ⇒ 重读重试 */
+      }
+      /* 建行后按 CAS 认领 base+1（建行写入的 `seq: base` 是「已发放到 base」的基线）。 */
+      continue
+    }
+    const current = Number(rows[0].seq)
+    if (!Number.isFinite(current) || current < 0 || Math.floor(current) !== current) {
+      return deny(REASONS.INVALID_VALUE, '計數文檔形態不合法（seq 非非負整數）；本次零寫入。')
+    }
+    if (current >= capacity) {
+      return deny(REASONS.INVALID_VALUE, `識別編碼號源已達容量上限（${capacity}）；本次零寫入。`)
+    }
+    const command = db && db.command
+    const increment = command && typeof command.inc === 'function' ? command.inc(1) : current + 1
+    const reply = await db
+      .collection(COUNTERS_COLLECTION)
+      .where({ _id: id, seq: current })
+      .update({ seq: increment, updated_at: text(new Date().toISOString()) })
+    const updated = updatedCountOf(reply)
+    if (updated === 1) return { ok: true, no: current + 1 }
+    if (updated === null) {
+      /* 计数读不出 ⇒ **按失败重读**（宁留空洞、不发重号）。 */
+      continue
+    }
+    /* updated === 0 ⇒ 并发抢先 ⇒ 重读重试。 */
+  }
+  return deny(REASONS.STORAGE_UNAVAILABLE, '識別編號發號競爭超時；本次零寫入。')
+}
+
+/**
+ * 发号 ＋ **避开既有行占位**（采纳路径专用）：撞号继续取下一个号，**绝不改写既有行**。
+ * @param {'seal'|'face'} kind 号别
+ * @param {(no:number)=>boolean} isTaken 既有行是否已占该号
+ */
+async function issueCodeNumberAvoiding(kind, isTaken) {
+  for (let guard = 0; guard < 128; guard += 1) {
+    const issued = await issueCodeNumber(kind)
+    if (!issued.ok) return issued
+    if (!isTaken(issued.no)) return issued
+  }
+  return deny(REASONS.STORAGE_UNAVAILABLE, '識別編號發號撞號重試超限；本次零寫入。')
 }
 
 /**
@@ -2551,15 +2677,27 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
     if (digestDenial) return { ok: false, reason: REASONS.INVALID_VALUE }
     resolvedFaces.push({ face, image })
   }
-  const stampId = nextSealStampIdOf(seals)
+  /* **识别编码（口径件 §3｜R-2 / R-5）**：采纳时由**服务端计数器**原子发号 ⇒ `seal_no`，
+     `sid` ＝ `encodeSealCode(seal_no)`；`stamp_id` 的值 **＝ `sid`**（旧 `XA…` / 纯数字形态不再产生）。
+     载荷里的 `sid` / `seal_no` **一律不采信**（本函数自产）；与既有行撞号 ⇒ 继续取号（不改写既有行）。 */
+  const issuedSeal = await issueCodeNumberAvoiding('seal', (no) =>
+    (Array.isArray(seals) ? seals : []).some((item) => Number(item && item.seal_no) === no)
+  )
+  if (!issuedSeal.ok) return { ok: false, reason: issuedSeal.reason }
+  const sealNo = issuedSeal.no
+  const sealCode = codeId.encodeSealCode(sealNo)
+  if (!sealCode.ok) return { ok: false, reason: REASONS.INVALID_VALUE }
+  const stampId = sealCode.code
   const serial = sealStampSerialOf(stampId)
   const source = text(row && row.source)
   const sealName = text(row && row.seal_name)
   const sealDoc = {
     /* **源側擴面 51 鍵整條落正式行**（E-3；`category` 逐字由下方平台別名覆蓋 ⇒ 見注）。 */
     ...sealSourceFieldsOf(row),
+    seal_no: sealNo, // 识别编码：权威自增号（服务端计数器发号）
+    sid: stampId, // 识别编码：由 `seal_no` 恒重算（＝ `stamp_id`，R-5）
     sealGroupId: `g-${serial}`,
-    stamp_id: stampId,
+    stamp_id: stampId, // **R-5：值 ＝ `sid`**
     id: stampId,
     seal_name: sealName,
     name: sealName,
@@ -2588,10 +2726,21 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
     const faceId = nextFaceIdOf(stampId, face.kind, taken)
     taken.add(faceId)
     const isEdge = face.kind === 'EDGE'
+    /* **识别编码（印面侧）**：`face_no` 同样由计数器原子发号、`fid` 由其恒重算；撞号继续取。 */
+    const issuedFace = await issueCodeNumberAvoiding('face', (no) =>
+      (Array.isArray(faces) ? faces : []).some((item) => Number(item && item.face_no) === no) ||
+      faceDocs.some((item) => Number(item.face_no) === no)
+    )
+    if (!issuedFace.ok) return { ok: false, reason: issuedFace.reason }
+    const faceNo = issuedFace.no
+    const faceCode = codeId.encodeFaceCode(faceNo)
+    if (!faceCode.ok) return { ok: false, reason: REASONS.INVALID_VALUE }
     faceDocs.push({
       id: faceId,
       sealId: stampId,
       stamp_id: stampId,
+      face_no: faceNo, // 识别编码：印面自增号（服务端计数器发号）
+      fid: faceCode.code, // 识别编码：由 `face_no` 恒重算
       kind: face.kind,
       face_image_id: !isEdge && image ? text(image.id) : null,
       edge_image_ids: isEdge && image ? [text(image.id)] : [],
@@ -2615,6 +2764,308 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
 }
 
 const ADMIN_OPS = Object.freeze({
+  /**
+   * **一次性幂等编号迁移（R-3 ＋ R-5｜V3 全量重编）** —— 管理员写面（白名单门同 `migrateDynastyValues`）。
+   *
+   * 契约（口径件 §4 / §8，逐条）：
+   *   · **入参** `{ dry_run?: boolean }`（**缺省 `true`**；键面 ＝ `MIGRATE_ALLOWED_KEYS`，封闭）。
+   *   · **改写面恰五个键族**：`xiai_seals.stamp_id`（＋新增 `seal_no` / `sid`）、
+   *     `xiai_faces.stamp_id` / `sealId`（＋新增 `face_no` / `fid`）、`xiai_images.stamp_id`、
+   *     `xiai_corrections.sealId` / `stamp_id`、`xiai_corrections_public.sealId`。
+   *     **其余字段一字不动** —— `faceId`、影像 `_id`、行 `_id`、`seal_name`、`sealGroupId` … 逐字保留。
+   *   · **发号顺序（一经分派即固定）**：印章按旧 `stamp_id` 数值升序（`"1"`…`"79"` ⇒ `seal_no` 1…79）；
+   *     印面按「所属印章号 ＋ 同类序号（FACE 在前、EDGE 在后）」升序 ⇒ `face_no` 1…79。
+   *     **已有号的行不重新发号**（幂等：只补缺号行）。
+   *   · `sid` / `fid` 一律由 `no` **重算**（`codeId` 纯函数）；号域越界 ⇒ 结构化拒绝 ＋ 零写入。
+   *   · **回包（固定键面）**：`{ ok, op, dry_run, scanned:{seals,faces,images,corrections,
+   *     corrections_public}, assigned:{seals,faces}, rewritten:{…5 集合}, skipped:{…5 集合},
+   *     mapping:{ seals:[{old_stamp_id,seal_no,sid}], faces:[{face_id,old_seal,face_no,fid}] },
+   *     samples:[…], idempotent, plan? }` —— `mapping` 是**完整旧→新映射表**（干跑即得，供人工核）。
+   *   · **幂等**：重放 ⇒ `assigned` 全 `0`、`rewritten` 全 `0`、**零写入**（不产 `plan`）。
+   *   · `dry_run:true` ⇒ **零写入**，只回读数与映射表。
+   *   · **不在本 op 内**：`xiai_seal_imports` 3,781 行不入（采纳时才发号）；`xiai_counters`
+   *     **不进云读面**；不写 `faceId` / 影像 `_id` / 行 `_id`。
+   * @param {object} [payload] `{ dry_run?: boolean }`
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async migrateCodeNumbers(payload, identity, context) {
+    /* ① 管理员白名单门（写之前；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    const input = payload === undefined || payload === null ? {} : payload
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const unknown = Object.keys(input).filter((key) => MIGRATE_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}；本次零寫入。`)
+    }
+    let dryRun = true
+    if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+      if (typeof input.dry_run !== 'boolean') {
+        return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+      }
+      dryRun = input.dry_run
+    }
+
+    /* ② 只读扫描（五个集合；单次上限 1000 行，分页护栏口径同既有 op）。 */
+    const readAll = (collection) => readRows(collection, {}, { limit: 1000 })
+    const seals = await readAll(COLLECTIONS.seals)
+    const faces = await readAll(COLLECTIONS.faces)
+    const images = await readAll(COLLECTIONS.images)
+    const corrections = await readAll(COLLECTIONS.corrections)
+    const publics = await readAll(COLLECTIONS.correctionsPublic)
+
+    const scanned = {
+      seals: seals.length,
+      faces: faces.length,
+      images: images.length,
+      corrections: corrections.length,
+      corrections_public: publics.length
+    }
+    const assigned = { seals: 0, faces: 0 }
+    const rewritten = { seals: 0, faces: 0, images: 0, corrections: 0, corrections_public: 0 }
+    const skipped = { seals: 0, faces: 0, images: 0, corrections: 0, corrections_public: 0 }
+    const samples = []
+    const writes = []
+    const MAX_SAMPLES = 5
+    const rowId = (row) => text(row && (row._id || row.id))
+    const intOrNull = (value) => {
+      const n = Number(value)
+      return Number.isInteger(n) && n >= 1 ? n : null
+    }
+    /* 旧号识别（与 `db.js::legacySealSerialOf` 同一套换算；**只读、不改写旧行**）。 */
+    const legacySerialOf = (stampId) => {
+      const raw = text(stampId)
+      if (!raw) return null
+      if (/^\d{1,12}$/.test(raw)) return Number(raw)
+      const xa = /^XA(\d{9})$/.exec(raw)
+      if (xa) return Number(xa[1])
+      const legacy = /^XAI-(\d+)$/.exec(raw)
+      if (legacy) return Number(legacy[1])
+      return null
+    }
+    const pushSample = (collection, id, before, after) => {
+      if (samples.length < MAX_SAMPLES * 5) samples.push({ collection, id, before, after })
+    }
+
+    /* ③ 印章：已有 `seal_no` 的行占位不动；「已是 sid 形态却无号」的行按码反解占位；
+          其余缺号行按**旧号数值升序**领号（跳过已占 ⇒ 幂等 + 无重号）。 */
+    const finalSealNo = new Map()
+    const usedSealNos = new Set()
+    seals.forEach((row) => {
+      const own = intOrNull(row && row.seal_no)
+      if (own) {
+        finalSealNo.set(row, own)
+        usedSealNos.add(own)
+      }
+    })
+    const backfilledSeals = []
+    seals.forEach((row) => {
+      if (finalSealNo.has(row)) return
+      const decoded = codeId.decodeSealCode(text(row && row.stamp_id))
+      if (decoded.ok) {
+        finalSealNo.set(row, decoded.no)
+        usedSealNos.add(decoded.no)
+        backfilledSeals.push(row)
+      }
+    })
+    const pendingSeals = seals
+      .filter((row) => !finalSealNo.has(row))
+      .sort((a, b) => {
+        const sa = legacySerialOf(a && a.stamp_id)
+        const sb = legacySerialOf(b && b.stamp_id)
+        const na = sa === null ? Number.MAX_SAFE_INTEGER : sa
+        const nb = sb === null ? Number.MAX_SAFE_INTEGER : sb
+        if (na !== nb) return na - nb
+        return rowId(a).localeCompare(rowId(b))
+      })
+    let sealCursor = 1
+    pendingSeals.forEach((row) => {
+      while (usedSealNos.has(sealCursor)) sealCursor += 1
+      finalSealNo.set(row, sealCursor)
+      usedSealNos.add(sealCursor)
+      assigned.seals += 1
+      sealCursor += 1
+    })
+
+    /* ④ 印章改写（键族：`stamp_id` → sid；新增 `seal_no` / `sid`）＋ 完整映射表。 */
+    const mappingSeals = []
+    const sealKeyToNo = new Map()
+    for (const row of seals) {
+      const no = finalSealNo.get(row)
+      const encoded = codeId.encodeSealCode(no)
+      if (!encoded.ok) {
+        return deny(REASONS.INVALID_VALUE, `印章 ${rowId(row)} 的新號越界（seal_no=${no}）；本次零寫入。`)
+      }
+      const sid = encoded.code
+      const oldStamp = text(row && row.stamp_id)
+      sealKeyToNo.set(oldStamp, no)
+      sealKeyToNo.set(sid, no)
+      mappingSeals.push({ old_stamp_id: oldStamp, seal_no: no, sid })
+      const doc = {}
+      if (intOrNull(row && row.seal_no) !== no) doc.seal_no = no
+      if (text(row && row.sid) !== sid) doc.sid = sid
+      if (oldStamp !== sid) doc.stamp_id = sid
+      if (Object.keys(doc).length > 0) {
+        rewritten.seals += 1
+        pushSample(COLLECTIONS.seals, rowId(row), { stamp_id: oldStamp, seal_no: row && row.seal_no }, doc)
+        writes.push({ kind: 'update', collection: COLLECTIONS.seals, match: { _id: rowId(row) }, doc, expectAtLeast: 1 })
+      } else {
+        skipped.seals += 1
+      }
+    }
+    mappingSeals.sort((a, b) => a.seal_no - b.seal_no)
+
+    /* ⑤ 印面：按「所属印章号 ＋ 同类序号」升序领号（FACE 在前、EDGE 在后）。 */
+    const kindOrder = (row) => (text(row && row.kind) === 'EDGE' ? 1 : 0)
+    const faceSealNoOf = (row) => {
+      const key = text(row && (row.sealId || row.stamp_id))
+      return sealKeyToNo.has(key) ? sealKeyToNo.get(key) : Number.MAX_SAFE_INTEGER
+    }
+    const finalFaceNo = new Map()
+    const usedFaceNos = new Set()
+    faces.forEach((row) => {
+      const own = intOrNull(row && row.face_no)
+      if (own) {
+        finalFaceNo.set(row, own)
+        usedFaceNos.add(own)
+      }
+    })
+    faces.forEach((row) => {
+      if (finalFaceNo.has(row)) return
+      const decoded = codeId.decodeFaceCode(text(row && row.fid))
+      if (decoded.ok) {
+        finalFaceNo.set(row, decoded.no)
+        usedFaceNos.add(decoded.no)
+      }
+    })
+    const pendingFaces = faces
+      .filter((row) => !finalFaceNo.has(row))
+      .sort(
+        (a, b) =>
+          faceSealNoOf(a) - faceSealNoOf(b) ||
+          kindOrder(a) - kindOrder(b) ||
+          rowId(a).localeCompare(rowId(b))
+      )
+    let faceCursor = 1
+    pendingFaces.forEach((row) => {
+      while (usedFaceNos.has(faceCursor)) faceCursor += 1
+      finalFaceNo.set(row, faceCursor)
+      usedFaceNos.add(faceCursor)
+      assigned.faces += 1
+      faceCursor += 1
+    })
+
+    /* ⑥ 印面改写（键族：`stamp_id` / `sealId` → 新 sid；新增 `face_no` / `fid`）。 */
+    const mappingFaces = []
+    for (const row of faces) {
+      const no = finalFaceNo.get(row)
+      const encoded = codeId.encodeFaceCode(no)
+      if (!encoded.ok) {
+        return deny(REASONS.INVALID_VALUE, `印面 ${rowId(row)} 的新號越界（face_no=${no}）；本次零寫入。`)
+      }
+      const fid = encoded.code
+      const sealKey = text(row && (row.sealId || row.stamp_id))
+      const newSealSid = sealKeyToNo.has(sealKey) ? codeId.encodeSealCode(sealKeyToNo.get(sealKey)).code : ''
+      mappingFaces.push({ face_id: rowId(row), old_seal: sealKey, face_no: no, fid })
+      const doc = {}
+      if (newSealSid) {
+        if (text(row && row.stamp_id) !== newSealSid) doc.stamp_id = newSealSid
+        if (text(row && row.sealId) !== newSealSid) doc.sealId = newSealSid
+      }
+      if (intOrNull(row && row.face_no) !== no) doc.face_no = no
+      if (text(row && row.fid) !== fid) doc.fid = fid
+      if (Object.keys(doc).length > 0) {
+        rewritten.faces += 1
+        pushSample(COLLECTIONS.faces, rowId(row), { stamp_id: row && row.stamp_id, sealId: row && row.sealId, face_no: row && row.face_no }, doc)
+        writes.push({ kind: 'update', collection: COLLECTIONS.faces, match: { _id: rowId(row) }, doc, expectAtLeast: 1 })
+      } else {
+        skipped.faces += 1
+      }
+    }
+    mappingFaces.sort((a, b) => a.face_no - b.face_no)
+
+    /* ⑦ 影像（键族：`stamp_id` → 新 sid；影像 `_id` **不动**）。 */
+    const resolveSealSid = (key) => {
+      const raw = text(key)
+      if (!raw) return ''
+      if (sealKeyToNo.has(raw)) {
+        const encoded = codeId.encodeSealCode(sealKeyToNo.get(raw))
+        return encoded.ok ? encoded.code : ''
+      }
+      return codeId.decodeSealCode(raw).ok ? raw : ''
+    }
+    for (const row of images) {
+      const sid = resolveSealSid(row && (row.stamp_id || row.sealId))
+      if (!sid) {
+        skipped.images += 1
+        continue
+      }
+      if (text(row && row.stamp_id) !== sid) {
+        rewritten.images += 1
+        pushSample(COLLECTIONS.images, rowId(row), { stamp_id: row && row.stamp_id }, { stamp_id: sid })
+        writes.push({ kind: 'update', collection: COLLECTIONS.images, match: { _id: rowId(row) }, doc: { stamp_id: sid }, expectAtLeast: 1 })
+      } else {
+        skipped.images += 1
+      }
+    }
+
+    /* ⑧ 勘误私有行（键族：`sealId` / `stamp_id` → 新 sid；`faceId` **不动**）。 */
+    for (const row of corrections) {
+      const sid = resolveSealSid(row && (row.sealId || row.stamp_id))
+      if (!sid) {
+        skipped.corrections += 1
+        continue
+      }
+      const doc = {}
+      if (text(row && row.sealId) !== sid) doc.sealId = sid
+      if (text(row && row.stamp_id) !== sid) doc.stamp_id = sid
+      if (Object.keys(doc).length > 0) {
+        rewritten.corrections += 1
+        pushSample(COLLECTIONS.corrections, rowId(row), { sealId: row && row.sealId, stamp_id: row && row.stamp_id }, doc)
+        writes.push({ kind: 'update', collection: COLLECTIONS.corrections, match: { _id: rowId(row) }, doc, expectAtLeast: 1 })
+      } else {
+        skipped.corrections += 1
+      }
+    }
+
+    /* ⑨ 公开投影行（键族：`sealId` → 新 sid；按 §4「恰五个键族」**只改 `sealId`**，
+          行上另一别名 `stamp_id` 依 §4「其余字段一字不动」保持原值 —— 冲突点已在交付报告登记）。 */
+    for (const row of publics) {
+      const sid = resolveSealSid(row && row.sealId)
+      if (!sid) {
+        skipped.corrections_public += 1
+        continue
+      }
+      if (text(row && row.sealId) !== sid) {
+        rewritten.corrections_public += 1
+        pushSample(COLLECTIONS.correctionsPublic, rowId(row), { sealId: row && row.sealId }, { sealId: sid })
+        writes.push({ kind: 'update', collection: COLLECTIONS.correctionsPublic, match: { _id: rowId(row) }, doc: { sealId: sid }, expectAtLeast: 1 })
+      } else {
+        skipped.corrections_public += 1
+      }
+    }
+
+    /* ⑩ 回包：只有「执行态且有写入」才产落盘计划 ⇒ `dry_run` / 重放 ⇒ 零写入。 */
+    const rewrittenTotal = Object.keys(rewritten).reduce((sum, key) => sum + rewritten[key], 0)
+    const result = {
+      ok: true,
+      op: 'migrateCodeNumbers',
+      dry_run: dryRun,
+      scanned,
+      assigned,
+      rewritten,
+      skipped,
+      mapping: { seals: mappingSeals, faces: mappingFaces },
+      samples,
+      idempotent: assigned.seals + assigned.faces === 0 && rewrittenTotal === 0
+    }
+    if (!dryRun && writes.length > 0) result.plan = { op: 'migrateCodeNumbers', writes }
+    return result
+  },
+
   /**
    * **【本单改造】簽發一枚斐萃（feicui）令牌** —— 管理员写面（**仅管理员**：沿用 `adminWhitelistDenial`：
    * 会话路看 `xiai_roles` 的 `role==='admin'`，令牌路看手机号白名单；两路都 fail-closed）。
@@ -4053,6 +4504,10 @@ module.exports = {
   countRemainingImportPending,
   OPS,
   ADMIN_OPS,
+  /* **识别编码（本单新增）**：号源发号单点 ＋ 号源集合名（供离线自检注入假体直接跑）。 */
+  COUNTERS_COLLECTION,
+  issueCodeNumber,
+  issueCodeNumberAvoiding,
   setOpsDbProvider,
   opsDbInjected,
   setOpsStorageProvider,

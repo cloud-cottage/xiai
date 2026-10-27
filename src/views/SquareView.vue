@@ -8,6 +8,9 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import UploadSealDialog from '../components/UploadSealDialog.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
+import CodeSearchOtp from '../components/CodeSearchOtp.vue'
+/* **識別編碼精確查**（§5）：服務層單點（decode ⇒ 按 `no` 等值匹配；查無即「查無此印」）。 */
+import { findSealByCode } from '../services/seals.js'
 import { seals, corrections, points, imageFaces } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn } from '../data/session.js'
@@ -49,6 +52,32 @@ const demoFallback = computed(() => dataSource.value.failed)
 
 function retryDataSource() {
   void seals.retryDataSource()
+}
+
+/* ============================================================================
+   識別編碼精確查（口径件 §5｜R-4）
+   ----------------------------------------------------------------------------
+   · 唯一入口 ＝ `CodeSearchOtp`（5 / 8 格、首字符自動判型、非法字符就地拒）；
+   · decode ⇒ **按 `no` 精確等值匹配**；查無 ⇒ `查無此印` **空態**，
+     **絕不回落關鍵詞 `q`、絕不模糊匹配**（服務層 `findSealByCode` 同口徑）；
+   · 命中 ⇒ 直達該印章詳情（`stamp_id` 精確等值路由；R-6：舊碼不受理、不加兼容分支）。
+   ============================================================================ */
+const codeMiss = ref(false)
+const codeMessage = ref('')
+
+function onCodeSearch(code) {
+  codeMiss.value = false
+  codeMessage.value = ''
+  const found = findSealByCode(code)
+  if (found.ok) {
+    router.push({ name: 'seal-detail', params: { id: found.seal.stamp_id } })
+    return
+  }
+  if (found.reason === 'NOT_FOUND') {
+    codeMiss.value = true
+    return
+  }
+  codeMessage.value = found.message
 }
 /* ============================================================================
    筛选条四维度值集（R-21 / R-30 / R-31 / R-34）
@@ -256,6 +285,12 @@ function onSealSaved() {}
       @reset="resetFilter"
     />
 
+    <!-- 識別編碼入口（§5｜R-4）：單框自動判型；**精確查、查無即空態**，不回落關鍵詞 `q`、不模糊匹配。 -->
+    <div class="square__code">
+      <CodeSearchOtp @submit="onCodeSearch" />
+      <p v-if="codeMessage" class="square__keyword">{{ codeMessage }}</p>
+    </div>
+
     <p v-if="keyword" class="square__keyword">當前檢索「{{ keyword }}」，共 {{ list.length }} 枚</p>
 
     <!-- **O-1**：雲讀失敗已回落本機示範資料 ⇒ 顯式提示 ＋ 重試入口（不靜默；字形同全站）。 -->
@@ -266,7 +301,15 @@ function onSealSaved() {}
 
     <!-- 縮略圖走**縮略面**（規範 §3.27.6：256 長邊**單件**、不經切分內核；卡片內不再按塊渲染）；
          存量 / 非 TIFF 存儲件仍由瀏覽器原生解碼顯示（存量面不得回歸）。 -->
-    <div v-if="list.length" class="square__grid">
+    <!-- 識別編碼查無 ⇒ **明確空態「查無此印」**（不回落關鍵詞、不模糊匹配）。 -->
+    <PlaceholderPanel
+      v-if="codeMiss"
+      glyph="查"
+      title="查無此印"
+      desc="查無此印：請核對識別編碼後再試；本入口不會改用關鍵詞檢索，也不做近似匹配。"
+    />
+
+    <div v-else-if="list.length" class="square__grid">
       <SealCard
         v-for="seal in list"
         :key="seal.stamp_id"
@@ -334,6 +377,10 @@ function onSealSaved() {}
 }
 .square__notice {
   margin-bottom: var(--s-4);
+}
+
+.square__code {
+  margin: var(--s-4) 0;
 }
 
 .square__keyword {

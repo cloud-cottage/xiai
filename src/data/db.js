@@ -37,6 +37,11 @@ import {
   blobstoreInfo
 } from './blobstore.js'
 import { normalizeImagePayload, bytesToDataUrl, dataUrlToBytes, imageSize, sha256Hex, toUint8Array } from './assetmeta.js'
+/* **识别编码（sid / fid）纯函数单点**：`src/utils/codeId.js`（与云函数副本**逐字节相同**）。
+   该文件是**双端同段代码**（不写 `export`，见其文件头「双端可载纪律」）⇒ 前端只能**副作用导入**、
+   API 挂 `globalThis.__XIAI_CODE_ID__`（本文件只取 encode 两枚；decode 由服务层 / 视图自行取）。 */
+import '../utils/codeId.js'
+const { encodeSealCode, encodeFaceCode } = globalThis.__XIAI_CODE_ID__
 /* **身份标识（uid）单点**：`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号。 */
 import { uidOf } from './uid.js'
 /* **CloudBase 讀取面（v1）**：雲端快照的**唯一讀入口**（同步、零網絡）。
@@ -1997,9 +2002,10 @@ export function imageRowByRef(ref) {
   )
 }
 
-/* **採納路徑複用既有 id 派生（既有實現，非第二套）**：印章編號（`XA` ＋ 9 位零填充）與
-   印面編號（`<stampId>-<FACE|EDGE><序>`）的派生真源仍在下方既有函數（本處只把它們導出，
-   **不另寫一份**）。 */
+/* **採納路徑複用既有 id 派生（既有實現，非第二套）**：印章編號（**R-5 起 ＝ `sid`**，
+   5 位 base-22，由 `seal_no` 重算）與印面編號（`<stampId>-<FACE|EDGE><序>`；`stampSerial`
+   對 5 位字母輸入的退化形態**已登記為允許並存**）的派生真源仍在下方既有函數
+   （本處只把它們導出，**不另寫一份**）。 */
 export { nextSealStampId, nextFaceId }
 
 /** 取数组首非空文本（`字` / `号` 等数组的取首值口径）。 */
@@ -2784,7 +2790,12 @@ const SEAL_INSERT_INPUT_FIELDS = [
   'author',
   'transcription',
   'seal_style', // 旧键：风格（与印面级 `face_style` 不是同一口径，R-31）
-  'style'
+  'style',
+  /* **识别编码（口径件 §3｜R-5）**：`seal_no` ＝ 权威自增整数（**本地 dev 形态**允许调用方指定；
+     云端权威形态由云函数 `xiai_counters` 发号、以服务端回包为准）；`sid` ＝ 由 `seal_no`
+     **恒重算**的 5 位字母码（**传入一律不采信**：覆盖并如实回显）。 */
+  'seal_no',
+  'sid'
 ]
 
 /** **印面实体**输入键面（`insertFaceRow` 会写的键；含影像入参）。 */
@@ -2812,7 +2823,10 @@ const FACE_INSERT_INPUT_FIELDS = [
   'sealClass',
   'author',
   'author_person_id', // **印面「作者」＝ 引用型（person-model §4.1）**：选填、填则必须指向既有印人
-  'transcription'
+  'transcription',
+  /* **识别编码（口径件 §3｜R-5）**：`face_no` 权威自增号（本地 dev 可指定）、`fid` 由其**恒重算**。 */
+  'face_no',
+  'fid'
 ]
 
 /** **影像实体**输入键面（`insertImageRow` 会写的键）。 */
@@ -2839,7 +2853,9 @@ const SEAL_COMPOSITE_INPUT_FIELDS = [
   'sealClass',
   'faceImage', // 印面图入参（必填门另判）
   'image',
-  'edgeImage' // 边款图入参（可选）
+  'edgeImage', // 边款图入参（可选）
+  'face_no', // 识别编码（印面号；**本地 dev 形态**可指定，权威号源＝云函数计数器）
+  'fid' // 识别编码（由 `face_no` **恒重算**，传入即覆盖、如实回显）
 ]
 
 /** 从组合入口载荷里**只挑印章实体键**（其余键归印面 / 影像面，由组合写自己消费）。 */
@@ -2925,17 +2941,18 @@ function missingSealFields(clean) {
 /* --------------------------- id 生成（不得与既有冲突，§4.1.1 表下注 ②） --------------------------- */
 
 /**
- * 印章编号口径（本单口径①）：**`XA` + 9 位零填充序号**（例：第 1 枚 ⇒ `XA000000001`）。
- * **既有种子 `XAI-0001`…`XAI-0008` 保留、不得改写**，也不参与新序号的递增。
+ * **识别编码口径（口径件 §3 / §4；R-5 全量重编）**：
+ *   · `seal_no`（权威自增整数）→ `sid`（定长 5 位 base-22）；新印章 `stamp_id` 的值 **＝ `sid`**。
+ *   · **`XA` + 9 位格式器已随 R-5 删除**：`formatSealStampId` 不再存在 ⇒ 仓内**不再产出** `XA…`
+ *     新值（AC-98「已定义未使用」不命中）；旧种子 `XAI-0001`…`XAI-0008` 与旧纯数字形态
+ *     **只读不写**，仅用于识别旧序号参与递增（§8.6 换算）。
  */
+/** 旧口径 `XA` + 9 位（**只用于容错识别旧序号**；不产生新值）。 */
 const SEAL_STAMP_ID_PATTERN = /^XA(\d{9})$/
-/** 旧口径 `XAI-<数字>`：**只用于容错识别**（不参与新序号递增）。 */
+/** 旧口径 `XAI-<数字>`：**只用于容错识别**（不参与新序号的递增）。 */
 const LEGACY_STAMP_ID_PATTERN = /^XAI-(\d+)$/
-
-/** 序号 → 编号：`XA` + 9 位零填充。 */
-function formatSealStampId(serial) {
-  return `XA${String(serial).padStart(9, '0')}`
-}
+/** 旧纯数字形态（云端实测 `stamp_id` ＝ `"1"`…`"79"`）：**只用于容错识别旧序号**。 */
+const LEGACY_NUMERIC_STAMP_ID_PATTERN = /^(\d{1,12})$/
 
 function uniqueId(base, taken) {
   if (!taken.has(base)) return base
@@ -2945,20 +2962,58 @@ function uniqueId(base, taken) {
 }
 
 /**
- * 下一个印章编号：`XA` + 9 位序号，**跳过已占用**。
- * 解析容错：**只把匹配 `^XA\d{9}$` 的既有行当序号参与递增**；
- * 旧 `XAI-000x` 一律不被误解析成序号（它们只是「已占用」集合里的一员）。
+ * **旧序号换算（§8.6 纯函数）**：旧 `stamp_id` ⇒ 参与新号递增的整数序号；认不出 ⇒ `null`。
+ * 覆盖三种历史形态：纯数字 `"N"` / `XA` + 9 位 / `XAI-N`。**不改写任何旧行**，只取序号。
  */
-function nextSealStampId(rows) {
+function legacySealSerialOf(stampId) {
+  const raw = String(stampId === undefined || stampId === null ? '' : stampId).trim()
+  if (!raw) return null
+  const numeric = LEGACY_NUMERIC_STAMP_ID_PATTERN.exec(raw)
+  if (numeric) return Number(numeric[1])
+  const xa = SEAL_STAMP_ID_PATTERN.exec(raw)
+  if (xa) return Number(xa[1])
+  const legacy = LEGACY_STAMP_ID_PATTERN.exec(raw)
+  if (legacy) return Number(legacy[1])
+  return null
+}
+
+/**
+ * 下一个**印章自增号** `seal_no`（≥1）＝「既有 `seal_no`」与「可识别的旧序号」两者的最大值 +1。
+ * 旧行的旧 `stamp_id` **一律不改写**（既有本地行的就地纠正走 bootstrap，不在本单）。
+ */
+function nextSealNo(rows) {
   let max = 0
   rows.forEach((row) => {
-    const matched = SEAL_STAMP_ID_PATTERN.exec(String((row && row.stamp_id) || ''))
-    if (matched) max = Math.max(max, Number(matched[1]))
+    const own = Number(row && row.seal_no)
+    if (Number.isInteger(own) && own > max) max = own
+    const legacy = legacySealSerialOf(row && row.stamp_id)
+    if (legacy !== null && legacy > max) max = legacy
   })
+  return max + 1
+}
+
+/**
+ * 认领一个 `seal_no`：给了就用给的（**本地 dev 形态**），没给就 `nextSealNo`；**撞号顺延**。
+ * 号域越界由调用方按 `encodeSealCode` 的结构化拒绝处理（此处不回绕、不截断）。
+ */
+function reserveSealNo(rows, providedNo) {
   const taken = new Set(rows.map((row) => String((row && row.stamp_id) || '')))
-  let index = max + 1
-  while (taken.has(formatSealStampId(index))) index += 1
-  return formatSealStampId(index)
+  let no = providedNo === null ? nextSealNo(rows) : providedNo
+  let encoded = encodeSealCode(no)
+  while (encoded.ok && taken.has(encoded.code)) {
+    no += 1
+    encoded = encodeSealCode(no)
+  }
+  return no
+}
+
+/**
+ * 下一个印章编号：**＝ `sid`（R-5）** —— 定长 5 位 base-22，由 `seal_no` 重算。
+ * （改前是 `XA` + 9 位序号；`formatSealStampId` 随之删除 ⇒ 仓内不再产出 `XA…` 新值。）
+ */
+function nextSealStampId(rows) {
+  const encoded = encodeSealCode(nextSealNo(rows))
+  return encoded.ok ? encoded.code : ''
 }
 
 /** 印章序号（用于派生印面 / 影像 id 的 `<序号>` 位，编号模板本身不变）。 */
@@ -2979,6 +3034,19 @@ function nextFaceId(stampId, kind, taken) {
   return `fc-${serial}-${letter}${index}`
 }
 
+/**
+ * 下一个**印面自增号** `face_no`（≥1）＝既有 `face_no` 最大值 +1（无既有号 ⇒ 1）。
+ * 旧行没有该键 ⇒ **不参与**递增（旧 `fc-…` 内部 id 与 `faceId` 一律不动，口径件 §3 末条）。
+ */
+function nextFaceNo(rows) {
+  let max = 0
+  rows.forEach((row) => {
+    const own = Number(row && row.face_no)
+    if (Number.isInteger(own) && own > max) max = own
+  })
+  return max + 1
+}
+
 /** 影像 id：`img-<印章序号><f|e>`（同类冲突则追加序号）。 */
 function nextImageId(stampId, kind, taken) {
   const letter = kind === FACE_KIND.EDGE ? 'e' : 'f'
@@ -2986,6 +3054,52 @@ function nextImageId(stampId, kind, taken) {
 }
 
 /* ------------------------------- 内部工具 ------------------------------- */
+
+/**
+ * 取载荷里的**自增号（本地 dev 形态）**。
+ * 缺省 ⇒ `{ok:true, value:null}`（走本地自增）；非法（非整数 / <1 / 非数字）
+ * ⇒ `{ok:false, reason:'INVALID_VALUE', message}`（**结构化拒绝 ＋ 零写入**，判定在任何写入之前）。
+ * @param {unknown} raw 载荷原值
+ * @param {string} label 上屏标签（繁體）
+ */
+function parseProvidedNo(raw, label) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: null }
+  let value = null
+  if (typeof raw === 'number' && Number.isInteger(raw)) value = raw
+  else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) value = Number(raw.trim())
+  if (value === null || value < 1) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message:
+        `${label}必須是 ≥ 1 的整數（本地 dev 形態才可指定；權威號源是雲端計數器）；` +
+        '已結構化拒絕，本次零寫入。'
+    }
+  }
+  return { ok: true, value }
+}
+
+/**
+ * **写之前**一次算清本次要落的印面号（`count` 个；给定首个号则从它起，缺省 `nextFaceNo`）。
+ * 撞号顺延；号域越界 ⇒ 结构化拒绝（`INVALID_VALUE`，**零写入**）。
+ * @returns {{ok:true, nos:number[]}|{ok:false, reason:string, message:string}}
+ */
+function planFaceNumbers(existingRows, providedFirstNo, count) {
+  const taken = new Set(
+    existingRows.map((row) => Number(row && row.face_no)).filter((n) => Number.isInteger(n) && n > 0)
+  )
+  let cursor = providedFirstNo === null ? nextFaceNo(existingRows) : providedFirstNo
+  const nos = []
+  while (nos.length < count) {
+    while (taken.has(cursor)) cursor += 1
+    const encoded = encodeFaceCode(cursor)
+    if (!encoded.ok) return { ok: false, reason: 'INVALID_VALUE', message: encoded.message }
+    nos.push(cursor)
+    taken.add(cursor)
+    cursor += 1
+  }
+  return { ok: true, nos }
+}
 
 function snapshotCollections() {
   return { seals: listSealRows(), faces: listFaceRows(), images: listImageRows() }
@@ -3097,12 +3211,27 @@ export function insertSealRow(actor, payload = {}) {
      —— 该键已不在 `SEAL_INSERT_INPUT_FIELDS`（传进来会先被键白名单门判 `INVALID_FIELD`）。
      引用的值域门（`personReferenceDenial`）由**印面级入口 / 组合入口**在写前判。 */
   const rows = listSealRows()
-  const stampId = nextSealStampId(rows)
+  /* **识别编码（口径件 §3；R-5）** —— `stamp_id` 的值 **＝ `sid`**（5 位字母）：
+     · `seal_no`：**本地 dev 形态**允许调用方指定（**dev 降级**，返回里 `number_source` 如实标注；
+       云端权威形态由云函数 `xiai_counters` 原子发号、以服务端回包为准，前端不得自证权威）；
+       未指定 ⇒ 本地自增 `nextSealNo`；**撞号顺延**。
+     · `sid`：**恒由 `seal_no` 重算** —— 载荷里的 `sid` 一律**不采信**（覆盖并如实回显）。
+     · 号域越界 ⇒ **结构化拒绝 ＋ 零写入**（判定在 `saveSealRows` 之前）。 */
+  const providedSealNo = parseProvidedNo(payload.seal_no, '印章自增號')
+  if (!providedSealNo.ok) return providedSealNo
+  const sealNo = reserveSealNo(rows, providedSealNo.value)
+  const encodedSeal = encodeSealCode(sealNo)
+  if (!encodedSeal.ok) return { ok: false, reason: 'INVALID_VALUE', message: encodedSeal.message }
+  const stampId = encodedSeal.code
+  const numberSource = providedSealNo.value === null ? 'LOCAL_AUTO' : 'DEV_CLIENT'
+  const providedSid = pickText(payload, ['sid'])
   const at = nowIso()
   const row = {
+    seal_no: sealNo, // 识别编码：权威自增号（R-5）
+    sid: stampId, // 识别编码：由 `seal_no` **恒重算**（不独立分配）
     sealGroupId: `g-${stampSerial(stampId)}`,
-    stamp_id: stampId, // 兼容别名（既落盘视图按它定位），勿删
-    id: stampId, // §4.1.1 规范字段名
+    stamp_id: stampId, // **R-5：值 ＝ `sid`**（旧 `XA…` / 纯数字形态不再产生）
+    id: stampId, // §4.1.1 规范字段名（R-5 起 ＝ `sid`）
     seal_name: clean.seal_name, // 印文（**可空**；空则对外显示「佚名」）
     name: clean.seal_name, // 兼容别名（＝印文）
     transcription: clean.transcription,
@@ -3124,7 +3253,14 @@ export function insertSealRow(actor, payload = {}) {
     updated_at: at
   }
   saveSealRows([...rows, row])
-  return { ok: true, row, stampId, message: `已新增印章《${sealDisplayName(clean)}》（${stampId}）` }
+  return {
+    ok: true,
+    row,
+    stampId,
+    /* **如实回显识别编码**（口径件 §3：调用方传的 `sid` 一律被重算值覆盖）。 */
+    code: { seal_no: sealNo, sid: stampId, number_source: numberSource, provided_sid: providedSid },
+    message: `已新增印章《${sealDisplayName(clean)}》（${stampId}）`
+  }
 }
 
 /* --------------------------- ② 上传印面图（管理员） --------------------------- */
@@ -3371,11 +3507,22 @@ export async function insertFaceRow(actor, payload = {}) {
 
   const faces = listFaceRows()
   const faceId = uniqueId(pickText(payload, ['id']) || nextFaceId(sealId, kind, new Set(faces.map((row) => row.id))), new Set(faces.map((row) => row.id)))
+  /* **识别编码（口径件 §3；印面侧）**：`face_no` 本地 dev 可指定（dev 降级、撞号顺延），
+     `fid` **恒由 `face_no` 重算**（载荷里的 `fid` 不采信）；号域越界 ⇒ 零写入。 */
+  const providedFaceNo = parseProvidedNo(payload.face_no, '印面自增號')
+  if (!providedFaceNo.ok) return providedFaceNo
+  const plannedFace = planFaceNumbers(faces, providedFaceNo.value, 1)
+  if (!plannedFace.ok) return plannedFace
+  const faceNo = plannedFace.nos[0]
+  const encodedFace = encodeFaceCode(faceNo)
+  const faceNumberSource = providedFaceNo.value === null ? 'LOCAL_AUTO' : 'DEV_CLIENT'
   const at = nowIso()
   const row = {
     id: faceId,
     sealId,
     stamp_id: sealId, // 兼容别名，勿删
+    face_no: faceNo, // 识别编码：印面自增号（R-5）
+    fid: encodedFace.code, // 识别编码：由 `face_no` 恒重算
     kind,
     face_image_id: faceImageId || null,
     /* **R-32 / AC-67**：新建印面**不写印面级 `material` 键**（材质真源在印章行 ⇒
@@ -3402,7 +3549,14 @@ export async function insertFaceRow(actor, payload = {}) {
     updated_at: at
   }
   saveFaceRows([...faces, row])
-  return { ok: true, deduped: false, row, message: `已新增${kind === FACE_KIND.EDGE ? '邊款' : '印面'}（${faceId}）` }
+  return {
+    ok: true,
+    deduped: false,
+    row,
+    /* **如实回显识别编码**（`fid` 恒由 `face_no` 重算，传入值一律被覆盖）。 */
+    code: { face_no: faceNo, fid: encodedFace.code, number_source: faceNumberSource },
+    message: `已新增${kind === FACE_KIND.EDGE ? '邊款' : '印面'}（${faceId}）`
+  }
 }
 
 /* ============================================================================
@@ -3613,6 +3767,14 @@ export async function createSealWithFaceRows(actor, payload = {}) {
     edgeInput = payload.edgeImage
   }
 
+  /* **识别编码（口径件 §3；印面侧）**：**写之前**一次算清本次要落的 `face_no`
+     （`face_no` 本地 dev 可指定 ⇒ dev 降级；撞号顺延、号域越界 ⇒ **零写入**）。
+     权威形态下号由云函数计数器发号、以服务端回包为准。 */
+  const providedFaceNo = parseProvidedNo(payload.face_no, '印面自增號')
+  if (!providedFaceNo.ok) return providedFaceNo
+  const plannedFaceNos = planFaceNumbers(listFaceRows(), providedFaceNo.value, edgeInput ? 2 : 1)
+  if (!plannedFaceNos.ok) return plannedFaceNos
+
   /* 防重（印章级）：语义等价的整枚印章不重复新增。 */
   const equivalent = findEquivalentSeal(clean, faceImage.sha256)
   if (equivalent) {
@@ -3652,11 +3814,13 @@ export async function createSealWithFaceRows(actor, payload = {}) {
     }
 
     const at = nowIso()
-    const writeFace = (id, kind, faceImageId, edgeImageIds) => ({
+    const writeFace = (id, kind, faceImageId, edgeImageIds, faceNo) => ({
       id,
       sealId: stampId,
       stamp_id: stampId,
       kind,
+      face_no: faceNo, // 识别编码：印面自增号（R-5；由写前规划给定）
+      fid: encodeFaceCode(faceNo).code, // 识别编码：由 `face_no` **恒重算**
       face_image_id: faceImageId,
       /* **R-32 / AC-67（材质移级）**：新建印面**不写**印面级 `material` 键（真源＝印章行，
          见上面 `insertSealRow` 落下的 `material`）—— 新建行**逐键输出无 `material`**；
@@ -3677,9 +3841,9 @@ export async function createSealWithFaceRows(actor, payload = {}) {
       created_at: at,
       updated_at: at
     })
-    const faceRows = [writeFace(faceId, FACE_KIND.FACE, faceImageRow.row.id, [])]
+    const faceRows = [writeFace(faceId, FACE_KIND.FACE, faceImageRow.row.id, [], plannedFaceNos.nos[0])]
     if (edgeImageRow) {
-      faceRows.push(writeFace(edgeFaceId, FACE_KIND.EDGE, null, [edgeImageRow.row.id]))
+      faceRows.push(writeFace(edgeFaceId, FACE_KIND.EDGE, null, [edgeImageRow.row.id], plannedFaceNos.nos[1]))
     }
     saveFaceRows([...listFaceRows(), ...faceRows])
 
@@ -3694,6 +3858,10 @@ export async function createSealWithFaceRows(actor, payload = {}) {
       stampId,
       faceId,
       edgeFaceId: edgeFaceId || '',
+      /* **如实回显识别编码**：印章号（重算值）＋ 逐印面号（`fid` 恒由 `face_no` 重算）。 */
+      code: Object.assign({}, sealWritten.code, {
+        faces: faceRows.map((row) => ({ id: row.id, face_no: row.face_no, fid: row.fid }))
+      }),
       message: `已新增印章《${sealDisplayName(clean)}》（${stampId}）與 ${faceRows.length} 個印面`
     }
   } catch (err) {
