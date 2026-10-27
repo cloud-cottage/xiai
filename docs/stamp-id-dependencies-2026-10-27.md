@@ -1,0 +1,298 @@
+# `stamp_id` 依赖点清单（本单 grep，2026-10-27）
+
+分类口径：路由键 / 印面 id 派生 / 勘误 join 键 / 导出 / 其他（按行内容启发式，人工复核用）。
+
+- `src/utils/file.js:118` [其他] `印章編號：${seal.stamp_id}`,
+- `src/components/SealCard.vue:21` [其他] const face = computed(() => seals.primaryFaceOf(props.seal.stamp_id))
+- `src/components/SealCard.vue:117` [其他] watch(() => props.seal.stamp_id, loadThumb)
+- `src/components/SealCard.vue:123` [路由键] <router-link class="seal-card__thumb" :to="{ name: 'seal-detail', params: { id: seal.stamp_id } }">
+- `src/components/SealCard.vue:148` [路由键] <router-link :to="{ name: 'seal-detail', params: { id: seal.stamp_id } }">
+- `src/components/SealCard.vue:164` [其他] <dd>{{ seal.stamp_id }}</dd>
+- `src/components/SealCard.vue:170` [路由键] <router-link class="btn btn--ghost" :to="{ name: 'seal-detail', params: { id: seal.stamp_id } }">
+- `src/components/FaceFixedAttributesDialog.vue:37` [其他] const sealId = props.face.sealId || props.face.stamp_id || ''
+- `src/components/FaceFixedAttributesDialog.vue:51` [其他] const sealId = props.face.sealId || props.face.stamp_id || ''
+- `src/data/db.js:127` [其他] if (!seal || !seal.stamp_id) return
+- `src/data/db.js:131` [其他] const primary = primaryFaceIn(next.filter((row) => row.sealId === seal.stamp_id))
+- `src/data/db.js:134` [其他] const edgeIndex = firstIndexByKind(seal.stamp_id, FACE_KIND.EDGE)
+- `src/data/db.js:299` [其他] * 行身份键（覆盖层的**唯一配对依据**）：`_id` 优先 ⇒ `id` ⇒ `stamp_id`。
+- `src/data/db.js:306` [其他] const raw = firstPresent(row._id, row.id, row.stamp_id)
+- `src/data/db.js:415` [其他] /** 读印面并回填兼容别名（`stamp_id` ＝ `sealId`）。 */
+- `src/data/db.js:419` [其他] stamp_id: row.sealId || row.stamp_id || '',
+- `src/data/db.js:564` [其他] - `downloaded`（**不转**）：`id` / `user_id` / `stamp_id` / `session_key` 是 ASCII 标识，
+- `src/data/db.js:566` [其他] - `images`（**不转**）：`id` / `stamp_id` / `kind` / `sha256` / `bytes` / 尺寸 / `color_mode`
+- `src/data/db.js:708` [其他] { collection: 'downloaded', converted: false, reason: '全爲 ASCII 標識與數字（id / user_id / stamp_id / session_key / cost）⇒ 無上屏 CJK' },
+- `src/data/db.js:709` [其他] { collection: 'images', converted: false, reason: '全爲 ASCII 元數據（id / stamp_id / kind / sha256 / bytes / 尺寸 / color_mode）⇒ 無上屏 CJK' },
+- `src/data/db.js:859` [其他] id: String(row.id || row.stamp_id || ''),
+- `src/data/db.js:873` [其他] const id = String(row.id || row.stamp_id || '')
+- `src/data/db.js:889` [其他] const id = String(row.id || row.stamp_id || '')
+- `src/data/db.js:905` [其他] id: String(row.id || row.stamp_id || ''),
+- `src/data/db.js:1202` [其他] const id = String(row.stamp_id || row.sealId || row.id || '')
+- `src/data/db.js:1425` [其他] * @param {string} assetId 影像 id（也接受 `stamp_id` 形态的唯一匹配）
+- `src/data/db.js:1505` [其他] stamp_id: row.stamp_id || '',
+- `src/data/db.js:1616` [其他] ? listFaceRows().filter((row) => (row.sealId || row.stamp_id) === (sealRow.stamp_id || sealRow.id))
+- `src/data/db.js:2370` [其他] ? { ...row, ...clean, stamp_id: row.sealId, updated_at: new Date().toISOString() }
+- `src/data/db.js:2384` [其他] * @returns 更新后的主印面行（带 `stamp_id` 兼容别名）。
+- `src/data/db.js:2433` [其他] * @param {string} stampId 目标印章编号（`stamp_id` / `id` 同值）
+- `src/data/db.js:2455` [其他] const index = rows.findIndex((row) => String((row && (row.stamp_id || row.id)) || '') === id)
+- `src/data/db.js:2474` [其他] stampId: String(current.stamp_id || current.id || id),
+- `src/data/db.js:2487` [其他] stampId: String(updated.stamp_id || updated.id || id),
+- `src/data/db.js:2803` [其他] 'sealId', // 所属印章三写兼容：sealId / stampId / stamp_id
+- `src/data/db.js:2805` [其他] 'stamp_id',
+- `src/data/db.js:2836` [其他] 'stamp_id',
+- `src/data/db.js:2945` [其他] *   · `seal_no`（权威自增整数）→ `sid`（定长 5 位 base-22）；新印章 `stamp_id` 的值 **＝ `sid`**。
+- `src/data/db.js:2954` [其他] /** 旧纯数字形态（云端实测 `stamp_id` ＝ `"1"`…`"79"`）：**只用于容错识别旧序号**。 */
+- `src/data/db.js:2965` [其他] * **旧序号换算（§8.6 纯函数）**：旧 `stamp_id` ⇒ 参与新号递增的整数序号；认不出 ⇒ `null`。
+- `src/data/db.js:2982` [其他] * 旧行的旧 `stamp_id` **一律不改写**（既有本地行的就地纠正走 bootstrap，不在本单）。
+- `src/data/db.js:2989` [其他] const legacy = legacySealSerialOf(row && row.stamp_id)
+- `src/data/db.js:3000` [其他] const taken = new Set(rows.map((row) => String((row && row.stamp_id) || '')))
+- `src/data/db.js:3145` [其他] (row.sealId || row.stamp_id) === sealId &&
+- `src/data/db.js:3165` [其他] (row.sealId || row.stamp_id) === seal.stamp_id &&
+- `src/data/db.js:3214` [其他] /* **识别编码（口径件 §3；R-5）** —— `stamp_id` 的值 **＝ `sid`**（5 位字母）：
+- `src/data/db.js:3233` [其他] stamp_id: stampId, // **R-5：值 ＝ `sid`**（旧 `XA…` / 纯数字形态不再产生）
+- `src/data/db.js:3285` [其他] const sealId = pickText(payload, ['sealId', 'stampId', 'stamp_id'])
+- `src/data/db.js:3295` [其他] const existing = images.find((row) => row.stamp_id === sealId && row.sha256 === image.sha256 && row.kind === kind)
+- `src/data/db.js:3338` [其他] stamp_id: sealId, // 兼容别名（既落盘服务按它定位），勿删
+- `src/data/db.js:3412` [其他] const sealId = pickText(payload, ['sealId', 'stampId', 'stamp_id'])
+- `src/data/db.js:3417` [其他] const sealRow = listSealRows().find((row) => row.stamp_id === sealId)
+- `src/data/db.js:3453` [其他] listFaceRows().filter((row) => (row.sealId || row.stamp_id) === sealId)
+- `src/data/db.js:3523` [其他] stamp_id: sealId, // 兼容别名，勿删
+- `src/data/db.js:3615` [其他] const sealId = target.sealId || target.stamp_id || ''
+- `src/data/db.js:3796` [其他] const stampId = sealWritten.row.stamp_id
+- `src/data/db.js:3820` [其他] stamp_id: stampId,
+- `src/data/db.js:3857` [其他] images: images.filter((row) => row.stamp_id === stampId),
+- `src/data/seed.js:9` [其他] * services 与视图在用的 `stamp_id` 别名（＝`sealId`），**不要删除该别名**。
+- `src/data/seed.js:131` [其他] stamp_id: 'XAI-0001',
+- `src/data/seed.js:144` [其他] stamp_id: 'XAI-0002',
+- `src/data/seed.js:157` [其他] stamp_id: 'XAI-0003',
+- `src/data/seed.js:170` [其他] stamp_id: 'XAI-0004',
+- `src/data/seed.js:183` [其他] stamp_id: 'XAI-0005',
+- `src/data/seed.js:196` [其他] stamp_id: 'XAI-0006',
+- `src/data/seed.js:209` [其他] stamp_id: 'XAI-0007',
+- `src/data/seed.js:222` [其他] stamp_id: 'XAI-0008',
+- `src/data/seed.js:247` [印面 id 派生] { id: 'img-0001f', stamp_id: 'XAI-0001', kind: 'FACE', sha256: '3d1f0b2a6c7e4915b8a2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718', bytes: 184320, widt
+- `src/data/seed.js:248` [印面 id 派生] { id: 'img-0001g', stamp_id: 'XAI-0001', kind: 'FACE', sha256: '5c6d7e8f90a1b2c3d4e5f60718293a4b3d1f0b2a6c7e4915b8a2c3d4e5f60718e', bytes: 141312, wid
+- `src/data/seed.js:249` [印面 id 派生] { id: 'img-0001e', stamp_id: 'XAI-0001', kind: 'EDGE', sha256: 'a1b2c3d4e5f60718293a4b5c6d7e8f903d1f0b2a6c7e4915b8a2c3d4e5f60718', bytes: 210112, widt
+- `src/data/seed.js:251` [印面 id 派生] { id: 'img-0002f', stamp_id: 'XAI-0002', kind: 'FACE', sha256: 'b2c3d4e5f60718293a4b5c6d7e8f90a13d1f0b2a6c7e4915b8a2c3d4e5f607182', bytes: 176540, wid
+- `src/data/seed.js:253` [印面 id 派生] { id: 'img-0003f', stamp_id: 'XAI-0003', kind: 'FACE', sha256: 'c3d4e5f60718293a4b5c6d7e8f90a1b23d1f0b2a6c7e4915b8a2c3d4e5f6071829', bytes: 158900, wi
+- `src/data/seed.js:255` [印面 id 派生] { id: 'img-0004f', stamp_id: 'XAI-0004', kind: 'FACE', sha256: 'd4e5f60718293a4b5c6d7e8f90a1b2c33d1f0b2a6c7e4915b8a2c3d4e5f6071829a', bytes: 199872, w
+- `src/data/seed.js:256` [印面 id 派生] { id: 'img-0004e', stamp_id: 'XAI-0004', kind: 'EDGE', sha256: 'e5f60718293a4b5c6d7e8f90a1b2c3d43d1f0b2a6c7e4915b8a2c3d4e5f6071829ab', bytes: 245760, 
+- `src/data/seed.js:258` [印面 id 派生] { id: 'img-0005f', stamp_id: 'XAI-0005', kind: 'FACE', sha256: 'f60718293a4b5c6d7e8f90a1b2c3d4e53d1f0b2a6c7e4915b8a2c3d4e5f6071829abc', bytes: 172032,
+- `src/data/seed.js:259` [印面 id 派生] { id: 'img-0005e', stamp_id: 'XAI-0005', kind: 'EDGE', sha256: '0718293a4b5c6d7e8f90a1b2c3d4e5f63d1f0b2a6c7e4915b8a2c3d4e5f6071829abcd', bytes: 233984
+- `src/data/seed.js:261` [印面 id 派生] { id: 'img-0006f', stamp_id: 'XAI-0006', kind: 'FACE', sha256: '18293a4b5c6d7e8f90a1b2c3d4e5f6073d1f0b2a6c7e4915b8a2c3d4e5f60718a', bytes: 165376, wid
+- `src/data/seed.js:263` [印面 id 派生] { id: 'img-0007f', stamp_id: 'XAI-0007', kind: 'FACE', sha256: '293a4b5c6d7e8f90a1b2c3d4e5f607183d1f0b2a6c7e4915b8a2c3d4e5f60718b', bytes: 289792, wid
+- `src/data/seed.js:264` [印面 id 派生] { id: 'img-0007e', stamp_id: 'XAI-0007', kind: 'EDGE', sha256: '3a4b5c6d7e8f90a1b2c3d4e5f60718293d1f0b2a6c7e4915b8a2c3d4e5f60718c', bytes: 301056, wid
+- `src/data/seed.js:266` [印面 id 派生] { id: 'img-0008f', stamp_id: 'XAI-0008', kind: 'FACE', sha256: '4b5c6d7e8f90a1b2c3d4e5f60718293a3d1f0b2a6c7e4915b8a2c3d4e5f60718d', bytes: 168960, wid
+- `src/data/seed.js:469` [其他] stamp_id: sealId, // 兼容别名：等同于 sealId，供既落盘 services / 视图按原命名读取
+- `src/data/cloudbase.js:532` [其他] * `stamp_id` / `id` 一律字符串；文本 NULL ⇒ `''`；`shape` / `author` 缺列 ⇒ `''`（**不臆造**）。
+- `src/data/cloudbase.js:536` [其他] const stampId = text(firstOf(row.stamp_id, row.id))
+- `src/data/cloudbase.js:540` [其他] stamp_id: stampId,
+- `src/data/cloudbase.js:565` [其他] const sealId = text(firstOf(row.sealId, row.stamp_id))
+- `src/data/cloudbase.js:572` [其他] stamp_id: sealId,
+- `src/data/cloudbase.js:597` [其他] const stampId = text(firstOf(row.stamp_id, row.sealId))
+- `src/data/cloudbase.js:603` [其他] stamp_id: stampId,
+- `src/data/cloudbase.js:637` [其他] *   · `faceId` / `sealId` / `stamp_id` 三个归属键补别名（同值）；
+- `src/data/cloudbase.js:646` [其他] const sealId = text(firstOf(row.sealId, row.seal_id, row.stamp_id))
+- `src/data/cloudbase.js:655` [其他] stamp_id: text(firstOf(row.stamp_id, sealId)),
+- `src/data/cloudbase.js:672` [其他] *   · `faceId` / `sealId` / `stamp_id` 三个归属键补别名（同值）；
+- `src/data/cloudbase.js:680` [其他] const sealId = text(firstOf(row.sealId, row.seal_id, row.stamp_id))
+- `src/data/cloudbase.js:693` [其他] stamp_id: text(firstOf(row.stamp_id, sealId)),
+- `src/data/storage.js:142` [其他] * `_id = 'cp-<correction_id>'` ＋ `{correction_id, faceId, sealId, stamp_id, field, field_label,
+- `src/data/storage.js:155` [其他] * 行 ＝ **本人**的采信行（`{_id, faceId, sealId, stamp_id, field, value, user_id,
+- `src/data/storage.js:167` [其他] * stamp_id, field, value, submits, endorses, status, submitter_uids, updated_at,
+- `src/views/MyCorrectionsView.vue:701` [勘误 join 键] return row.sealId || row.stamp_id
+- `src/views/SquareView.vue:63` [其他] · 命中 ⇒ 直達該印章詳情（`stamp_id` 精確等值路由；R-6：舊碼不受理、不加兼容分支）。
+- `src/views/SquareView.vue:73` [路由键] router.push({ name: 'seal-detail', params: { id: found.seal.stamp_id } })
+- `src/views/SquareView.vue:139` [其他] return points.quoteDownload(pendingSeal.value.stamp_id, points.downloadSessionKey())
+- `src/views/SquareView.vue:174` [路由键] router.push({ name: 'login', query: { redirect: `/seal/${seal.stamp_id}` } })
+- `src/views/SquareView.vue:191` [其他] const result = points.chargeSealDownload(sealRow.stamp_id, points.downloadSessionKey(), sealRow.seal_name)
+- `src/views/SquareView.vue:198` [其他] const out = await imageFaces.downloadOriginalFor(sealRow.stamp_id)
+- `src/views/SquareView.vue:224` [路由键] router.push({ name: 'login', query: { redirect: `/seal/${seal.stamp_id}` } })
+- `src/views/SquareView.vue:315` [其他] :key="seal.stamp_id"
+- `src/views/SquareView.vue:358` [其他] :seal-id="saveTarget.stamp_id"
+- `src/views/SealDetailView.vue:35` [其他] const gallery = computed(() => (seal.value ? photoService.listPhotosByStamp(seal.value.stamp_id) : []))
+- `src/views/SealDetailView.vue:278` [其他] result = seals.updateSealAttributes(null, seal.value.stamp_id, patch)
+- `src/views/SealDetailView.vue:395` [其他] const sealId = seal.value ? seal.value.stamp_id : face.sealId || ''
+- `src/views/SealDetailView.vue:479` [其他] const sealId = seal.value ? seal.value.stamp_id : face.sealId || ''
+- `src/views/SealDetailView.vue:513` [其他] return points.quoteDownload(seal.value.stamp_id, points.downloadSessionKey())
+- `src/views/SealDetailView.vue:742` [其他] const result = points.chargeSealDownload(sealRow.stamp_id, points.downloadSessionKey(), sealRow.seal_name)
+- `src/views/SealDetailView.vue:761` [其他] const out = await imageFaces.downloadOriginalFor(sealRow.stamp_id)
+- `src/views/SealDetailView.vue:829` [其他] sealId: seal.value.stamp_id,
+- `src/views/SealDetailView.vue:879` [其他] stampId: seal.value.stamp_id,
+- `src/views/SealDetailView.vue:1270` [其他] <span class="detail__id">藏品編號 {{ seal.stamp_id }}</span>
+- `src/views/SealDetailView.vue:1808` [其他] 藏品編號 {{ seal.stamp_id }}。形制與材質都是印章級固定屬性（整枚印章各一個）：
+- `src/views/SealDetailView.vue:2113` [其他] :seal-id="seal.stamp_id"
+- `src/views/MyPhotosView.vue:97` [其他] if (sealOptions.value.length > 0) stampId.value = sealOptions.value[0].stamp_id
+- `src/views/MyPhotosView.vue:408` [其他] <option v-for="item in sealOptions" :key="item.stamp_id" :value="item.stamp_id">
+- `src/views/MyPhotosView.vue:409` [其他] {{ corrections.resolveSealDisplayName(item) }}（{{ item.stamp_id }}）
+- `src/views/MyPhotosView.vue:501` [路由键] :to="{ name: 'seal-detail', params: { id: row.stamp_id } }"
+- `src/views/MyPhotosView.vue:518` [其他] {{ sealOf(row.stamp_id) ? corrections.resolveSealDisplayName(sealOf(row.stamp_id)) : row.stamp_id }}
+- `src/views/MyPhotosView.vue:520` [其他] <p class="photo-card__meta">{{ row.stamp_id }}</p>
+- `src/services/sealExport.js:361` [导出] push([boldCell(`璽愛 · 印章數據 · ${seal.stamp_id} · ${resolveSealDisplayName(seal)}`)])
+- `src/services/sealExport.js:362` [导出] push([boldCell('藏品編號'), textCell(seal.stamp_id)])
+- `src/services/sealExport.js:464` [导出] * @param {{stamp_id?:string, seal_name?:string}|null} seal
+- `src/services/sealExport.js:468` [导出] const id = sanitizeFilenamePart((seal && seal.stamp_id) || '') || '未編號'
+- `src/services/sealExport.js:502` [导出] const faces = listFacesOf(seal.stamp_id)
+- `src/services/sealExport.js:503` [导出] const photos = listPhotosByStamp(seal.stamp_id)
+- `src/services/endorsements.js:256` [其他] stamp_id: targetSeal,
+- `src/services/points.js:63` [其他] row.stamp_id === stampId &&
+- `src/services/points.js:166` [其他] (row) => row.user_id === user.id && row.stamp_id === stampId && row.session_key === sessionKey
+- `src/services/points.js:194` [其他] stamp_id: stampId,
+- `src/services/photos.js:56` [其他] return listPhotoRows().filter((row) => row.stamp_id === stampId).length
+- `src/services/photos.js:128` [其他] .filter((row) => row.stamp_id === stampId)
+- `src/services/photos.js:207` [其他] stamp_id: stampId, // 兼容别名：＝sealId，勿删
+- `src/services/drive.js:120` [其他] const seal = listSealRows().find((row) => row.id === id || row.stamp_id === id) || null
+- `src/services/drive.js:122` [其他] const stampId = seal.id || seal.stamp_id || id
+- `src/services/drive.js:123` [其他] const faces = listFaceRows().filter((row) => (row.sealId || row.stamp_id) === stampId)
+- `src/services/seals.js:19` [其他] * `stamp_id` 别名（＝`sealId`）；印章行保留 `stamp_id`，并另给规范字段名
+- `src/services/seals.js:175` [其他] const sealId = row.sealId || row.stamp_id || ''
+- `src/services/seals.js:179` [其他] ? listSealRows().find((item) => String(item.stamp_id || item.id || '') === sealId) || null
+- `src/services/seals.js:185` [其他] stamp_id: sealId, // 兼容别名：＝sealId，勿删
+- `src/services/seals.js:206` [其他] .filter((row) => (row.sealId || row.stamp_id) === sealId)
+- `src/services/seals.js:232` [其他] const sealKey = row.sealId || row.stamp_id
+- `src/services/seals.js:234` [其他] (item) => (item.sealId || item.stamp_id) === sealKey && item.kind === row.kind
+- `src/services/seals.js:243` [其他] rows.filter((item) => (item.sealId || item.stamp_id) === sealId)
+- `src/services/seals.js:297` [其他] const faces = listFacesOf(row.stamp_id)
+- `src/services/seals.js:327` [其他] id: row.stamp_id, // §4.1.1 规范字段名（印章主键）
+- `src/services/seals.js:343` [其他] images: listImageRows().filter((img) => img.stamp_id === row.stamp_id),
+- `src/services/seals.js:381` [其他] seal.stamp_id,
+- `src/services/seals.js:392` [其他] return listSeals().find((seal) => seal.stamp_id === stampId) || null
+- `src/services/seals.js:400` [其他] * · **匹配**：decode ⇒ 按 `no` **精確等值**匹配（`seal_no` / `face_no`，或等值 `stamp_id` / `fid`）。
+- `src/services/seals.js:424` [其他] const sealId = String((face && (face.stamp_id || face.sealId)) || '')
+- `src/services/seals.js:425` [其他] const seal = listSealRows().find((row) => String((row && row.stamp_id) || '') === sealId) || null
+- `src/services/seals.js:431` [其他] (row) => Number(row && row.seal_no) === decoded.no || String((row && row.stamp_id) || '') === input
+- `src/services/seals.js:438` [其他] return listImageRows().filter((img) => img.stamp_id === stampId)
+- `src/services/seals.js:462` [其他] const primary = primaryFaceOf(target.stamp_id)
+- `src/services/seals.js:592` [其他] *   - 成功：`seal` / `face` 为视图模型（含 `stamp_id` / `id` / `faces` / `faceImage`），
+- `src/services/seals.js:615` [其他] const stampId = written.stampId || (written.seal && (written.seal.stamp_id || written.seal.id)) || ''
+- `src/services/seals.js:1880` [其他] stamp_id: stampId, // 兼容別名（既落盤視圖按它定位），勿刪
+- `src/services/seals.js:1914` [其他] stamp_id: stampId, // 兼容別名，勿刪
+- `src/services/corrections.js:82` [勘误 join 键] `{ _id:'cs-<faceId>-<field>-<value 的 sha256 前 16 位>', faceId, sealId, stamp_id, field,
+- `src/services/corrections.js:135` [其他] stamp_id: normalizedSeal,
+- `src/services/corrections.js:351` [勘误 join 键] /** 归属键：新数据用 `sealId`，旧数据只有 `stamp_id`（两者同值）。 */
+- `src/services/corrections.js:353` [勘误 join 键] return row.sealId || row.stamp_id || ''
+- `src/services/corrections.js:558` [勘误 join 键] stamp_id: face.sealId, // 兼容别名：＝sealId，勿删
+- `src/services/corrections.js:632` [其他] const face = target && target.kind ? target : target ? primaryFaceOf(target.stamp_id) : null
+- `src/services/corrections.js:671` [其他] *   · 印章（视图模型 / 行，带 `stamp_id`）/ 雲盤簡報（带 `seal_id`）/ 照片行（带 `stamp_id`）
+- `src/services/corrections.js:713` [勘误 join 键] const sealId = String(row.sealId || row.stamp_id || row.seal_id || '').trim()
+- `src/services/corrections.js:801` [其他] 'stamp_id',
+- `src/services/corrections.js:845` [勘误 join 键] const stamp = String((row && row.stamp_id) || sealId || '')
+- `src/services/corrections.js:850` [其他] stamp_id: stamp,
+- `src/services/corrections.js:885` [勘误 join 键] stamp_id: String(source.stamp_id || source.sealId || ''),
+- `src/services/corrections.js:1121` [勘误 join 键] /** 印面归属键：优先 `faceId`；旧数据只有印章编号时回落 `sealId` / `stamp_id`。 */
+- `cloudfunctions/xiai-user-token/index.js:350` [其他] * `{ _id, faceId, sealId, stamp_id, field, value, submits, endorses, status, submitter_uids,
+- `cloudfunctions/xiai-user-token/lib/ops.js:26` [其他] *   · **值级公开摘要行（本单合并面）**：`{ faceId, sealId, stamp_id, field, value, submits,
+- `cloudfunctions/xiai-user-token/lib/ops.js:675` [其他] 'stamp_id',
+- `cloudfunctions/xiai-user-token/lib/ops.js:986` [其他] stamp_id: normalizedSeal,
+- `cloudfunctions/xiai-user-token/lib/ops.js:1268` [其他] * ⚠️ **已退出采纳主路**：R-5 起新印章 `stamp_id` ＝ `sid`（`issueCodeNumber` 发号 ＋
+- `cloudfunctions/xiai-user-token/lib/ops.js:1275` [其他] const matched = new RegExp(`^${SEAL_STAMP_ID_PREFIX}(\\d{9})$`).exec(text(row && row.stamp_id))
+- `cloudfunctions/xiai-user-token/lib/ops.js:1278` [其他] const taken = new Set((Array.isArray(rows) ? rows : []).map((row) => text(row && row.stamp_id)))
+- `cloudfunctions/xiai-user-token/lib/ops.js:1607` [其他] sealId: text(row.sealId || row.stamp_id),
+- `cloudfunctions/xiai-user-token/lib/ops.js:1608` [其他] stamp_id: text(row.stamp_id || row.sealId),
+- `cloudfunctions/xiai-user-token/lib/ops.js:1697` [其他] stamp_id: sealId || stampId, // 兼容别名：＝sealId，勿删
+- `cloudfunctions/xiai-user-token/lib/ops.js:1751` [其他] *   `{ _id, faceId, sealId, stamp_id, field, value, user_id, identity_source:'SERVER_TOKEN', created_at }`
+- `cloudfunctions/xiai-user-token/lib/ops.js:1754` [其他] *   `{ _id:`cs-<faceId>-<field>-<value 的 sha256 前 16 位>`, faceId, sealId, stamp_id, field, value,
+- `cloudfunctions/xiai-user-token/lib/ops.js:1821` [其他] stamp_id: normalizedSeal,
+- `cloudfunctions/xiai-user-token/lib/ops.js:2681` [其他] `sid` ＝ `encodeSealCode(seal_no)`；`stamp_id` 的值 **＝ `sid`**（旧 `XA…` / 纯数字形态不再产生）。
+- `cloudfunctions/xiai-user-token/lib/ops.js:2698` [其他] sid: stampId, // 识别编码：由 `seal_no` 恒重算（＝ `stamp_id`，R-5）
+- `cloudfunctions/xiai-user-token/lib/ops.js:2700` [其他] stamp_id: stampId, // **R-5：值 ＝ `sid`**
+- `cloudfunctions/xiai-user-token/lib/ops.js:2741` [其他] stamp_id: stampId,
+- `cloudfunctions/xiai-user-token/lib/ops.js:2772` [其他] *   · **改写面恰五个键族**：`xiai_seals.stamp_id`（＋新增 `seal_no` / `sid`）、
+- `cloudfunctions/xiai-user-token/lib/ops.js:2773` [其他] *     `xiai_faces.stamp_id` / `sealId`（＋新增 `face_no` / `fid`）、`xiai_images.stamp_id`、
+- `cloudfunctions/xiai-user-token/lib/ops.js:2774` [其他] *     `xiai_corrections.sealId` / `stamp_id`、`xiai_corrections_public.sealId`。
+- `cloudfunctions/xiai-user-token/lib/ops.js:2776` [其他] *   · **发号顺序（一经分派即固定）**：印章按旧 `stamp_id` 数值升序（`"1"`…`"79"` ⇒ `seal_no` 1…79）；
+- `cloudfunctions/xiai-user-token/lib/ops.js:2782` [其他] *     mapping:{ seals:[{old_stamp_id,seal_no,sid}], faces:[{face_id,old_seal,face_no,fid}] },
+- `cloudfunctions/xiai-user-token/lib/ops.js:2867` [其他] const decoded = codeId.decodeSealCode(text(row && row.stamp_id))
+- `cloudfunctions/xiai-user-token/lib/ops.js:2877` [其他] const sa = legacySerialOf(a && a.stamp_id)
+- `cloudfunctions/xiai-user-token/lib/ops.js:2878` [其他] const sb = legacySerialOf(b && b.stamp_id)
+- `cloudfunctions/xiai-user-token/lib/ops.js:2893` [其他] /* ④ 印章改写（键族：`stamp_id` → sid；新增 `seal_no` / `sid`）＋ 完整映射表。 */
+- `cloudfunctions/xiai-user-token/lib/ops.js:2903` [其他] const oldStamp = text(row && row.stamp_id)
+- `cloudfunctions/xiai-user-token/lib/ops.js:2906` [其他] mappingSeals.push({ old_stamp_id: oldStamp, seal_no: no, sid })
+- `cloudfunctions/xiai-user-token/lib/ops.js:2910` [其他] if (oldStamp !== sid) doc.stamp_id = sid
+- `cloudfunctions/xiai-user-token/lib/ops.js:2913` [其他] pushSample(COLLECTIONS.seals, rowId(row), { stamp_id: oldStamp, seal_no: row && row.seal_no }, doc)
+- `cloudfunctions/xiai-user-token/lib/ops.js:2924` [其他] const key = text(row && (row.sealId || row.stamp_id))
+- `cloudfunctions/xiai-user-token/lib/ops.js:2961` [其他] /* ⑥ 印面改写（键族：`stamp_id` / `sealId` → 新 sid；新增 `face_no` / `fid`）。 */
+- `cloudfunctions/xiai-user-token/lib/ops.js:2970` [其他] const sealKey = text(row && (row.sealId || row.stamp_id))
+- `cloudfunctions/xiai-user-token/lib/ops.js:2975` [其他] if (text(row && row.stamp_id) !== newSealSid) doc.stamp_id = newSealSid
+- `cloudfunctions/xiai-user-token/lib/ops.js:2982` [其他] pushSample(COLLECTIONS.faces, rowId(row), { stamp_id: row && row.stamp_id, sealId: row && row.sealId, face_no: row && row.face_no }, doc)
+- `cloudfunctions/xiai-user-token/lib/ops.js:2990` [其他] /* ⑦ 影像（键族：`stamp_id` → 新 sid；影像 `_id` **不动**）。 */
+- `cloudfunctions/xiai-user-token/lib/ops.js:3001` [其他] const sid = resolveSealSid(row && (row.stamp_id || row.sealId))
+- `cloudfunctions/xiai-user-token/lib/ops.js:3006` [其他] if (text(row && row.stamp_id) !== sid) {
+- `cloudfunctions/xiai-user-token/lib/ops.js:3008` [其他] pushSample(COLLECTIONS.images, rowId(row), { stamp_id: row && row.stamp_id }, { stamp_id: sid })
+- `cloudfunctions/xiai-user-token/lib/ops.js:3009` [其他] writes.push({ kind: 'update', collection: COLLECTIONS.images, match: { _id: rowId(row) }, doc: { stamp_id: sid }, expectAtLeast: 1 })
+- `cloudfunctions/xiai-user-token/lib/ops.js:3015` [其他] /* ⑧ 勘误私有行（键族：`sealId` / `stamp_id` → 新 sid；`faceId` **不动**）。 */
+- `cloudfunctions/xiai-user-token/lib/ops.js:3017` [其他] const sid = resolveSealSid(row && (row.sealId || row.stamp_id))
+- `cloudfunctions/xiai-user-token/lib/ops.js:3024` [其他] if (text(row && row.stamp_id) !== sid) doc.stamp_id = sid
+- `cloudfunctions/xiai-user-token/lib/ops.js:3027` [其他] pushSample(COLLECTIONS.corrections, rowId(row), { sealId: row && row.sealId, stamp_id: row && row.stamp_id }, doc)
+- `cloudfunctions/xiai-user-token/lib/ops.js:3035` [其他] 行上另一别名 `stamp_id` 依 §4「其余字段一字不动」保持原值 —— 冲突点已在交付报告登记）。 */
+- `cloudfunctions/xiai-user-token/lib/ops.js:3257` [其他] const summarySeal = text(row.sealId || row.stamp_id)
+- `cloudfunctions/xiai-admin-token/lib/ops.js:374` [其他] 'stamp_id',
+- `cloudfunctions/xiai-admin-token/lib/ops.js:627` [其他] const matched = new RegExp(`^${SEAL_STAMP_ID_PREFIX}(\\d{9})$`).exec(text(row && row.stamp_id))
+- `cloudfunctions/xiai-admin-token/lib/ops.js:630` [其他] const taken = new Set((Array.isArray(rows) ? rows : []).map((row) => text(row && row.stamp_id)))
+- `cloudfunctions/xiai-admin-token/lib/ops.js:678` [其他] sealId: text(row.sealId || row.stamp_id),
+- `cloudfunctions/xiai-admin-token/lib/ops.js:679` [其他] stamp_id: text(row.stamp_id || row.sealId),
+- `cloudfunctions/xiai-admin-token/lib/ops.js:1226` [其他] stamp_id: stampId,
+- `cloudfunctions/xiai-admin-token/lib/ops.js:1258` [其他] stamp_id: stampId,
+- `scripts/verify-admin-review-op.mjs:193` [印面 id 派生] { _id: 'doc-pend', id: 'cr-pend', faceId: 'fc-fx1-FACE', sealId: '1', stamp_id: '1', user_id: uidOfPhone(PHONE), field: 'dynasty', field_label: '朝代', 
+- `scripts/verify-admin-review-op.mjs:194` [印面 id 派生] { _id: 'doc-name', id: 'cr-name', faceId: 'fc-fx1-FACE', sealId: '1', stamp_id: '1', user_id: uidOfPhone(PHONE), field: 'seal_name', field_label: '印文'
+- `scripts/verify-migrate-code-numbers.mjs:12` [其他] *   M4 执行：五个键族按序改写；`stamp_id` 全 ＝ sid；`seal_no` / `face_no` 连续无空洞
+- `scripts/verify-migrate-code-numbers.mjs:128` [印面 id 派生] seals.push({ _id: `seal-${n}`, stamp_id: String(n), id: String(n), seal_name: `印${n}`, sealGroupId: `g-${n}`, dynasty: '戰國' })
+- `scripts/verify-migrate-code-numbers.mjs:132` [其他] stamp_id: String(n),
+- `scripts/verify-migrate-code-numbers.mjs:141` [印面 id 派生] images.push({ _id: `img-${i}`, id: `img-${i}`, stamp_id: owner, sealId: owner, kind: 'FACE' })
+- `scripts/verify-migrate-code-numbers.mjs:145` [印面 id 派生] corrections.push({ _id: `cr-${i}`, sealId: owner, stamp_id: owner, faceId: `fc-fx${((i % 79) + 1)}-FACE`, field: 'dynasty', value: '戰國' })
+- `scripts/verify-migrate-code-numbers.mjs:148` [其他] publics.push({ _id: `cp-cr-${i}`, sealId: '1', stamp_id: '1', field: 'dynasty', value: '戰國' })
+- `scripts/verify-migrate-code-numbers.mjs:185` [其他] { old_stamp_id: '1', seal_no: 1, sid: 'AAAAB' }, dry.mapping.seals[0])
+- `scripts/verify-migrate-code-numbers.mjs:187` [其他] { old_stamp_id: '79', seal_no: 79, sid: codeId.encodeSealCode(79).code }, dry.mapping.seals[78])
+- `scripts/verify-migrate-code-numbers.mjs:197` [其他] check('M4b', '`stamp_id` 全部 ＝ sid 形态', [], sealRows.filter((row) => !codeId.SID_PATTERN.test(row.stamp_id)).map((row) => row._id))
+- `scripts/verify-migrate-code-numbers.mjs:198` [其他] check('M4c', '`stamp_id` 两两不重复', 79, new Set(sealRows.map((row) => row.stamp_id)).size)
+- `scripts/verify-migrate-code-numbers.mjs:205` [其他] check('M4g', '印面 `stamp_id` / `sealId` 跟随所属印章新 sid', [],
+- `scripts/verify-migrate-code-numbers.mjs:206` [其他] faceRows.filter((row) => row.sealId !== row.stamp_id || !codeId.SID_PATTERN.test(row.sealId)).map((row) => row._id))
+- `scripts/verify-migrate-code-numbers.mjs:212` [其他] check('M5b', '影像 `stamp_id` 全为新 sid', [], imageRows.filter((row) => !codeId.SID_PATTERN.test(row.stamp_id)).map((row) => row._id))
+- `scripts/verify-migrate-code-numbers.mjs:214` [其他] check('M5c', '勘误 join：`sealId` 与新 `stamp_id` 行数一致（改前 36 → 改后仍 36）', 36,
+- `scripts/verify-migrate-code-numbers.mjs:215` [其他] correctionRows.filter((row) => sealRows.some((seal) => seal.stamp_id === row.sealId && seal.stamp_id === row.stamp_id)).length)
+- `scripts/verify-migrate-code-numbers.mjs:223` [其他] check('M5g', '公开投影行内另一别名 `stamp_id` 按 §4「其余字段一字不动」保持原值（冲突点，已登记）',
+- `scripts/verify-migrate-code-numbers.mjs:224` [其他] ['1', '1', '1', '1', '1', '1'], publicRows.map((row) => row.stamp_id))
+- `scripts/verify-session-authority.mjs:234` [其他] stamp_id: 'XA000000001',
+- `scripts/register-seal-placeholder-image.mjs:77` [其他] /* **不是** FACE / EDGE：本行**不对应任何真实印面**，只是占位图登记（无 `stamp_id` ⇒ 不进任何画廊）。 */
+- `scripts/verify-person-model.mjs:114` [其他] const stamp = seal.row.stamp_id
+- `scripts/verify-person-model.mjs:118` [其他] { id: imgId, stamp_id: stamp, kind: 'FACE', sha256: 'a'.repeat(64) }
+- `scripts/verify-person-model.mjs:156` [其他] const find = (stamp) => sealsSvc.listSeals().find((row) => row.stamp_id === stamp)
+- `scripts/verify-seal-imports.mjs:96` [其他] legacyReviewStatus[text(row.stamp_id || row.id)] = text(row.review_status)
+- `scripts/verify-seal-imports.mjs:286` [其他] const faces7 = db.listFaceRows().filter((r) => text(r.sealId || r.stamp_id) === text(seal7 && seal7.stamp_id))
+- `scripts/verify-seal-imports.mjs:296` [其他] const id = text(row.stamp_id || row.id)
+- `scripts/verify-seal-imports.mjs:344` [其他] const edgeFaces = db.listFaceRows().filter((r) => text(r.sealId || r.stamp_id) === text(seal3 && seal3.stamp_id))
+- `scripts/verify-seal-imports.mjs:560` [其他] const adoptedFace = db.listFaceRows().find((r) => text(r.sealId || r.stamp_id) === text(adopted && adopted.stamp_id))
+- `scripts/verify-seal-imports.mjs:633` [其他] const e8NoImgFaces = db.listFaceRows().filter((r) => text(r.sealId || r.stamp_id) === text(e8NoImgSeal && e8NoImgSeal.stamp_id))
+- `scripts/verify-seal-imports.mjs:638` [其他] { noimg: e8NoImgFaces.length, present: db.listFaceRows().filter((r) => text(r.sealId || r.stamp_id) === text(e8PresentSeal && e8PresentSeal.stamp_id))
+- `scripts/verify-review-token-path.mjs:187` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-review-token-path.mjs:221` [其他] const SEAL_ROW = { _id: 'xf-1', id: SEAL_ID, stamp_id: SEAL_ID, seal_name: '', dynasty: '晚清', seal_type: '姓名印', face_style: '黃牧甫印風', author: '黃士陵', tr
+- `scripts/verify-review-token-path.mjs:222` [其他] const FACE_ROW = { _id: FACE_ID, id: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, kind: 'FACE', face_image_id: null, seal_name: '', dynasty: '晚清', sea
+- `scripts/verify-review-token-path.mjs:227` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-admin-write-via-login.mjs:189` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-admin-write-via-login.mjs:490` [其他] { __collection: 'xiai_seals', _id: 's1', id: 's1', stamp_id: 'XAI-1', seal_name: '甲', dynasty: '战国' },
+- `scripts/verify-admin-write-via-login.mjs:491` [其他] { __collection: 'xiai_seals', _id: 's2', id: 's2', stamp_id: 'XAI-2', seal_name: '乙', dynasty: '秦汉' },
+- `scripts/verify-admin-write-via-login.mjs:492` [其他] { __collection: 'xiai_seals', _id: 's3', id: 's3', stamp_id: 'XAI-3', seal_name: '丙', dynasty: '明' },
+- `scripts/verify-admin-write-via-login.mjs:493` [其他] { __collection: 'xiai_seals', _id: 's4', id: 's4', stamp_id: 'XAI-4', seal_name: '丁', dynasty: '清' },
+- `scripts/verify-admin-write-via-login.mjs:494` [其他] { __collection: 'xiai_seals', _id: 's5', id: 's5', stamp_id: 'XAI-5', seal_name: '戊', dynasty: '明早中期' },
+- `scripts/verify-admin-write-via-login.mjs:495` [其他] { __collection: 'xiai_seals', _id: 's6', id: 's6', stamp_id: 'XAI-6', seal_name: '己', dynasty: '' },
+- `scripts/verify-seal-class.mjs:170` [其他] stamp_id: 'XA000000001',
+- `scripts/verify-seal-class.mjs:272` [其他] { _id: 'xf-b1', id: S1, stamp_id: S1, seal_name: '甲', dynasty: '晚清', seal_type: '', face_style: '', author: '', transcription: '', material: '', shape
+- `scripts/verify-seal-class.mjs:273` [其他] { _id: 'xf-b2', id: S2, stamp_id: S2, seal_name: '乙', dynasty: '晚清', seal_type: '', face_style: '', author: '', transcription: '', material: '', shape
+- `scripts/verify-seal-class.mjs:276` [其他] _id: id, id, sealId: stamp, stamp_id: stamp, kind: 'FACE', face_image_id: null,
+- `scripts/verify-seal-class.mjs:285` [其他] const idsOf = (list) => list.map((item) => (item && item.view ? item.view.stamp_id : item.stamp_id)).sort()
+- `scripts/verify-endorsement.mjs:211` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-endorsement.mjs:225` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-endorsement.mjs:239` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-endorsement.mjs:460` [勘误 join 键] const FACE = { id: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, kind: 'FACE', seal_name: '', dynasty: '', seal_type: '', face_style: '', author: '', t
+- `scripts/verify-endorsement.mjs:467` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-endorsement.mjs:487` [勘误 join 键] { id: 'c-other-pending', faceId: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, user_id: UID_OTHER, field: 'author', value: VALUE_OTHER_PENDING, status:
+- `scripts/verify-endorsement.mjs:488` [勘误 join 键] { id: 'c-mine-pending', faceId: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, user_id: UID_ME, field: 'author', value: VALUE_MINE_PENDING, status: 'PEN
+- `scripts/verify-endorsement.mjs:489` [勘误 join 键] { id: 'c-other-accepted', faceId: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, user_id: UID_OTHER, field: 'author', value: VALUE_OTHER_ACCEPTED, statu
+- `scripts/verify-endorsement.mjs:734` [勘误 join 键] check('E2f', '摘要行键面逐字 ＝ 新契约 12 键', ['_id', 'endorses', 'faceId', 'field', 'schema', 'sealId', 'stamp_id', 'status', 'submits', 'submitter_uids', 'upda
+- `scripts/verify-correction-display.mjs:205` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-correction-display.mjs:219` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-correction-display.mjs:248` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-correction-display.mjs:262` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-correction-display.mjs:276` [其他] stamp_id: SEAL_ID,
+- `scripts/verify-correction-display.mjs:424` [其他] const localMirror = { _id: 'cp-cr-name', correction_id: 'cr-name', faceId: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, field: 'seal_name', field_labe
+- `scripts/verify-correction-display.mjs:432` [其他] const second = { _id: 'cp-cr-name2', correction_id: 'cr-name2', faceId: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, field: 'seal_name', field_label: 
+- `scripts/verify-correction-display.mjs:440` [其他] const rejected = { _id: 'cp-cr-rej', correction_id: 'cr-rej', faceId: FACE_ID, sealId: SEAL_ID, stamp_id: SEAL_ID, field: 'seal_name', field_label: '印
