@@ -34,7 +34,13 @@ const REASONS = Object.freeze({
   MISSING_REQUIRED: 'MISSING_REQUIRED',
   STORAGE_UNAVAILABLE: 'STORAGE_UNAVAILABLE',
   ALREADY_ENDORSED: 'ALREADY_ENDORSED',
-  DUPLICATE_VALUE: 'DUPLICATE_VALUE'
+  DUPLICATE_VALUE: 'DUPLICATE_VALUE',
+  /**
+   * **積分（「金」）餘額不足**（本單新增；**派單方 2026-10-28 裁定**的唯一新字面值）：
+   * 只由 `lib/ledger.js` 的扣费路径产出，且恒为**零写入**（预检早于任何流水写入）。
+   * 逐字登记在此，与前 7 个同表管理（改名只改本表 ＋引用处）。
+   */
+  INSUFFICIENT_POINTS: 'INSUFFICIENT_POINTS'
 })
 
 /** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。

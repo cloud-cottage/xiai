@@ -437,6 +437,20 @@ async function handleVerify(event, config, callContext) {
     /* 讀失敗（`null`）⇒ **不放該鍵**（不得填 0 冒充）。 */
     if (remaining !== null) response.remaining = remaining
   }
+  /* **積分賬本面（additive 透傳｜**按 `op` 收窄**｜本單「金」上雲）**：`points` / `updated_at`
+     **僅當 `op === 'getPointsBalance'`** 才疊進回包；`rows` / `count` **僅當
+     `op === 'listPointsFlow'`** 才疊進回包（`rows` 逐行已由 `lib/ledger.js` 投影為恰 6 鍵
+     ⇒ **回包零 uid**）。兩組鍵名與 `pullImportRows` 的 `rows` / `count` **同字但按 op 隔離**
+     ⇒ 互不影響；**其餘任何 op 一律不透傳這 4 個鍵** ⇒ 既有回包逐字不變（序列化後亦不新增鍵）。
+     既有字段一律不刪、不改。 */
+  if (op === 'getPointsBalance') {
+    response.points = opResult.points
+    response.updated_at = opResult.updated_at
+  }
+  if (op === 'listPointsFlow') {
+    response.rows = opResult.rows
+    response.count = opResult.count
+  }
   return response
 }
 

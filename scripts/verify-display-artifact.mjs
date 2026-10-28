@@ -83,7 +83,9 @@ process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECOND
 
 const FROZEN_REASONS = [
   'FORBIDDEN', 'INVALID_FIELD', 'INVALID_VALUE', 'MISSING_REQUIRED',
-  'STORAGE_UNAVAILABLE', 'ALREADY_ENDORSED', 'DUPLICATE_VALUE'
+  'STORAGE_UNAVAILABLE', 'ALREADY_ENDORSED', 'DUPLICATE_VALUE',
+  /* 「金」上雲單（派單方 2026-10-28 裁定）新增的唯一 reason 字面值 ⇒ 冻结表取并集。 */
+  'INSUFFICIENT_POINTS'
 ]
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
 const isDenial = (value) => value && value.ok === false && shapeOf(value) === 'message,ok,reason' && FROZEN_REASONS.indexOf(value.reason) !== -1

@@ -46,6 +46,12 @@ const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsa
 /* **本单改造（斐萃令牌）**：HMAC 自包含令牌的**纯函数面**（签/验 / kid 轮换 / 吊销判定；
    零 SDK、零 IO、零时钟隐依赖；密钥只从 env 读，缺即 fail-closed）。 */
 const feicuiToken = require('./feicuiToken.js')
+/* **積分賬本（「金」上雲｜本單）**：唯一賬本實現點在 `lib/ledger.js`
+   （余额读取 / 扣费 / 退款 / 发奖 / 流水清单 / 初始幂等发放六件事单点落地）。
+   本文件只做两件事：① 经 `resolveLedgerStore()` 给它供**生产集合句柄**（`collection(`
+   字面仍只在本文件 ⇒ 静态门 A8 / A8b / D4 照旧成立）；② 在 `OPS` 注册两个**客户端可调**的
+   只读 op（`getPointsBalance` / `listPointsFlow`，走既有登录令牌门）。本文件**不写第二套账本**。 */
+const ledger = require('./ledger.js')
 
 /* ---------------------------------------------------------------------------
    **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器 —— **本单修正**：自两 `index.js` **迁回本文件**
@@ -921,6 +927,22 @@ function resolveDb() {
   return app.database()
 }
 
+/**
+ * **積分賬本的集合句柄供給點（生產單點）**：`xiai_balances` / `xiai_points_flow`
+ * 两集合**服务端专属私有** —— 参照 `COUNTERS_COLLECTION`（`xiai_counters`）先例：
+ * **不进**本文件的 `COLLECTIONS` 读写面登记表（那是既有 13 个集合的登记表；账本两集合
+ * 只由 `lib/ledger.js` 一处读写，单点即审计点），**更不进**前端 `CLOUD_COLLECTIONS` /
+ * `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL` ⇒ 客户端零读面。
+ * 离线自检可经 `ledger.setLedgerStoreProvider` 注入假体（不经本函数）。
+ */
+function resolveLedgerStore() {
+  const db = resolveDb()
+  return {
+    balances: db.collection(ledger.LEDGER_COLLECTIONS.balances),
+    flow: db.collection(ledger.LEDGER_COLLECTIONS.flow)
+  }
+}
+
 function makeId() {
   return `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 }
@@ -1647,6 +1669,37 @@ function buildProjection(row, decision, at, correctionId) {
    令牌本体、`jti`、`kid`、`iat` / `exp` 全由服务端产出 ⇒ 前端**没有任何身份类键**可传。
    --------------------------------------------------------------------------- */
 const FEICUI_TOKEN_ALLOWED_KEYS = Object.freeze(['target', 'role', 'ttl_seconds'])
+
+/* ---------------------------------------------------------------------------
+   **積分賬本面（「金」上雲｜本單新增 op）**：载荷封闭键面 ＋ 键面门。
+   `getPointsBalance` **零载荷键**（读本人余额，无参）；`listPointsFlow` 只认
+   `limit` / `cursor` 两键；**身份类键一律不在白名单内** ⇒ `INVALID_FIELD` ＋ 零写入
+   （身份永远取自已验签令牌，不采信前端自报）。
+   --------------------------------------------------------------------------- */
+const POINTS_BALANCE_ALLOWED_KEYS = Object.freeze([])
+const POINTS_FLOW_ALLOWED_KEYS = Object.freeze(['limit', 'cursor'])
+
+/**
+ * 积分两 op 的载荷键面门（形态 ＋ 封闭键面；判定早于任何读 / 写）。
+ * @param {object} payload
+ * @param {ReadonlyArray<string>} allowedKeys
+ * @returns {null|{ok:false, reason:string, message:string}}
+ */
+function pointsPayloadDenial(payload, allowedKeys) {
+  if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+  }
+  const unknown = Object.keys(payload).filter((key) => allowedKeys.indexOf(key) === -1)
+  if (unknown.length > 0) {
+    const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+    const hint =
+      identityKeys.length > 0
+        ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+        : '如實報回，不靜默丟鍵'
+    return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+  }
+  return null
+}
 
 /* ---------------------------------------------------------------------------
    op 注册面（每个 op 只**产出落盘计划**，落库在 `persist()`）
@@ -2444,6 +2497,56 @@ const OPS = Object.freeze({
       row,
       plan: { writes: [{ kind: 'add', collection: COLLECTIONS.itemImports, doc: row }] }
     }
+  },
+
+  /**
+   * **積分餘額（「金」上雲｜本單新增 op｜`getPointsBalance`）**：回**服务端权威**余额
+   * `{ok:true, points, updated_at}`（**新用户首次读即幂等发初始 50 金** —— 发放动作在
+   * `lib/ledger.js::readBalance` → `ensureBalance` 内完成，带 `INITIAL` 流水；同一 uid
+   * 重复初始化只发一次；**不采信前端自报**）。
+   * 顺序（**全部判定在任何写之前**；本 op 不产出 `plan` ⇒ `index.js` 落盘分支不触发）：
+   *   ① 载荷形态 ＋ 封闭键面（`POINTS_BALANCE_ALLOWED_KEYS` ＝ 空集 ⇒ 任何键
+   *      ⇒ `INVALID_FIELD` ＋ 零写入）；② 身份取自已验签令牌（缺 ⇒ `FORBIDDEN`）；
+   *   ③ 账本读（失败 ⇒ 账本侧结构化拒绝 / `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。
+   * @param {object} payload 载荷（**零允许键**）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   * @returns {Promise<{ok:true, points:number, updated_at:string}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async getPointsBalance(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, POINTS_BALANCE_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    const balance = await ledger.readBalance(identity.uid)
+    if (!balance.ok) return balance
+    return { ok: true, points: balance.points, updated_at: balance.updated_at }
+  },
+
+  /**
+   * **積分流水清單（「金」上雲｜本單新增 op｜`listPointsFlow`）**：回**本人**流水
+   * `{ok:true, rows:[{delta,kind,ref_type,ref_id,balance_after,created_at}], count}`
+   * —— 逐行由 `lib/ledger.js` 投影为**恰 6 键** ⇒ **回包零 `uid`、零 `_id`**；
+   * 未结算（写入中断遗留）的预留行不下发。
+   * 顺序（**全部判定在任何读之前**；本 op 零写入）：① 载荷形态 ＋ 封闭键面
+   * （`limit` / `cursor` 两键；未登记键 ⇒ `INVALID_FIELD` ＋ 零写入）；
+   * ② 身份取自已验签令牌（缺 ⇒ `FORBIDDEN`）；③ `limit` 1〜1000、`cursor` 非负整数
+   * （越界 ⇒ `INVALID_VALUE`，不静默夹取）；④ 只读读行（失败 ⇒ `STORAGE_UNAVAILABLE`）。
+   * @param {object} payload 载荷（允许键 `limit` / `cursor`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   * @returns {Promise<{ok:true, rows:Array<object>, count:number}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async listPointsFlow(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, POINTS_FLOW_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    const flow = await ledger.listFlow(identity.uid, { limit: payload.limit, cursor: payload.cursor })
+    if (!flow.ok) return flow
+    return { ok: true, rows: flow.rows, count: flow.count }
   }
 })
 
@@ -5108,6 +5211,13 @@ module.exports = {
   COUNTERS_COLLECTION,
   issueCodeNumber,
   issueCodeNumberAvoiding,
+  /* **積分賬本（「金」上雲｜本單）**：集合句柄供給點 ＋ 载荷封闭键面 ＋ 账本模块本体
+     （供离线自检注入假体直接断言；账本实现单点在 `lib/ledger.js`）。 */
+  resolveLedgerStore,
+  POINTS_BALANCE_ALLOWED_KEYS,
+  POINTS_FLOW_ALLOWED_KEYS,
+  pointsPayloadDenial,
+  ledger,
   setOpsDbProvider,
   opsDbInjected,
   setOpsStorageProvider,

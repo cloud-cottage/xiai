@@ -101,7 +101,9 @@ const FROZEN_REASONS = [
   'STORAGE_UNAVAILABLE',
   /* 本单（採信）新增的待规范单确认字面值 ⇒ 冻结表取并集。 */
   'ALREADY_ENDORSED',
-  'DUPLICATE_VALUE'
+  'DUPLICATE_VALUE',
+  /* 「金」上雲單（派單方 2026-10-28 裁定）新增的唯一 reason 字面值 ⇒ 冻结表取并集。 */
+  'INSUFFICIENT_POINTS'
 ]
 /* **uid 派生单点**：客户端 `src/data/uid.js::uidOf`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。
    自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */

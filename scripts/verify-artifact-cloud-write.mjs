@@ -99,7 +99,9 @@ const FROZEN_REASONS = [
   'MISSING_REQUIRED',
   'STORAGE_UNAVAILABLE',
   'ALREADY_ENDORSED',
-  'DUPLICATE_VALUE'
+  'DUPLICATE_VALUE',
+  /* 「金」上雲單（派單方 2026-10-28 裁定）新增的唯一 reason 字面值 ⇒ 冻结表取并集。 */
+  'INSUFFICIENT_POINTS'
 ]
 
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
