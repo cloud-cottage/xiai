@@ -17,7 +17,7 @@
  *      无令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ 零写入（且**零往返**，连补签都不发）。
  *   E. **本机镜像更正（云端权威优先）**：云端已落盘而本机 `writeCorrectionDecision` 未成功
  *      （`ALREADY_REVIEWED` 等）⇒ 返回 `ok:true` ＋ `reconciled:true`，本机行按服务端权威行更正。
- *   F. **`[data-admin-action]` 去重取值集合现实值**（10 值 / 归并 9 类，v1.54 钩子族扩充）＋ canary 正 / 负对照。
+ *   F. **`[data-admin-action]` 去重取值集合现实值**（11 值 / 归并 10 类，v1.73 钩子族扩充：＋edit-ai-upstream）＋ canary 正 / 负对照。
  *   G. **上屏文案繁體**（去注释后扫描；正 / 负对照证明探测器有效）。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
@@ -414,10 +414,11 @@ check('E3b', '反向对照：**不**触发更正分支（结果无 reconciled �
 check('E3c', '反向对照：本机行正常写入（reviewer_id ＝ 本地 actor）', ADMIN.id, localCorrection().reviewer_id)
 
 /* ===========================================================================
-   F 段：`[data-admin-action]` 去重取值集合现实值（10 值 / 归并 9 类）
+   F 段：`[data-admin-action]` 去重取值集合现实值（11 值 / 归并 10 类）
    =========================================================================== */
-console.log(JSON.stringify({ section: 'F', title: 'data-admin-action 去重集合（10 值 / 9 类）' }))
-const FROZEN_ADMIN_ACTIONS = [
+console.log(JSON.stringify({ section: 'F', title: 'data-admin-action 去重集合（11 值 / 10 类）' }))
+/* v1.73 前的冻结面（10 值 / v1.54）——只用于**差集 / 子集**正负对照，不再作集合主体判据。 */
+const PRE_V173_ADMIN_ACTIONS = [
   'correction-accept',
   'correction-reject',
   'edit-fixed-attributes',
@@ -429,7 +430,20 @@ const FROZEN_ADMIN_ACTIONS = [
   'replace-face-image',
   'upload-seal'
 ]
-const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal']
+const FROZEN_ADMIN_ACTIONS = [
+  'correction-accept',
+  'correction-reject',
+  'edit-ai-upstream',
+  'edit-fixed-attributes',
+  'edit-invite-reward',
+  'edit-seal-attributes',
+  'export-seal-data',
+  'person-proposal-review',
+  'person-import-review',
+  'replace-face-image',
+  'upload-seal'
+]
+const MERGED_CLASSES = ['correction-accept', 'edit-ai-upstream', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal']
 function walkFiles(dir, out = []) {
   readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
     const full = path.join(dir, entry.name)
@@ -456,15 +470,27 @@ function collectAdminActions(srcFiles, transform = (s) => s) {
 }
 const SRC_FILES = walkFiles(path.join(ROOT, 'src'))
 const scanned = collectAdminActions(SRC_FILES, stripComments)
-check('F1', '去重取值集合逐字 ＝ 冻结 10 值（v1.54）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
+check('F1', '去重取值集合逐字 ＝ 冻结 11 值（v1.73：＋edit-ai-upstream）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
+/* 差集 / 子集正负对照：相对 v1.54 十值面，只多出 edit-ai-upstream 这一个新钩子值。 */
+{
+  const addedVsPre = scanned.filter((value) => PRE_V173_ADMIN_ACTIONS.indexOf(value) === -1)
+  const droppedVsPre = PRE_V173_ADMIN_ACTIONS.filter((value) => scanned.indexOf(value) === -1)
+  check('F1b', '相对 v1.54 十值集合的差集 ＝ 恰 {edit-ai-upstream}（只增一个新钩子值）', ['edit-ai-upstream'], addedVsPre)
+  check('F1b2', '负对照：v1.54 十值一个都不少（旧集合 ⊆ 现集合）', [], droppedVsPre)
+  /* 正对照：往扫描面注入一个额外取值 ⇒ 差集机制必报（证明差集非恒真）。 */
+  const probedAdded = [...scanned, 'qa-missing-probe']
+    .filter((value) => PRE_V173_ADMIN_ACTIONS.indexOf(value) === -1)
+    .sort()
+  check('F1b3', '正对照：注入样本后差集变两项（差集机制有效）', ['edit-ai-upstream', 'qa-missing-probe'], probedAdded)
+}
 {
   const merged = scanned.map((value) => (value === 'correction-reject' ? 'correction-accept' : value))
   const distinct = [...new Set(merged)].sort()
-  check('F2', '按归并表归并 ⇒ 恰 9 类（v1.54：person-import-review 自成一类）', MERGED_CLASSES.slice().sort(), distinct)
+  check('F2', '按归并表归并 ⇒ 恰 10 类（v1.73：person-import-review / edit-ai-upstream 各自成一类）', MERGED_CLASSES.slice().sort(), distinct)
   const canary = 'qa-canary-9th'
   const withCanary = [...new Set([...scanned, canary])]
-  check('F1c', '正对照：注入 canary 取值 ⇒ 集合变 11（非恒等；v1.54 基线 10）', 11, withCanary.length)
-  check('F1c2', '负对照：移除 canary 后回基线 10', 10, withCanary.filter((value) => value !== canary).length)
+  check('F1c', '正对照：注入 canary 取值 ⇒ 集合变 12（非恒等；v1.73 基线 11）', 12, withCanary.length)
+  check('F1c2', '负对照：移除 canary 后回基线 11', 11, withCanary.filter((value) => value !== canary).length)
 }
 
 /* ===========================================================================

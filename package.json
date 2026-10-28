@@ -11,12 +11,12 @@
   },
   "dependencies": {
     "@cloudbase/js-sdk": "^2.25.3",
+    "@cloudbase/node-sdk": "^3.18.3",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0",
     "write-excel-file": "^4.1.1"
   },
   "devDependencies": {
-    "@cloudbase/node-sdk": "^3.18.3",
     "@vitejs/plugin-vue": "^5.2.1",
     "vite": "^5.4.11"
   }

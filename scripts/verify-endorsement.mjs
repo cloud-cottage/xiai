@@ -18,7 +18,7 @@
  *   C. **前端渲染逻辑**：纯函数 `endorsementDecision` ＋ 集成读数 `endorsementEntriesOf`：
  *      他人提交出按钮 / 自己的提交不出 / 已 ACCEPTED 不出 / 游客按钮渲染但点击走登录引导。
  *      （用服务层真源执行，**不以「读代码推断」充当证据**。）
- *   D. **机械扫描**：`[data-admin-action]` 去重集合现实值（10 值 / 归并 9 类，v1.54 钩子族扩充）；上屏文案繁體
+ *   D. **机械扫描**：`[data-admin-action]` 去重集合现实值（11 值 / 归并 10 类，v1.73 钩子族扩充：＋edit-ai-upstream）；上屏文案繁體
  *      （正 / 负对照）；既有 `STORAGE_KEYS` 逐字未动。
  *
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
@@ -568,7 +568,8 @@ const ADMIN_ACTION_EXPECTED = [
   'edit-invite-reward',
   'export-seal-data',
   'person-proposal-review',
-  'person-import-review'
+  'person-import-review',
+  'edit-ai-upstream'
 ]
 {
   const found = new Set()
@@ -577,18 +578,18 @@ const ADMIN_ACTION_EXPECTED = [
     const matches = body.match(/data-admin-action="([^"]+)"/g) || []
     matches.forEach((m) => found.add(m.replace(/^data-admin-action="/, '').replace(/"$/, '')))
   })
-  check('D1', '`[data-admin-action]` 去重取值集合逐字 ＝ 规范现值（10 值，v1.54）', sorted(ADMIN_ACTION_EXPECTED), sorted([...found]))
-  /* 归并 9 类：`correction-*` 合一（correction-accept|reject），其余 `person-proposal-review`
-     / `person-import-review` 等各自成类 ⇒ 10 值归并 9 类。 */
+  check('D1', '`[data-admin-action]` 去重取值集合逐字 ＝ 规范现值（11 值，v1.73：＋edit-ai-upstream）', sorted(ADMIN_ACTION_EXPECTED), sorted([...found]))
+  /* 归并 10 类：`correction-*` 合一（correction-accept|reject），其余 `person-proposal-review`
+     / `person-import-review` / `edit-ai-upstream` 等各自成类 ⇒ 11 值归并 10 类。 */
   const classes = [...found].map((v) => (v.startsWith('correction-') ? 'correction-accept|reject' : v))
-  check('D1b', '按归并表归并后 ＝ 9 类（v1.54：新增 person-import-review 自成一类）', 9, new Set(classes).size)
-  /* **正 / 负对照（本单新增 ⑸）**：注入 canary 取值 ⇒ 去重集合必须变 11 值 / 10 类
-     （证明探针能看见「多出来的值」，不是恒等或硬编码）；移除后回基线 10 / 9。 */
+  check('D1b', '按归并表归并后 ＝ 10 类（v1.73：新增 edit-ai-upstream 自成一类）', 10, new Set(classes).size)
+  /* **正 / 负对照（本单新增 ⑸）**：注入 canary 取值 ⇒ 去重集合必须变 12 值 / 11 类
+     （证明探针能看见「多出来的值」，不是恒等或硬编码）；移除后回基线 11 / 10。 */
   const withCanary = new Set([...found, 'qa-canary-9th'])
-  check('D1c', '正对照：注入 canary `qa-canary-9th` ⇒ 去重集合变 11（v1.54 基线 10）', 11, withCanary.size)
+  check('D1c', '正对照：注入 canary `qa-canary-9th` ⇒ 去重集合变 12（v1.73 基线 11）', 12, withCanary.size)
   const classesWithCanary = [...withCanary].map((v) => (v.startsWith('correction-') ? 'correction-accept|reject' : v))
-  check('D1c2', '正对照：canary 使归并类数变 10（v1.54 基线 9）', 10, new Set(classesWithCanary).size)
-  check('D1c3', '负对照：移除 canary 后回基线 10（集合非恒等）', 10, found.size)
+  check('D1c2', '正对照：canary 使归并类数变 11（v1.73 基线 10）', 11, new Set(classesWithCanary).size)
+  check('D1c3', '负对照：移除 canary 后回基线 11（集合非恒等）', 11, found.size)
   /* 本单新增的采信钮一律用 `data-action`，**不得**带 `data-admin-action`（去注释后再判）。 */
   const endorseBlock = stripComments(readFileSync(path.join(ROOT, 'src/views/SealDetailView.vue'), 'utf8'))
   check('D1d', '采信钮用 `data-action="endorse"`（未新增 admin 钩子取值）', true, /data-action="endorse"/.test(endorseBlock))

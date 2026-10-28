@@ -32,8 +32,11 @@ import * as items from './items.js'
 /* **「斐萃令牌」门面（本单改造）**：管理员签发 HMAC 令牌（取代一次性授权码 / CloudBase 核销）；
    页面与组件仍**只**经本门面访问数据。 */
 import * as feicui from './feicui.js'
+/* **「我的 AI」门面（本單新增）**：7 個 op（AI 金鑰 / 用量 / 上游配置）的唯一業務入口
+   （`aiAccess.js`；鍵面真源、op 名字面值全倉唯一處）。页面与组件仍**只**经本门面访问数据。 */
+import * as aiAccess from './aiAccess.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess }
 export default services

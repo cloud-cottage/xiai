@@ -4,6 +4,11 @@
   "installCommand": "npm install",
   "buildCommand": "npm run build -- --outDir dist/xiai",
   "outputDirectory": "dist",
+  "functions": {
+    "api/ai/v1/*.js": {
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
     {
       "source": "/assets/:path*",

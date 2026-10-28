@@ -1,0 +1,614 @@
+/**
+ * 玺爱 · **AI 中转核心**（可测纯 handler；本文件零 SDK 字面、零取句柄字面，依赖全部可注入）
+ * ============================================================================
+ * 被 `api/ai/v1/[...path].js`（Vercel 路由入口）与 `scripts/verify-ai-relay.mjs`
+ * （离线自检）共同调用 —— **同一份实现、两条入口，不写第二套**。
+ *
+ * 四个云函数 lib 一律**复用既有导出与既有注入缝**（`setLedgerStoreProvider` /
+ * `setAiKeyStoreProvider` / `setUpstreamStoreProvider` / `setAiUsageStoreProvider`），
+ * 本文件**不改** `cloudfunctions/**` 的任何既有方法语义与行形状（本单未改 cloudfunctions 一字）。
+ *
+ * 流程（**顺序不得变**；每步的失败面写在括号里）：
+ *   ① 方法面：只认 `POST`（405 `METHOD_NOT_ALLOWED`）
+ *   ② path 白名单（封闭两值：`images/edits` / `images/generations`；含多段、空、`models`
+ *      ⇒ 404 `PATH_NOT_ALLOWED`）
+ *   ③ 鉴权：`Authorization` 头按 `Bearer` 方案取凭据，且值须以 `sk-xiai-` 开头
+ *   ④ 必填头 `X-Request-Id`（8〜64 字；**幂等键的组成部分**）（400 `INVALID_ARGUMENT`）
+ *   ⑤ 入参 JSON（封闭键面；**不接受 multipart、图片不得 base64 直塞**）
+ *      （400 `INVALID_ARGUMENT`）
+ *   ⑥ `evaluateGate` 只读限额判定（429 `LIMIT_DAY` / `LIMIT_MINUTE` ＋ `Retry-After`；**零扣费**）
+ *   ⑦ `resolveUpstreamSecret` 取上游（503 `CONFIG_MISSING`；**零扣费**）
+ *   ⑧ 参考图 `storage_key` → 签名链（`@cloudbase/node-sdk::getTempFileURL`；
+ *      **本函数不下载字节、不 base64 转发**；失败 ⇒ 503 `CONFIG_MISSING`，**零扣费**）
+ *   ⑨ **预扣 10 金**（`chargePoints`；kind=`CHARGE`、ref_type=`AI_IMAGE`、
+ *      ref_id=上游请求标识、idem_key=`sha256(key_id ＋ 冒號 ＋ X-Request-Id)`）
+ *      （余额不足 ⇒ 402 `INSUFFICIENT_POINTS`，**零写入**）
+ *   ⑩ 调上游（凭据按 `Bearer` 方案放进 `Authorization` 头、JSON body、超时取 `timeout_ms` 缺省 60000）
+ *      失败 / 超时 / 非 2xx / 非 JSON / 缺图片字段 ⇒ **退款**（`refundPoints` 同 `ref_id`、
+ *      kind=`REFUND`）＋ 502 `UPSTREAM_ERROR`（带上游状态码；网络错与超时为 `0`）
+ *   ⑪ 成功 ⇒ `commitUsage` ＋ 200；回包**恰 5 键**
+ *      `{ok, image, charge, usage, idempotent}`（上游回 url 就回 url、回 b64 就回 b64，
+ *      **不再自己编码一次**）
+ *
+ * 错误面（**只这 8 个 HTTP 码 / 9 个 reason 字面值；不新增第九个 reason**）：
+ *   400 `INVALID_ARGUMENT` ／ 401 `KEY_INVALID` ／ 402 `INSUFFICIENT_POINTS` ／
+ *   404 `PATH_NOT_ALLOWED` ／ 405 `METHOD_NOT_ALLOWED` ／
+ *   429 `LIMIT_DAY` 或 `LIMIT_MINUTE`（带 `Retry-After`）／
+ *   502 `UPSTREAM_ERROR`（带 `status`：上游状态码，网络错为 0）／ 503 `CONFIG_MISSING`
+ *
+ * 【已知项 · 逐条登记（派单方要求）】
+ *   A. **幂等只保证「不重复扣金」**：同 `idem_key` 重放时 `chargePoints` 回**首次结果**
+ *      （余额只扣一次、不新增第二行 CHARGE 流水），但**仍会重新调上游**，回包
+ *      `idempotent: true`；用量 `commitUsage` 亦会再次 +1（由 `lib/aiUsage.js` 语义决定）。
+ *   B. lib 侧的内部原因（`STORAGE_UNAVAILABLE`、账本非 402 的拒绝、`commitUsage` 失败）
+ *      在本端点**折叠**为 503 `CONFIG_MISSING` —— 封閉錯誤面只有那 8 个码，**不新增第九个
+ *      reason 字面值**（fail-closed，绝不伪装成 4xx 越权）。
+ *   C. `usage` 键名按凍結契約写 **`today`**（`lib/aiUsage.commitUsage` 回的是 `day`；
+ *      本文件做 `day → today` 的**改名**，不改 lib）。
+ *   D. `charge.points` ＝ **本次扣费金额 10**（lib 回的 `points` 是余额，已由
+ *      `charge.balance_after` 承载；两键同值会让契约的两键失去意义）。
+ *   E. `image` 物件的封闭鍵面按契約逐字实现为**恰 1 鍵 `storage_key`**
+ *      （契約原文「僅兩個鍵：storage_key」只点名了一枚鍵 ⇒ 按点名实现，差异提请裁定）。
+ *   F. `images/generations` **不接受 `image`**（带 ⇒ 400；不静默丢、也不转发给不认该字段的上游）。
+ *   G. 任何非 200 回包 ⇒ **净扣费为 0**（未扣的不扣、已扣的退款），这是本端点的自检不变式。
+ *
+ * 离线自检：`scripts/verify-ai-relay.mjs`（真 handler ＋ 真 `http.createServer` ＋
+ * 假上游 ＋ 注入 store / clock / fetch；不碰云端、不碰真上游）。
+ */
+
+import crypto from 'node:crypto'
+import { createRequire } from 'node:module'
+
+import configModule from '../../cloudfunctions/xiai-user-token/lib/config.js'
+import ledgerModule from '../../cloudfunctions/xiai-user-token/lib/ledger.js'
+import aiKeysModule from '../../cloudfunctions/xiai-user-token/lib/aiKeys.js'
+import aiUpstreamModule from '../../cloudfunctions/xiai-user-token/lib/aiUpstream.js'
+import aiUsageModule from '../../cloudfunctions/xiai-user-token/lib/aiUsage.js'
+
+const require = createRequire(import.meta.url)
+
+/* CJS 互操作：Node ESM 的 default 即 `module.exports`；再兜一层 `.default`（打包器差异）。 */
+function libOf(mod, probe) {
+  if (mod && typeof mod[probe] === 'function') return mod
+  if (mod && mod.default && typeof mod.default[probe] === 'function') return mod.default
+  throw new Error('AI_RELAY_LIB_UNAVAILABLE')
+}
+
+const userConfig = libOf(configModule, 'deny')
+const ledger = libOf(ledgerModule, 'chargePoints')
+const aiKeys = libOf(aiKeysModule, 'resolveAiKey')
+const aiUpstream = libOf(aiUpstreamModule, 'resolveUpstreamSecret')
+const aiUsage = libOf(aiUsageModule, 'evaluateGate')
+
+/* ---------------------------------------------------------------------------常量面（封闭）
+   --------------------------------------------------------------------------- */
+
+/** 单张图预扣金（**派单方裁定**：图生图单价 10 金 / 张、失败不扣）。 */
+export const CHARGE_AMOUNT = 10
+
+/** path 白名单（封闭两值；**唯一一处定义点**）。 */
+export const ALLOWED_ROUTES = Object.freeze(['images/edits', 'images/generations'])
+
+/** 入参 JSON 封闭键面（出现其它键 ⇒ 400，**不静默丢**）。 */
+export const ALLOWED_BODY_KEYS = Object.freeze(['prompt', 'image', 'size', 'n'])
+
+/** `X-Request-Id` 长度界（幂等键的组成部分；**必填**）。 */
+export const REQUEST_ID_MIN_LENGTH = 8
+export const REQUEST_ID_MAX_LENGTH = 64
+
+/** `prompt` 长度界。 */
+export const PROMPT_MAX_LENGTH = 2000
+
+/** 上游超时缺省（`resolveUpstreamSecret` 未给时兜底；与 `lib/aiUpstream.TIMEOUT_DEFAULT_MS` 同值）。 */
+export const DEFAULT_TIMEOUT_MS = 60000
+
+/** 参考图 `storage_key` 上限（只做形态护栏，不猜内容）。 */
+export const STORAGE_KEY_MAX_LENGTH = 512
+
+/** 请求体读入上限（超限 ⇒ 按非法 JSON 走 400；**不接受 multipart / 图片字节**）。 */
+export const MAX_BODY_BYTES = 512 * 1024
+
+/** 对外 reason 面（**只有这 9 个字面值 / 8 个错误面；429 占两个**）。 */
+export const REASONS = Object.freeze({
+  INVALID_ARGUMENT: 'INVALID_ARGUMENT',
+  KEY_INVALID: 'KEY_INVALID',
+  INSUFFICIENT_POINTS: 'INSUFFICIENT_POINTS',
+  PATH_NOT_ALLOWED: 'PATH_NOT_ALLOWED',
+  METHOD_NOT_ALLOWED: 'METHOD_NOT_ALLOWED',
+  LIMIT_DAY: 'LIMIT_DAY',
+  LIMIT_MINUTE: 'LIMIT_MINUTE',
+  UPSTREAM_ERROR: 'UPSTREAM_ERROR',
+  CONFIG_MISSING: 'CONFIG_MISSING'
+})
+
+/** 成功回包键面（**恰 5 键**）。 */
+export const SUCCESS_KEYS = Object.freeze(['charge', 'idempotent', 'image', 'ok', 'usage'])
+
+/** 错误回包键面（400/401/402/404/405/429/503 恰 3 键；502 另带 `status`）。 */
+export const ERROR_KEYS = Object.freeze(['message', 'ok', 'reason'])
+
+/** 冻结的错误面表（HTTP 码 ↔ reason；自检逐条对照）。 */
+export const ERROR_SURFACE = Object.freeze({
+  INVALID_ARGUMENT: 400,
+  KEY_INVALID: 401,
+  INSUFFICIENT_POINTS: 402,
+  PATH_NOT_ALLOWED: 404,
+  METHOD_NOT_ALLOWED: 405,
+  LIMIT_DAY: 429,
+  LIMIT_MINUTE: 429,
+  UPSTREAM_ERROR: 502,
+  CONFIG_MISSING: 503
+})
+
+/** 对外 message 面（繁体、如实、**不含任何凭据与内部标识**）。 */
+const MSG = Object.freeze({
+  METHOD: '本端點只接受 POST 請求。',
+  PATH: '不支援的端點路徑。',
+  /* 401 三种失败情形**同一句**（不向客户端区分失败原因 ⇒ 防枚举）。 */
+  KEY_INVALID: 'AI 金鑰無效或已失效；請重新簽發後再試。',
+  REQUEST_ID: `缺少或格式不合法的要求標識（X-Request-Id，需 ${REQUEST_ID_MIN_LENGTH}〜${REQUEST_ID_MAX_LENGTH} 字）。`,
+  BODY: '請求體必須是 JSON 物件（不接受 multipart；圖片不得以 base64 直塞）。',
+  PROMPT: `提示詞（prompt）必填且長度不得超過 ${PROMPT_MAX_LENGTH} 字。`,
+  IMAGE: '參考圖（image）必須是只含 storage_key 一個鍵的物件。',
+  IMAGE_B64: '圖片必須以 storage_key 引用，不得 base64 直塞。',
+  IMAGE_GENERATIONS: '圖生圖（image）只適用於 images/edits。',
+  SIZE: '尺寸（size）必須是非空字串。',
+  N: '生成數量（n）只能為 1。',
+  INSUFFICIENT_POINTS: '金餘額不足；本次零寫入。',
+  CONFIG_MISSING: 'AI 中轉服務尚未配置完成；請稍後再試。',
+  UPSTREAM: 'AI 上游調用失敗；本次已退款。'
+})
+
+/* --------------------------------------------------------------------------- 小工具
+   --------------------------------------------------------------------------- */
+
+function text(value) {
+  return String(value === undefined || value === null ? '' : value).trim()
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex')
+}
+
+/** 大小写不敏感取头（Node 入站头已小写；直调 / 测试面保持同样宽容）。 */
+export function headerOf(headers, name) {
+  const source = headers && typeof headers === 'object' ? headers : {}
+  const wanted = String(name).toLowerCase()
+  for (const key of Object.keys(source)) {
+    if (String(key).toLowerCase() !== wanted) continue
+    const raw = source[key]
+    return text(Array.isArray(raw) ? raw[0] : raw)
+  }
+  return ''
+}
+
+/** path 段（优先 `path` 字段、其次 `url`；去掉 `/api/ai/v1` 前缀；**一律去空段**）。 */
+export function segmentsOf(request) {
+  const raw =
+    typeof request === 'string'
+      ? request
+      : text(request && (request.path !== undefined && request.path !== null ? request.path : request.url))
+  let pathname = raw
+  try {
+    pathname = new URL(raw || '/', 'http://localhost').pathname
+  } catch {
+    pathname = String(raw).split('?')[0]
+  }
+  const prefix = '/api/ai/v1'
+  if (pathname.indexOf(prefix) === 0) pathname = pathname.slice(prefix.length)
+  return pathname.split('/').map(text).filter(Boolean)
+}
+
+/** 取 `Authorization` 头按 `Bearer` 方案给出的凭据（scheme 大小写不敏感；其余 scheme ⇒ 空串）。 */
+export function bearerOf(headers) {
+  const raw = headerOf(headers, 'authorization')
+  if (!raw) return ''
+  const space = raw.indexOf(' ')
+  if (space <= 0) return ''
+  if (raw.slice(0, space).trim().toLowerCase() !== 'bearer') return ''
+  return raw.slice(space + 1).trim()
+}
+
+/**
+ * 429 的 `Retry-After`（秒；**用注入时钟**，不读系统时间）。
+ * 分鐘限 ⇒ 本分鐘剩余；日限 ⇒ 本日（本地日历日）剩余。
+ */
+export function retryAfterSeconds(reason, nowMs) {
+  const at = Number.isFinite(nowMs) ? nowMs : Date.now()
+  if (reason === REASONS.LIMIT_MINUTE) {
+    const intoMinute = Math.floor(at / 1000) % 60
+    return Math.max(1, 60 - intoMinute)
+  }
+  const d = new Date(at)
+  const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+  return Math.max(1, Math.ceil((midnight - at) / 1000))
+}
+
+/* --------------------------------------------------------------------------- 入参解析（封闭键面）
+   --------------------------------------------------------------------------- */
+
+/**
+ * 入参 JSON 解析 ＋ 值域门（**全部判定在任何写入之前**）。
+ * @param {string|Buffer|object} raw 原始请求体（或已解析对象）
+ * @returns {{ok:true, value:{prompt:string, image:null|{storage_key:string}, size?:string, n:1}}
+ *          |{ok:false, message:string}}
+ */
+export function parseBody(raw) {
+  let value = raw
+  if (value === undefined || value === null || value === '') return { ok: false, message: MSG.BODY }
+  if (typeof value === 'string' || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) {
+    const source = String(value)
+    if (source.length > MAX_BODY_BYTES) return { ok: false, message: MSG.BODY }
+    try {
+      value = JSON.parse(source)
+    } catch {
+      return { ok: false, message: MSG.BODY }
+    }
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return { ok: false, message: MSG.BODY }
+
+  const unknown = Object.keys(value).filter((key) => ALLOWED_BODY_KEYS.indexOf(key) === -1)
+  if (unknown.length > 0) return { ok: false, message: `未知參數：${unknown.slice(0, 3).join('、')}` }
+
+  const prompt = value.prompt
+  if (typeof prompt !== 'string' || prompt.length < 1 || prompt.length > PROMPT_MAX_LENGTH) {
+    return { ok: false, message: MSG.PROMPT }
+  }
+
+  let image = null
+  if (value.image !== undefined && value.image !== null) {
+    const candidate = value.image
+    if (typeof candidate !== 'object' || Array.isArray(candidate)) return { ok: false, message: MSG.IMAGE }
+    const keys = Object.keys(candidate)
+    if (keys.length !== 1 || keys[0] !== 'storage_key') return { ok: false, message: MSG.IMAGE }
+    const storageKey = candidate.storage_key
+    if (typeof storageKey !== 'string' || storageKey.trim().length < 1 || storageKey.length > STORAGE_KEY_MAX_LENGTH) {
+      return { ok: false, message: MSG.IMAGE }
+    }
+    if (storageKey.slice(0, 5).toLowerCase() === 'data:') return { ok: false, message: MSG.IMAGE_B64 }
+    image = { storage_key: storageKey }
+  }
+
+  let size
+  if (value.size !== undefined && value.size !== null) {
+    if (typeof value.size !== 'string' || value.size.trim().length < 1 || value.size.length > 64) {
+      return { ok: false, message: MSG.SIZE }
+    }
+    size = value.size
+  }
+
+  if (value.n !== undefined && value.n !== null && value.n !== 1) return { ok: false, message: MSG.N }
+
+  const out = { prompt, image, n: 1 }
+  if (size !== undefined) out.size = size
+  return { ok: true, value: out }
+}
+
+/* --------------------------------------------------------------------------- 上游回包投影
+   --------------------------------------------------------------------------- */
+
+/**
+ * 上游 2xx 回包 → `image` 物件（**原样透传，不重新编码**）。
+ * 认 `data[]` 逐项与顶层；键认 `url` / `b64_json` / `b64`；`mime` / `sha256` 由上游给则带。
+ * @returns {null|{url?:string, b64?:string, mime?:string, sha256?:string}}
+ */
+export function imageOf(parsed) {
+  const candidates = []
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.data)) candidates.push(...parsed.data)
+  if (parsed && typeof parsed === 'object') candidates.push(parsed)
+  for (const item of candidates) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    let out = null
+    if (typeof item.url === 'string' && item.url) out = { url: item.url }
+    else if (typeof item.b64_json === 'string' && item.b64_json) out = { b64: item.b64_json }
+    else if (typeof item.b64 === 'string' && item.b64) out = { b64: item.b64 }
+    if (!out) continue
+    const mime = text(item.mime || item.mime_type || item.content_type)
+    const digest = text(item.sha256)
+    if (mime) out.mime = mime
+    if (digest) out.sha256 = digest
+    return out
+  }
+  return null
+}
+
+/* --------------------------------------------------------------------------- 参考图签名链（默认实现）
+   --------------------------------------------------------------------------- */
+
+/**
+ * **默认**参考图解析：`storage_key` → `@cloudbase/node-sdk::getTempFileURL` 的**签名链接**。
+ * 硬口径：**不在本函数内下载图片字节、不做 base64 转换**（只换一条可给上游直取的链接）；
+ * 任何失败（缺 SDK / 缺 env / 回包无链接）⇒ 抛错 ⇒ 调用方 fail-closed 503（**零扣费**）。
+ * 离线自检注入假实现（不连云端）。
+ * @param {string} storageKey 云存储 fileID
+ * @param {object} env 环境（缺省 `process.env`）
+ * @returns {Promise<string>} 签名链接
+ */
+export async function defaultResolveImageUrl(storageKey, env) {
+  const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
+  const tcb = require('@cloudbase/node-sdk')
+  const envId = userConfig.readEnvId(source)
+  const init = { env: envId }
+  const secretId = text(source.TENCENTCLOUD_SECRETID)
+  const secretKey = text(source.TENCENTCLOUD_SECRETKEY)
+  if (secretId && secretKey) {
+    init.secretId = secretId
+    init.secretKey = secretKey
+  }
+  const app = tcb.init(init)
+  const reply = await app.getTempFileURL({ fileList: [String(storageKey)] })
+  const first = reply && Array.isArray(reply.fileList) ? reply.fileList[0] : null
+  const url = first ? text(first.tempFileURL) : ''
+  if (!url) throw new Error('TEMP_URL_UNAVAILABLE')
+  return url
+}
+
+/* --------------------------------------------------------------------------- 处理器工厂（依赖注入 ⇒ 离线可测）
+   --------------------------------------------------------------------------- */
+
+/**
+ * @param {{env?:object, fetch?:function, now?:function, resolveImageUrl?:function,
+ *          logger?:object, stores?:{balances?:object, flow?:object, keys?:object,
+ *          upstream?:object, usage?:object}}} [options]
+ *   · `stores` 给了 ⇒ 经四个 lib 的**既有注入缝**接上（同一只读 / 单文档更新面）；
+ *     不给 ⇒ 生产路径走 `lib/ops.js::resolveAiStore` / `resolveLedgerStore` 的真句柄。
+ *   · `fetch` / `now` / `resolveImageUrl` / `env` 缺省取全局实现。
+ * @returns {(request:{method?:string, path?:string, url?:string, headers?:object,
+ *          body?:string|Buffer|object})=>Promise<{status:number, body:object, headers:object}>}
+ */
+export function createAiRelay(options = {}) {
+  const env = options.env || (typeof process !== 'undefined' ? process.env : {}) || {}
+  const fetchImpl =
+    typeof options.fetch === 'function' ? options.fetch : typeof fetch === 'function' ? fetch : null
+  const now = typeof options.now === 'function' ? options.now : () => Date.now()
+  const resolveImageUrl = typeof options.resolveImageUrl === 'function' ? options.resolveImageUrl : defaultResolveImageUrl
+  const logger = options.logger || (typeof console !== 'undefined' ? console : null)
+
+  const stores = options.stores
+  if (stores && typeof stores === 'object') {
+    if (stores.balances && stores.flow) {
+      ledger.setLedgerStoreProvider(() => ({ balances: stores.balances, flow: stores.flow }))
+    }
+    if (stores.keys) aiKeys.setAiKeyStoreProvider(() => ({ keys: stores.keys }))
+    if (stores.upstream) aiUpstream.setUpstreamStoreProvider(() => ({ upstream: stores.upstream }))
+    if (stores.usage) aiUsage.setAiUsageStoreProvider(() => ({ usage: stores.usage, keys: stores.keys }))
+  }
+
+  /** 诊断日志：**只给布尔与状态码**（不写上游 key、不写密文、不写令牌、不写 prompt）。 */
+  function audit(record) {
+    try {
+      if (logger && typeof logger.log === 'function') logger.log(JSON.stringify(Object.assign({ tag: 'xiai-ai-relay' }, record)))
+    } catch {
+      /* 日志失败不得影响判定 */
+    }
+  }
+
+  function denyResult(status, reason, message, headers, extra) {
+    const body = Object.assign({ ok: false, reason, message }, extra || {})
+    return { status, body, headers: headers || {} }
+  }
+
+  /** 退款（**同 `ref_id`、kind=`REFUND`、确定性 `idem_key`** ⇒ 重复失败不重复退款）。 */
+  async function safeRefund(uid, refId, chargeIdemKey) {
+    try {
+      const reply = await ledger.refundPoints({
+        uid,
+        amount: CHARGE_AMOUNT,
+        kind: ledger.FLOW_KINDS.REFUND,
+        ref_type: ledger.REF_TYPES.AI_IMAGE,
+        ref_id: refId,
+        idem_key: `${chargeIdemKey}:refund`
+      })
+      return !!(reply && reply.ok === true)
+    } catch {
+      return false
+    }
+  }
+
+  return async function handleAiRelay(request) {
+    try {
+      return await run(request)
+    } catch (error) {
+      /* 任何未预期的内部异常（存储句柄缺位等）⇒ fail-closed 503；日志只留 name。 */
+      audit({ outcome: REASONS.CONFIG_MISSING, stage: 'internal', detail: (error && error.name) || 'Error' })
+      return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+    }
+  }
+
+  async function run(request) {
+    const req = request && typeof request === 'object' ? request : {}
+
+    /* ① 方法面（只认 POST）。 */
+    if (text(req.method).toUpperCase() !== 'POST') {
+      audit({ outcome: REASONS.METHOD_NOT_ALLOWED, stage: 'method' })
+      return denyResult(405, REASONS.METHOD_NOT_ALLOWED, MSG.METHOD, { Allow: 'POST' })
+    }
+
+    /* ② path 白名单（封闭两值；**绝不透传任意 path**）。 */
+    const segments = segmentsOf(req)
+    const joined = segments.join('/')
+    if (segments.length !== 2 || segments[0] !== 'images' || ALLOWED_ROUTES.indexOf(joined) === -1) {
+      audit({ outcome: REASONS.PATH_NOT_ALLOWED, stage: 'path', segments: segments.length })
+      return denyResult(404, REASONS.PATH_NOT_ALLOWED, MSG.PATH)
+    }
+    const route = joined
+
+    /* ③ 鉴权（格式错 / 前缀错 / 不存在 / 已吊销 ⇒ **同一 401**，不区分原因）。 */
+    const token = bearerOf(req.headers)
+    const prefix = text(aiKeys.KEY_PLAIN_PREFIX) || 'sk-xiai-'
+    if (!token || token.slice(0, prefix.length) !== prefix || token.length <= prefix.length) {
+      audit({ outcome: REASONS.KEY_INVALID, stage: 'header', tokenPresent: Boolean(token) })
+      return denyResult(401, REASONS.KEY_INVALID, MSG.KEY_INVALID)
+    }
+    const keyInfo = await aiKeys.resolveAiKey(token)
+    if (!keyInfo || keyInfo.ok !== true) {
+      audit({ outcome: REASONS.KEY_INVALID, stage: 'resolve', tokenPresent: true })
+      return denyResult(401, REASONS.KEY_INVALID, MSG.KEY_INVALID)
+    }
+
+    /* ④ 必填头 `X-Request-Id`（8〜64 字；**幂等键的组成部分**）。 */
+    const requestId = headerOf(req.headers, 'x-request-id')
+    if (requestId.length < REQUEST_ID_MIN_LENGTH || requestId.length > REQUEST_ID_MAX_LENGTH) {
+      audit({ outcome: REASONS.INVALID_ARGUMENT, stage: 'request-id', len: requestId.length })
+      return denyResult(400, REASONS.INVALID_ARGUMENT, MSG.REQUEST_ID)
+    }
+
+    /* ⑤ 入参 JSON（封闭键面；全部判定在任何写入之前）。 */
+    const parsed = parseBody(req.body)
+    if (!parsed.ok) {
+      audit({ outcome: REASONS.INVALID_ARGUMENT, stage: 'body' })
+      return denyResult(400, REASONS.INVALID_ARGUMENT, parsed.message)
+    }
+    const payload = parsed.value
+    if (route === 'images/edits' && !payload.image) {
+      /* 有参考图的端点**必须**带 `image`（仅 edits 需要）。 */
+      audit({ outcome: REASONS.INVALID_ARGUMENT, stage: 'image-missing', route })
+      return denyResult(400, REASONS.INVALID_ARGUMENT, MSG.IMAGE)
+    }
+    if (payload.image && route !== 'images/edits') {
+      audit({ outcome: REASONS.INVALID_ARGUMENT, stage: 'image', route })
+      return denyResult(400, REASONS.INVALID_ARGUMENT, MSG.IMAGE_GENERATIONS)
+    }
+
+    /* ⑥ 限额判定（**只读**；超限即拒、**零扣费**）。 */
+    const gate = await aiUsage.evaluateGate({
+      uid: keyInfo.uid,
+      day_limit: keyInfo.day_limit,
+      minute_limit: keyInfo.minute_limit
+    })
+    if (!gate || gate.ok !== true) {
+      const reason = gate && gate.reason === REASONS.LIMIT_MINUTE ? REASONS.LIMIT_MINUTE : gate && gate.reason === REASONS.LIMIT_DAY ? REASONS.LIMIT_DAY : null
+      if (!reason) {
+        audit({ outcome: REASONS.CONFIG_MISSING, stage: 'gate' })
+        return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+      }
+      const seconds = retryAfterSeconds(reason, Number(now()))
+      audit({ outcome: reason, stage: 'gate', retryAfter: seconds })
+      return denyResult(429, reason, gate.message, { 'Retry-After': String(seconds) })
+    }
+
+    /* ⑦ 上游配置（fail-closed；**零扣费**）。 */
+    const resolved = await aiUpstream.resolveUpstreamSecret(env)
+    const upstreamReady =
+      !!resolved && typeof resolved.key === 'string' && resolved.key !== '' && typeof resolved.base_url === 'string' && resolved.base_url !== ''
+    if (!upstreamReady) {
+      audit({ outcome: REASONS.CONFIG_MISSING, stage: 'upstream-config' })
+      return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+    }
+
+    /* ⑧ 参考图 → 签名链（**不下载字节、不 base64 转发**；失败 ⇒ 503、零扣费）。 */
+    let imageUrl = ''
+    if (payload.image) {
+      try {
+        imageUrl = text(await resolveImageUrl(payload.image.storage_key, env))
+      } catch {
+        imageUrl = ''
+      }
+      if (!imageUrl) {
+        audit({ outcome: REASONS.CONFIG_MISSING, stage: 'image-url' })
+        return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+      }
+    }
+
+    if (typeof fetchImpl !== 'function') {
+      audit({ outcome: REASONS.CONFIG_MISSING, stage: 'fetch' })
+      return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+    }
+
+    /* ⑨ 预扣 10 金（幂等键 = sha256(key_id ＋ 冒號 ＋ X-Request-Id)；余额不足 ⇒ 402 零写入）。 */
+    const chargeIdemKey = sha256(`${keyInfo.key_id}:${requestId}`)
+    const refId = `${route}:${keyInfo.key_id}:${requestId}`
+    const charge = await ledger.chargePoints({
+      uid: keyInfo.uid,
+      amount: CHARGE_AMOUNT,
+      kind: ledger.FLOW_KINDS.CHARGE,
+      ref_type: ledger.REF_TYPES.AI_IMAGE,
+      ref_id: refId,
+      idem_key: chargeIdemKey
+    })
+    if (!charge || charge.ok !== true) {
+      if (charge && charge.reason === userConfig.REASONS.INSUFFICIENT_POINTS) {
+        audit({ outcome: REASONS.INSUFFICIENT_POINTS, stage: 'charge', charged: false })
+        return denyResult(402, REASONS.INSUFFICIENT_POINTS, MSG.INSUFFICIENT_POINTS)
+      }
+      audit({ outcome: REASONS.CONFIG_MISSING, stage: 'charge', charged: false })
+      return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+    }
+
+    /* ⑩ 调上游（**失败一律退款 ＋ 502**，绝不伪装成功）。 */
+    const upstreamUrl = `${resolved.base_url.replace(/\/+$/, '')}/${route}`
+    const upstreamBody = { prompt: payload.prompt, model: text(resolved.model), n: 1 }
+    if (payload.size !== undefined) upstreamBody.size = payload.size
+    if (imageUrl) upstreamBody.image = imageUrl
+    const timeoutMs = Number(resolved.timeout_ms) > 0 ? Number(resolved.timeout_ms) : DEFAULT_TIMEOUT_MS
+    /* 凭据只在此组装、只进上游请求头；**不进日志、不进回包**。 */
+    const upstreamAuth = ['Bearer', resolved.key].join(' ')
+
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+    let response = null
+    try {
+      response = await fetchImpl(upstreamUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: upstreamAuth
+        },
+        body: JSON.stringify(upstreamBody),
+        signal: controller ? controller.signal : undefined
+      })
+    } catch (error) {
+      if (timer) clearTimeout(timer)
+      const refunded = await safeRefund(keyInfo.uid, refId, chargeIdemKey)
+      audit({ outcome: REASONS.UPSTREAM_ERROR, stage: 'fetch', status: 0, refunded, detail: (error && error.name) || 'fetch-failed' })
+      return denyResult(502, REASONS.UPSTREAM_ERROR, MSG.UPSTREAM, {}, { status: 0 })
+    }
+    if (timer) clearTimeout(timer)
+
+    const upstreamStatus = Number(response && response.status) || 0
+    const failUpstream = async (stage, status) => {
+      const refunded = await safeRefund(keyInfo.uid, refId, chargeIdemKey)
+      audit({ outcome: REASONS.UPSTREAM_ERROR, stage, status, refunded })
+      return denyResult(502, REASONS.UPSTREAM_ERROR, MSG.UPSTREAM, {}, { status })
+    }
+
+    let raw = ''
+    try {
+      raw = await response.text()
+    } catch {
+      return failUpstream('read', upstreamStatus)
+    }
+    if (!response || upstreamStatus < 200 || upstreamStatus >= 300) return failUpstream('status', upstreamStatus)
+    let upstreamJson = null
+    try {
+      upstreamJson = JSON.parse(raw)
+    } catch {
+      return failUpstream('non-json', upstreamStatus)
+    }
+    const image = imageOf(upstreamJson)
+    if (!image) return failUpstream('no-image', upstreamStatus)
+
+    /* ⑪ 成功：`commitUsage`（日 / 分鐘各 +1）→ 200。commitUsage 失败 ⇒ 退款 ＋ 503（已知项 B/G）。 */
+    const usage = await aiUsage.commitUsage({ uid: keyInfo.uid })
+    if (!usage || usage.ok !== true) {
+      const refunded = await safeRefund(keyInfo.uid, refId, chargeIdemKey)
+      audit({ outcome: REASONS.CONFIG_MISSING, stage: 'commit-usage', refunded })
+      return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+    }
+    audit({ outcome: 'OK', stage: 'done', status: 200, idempotent: charge.idempotent === true })
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        image,
+        charge: { points: CHARGE_AMOUNT, balance_after: charge.balance_after },
+        usage: { today: usage.day, minute: usage.minute },
+        idempotent: charge.idempotent === true
+      },
+      headers: {}
+    }
+  }
+}
+
+/** Vercel / 生产缺省实例（真 env ＋ 真 fetch ＋ 默认签名链实现）。 */
+export default createAiRelay()

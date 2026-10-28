@@ -419,9 +419,9 @@ check('F1n', '负对照：不含钩子的样本不命中', false, CODEFIELD_RE.t
 }
 
 /* ===========================================================================
-   G 段：⑥ `[data-admin-action]` 去重集合 10 值 / 归并 9 类 ＋ canary
+   G 段：⑥ `[data-admin-action]` 去重集合 11 值 / 归并 10 类 ＋ canary（v1.73：＋edit-ai-upstream）
    =========================================================================== */
-console.log(JSON.stringify({ section: 'G', title: '⑥ data-admin-action 去重集合 10 值 / 9 类' }))
+console.log(JSON.stringify({ section: 'G', title: '⑥ data-admin-action 去重集合 11 值 / 10 类' }))
 const FROZEN_ADMIN_ACTIONS = [
   'correction-accept',
   'correction-reject',
@@ -432,9 +432,10 @@ const FROZEN_ADMIN_ACTIONS = [
   'person-proposal-review',
   'person-import-review',
   'replace-face-image',
-  'upload-seal'
+  'upload-seal',
+  'edit-ai-upstream'
 ]
-const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal']
+const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal', 'edit-ai-upstream']
 {
   const found = new Set()
   walkFiles(path.join(ROOT, 'src')).forEach((file) => {
@@ -443,13 +444,13 @@ const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invi
     matches.forEach((m) => found.add(m.replace(/data-admin-action="/, '').replace(/"$/, '')))
   })
   const scanned = [...found].sort()
-  check('G1', '去重取值集合逐字 ＝ 冻结 10 值（v1.54）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
+  check('G1', '去重取值集合逐字 ＝ 冻结 11 值（v1.73：＋edit-ai-upstream）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
   const merged = scanned.map((v) => (v === 'correction-reject' ? 'correction-accept' : v))
-  check('G2', '按归并表归并 ⇒ 恰 9 类（v1.54：person-import-review 自成一类）', MERGED_CLASSES.slice().sort(), [...new Set(merged)].sort())
+  check('G2', '按归并表归并 ⇒ 恰 10 类（v1.73：edit-ai-upstream 自成一类）', MERGED_CLASSES.slice().sort(), [...new Set(merged)].sort())
   const canary = 'qa-canary-9th'
   const withCanary = [...new Set([...scanned, canary])]
-  check('G1c', '正对照：注入 canary 取值 ⇒ 集合变 11（非恒等；v1.54 基线 10）', 11, withCanary.length)
-  check('G1c2', '负对照：移除 canary 后回基线 10', 10, withCanary.filter((v) => v !== canary).length)
+  check('G1c', '正对照：注入 canary 取值 ⇒ 集合变 12（非恒等；v1.73 基线 11）', 12, withCanary.length)
+  check('G1c2', '负对照：移除 canary 后回基线 11', 11, withCanary.filter((v) => v !== canary).length)
 }
 
 /* ===========================================================================

@@ -92,10 +92,12 @@ export async function ensureUserTokenForWrite() {
  * 不过门（无会话 / 补签失败 / 服务端结构化拒绝 / 传输失败）⇒ **原样透传** ＋ 零写入。
  * @param {string} op 写操作名（须在云函数 `OPS` / `ADMIN_OPS` 注册面内）
  * @param {object} payload 载荷（身份类键由服务端拒）
+ * @param {{readoutKeys?:Array<string>}} [options] **additive 透传声明**（原样转交 `userGate` 第三参；
+ *   键面真源 ＝ `aiAccess.js`，本文件零 op 名字面值、零键名字面值）
  * @returns {Promise<object>} `userGate` 的返回（成功含 `mode` / `row` / `projection` / `docId` …）
  */
-export async function userWriteGate(op, payload) {
+export async function userWriteGate(op, payload, options) {
   const guaranteed = await ensureUserTokenForWrite()
   if (!guaranteed.ok) return guaranteed
-  return userGate(op, payload)
+  return userGate(op, payload, options)
 }

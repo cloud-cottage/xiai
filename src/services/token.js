@@ -225,8 +225,14 @@ export function createTokenChannel(profile) {
    * 写操作的服务端门：**云端形态下必须由云函数回 `ok:true` 才算过门**。
    * @param {string} op 写操作名（须在云函数的 `OPS` 注册面内）
    * @param {object} payload 载荷（**身份类键由服务端拒**）
+   * @param {{readoutKeys?:Array<string>}} [options] **additive 透传声明（本單「我的 API」新增）**：
+   *   `readoutKeys` ＝ 调用方**逐字声明**的回包读数键面（如 AI 金鑰 / 用量 / 上游配置面的
+   *   `key` / `rows` / `points` / `today` / `minute` / `key_mask` …）。本函数**只按声明的键名**
+   *   把「云函数回包（`result`）**确有**的键」逐字叠进出参；未声明 ⇒ 行为逐字不变，
+   *   **其余任何 op 一律不出现这些键**（与 `pullImportRows` / review 两段收窄透传同族口径）。
+   *   **本文件不含任何 op 名字面值**（鍵面真源 ＝ `src/services/aiAccess.js`）。
    */
-  async function gate(op, payload) {
+  async function gate(op, payload, options) {
     if (writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV) {
       /* dev / 离线形态：**没有服务端** ⇒ 本门放行「到服务层自己的判定」为止；
          **明文：这条分支不算授权** —— 调用方仍须跑它自己的本地角色门，
@@ -305,6 +311,14 @@ export function createTokenChannel(profile) {
         for (const key of IMPORT_REVIEW_READOUT_KEYS) {
           if (Object.prototype.hasOwnProperty.call(result, key)) envelope[key] = result[key]
         }
+      }
+      /* **調用方聲明的讀數面（additive 透傳｜按聲明收窄｜本單「我的 API」）**：只把
+         `options.readoutKeys` 里**云函数回包确有的键**逐字叠进出参（键名 / 值一个都不改写、
+         不编造、不派生）；未声明 ⇒ 本段零行为（既有回包逐字不变）。**本文件零 op 名字面值**
+         —— 键面真源 ＝ `src/services/aiAccess.js`（唯一业务入口）。 */
+      const declaredReadouts = options && Array.isArray(options.readoutKeys) ? options.readoutKeys : []
+      for (const readoutKey of declaredReadouts) {
+        if (Object.prototype.hasOwnProperty.call(result, readoutKey)) envelope[readoutKey] = result[readoutKey]
       }
       return envelope
     }
@@ -406,8 +420,10 @@ export function ensureUserWriteSession(code, phone) {
   return userTokenChannel.ensureWriteSession({ code, phone })
 }
 
-export function userGate(op, payload) {
-  return userTokenChannel.gate(op, payload)
+export function userGate(op, payload, options) {
+  /* `options`（如 `readoutKeys` 的 additive 透傳聲明）**原樣透傳**給通道 —— 漏掉第三參會讓
+     調用方（`aiAccess.js`）声明的讀數面被靜默丟掉（鍵名在、值恆 undefined）。 */
+  return userTokenChannel.gate(op, payload, options)
 }
 
 export function userTokenStatus() {
