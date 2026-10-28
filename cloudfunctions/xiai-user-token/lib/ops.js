@@ -34,7 +34,7 @@
  */
 
 const crypto = require('crypto')
-const { REASONS, deny, normalizePhone, isPhoneLike, uidOf } = require('./config.js')
+const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf } = require('./config.js')
 /* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`
    **逐字节相同**（`scripts/verify-code-id.mjs` 机械断言）；本文件只经它编 / 解码，不自写第二套。 */
 const codeId = require('./codeId.js')
@@ -1293,10 +1293,18 @@ function nextFaceIdOf(stampId, kind, taken) {
 /**
  * **影像引用存在性读点（§3.55.6｜复用既有 `xiai_images` 集合；只读）**：
  * 按（摘要 / 内容寻址键）查引用对象；命中 ⇒ 回该行，否则 ⇒ `null`（缺失 ⇒ 采纳时该条拒绝）。
+ *
+ * **无审核直写面追加（可选第 2 参 `overlay`）**：直写 op **自写 `xiai_images` 登记行**（该集合在
+ * 生产没有任何 op 写者），登记行**尚未落库**（只在 `plan` 内）⇒ 本读点**先查覆蓋層、未命中再回落
+ * 集合**。覆蓋層只由直写 op 传入；**既有三个调用点不传 ⇒ 行为逐字不变**。
+ * @param {object} face 印面（含 `image_sha256` / `image_storage_key`）
+ * @param {Array<object>} [overlay] 直写通道的影像登记行覆蓋層（只读）
  */
-async function findSealImportImageRow(face) {
+async function findSealImportImageRow(face, overlay) {
   const sha = text(face && face.image_sha256)
   const key = text(face && face.image_storage_key)
+  const pending = imageOverlayRowOf(overlay, sha, key)
+  if (pending) return pending
   if (sha) {
     const rows = await readRows(COLLECTIONS.images, { sha256: sha })
     if (rows.length > 0) return rows[0]
@@ -1304,6 +1312,23 @@ async function findSealImportImageRow(face) {
   if (key) {
     const rows = await readRows(COLLECTIONS.images, { storage_key: key })
     if (rows.length > 0) return rows[0]
+  }
+  return null
+}
+
+/**
+ * 直写通道影像登记行覆蓋層的**命中判定**（纯函数；`sha` → `storage_key` 两级，与上面的集合读点同序）。
+ * @returns {object|null}
+ */
+function imageOverlayRowOf(overlay, sha, key) {
+  const list = Array.isArray(overlay) ? overlay : []
+  if (sha) {
+    const hit = list.find((row) => text(row && row.sha256) === sha)
+    if (hit) return hit
+  }
+  if (key) {
+    const hit = list.find((row) => text(row && row.storage_key) === key)
+    if (hit) return hit
   }
   return null
 }
@@ -2650,14 +2675,17 @@ function buildPersonDocFromImport(row, identity, at, code) {
  *
  * **影像引用逐条校验**（沿既有口径）：宣告了引用但解析不到 ⇒ `{ok:false}`；
  * `kind=FACE` **无任何引用**亦 ⇒ `{ok:false}`（边款 `EDGE` 无引用则放行）。
+ * **第 6 参 `imageOverlay`（无审核直写面追加；可选）**：直写 op 自建的影像登记行覆蓋層
+ * （登记行尚未落库）⇒ 逐条校验时**先查覆蓋層**；**既有三个调用点不传 ⇒ 行为逐字不变**。
  * @param {object} row 印章导入行
  * @param {Array<object>} seals 既有正式印章行（用于编号分配）
  * @param {Array<object>} faces 既有印面行（用于 id 分配）
  * @param {{uid:string}} identity 服务端派生身份
  * @param {string} at ISO 时戳
+ * @param {Array<object>} [imageOverlay] 直写通道的影像登记行覆蓋層（只读）
  * @returns {Promise<{ok:true, stampId:string, sealDoc:object, faceDocs:Array<object>}|{ok:false}>}
  */
-async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
+async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, imageOverlay) {
   const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
   /* **佔位圖來源門 ＋ 摘要門**（本單新增｜影像例外；與提交門同判）：
      佔位鍵僅 sealbank（feicui）家族可引用；指向佔位鍵者其摘要必須 ≡ 登記摘要。 */
@@ -2671,7 +2699,7 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
       resolvedFaces.push({ face, image: null })
       continue
     }
-    const image = await findSealImportImageRow(face)
+    const image = await findSealImportImageRow(face, imageOverlay)
     if (!image) return { ok: false }
     const digestDenial = sealPlaceholderDigestDenial(face, image)
     if (digestDenial) return { ok: false, reason: REASONS.INVALID_VALUE }
@@ -2761,6 +2789,249 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at) {
     })
   }
   return { ok: true, stampId, sealDoc, faceDocs }
+}
+
+/* ---------------------------------------------------------------------------
+  **无审核直写面（人类口径 2026-10-28）**：`createSealWithFaceDirect`（直写正式行）
+  ＋ `querySealByFingerprint`（只读三态对照）
+  ---------------------------------------------------------------------------
+  口径（Kevin 2026-10-28 逐字）：
+    · 正式落点 `xiai_seals` / `xiai_faces` **允许无审核直写**，但**来源限白名单**；
+    · 幂等键 ＝ `source` ＋ `source_seal_id`（面级另用 `faces[].image_sha256` 内容寻址去重）；
+    · **面行 `xiai_faces` 必落 `image_sha256`**（印章行不必）；
+    · 鉴权收紧 S1 ＋ S2：`XIAI_DIRECT_WRITE_PHONE`（分权：该身份**只能直写**、不得调 `review*`）
+      ＋ `XIAI_DIRECT_WRITE_SOURCES`（逗号分隔来源表）；**缺 env ⇒ fail-closed 拒所有直写**。
+  设计件：`bistro/feicui/ops/xiai-uplink-probe/direct-write-design-2026-10-28.md`（§1 / §2 / §3.2 / §5）。
+  硬口径（逐条）：
+    · 两个 op 都落 `ADMIN_OPS`（**不开新的用户级写面**）；
+    · **判定全部在写之前**；失败恒为恰 3 键 `{ok:false, reason, message}`，`reason` **零新增字面值**；
+    · op 只产 `plan`，落库一律在 `persist()`（**单点落盘**）；幂等命中 / 只读 ⇒ **无 `plan`**；
+    · **业务键全部塞进 `row`**（`index.js` 对 `row` **零过滤**）⇒ **不改 `index.js` 全局回包白名单**；
+      `plan` 是内部面、仍**绝不外传**。
+  --------------------------------------------------------------------------- */
+
+/** 直写载荷键面 ＝ **复用印章导入键面**（不另立第二套 ⇒ 未知键判定与 `submitSealImport` 逐字同门）。
+ *  `batch_id` / `raw_json` / `image_status` 允许出现在载荷里，但**直写正式行不落这三键**
+ *  （直写不经暂存行；构建器亦不读它们）。 */
+const DIRECT_WRITE_ALLOWED_KEYS = SEAL_IMPORT_ALLOWED_KEYS
+
+/** 直写回包 `row` 的业务键面（**恰含**这 9 键；由 `scripts/verify-direct-write.mjs` 机械断言）。 */
+const DIRECT_WRITE_ROW_KEYS = Object.freeze([
+  'ok',
+  'sid',
+  'fid',
+  'seal_no',
+  'face_no',
+  'face_id',
+  'image_id',
+  'faces',
+  'idempotent'
+])
+
+/** 直写回包 `row.faces[]` 单条键面（**恰含**这 5 键）。 */
+const DIRECT_WRITE_FACE_KEYS = Object.freeze(['fid', 'face_no', 'face_id', 'image_id', 'kind'])
+
+/** 指纹对照查询载荷键面（**封闭四元组**；身份类键一律拒）。 */
+const SEAL_FINGERPRINT_QUERY_KEYS = Object.freeze(['transcription', 'dynasty', 'author', 'image_sha256'])
+
+/** 指纹对照三态（**服务端唯一判据键**；一次回齐，不许前端自行拼判断）。 */
+const SEAL_FINGERPRINT_MATCH = Object.freeze({ FULL: 'FULL', IMAGE_DIFF: 'IMAGE_DIFF', NONE: 'NONE' })
+
+/** 指纹对照回包 `row` 的业务键面（**恰含**这 8 键）。 */
+const SEAL_FINGERPRINT_ROW_KEYS = Object.freeze([
+  'match',
+  'sid',
+  'fid',
+  'face_id',
+  'seal_name',
+  'image_id',
+  'image_sha256',
+  'faces'
+])
+
+/** 指纹对照回包 `row.faces[]` 单条键面（**恰含**这 4 键）。 */
+const SEAL_FINGERPRINT_FACE_KEYS = Object.freeze(['fid', 'face_id', 'image_id', 'image_sha256'])
+
+/** 直写影像登记行 id 前缀 ＋ 摘要位数（**内容寻址** ⇒ 同图恒同 `_id` ⇒ 幂等覆写、不增行）。 */
+const DIRECT_IMAGE_ID_PREFIX = 'img-'
+const DIRECT_IMAGE_ID_HEX_LENGTH = 16
+
+/** 直写单次读取护栏（撞号避让 / 幂等读 / 取面；号源权威仍在计数器 `issueCodeNumber`）。 */
+const DIRECT_WRITE_READ_LIMIT = 1000
+
+/** env 字符串读取（**名字真源 ＝ `config.js::ENV_NAMES`；本文件不写任何值**）。 */
+function envStringOf(name, env) {
+  const source = env || process.env
+  const raw = source ? source[name] : undefined
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+/**
+ * 直写收紧 env（S1 ＋ S2）读数：`XIAI_DIRECT_WRITE_PHONE`（分权手机号）＋
+ * `XIAI_DIRECT_WRITE_SOURCES`（逗号分隔来源白名单）。**任一缺 ⇒ 对应项为空** ⇒ 调用侧 fail-closed。
+ * @param {object} [env] 环境（缺省 `process.env`；离线自检可注入）
+ */
+function directWriteEnvOf(env) {
+  const raw = envStringOf(ENV_NAMES.DIRECT_WRITE_SOURCES, env)
+  return {
+    phone: normalizePhone(envStringOf(ENV_NAMES.DIRECT_WRITE_PHONE, env)),
+    sources: raw === '' ? [] : raw.split(',').map((item) => item.trim()).filter((item) => item !== '')
+  }
+}
+
+/**
+ * S1 直写**身份门**（op 第一句；**fail-closed**：缺 env ⇒ 拒所有直写、无手机号 ⇒ 拒、
+ * 手机号不在表 ⇒ 拒）。**平台会话路无手机号 ⇒ 不满足分权判据 ⇒ 拒**（如需会话路直写须另开单拍板）。
+ * @param {{uid:string, phone:string}|null|undefined} identity 服务端派生身份
+ * @param {object} [env] 环境（缺省 `process.env`）
+ * @returns {null|{ok:false, reason:string, message:string}} 放行 ⇒ `null`
+ */
+function directWriteIdentityDenial(identity, env) {
+  const expected = directWriteEnvOf(env).phone
+  if (!expected) {
+    /* 未配置 ⇒ **内部不可用**（不是「越权」）⇒ 沿工程口径用 `STORAGE_UNAVAILABLE`；
+       明文：**不得**因未配置而放行，也不得静默。 */
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      '直寫面未配置（缺環境變量：XIAI_DIRECT_WRITE_PHONE）⇒ 拒絕所有直寫操作；本次零寫入。'
+    )
+  }
+  if (!identity || !identity.phone) {
+    return deny(REASONS.FORBIDDEN, '缺少可驗證的直寫身份（直寫面只認分權白名單手機號；平台會話路無手機號 ⇒ 不放行）；本次零寫入。')
+  }
+  if (normalizePhone(identity.phone) !== expected) {
+    return deny(REASONS.FORBIDDEN, '僅直寫專用身份可以執行此操作（手機號不在 XIAI_DIRECT_WRITE_PHONE 白名單）；本次零寫入。')
+  }
+  return null
+}
+
+/**
+ * S2 直写**来源门**（fail-closed：缺 env ⇒ 拒**所有**来源；`source` 不在表 ⇒ 拒）。
+ * 与占位图门**互不替代**：`feicui-local-dist` 走真实影像，占位图门照旧只认 sealbank 家族
+ * （`sealPlaceholderRefDenial` / `isSealBankSource` **一字未改**）。
+ * @returns {null|{ok:false, reason:string, message:string}}
+ */
+function directWriteSourceDenial(source, env) {
+  const sources = directWriteEnvOf(env).sources
+  if (sources.length === 0) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      '直寫來源白名單未配置（缺環境變量：XIAI_DIRECT_WRITE_SOURCES）⇒ 拒絕所有直寫；本次零寫入。'
+    )
+  }
+  if (sources.indexOf(text(source)) === -1) {
+    return deny(REASONS.FORBIDDEN, '來源標籤不在直寫來源白名單（XIAI_DIRECT_WRITE_SOURCES）⇒ 拒絕直寫；本次零寫入。')
+  }
+  return null
+}
+
+/**
+ * S1 **分权泄漏面**：`review*` 系 op 对「直写专身份」**显式拒**（该身份只能直写、不得审核）。
+ * 泄漏场景 ＝ 同一手机号**同时**被配进 `XIAI_ADMIN_PHONE` 与 `XIAI_DIRECT_WRITE_PHONE`
+ * （否则管理员白名单门本就会拒它）。env 缺 / 身份不是直写身份 ⇒ `null`
+ * （放行判定交回管理员白名单门，**不误伤**）。
+ * @returns {null|{ok:false, reason:string, message:string}}
+ */
+function directWriteReviewerDenial(identity, env) {
+  const expected = directWriteEnvOf(env).phone
+  if (!expected || !identity || !identity.phone) return null
+  if (normalizePhone(identity.phone) !== expected) return null
+  return deny(REASONS.FORBIDDEN, '直寫專用身份不得執行審覈類操作（S1 分權：該身份只能直寫）；本次零寫入。')
+}
+
+/**
+ * 直写影像**登记行**（B2：`xiai_images` 在生产没有任何 op 写者 ⇒ 直写 op 自写）。
+ * 字段面 ＝ 设计件 §1.5 / §3.2 ⑤（`id/stamp_id/kind/storage/storage_key/sha256/bytes/mime/
+ * width/height/updated_at`）；`_id` ＝ **内容寻址**（`img-` ＋摘要前 16 位）⇒ 同图恒同 `_id`
+ * ⇒ 幂等覆写、不增行、**不消耗号**。`stamp_id` 由调用方在拿到 `sid` 后回填（发号在构建期之后）。
+ * 像素尺寸：直写载荷不带、服务端不为此整图解码 ⇒ 如实落 `null`（读面按行派生展示键，不据此判定）。
+ */
+function buildDirectImageRow(face, at) {
+  const sha = text(face && face.image_sha256)
+  const size = Number(face && face.image_bytes)
+  return {
+    id: `${DIRECT_IMAGE_ID_PREFIX}${sha.slice(0, DIRECT_IMAGE_ID_HEX_LENGTH)}`,
+    stamp_id: '',
+    kind: text(face && face.kind) === 'EDGE' ? 'EDGE' : 'FACE',
+    storage: 'server',
+    storage_key: text(face && face.image_storage_key),
+    sha256: sha,
+    bytes: Number.isFinite(size) && size > 0 ? Math.round(size) : null,
+    /* 源件容器（真图一律 TIFF，与 `registerArtifact` 同口径）；`.tiff` 源件行在读面按行**派生**
+       展示键 `.png`（`cloudBaseObjectKeyOf`）⇒ 匿名读不到原图字节。 */
+    mime: ARTIFACT_MIME,
+    width: null,
+    height: null,
+    updated_at: at
+  }
+}
+
+/** 印面行 ⇒ 回包用 `image_id`（＝ `face_image_id`［FACE］/ `edge_image_ids[0]`［EDGE］/ `null`）。 */
+function faceImageIdOf(doc) {
+  if (!doc || typeof doc !== 'object') return null
+  if (text(doc.kind) === 'EDGE') {
+    const list = Array.isArray(doc.edge_image_ids) ? doc.edge_image_ids : []
+    return list.length > 0 && text(list[0]) !== '' ? text(list[0]) : null
+  }
+  return text(doc.face_image_id) || null
+}
+
+/** 自由文本长度门（**构建器不做长度门 ⇒ op 自加**；`MAX_TEXT_LENGTH` 同值；空串不参与判定）。 */
+function sealTextLengthDenial(payload, faces) {
+  const over = []
+  const scan = (key, value) => {
+    if (typeof value === 'string' && value.length > MAX_TEXT_LENGTH) over.push(key)
+  }
+  SEAL_IMPORT_SEAL_FIELDS.forEach((key) => scan(key, payload[key]))
+  ;(Array.isArray(faces) ? faces : []).forEach((face) => {
+    SEAL_IMPORT_FACE_FIELDS.forEach((key) => scan(`faces[].${key}`, face[key]))
+  })
+  if (over.length === 0) return null
+  return deny(REASONS.INVALID_VALUE, `自由文本超出上限（${MAX_TEXT_LENGTH} 字）：${over.join('、')}；本次零寫入。`)
+}
+
+/** 值域门（`VALUE_DOMAINS` 现只用于 `reviewCorrection` ⇒ **直写面自加**；空串不参与判定）。
+ *  明文：域表按**字段名**取（`dynasty` / `seal_type` / `face_style` / `seal_class`），
+ *  报错文案用**带前缀的键名**（`faces[].<key>`）以便排障。 */
+function sealValueDomainDenial(payload, faces) {
+  const bad = []
+  const scan = (label, key, value) => {
+    const domain = VALUE_DOMAINS[key]
+    const current = text(value)
+    if (!domain || current === '') return
+    if (domain.indexOf(current) === -1) bad.push(label)
+  }
+  SEAL_IMPORT_SEAL_FIELDS.forEach((key) => scan(key, key, payload[key]))
+  ;(Array.isArray(faces) ? faces : []).forEach((face) => {
+    SEAL_IMPORT_FACE_FIELDS.forEach((key) => scan(`faces[].${key}`, key, face[key]))
+  })
+  if (bad.length === 0) return null
+  return deny(REASONS.INVALID_VALUE, `值域外取值：${bad.join('、')}；本次零寫入。`)
+}
+
+/** 既有正式行 ⇒ 幂等回包用 `row`（**只读**；面行按 `sealId` 取该印全部面）。 */
+async function directWriteRowOfExistingSeal(sealRow, idempotent) {
+  const sid = text(sealRow && (sealRow.sid || sealRow.stamp_id))
+  const faceRows = sid === '' ? [] : await readRows(COLLECTIONS.faces, { sealId: sid }, { limit: 64 })
+  const faces = faceRows.map((doc) => ({
+    fid: text(doc && doc.fid),
+    face_no: Number(doc && doc.face_no),
+    face_id: text(doc && doc.id),
+    image_id: faceImageIdOf(doc),
+    kind: text(doc && doc.kind) === 'EDGE' ? 'EDGE' : 'FACE'
+  }))
+  const primary = faceRows.find((doc) => text(doc && doc.kind) !== 'EDGE') || faceRows[0] || {}
+  return {
+    ok: true,
+    sid,
+    fid: text(primary.fid),
+    seal_no: Number(sealRow && sealRow.seal_no),
+    face_no: Number(primary.face_no),
+    face_id: text(primary.id),
+    image_id: faceImageIdOf(primary),
+    faces,
+    idempotent
+  }
 }
 
 const ADMIN_OPS = Object.freeze({
@@ -3192,6 +3463,9 @@ const ADMIN_OPS = Object.freeze({
     /* ① 管理员白名单门（**身份判据，写之前**；缺 env ⇒ 结构化拒绝 ＋ 零写入）。 */
     const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
     if (identityDenial) return identityDenial
+    /* **S1 分权（无审核直写面本单）**：直写专身份**不得**执行 `review*` 系 op（该身份只能直写）。 */
+    const directWriteDenial = directWriteReviewerDenial(identity)
+    if (directWriteDenial) return directWriteDenial
     if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
       return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
     }
@@ -3391,6 +3665,9 @@ const ADMIN_OPS = Object.freeze({
   async reviewPersonProposal(payload, identity, context) {
     const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
     if (identityDenial) return identityDenial
+    /* **S1 分权（无审核直写面本单）**：直写专身份**不得**执行 `review*` 系 op（该身份只能直写）。 */
+    const directWriteDenial = directWriteReviewerDenial(identity)
+    if (directWriteDenial) return directWriteDenial
     if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
       return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
     }
@@ -3518,6 +3795,9 @@ const ADMIN_OPS = Object.freeze({
   async reviewPersonImport(payload, identity, context) {
     const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
     if (identityDenial) return identityDenial
+    /* **S1 分权（无审核直写面本单）**：直写专身份**不得**执行 `review*` 系 op（该身份只能直写）。 */
+    const directWriteDenial = directWriteReviewerDenial(identity)
+    if (directWriteDenial) return directWriteDenial
     if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
       return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
     }
@@ -3652,6 +3932,9 @@ const ADMIN_OPS = Object.freeze({
   async reviewSealImport(payload, identity, context) {
     const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
     if (identityDenial) return identityDenial
+    /* **S1 分权（无审核直写面本单）**：直写专身份**不得**执行 `review*` 系 op（该身份只能直写）。 */
+    const directWriteDenial = directWriteReviewerDenial(identity)
+    if (directWriteDenial) return directWriteDenial
     if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
       return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
     }
@@ -3798,6 +4081,9 @@ const ADMIN_OPS = Object.freeze({
   async reviewItemImport(payload, identity, context) {
     const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
     if (identityDenial) return identityDenial
+    /* **S1 分权（无审核直写面本单）**：直写专身份**不得**执行 `review*` 系 op（该身份只能直写）。 */
+    const directWriteDenial = directWriteReviewerDenial(identity)
+    if (directWriteDenial) return directWriteDenial
     if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
       return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
     }
@@ -4330,6 +4616,301 @@ const ADMIN_OPS = Object.freeze({
     const safeRows = rows.map((row) => stripImportIdentityFields(row))
     return { ok: true, op: 'pullImportRows', rows: safeRows, count: safeRows.length }
   },
+
+  /**
+   * **无审核直写（本单新增｜管理员面｜`createSealWithFaceDirect`）**：
+   * ① S1 身份门（`XIAI_DIRECT_WRITE_PHONE`；fail-closed）→ ② 封闭键面（＝ 导入键面）→
+   * ③ S2 来源白名单（`XIAI_DIRECT_WRITE_SOURCES`；fail-closed）→ ④ `source` ＋ `source_seal_id`
+   * 幂等键必有 → ⑤ 印面 1..N ＋ `kind=FACE` 必有影像引用 ＋ 摘要 / 对象键 / 体量形态门 →
+   * ⑥ 源侧扩面形态门 ＋ 自由文本长度门 ＋ 值域门 → ⑦ **幂等读**（同 `source` ＋ `source_seal_id`
+   * 已有正式行 ⇒ `idempotent:true`、返回既有 `sid`/`fid`、**零新增行、不改写既有行**）→
+   * ⑧ 自写 `xiai_images` 登记行（内容寻址 `_id`）＋ **复用 `buildSealAcceptanceFromImport`**
+   * （行构造 ＋ 原子发号）→ ⑨ **面行追加 `image_sha256`**（口径：面行必落；印章行不必）→
+   * ⑩ 回包业务键**全塞 `row`**（`index.js` 对 `row` 零过滤 ⇒ **不改全局回包白名单**）。
+   *
+   * 影像通道（设计件 §3.2）：客户端**先直传对象**（内容寻址键 `xiai/images/<hh>/<sha>.tiff`）→
+   * 调 `OPS.registerArtifact`（服务端回读字节 / 摘要校验，**零落盘**）→ 可选
+   * `OPS.ensureDisplayArtifact`（展示件，best-effort）→ 本 op 校验**引用形态**并**自写登记行**。
+   * 本 op **不读对象字节**（载荷只带引用）；引用解析不到 ⇒ 拒（零写入）。
+   *
+   * `source='feicui-local-dist'` **不靠占位图**（真实影像）；占位图门一字未改（仍只认 sealbank 家族）。
+   * @param {object} payload 载荷（允许键见 `DIRECT_WRITE_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<object>} 成功 ⇒ `{ok, op, row, plan}`；幂等命中 ⇒ 无 `plan`；失败 ⇒ 恰 3 键
+   */
+  async createSealWithFaceDirect(payload, identity, context) {
+    /* ① S1 身份门（**写之前**；fail-closed）。 */
+    const identityDenial = directWriteIdentityDenial(identity)
+    if (identityDenial) return identityDenial
+    /* ② 载荷形态 ＋ 封闭键面（与 `submitSealImport` 逐字同门）。 */
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => DIRECT_WRITE_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const source = text(payload.source)
+    /* ③ S2 来源白名单（fail-closed：缺 env ⇒ 拒所有来源）。 */
+    const sourceDenial = directWriteSourceDenial(source)
+    if (sourceDenial) return sourceDenial
+    const sourceId = text(payload.source_seal_id)
+    if (!sourceId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少外部冪等鍵（source_seal_id）⇒ 拒絕直寫；本次零寫入。')
+    }
+    if (sourceId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `外部冪等鍵超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕直寫；本次零寫入。`)
+    }
+    /* ④ 印面 1..N ＋ 引用形态门（`kind=FACE` 必有引用；`EDGE` 可空）。 */
+    const faces = Array.isArray(payload.faces) ? payload.faces.map(normalizeSealImportFace) : []
+    if (faces.length === 0) {
+      return deny(REASONS.MISSING_REQUIRED, '直寫行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE）⇒ 拒絕直寫；本次零寫入。')
+    }
+    /* 佔位圖來源門**一字未改**（只认 sealbank 家族）；`feicui-local-dist` 走真实影像。 */
+    const placeholderDenial = sealPlaceholderRefDenial(source, faces)
+    if (placeholderDenial) return deny(REASONS.INVALID_VALUE, placeholderDenial)
+    for (const face of faces) {
+      face.image_sha256 = text(face.image_sha256).toLowerCase()
+      const sha = text(face.image_sha256)
+      const key = text(face.image_storage_key)
+      const hasRef = sha !== '' || key !== ''
+      if (!hasRef) {
+        if (face.kind === 'FACE') {
+          return deny(REASONS.MISSING_REQUIRED, '印面（kind=FACE）必須帶影像引用（image_storage_key ＋ image_sha256）⇒ 拒絕直寫；本次零寫入。')
+        }
+        continue
+      }
+      /* 佔位鍵另由來源門 ＋ 摘要門判（`sealPlaceholderRefDenial` / `sealPlaceholderDigestDenial`）；
+         **内容寻址键**走通用形态门（与 `registerArtifact` 同一张表）。 */
+      if (key === SEAL_PLACEHOLDER_IMAGE_KEY) continue
+      if (!ARTIFACT_DIGEST_PATTERN.test(sha)) {
+        return deny(REASONS.INVALID_VALUE, '影像摘要（image_sha256）必須是 64 位小寫十六進制；本次零寫入。')
+      }
+      const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(key)
+      if (!matched || matched[2] !== sha || matched[1] !== sha.slice(0, 2)) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff，且鍵內摘要 ≡ image_sha256）；本次零寫入。'
+        )
+      }
+      const bytes = Number(face.image_bytes)
+      if (!Number.isInteger(bytes) || bytes <= 0 || bytes > ARTIFACT_MAX_BYTES) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `影像字節數（image_bytes）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+        )
+      }
+    }
+    /* ⑤ 源侧扩面形态门 ＋ 自由文本长度门 ＋ 值域门（全部写之前）。 */
+    const sourceValueDenial = sealSourceValueDenial(payload)
+    if (sourceValueDenial) return sourceValueDenial
+    const lengthDenial = sealTextLengthDenial(payload, faces)
+    if (lengthDenial) return lengthDenial
+    const domainDenial = sealValueDomainDenial(payload, faces)
+    if (domainDenial) return domainDenial
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的直寫身份；本次零寫入。')
+    }
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    /* ⑦ 影像登记行（**先传对象 → 本 op 只校验引用**）：集合里已有行 ⇒ **不改写既有行**；
+       内容寻址键无行 ⇒ 自建登记行（同 sha 恒同 `_id` ⇒ 幂等覆写、不增行）。 */
+    const imageRows = []
+    for (const face of faces) {
+      if (text(face.image_sha256) === '' && text(face.image_storage_key) === '') continue
+      const resolved = await findSealImportImageRow(face)
+      if (resolved) continue
+      if (text(face.image_storage_key) === SEAL_PLACEHOLDER_IMAGE_KEY) {
+        return deny(REASONS.INVALID_VALUE, '佔位圖登記行不存在 ⇒ 拒絕直寫；本次零寫入。')
+      }
+      imageRows.push(buildDirectImageRow(face, at))
+    }
+    /* ⑥ **幂等读**（`source` ＋ `source_seal_id`；命中 ⇒ 零新增行、**不改写既有行**、**无 `plan`**）。 */
+    const seals = await readRows(COLLECTIONS.seals, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    const existing = seals.find(
+      (item) => text(item && item.source_seal_id) === sourceId && text(item && item.source) === source
+    )
+    if (existing) {
+      return {
+        ok: true,
+        op: 'createSealWithFaceDirect',
+        row: await directWriteRowOfExistingSeal(existing, true),
+        message: '該外部冪等鍵（source ＋ source_seal_id）已有正式行 ⇒ 未新增任何行、未改寫既有行（冪等）。'
+      }
+    }
+    /* ⑧ 复用构造器（**行构造 ＋ 原子发号**一次搞定）；影像引用经登记行覆蓋層解析（尚未落库）。 */
+    const importRow = { ...pickSealImportSealFields(payload), source, source_seal_id: sourceId, faces }
+    const faceRows = await readRows(COLLECTIONS.faces, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    const built = await buildSealAcceptanceFromImport(importRow, seals, faceRows, identity, at, imageRows)
+    if (!built.ok) {
+      return built.reason
+        ? deny(built.reason, '直寫落點構造失敗（影像引用 / 佔位圖 / 號域判定未過）⇒ 拒絕直寫；本次零寫入。')
+        : deny(REASONS.INVALID_VALUE, '直寫落點構造失敗（印面必須帶可解析的影像引用）⇒ 拒絕直寫；本次零寫入。')
+    }
+    /* ⑨ **面行追加 `image_sha256`**（口径：面行必落；印章行不必）。 */
+    const replies = []
+    built.faceDocs.forEach((doc, index) => {
+      doc.image_sha256 = text(faces[index] && faces[index].image_sha256) || null
+      replies.push({
+        fid: text(doc.fid),
+        face_no: Number(doc.face_no),
+        face_id: text(doc.id),
+        image_id: faceImageIdOf(doc),
+        kind: text(doc.kind) === 'EDGE' ? 'EDGE' : 'FACE'
+      })
+    })
+    /* ⑩ plan：**影像登记行 → 印章正式行 → 逐印面行**（先落被引用的登记行；`stamp_id` 此刻才有值）。 */
+    imageRows.forEach((row) => {
+      row.stamp_id = built.stampId
+    })
+    const primaryIndex = built.faceDocs.findIndex((doc) => text(doc.kind) !== 'EDGE')
+    const primaryAt = primaryIndex === -1 ? 0 : primaryIndex
+    return {
+      ok: true,
+      op: 'createSealWithFaceDirect',
+      row: {
+        ok: true,
+        sid: built.stampId,
+        fid: replies[primaryAt].fid,
+        seal_no: Number(built.sealDoc.seal_no),
+        face_no: replies[primaryAt].face_no,
+        face_id: replies[primaryAt].face_id,
+        image_id: replies[primaryAt].image_id,
+        faces: replies,
+        idempotent: false
+      },
+      plan: {
+        op: 'createSealWithFaceDirect',
+        writes: [
+          ...imageRows.map((row) => ({ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row })),
+          { kind: 'set', collection: COLLECTIONS.seals, id: built.stampId, doc: built.sealDoc },
+          ...built.faceDocs.map((doc) => ({ kind: 'set', collection: COLLECTIONS.faces, id: doc.id, doc }))
+        ]
+      }
+    }
+  },
+
+  /**
+   * **指纹对照（本单新增｜只读三态｜`querySealByFingerprint`）**：
+   * 入参四元组 `transcription` / `dynasty` / `author` / `image_sha256`（封闭键面）；文本侧**至少给 1 个**；
+   * `image_sha256` 未给 ⇒ **不可能判 `FULL`**（三态里「同图」无判据）⇒ 命中即 `IMAGE_DIFF`（如实）。
+   *
+   * 三态**服务端一次回齐**（`match` 是唯一判据键；**不许前端自行拼判断** —— 沿 `index.js`
+   * 「服务端权威行、前端只做镜像」的既有纪律）：
+   *   · `FULL`      ＝ 文本条件命中 **且** 至少一面 `image_sha256` 相同（【上传】禁用：同图同文 ⇒ 本地改名即可）；
+   *   · `IMAGE_DIFF` ＝ 文本条件命中、无任何面 sha 相同（【上传】启用：同文不同图）；
+   *   · `NONE`      ＝ 文本条件 0 行（【上传】启用：正常新传）。
+   *
+   * **只读、零写**（不产出 `plan` ⇒ `index.js` 恒 `shouldPersist=false`）。
+   * 身份门：op 落 `ADMIN_OPS` 面（不开用户级读面），门 ＝ **管理员 或 直写专身份**（二选一放行；
+   * 两者各自 fail-closed）—— local-dist 的【对照】页由直写专身份调用。
+   * @param {object} payload 载荷（允许键见 `SEAL_FINGERPRINT_QUERY_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<object>} 成功 ⇒ `{ok, op, row}`；失败 ⇒ 恰 3 键
+   */
+  async querySealByFingerprint(payload, identity, context) {
+    /* ① 身份门（只读面；管理员 或 直写专身份；各自 fail-closed）。 */
+    const adminDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    const directDenial = adminDenial ? directWriteIdentityDenial(identity) : null
+    if (directDenial) return directDenial
+    /* ② 载荷形态 ＋ 封闭四元组键面（零读面副作用）。 */
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零讀取。')
+    }
+    const unknown = Object.keys(payload).filter((key) => SEAL_FINGERPRINT_QUERY_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零讀取。`)
+    }
+    const transcription = text(payload.transcription)
+    const dynasty = text(payload.dynasty)
+    const author = text(payload.author)
+    const digest = text(payload.image_sha256).toLowerCase()
+    if (!transcription && !dynasty && !author) {
+      return deny(REASONS.MISSING_REQUIRED, '指紋對照至少要給一個文本側鍵（transcription / dynasty / author）；本次零讀取。')
+    }
+    if (digest !== '' && !ARTIFACT_DIGEST_PATTERN.test(digest)) {
+      return deny(REASONS.INVALID_VALUE, '影像摘要（image_sha256）必須是 64 位小寫十六進制；本次零讀取。')
+    }
+    /* ③ 只读取行（文本侧非空条件；`image_sha256` 只作三态判据、不作集合条件 —— 摘要活在面行上）。 */
+    const match = {}
+    if (transcription) match.transcription = transcription
+    if (dynasty) match.dynasty = dynasty
+    if (author) match.author = author
+    const seals = await readRows(COLLECTIONS.seals, match, { limit: DIRECT_WRITE_READ_LIMIT })
+    if (seals.length === 0) {
+      return {
+        ok: true,
+        op: 'querySealByFingerprint',
+        row: {
+          match: SEAL_FINGERPRINT_MATCH.NONE,
+          sid: '',
+          fid: '',
+          face_id: '',
+          seal_name: '',
+          image_id: null,
+          image_sha256: digest,
+          faces: []
+        }
+      }
+    }
+    const reports = []
+    for (const seal of seals) {
+      const sid = text(seal && (seal.sid || seal.stamp_id))
+      const faceRows = sid === '' ? [] : await readRows(COLLECTIONS.faces, { sealId: sid }, { limit: 64 })
+      const faces = faceRows.map((doc) => ({
+        fid: text(doc && doc.fid),
+        face_id: text(doc && doc.id),
+        image_id: faceImageIdOf(doc),
+        image_sha256: text(doc && doc.image_sha256),
+        /* 仅供内部挑选主面（不进回包 `faces[]` 单条键面）。 */
+        __kind: text(doc && doc.kind) === 'EDGE' ? 'EDGE' : 'FACE',
+        __seal_name: text(doc && doc.seal_name)
+      }))
+      reports.push({
+        seal,
+        sid,
+        faces,
+        hit: digest === '' ? null : faces.find((face) => face.image_sha256 === digest) || null
+      })
+    }
+    const full = reports.find((report) => report.hit) || null
+    const target = full || reports[0]
+    const primary =
+      (target.hit ? target.hit : target.faces.find((face) => face.__kind !== 'EDGE') || target.faces[0]) || {}
+    return {
+      ok: true,
+      op: 'querySealByFingerprint',
+      row: {
+        match: full ? SEAL_FINGERPRINT_MATCH.FULL : SEAL_FINGERPRINT_MATCH.IMAGE_DIFF,
+        sid: target.sid,
+        fid: text(primary.fid),
+        face_id: text(primary.face_id),
+        seal_name: text(primary.__seal_name) || text(target.seal && (target.seal.seal_name || target.seal.name)),
+        image_id: primary.image_id === undefined ? null : primary.image_id,
+        image_sha256: digest,
+        faces: target.faces.map((face) => ({
+          fid: face.fid,
+          face_id: face.face_id,
+          image_id: face.image_id,
+          image_sha256: face.image_sha256
+        }))
+      }
+    }
+  }
 })
 
 /**
@@ -4465,6 +5046,20 @@ module.exports = {
   SEAL_PLACEHOLDER_IMAGE_KEY,
   SEAL_PLACEHOLDER_IMAGE,
   buildSealAcceptanceFromImport,
+  /* **无审核直写面（本单新增｜人类口径 2026-10-28）**：两 op 的封闭键面 / 三态枚举 /
+     env 与三道硬门（供离线自检直接断言与直接跑）。 */
+  DIRECT_WRITE_ALLOWED_KEYS,
+  DIRECT_WRITE_ROW_KEYS,
+  DIRECT_WRITE_FACE_KEYS,
+  SEAL_FINGERPRINT_QUERY_KEYS,
+  SEAL_FINGERPRINT_MATCH,
+  SEAL_FINGERPRINT_ROW_KEYS,
+  SEAL_FINGERPRINT_FACE_KEYS,
+  directWriteEnvOf,
+  directWriteIdentityDenial,
+  directWriteSourceDenial,
+  directWriteReviewerDenial,
+  buildDirectImageRow,
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,

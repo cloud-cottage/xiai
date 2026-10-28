@@ -39,14 +39,21 @@ const REASONS = Object.freeze({
 
 /** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。
  *  **V3 追加**：`ADMIN_PHONE` ＝ 管理员白名单真源（挂在**本函数**上）；缺 / 空 ⇒
- *  所有管理员类 op 一律结构化拒绝 ＋ 零写入（**不因未配置而放行**）。 */
+ *  所有管理员类 op 一律结构化拒绝 ＋ 零写入（**不因未配置而放行**）。
+ *  **无审核直写收紧（S1 ＋ S2｜人类口径 2026-10-28）追加两项**（**只登记名字、本文件不写值**；
+ *  读点 ＝ `lib/ops.js::directWriteEnvOf`，缺 / 空 ⇒ **fail-closed 拒所有直写**）：
+ *    · `DIRECT_WRITE_PHONE` ＝ **分权手机号真源**：该身份**只能直写**、不得调 `review*` 系 op；
+ *    · `DIRECT_WRITE_SOURCES` ＝ **来源白名单**（逗号分隔，如 `feicui-local-dist`）：
+ *      `source` 不在表内 ⇒ 拒。 */
 const ENV_NAMES = Object.freeze({
   SMS_CODE: 'XIAI_USER_SMS_CODE',
   SECRET: 'XIAI_USER_TOKEN_SECRET',
   VERSION: 'XIAI_USER_TOKEN_VERSION',
   TTL_SECONDS: 'XIAI_USER_TOKEN_TTL_SECONDS',
   LEEWAY_SECONDS: 'XIAI_USER_TOKEN_LEEWAY_SECONDS',
-  ADMIN_PHONE: 'XIAI_ADMIN_PHONE'
+  ADMIN_PHONE: 'XIAI_ADMIN_PHONE',
+  DIRECT_WRITE_PHONE: 'XIAI_DIRECT_WRITE_PHONE',
+  DIRECT_WRITE_SOURCES: 'XIAI_DIRECT_WRITE_SOURCES'
 })
 
 /** 环境 Id 的三个候选环境变量（**运行期注入**，与 liwu 既有函数 `fortuneDailySettlement` 同一读法；

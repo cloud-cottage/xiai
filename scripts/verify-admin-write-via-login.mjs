@@ -239,13 +239,17 @@ session.setUser({ id: uidOfPhone(PHONE), phone: PHONE, role: 'admin', nickname: 
    =========================================================================== */
 console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 ＋ op 注册面' }))
 /* A1（2026-10-27 合法过期 ⇒ 期望 11 → 12）：新增 `migrateCodeNumbers` 一次性发号重编（口径件 §4）。
+   A1（2026-10-28 合法过期 ⇒ 期望 12 → 14）：新增**无审核直写面**两 op（人类口径 2026-10-28）——
+   `createSealWithFaceDirect`（直写正式行，S1/S2 双 env 收紧）＋ `querySealByFingerprint`（只读三态）。
    加严：同判据补两条**负对照**（期望抽掉一项 / 多一个不存在的 op ⇒ 必红），防判据退化成「恒绿」。 */
 const ADMIN_OPS_EXPECTED = [
+  'createSealWithFaceDirect',
   'issueFeicuiToken',
   'migrateCodeNumbers',
   'migrateDynastyValues',
   'migrateSealValueDomains',
   'pullImportRows',
+  'querySealByFingerprint',
   'repairImportAcceptance',
   'reviewCorrection',
   'reviewItemImport',
@@ -256,7 +260,7 @@ const ADMIN_OPS_EXPECTED = [
 ]
 const adminOpsActual = sorted(Object.keys(ops.ADMIN_OPS))
 const adminOpsEqual = (expected) => canonical(sorted(expected)) === canonical(adminOpsActual)
-check('A1', '`ADMIN_OPS` 恰含 12 项 {issueFeicuiToken, migrateCodeNumbers, migrateDynastyValues, migrateSealValueDomains, pullImportRows, repairImportAcceptance, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setInviteReward}（2026-10-12 階段乙增 pullImportRows；本单增 issueFeicuiToken：仅管理员签发斐萃令牌、零落盘；2026-10-27 §4 增 migrateCodeNumbers 一次性发号重编）', ADMIN_OPS_EXPECTED, adminOpsActual)
+check('A1', '`ADMIN_OPS` 恰含 14 项 {createSealWithFaceDirect, issueFeicuiToken, migrateCodeNumbers, migrateDynastyValues, migrateSealValueDomains, pullImportRows, querySealByFingerprint, repairImportAcceptance, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setInviteReward}（2026-10-12 階段乙增 pullImportRows；本单增 issueFeicuiToken：仅管理员签发斐萃令牌、零落盘；2026-10-27 §4 增 migrateCodeNumbers 一次性发号重编；2026-10-28 增无审核直写两 op）', ADMIN_OPS_EXPECTED, adminOpsActual)
 check('A1n1', '负对照①（必红）：期望数组抽掉 `migrateCodeNumbers` ⇒ 与现实值不等', false, adminOpsEqual(ADMIN_OPS_EXPECTED.filter((op) => op !== 'migrateCodeNumbers')))
 check('A1n2', '负对照②（必红）：期望数组多一个不存在的 op ⇒ 与现实值不等', false, adminOpsEqual([...ADMIN_OPS_EXPECTED, 'noSuchOp'].sort()))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
