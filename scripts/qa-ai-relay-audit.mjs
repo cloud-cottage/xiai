@@ -8,7 +8,7 @@
  * 被测件：`cloudfunctions/xiai-user-token/{index.js, lib/{ops,ledger,aiKeys,aiUpstream,aiUsage}.js}`
  *        ＋ `api/_lib/aiRelay.js`（真 handler 直调）。
  *
- * 断言面（本套 **50** 条）：
+ * 断言面（本套 **52** 条）：
  *   A 甲1 越权：A 会话吊销 / 改限 B 的金鑰 ⇒ FORBIDDEN ＋ **零写入**；不存在 vs 非本人
  *      **同一 reason 同一 message**（防枚举）；**管理员也不例外**（管理员非金鑰本人亦拒）。
  *   B 甲2 零明文：全部 11 op 回包 ＋ 中转全部回包 ＋ 全部日志，对
@@ -40,7 +40,10 @@
  *
  *   L AC 补面（矩阵取证）：L1 中转端点契约（edits / generations 路径 ＋ 换配置零改码跟随 ＋
  *      502 归一化零透传＝AC-593）；L2 `image` 第三鍵 ⇒ 400 零写入（AC-601 ②）；
- *      L3 签发回包明文正则 ＋ 8 位前缀（AC-591 ①）。
+ *      L3 签发回包明文正则 ＋ 8 位前缀（AC-591 ①）；
+ *      L4 请求体上限（`MAX_BODY_BYTES` 4 MiB 阀值真源，恰 4 MiB 与 4 MiB+1 裸体 ⇒ 400
+ *      零上游零扣费＝AC-599③）；L5 `data_url` 前缀/形态非法四发（非 image 类 / 裸 base64 /
+ *      缺 payload / 缺 `;base64` ⇒ 全 400 零写入＝AC-602②）。
  *
  * 纪律：只新增本文件；不改产品代码 / 规范 / 既有 verify 脚本；不做 git 写操作；
  * 不打印任何明文凭据（只打印长度与指纹）；断言失败 ⇒ 退出码 1。
@@ -1037,6 +1040,54 @@ const RKEY = relayKey.key
   check('L', 'L3', 'AC-591 ① 签发回包明文匹配 `/^sk-xiai-[0-9a-f]{32}$/` ＋ `key_prefix` 恰 8 位且为明文前缀',
     keyRegexOk && prefixLen === 8 && String(issuedA.key).startsWith(String(issuedA.key_prefix)),
     { regexOk: keyRegexOk, keyLen: String(issuedA.key).length, prefixLen })
+
+  /* L4 · AC-599③ 请求体上限：用「恰 4 MiB」与「4 MiB＋1」的**原始 body 字节串**直接驱动
+     handler 的 body 读取层（不真塞 base64 进 JSON）。阀值真源 ＝ `MAX_BODY_BYTES`（4 MiB，
+     `aiRelay.js` 导出）；Vercel 自身 ≈4.5 MB 体限是**外层护栏**（本离线层测不到）。
+     实测形态：恰 4 MiB ⇒ 过长度门、`JSON.parse` 失败 ⇒ 400（**不当截断**，是当非法 JSON）；
+     4 MiB＋1 ⇒ `MAX_BODY_BYTES` 长度门直接拒 ⇒ 400。两发均零上游零扣费零流水。 */
+  const l4Uid = 'u-qa-l4-00001'
+  const l4Issued = await aiKeys.issueAiKey({ uid: l4Uid, label: '质检-L4体限', day_limit: 500, minute_limit: 120 })
+  fakeDb.bucketOf('xiai_balances').set(`bl-${l4Uid}`, { _id: `bl-${l4Uid}`, uid: l4Uid, points: 500, updated_at: 'seed' })
+  const L4KEY = l4Issued.key
+  const l4Hits0 = upstreamHits.length
+  const l4Flow0 = flowRows().length
+  const l4Writes0 = writesNow()
+  const l4Exact = await callRelay({ key: L4KEY, requestId: 'rid-l4-exact-01', rawBody: 'A'.repeat(core.MAX_BODY_BYTES) })
+  const l4Over = await callRelay({ key: L4KEY, requestId: 'rid-l4-over-001', rawBody: 'A'.repeat(core.MAX_BODY_BYTES + 1) })
+  check('L', 'L4', 'AC-599③ 请求体上限：阀值真源＝`MAX_BODY_BYTES`（4 MiB）；Vercel ≈4.5 MB 体限为外层护栏。恰 4 MiB 裸体 ⇒ 过长度门、`JSON.parse` 失败 ⇒ 400；4 MiB＋1 ⇒ 长度门直接拒 ⇒ 400；两发均零上游、零扣费、零流水',
+    l4Exact.status === 400 && l4Exact.body.reason === 'INVALID_ARGUMENT'
+      && l4Over.status === 400 && l4Over.body.reason === 'INVALID_ARGUMENT'
+      && upstreamHits.length === l4Hits0 && flowRows().length === l4Flow0 && writesNow() === l4Writes0,
+    { exact: l4Exact.status, exactReason: l4Exact.body.reason, over: l4Over.status, overReason: l4Over.body.reason,
+      upstreamCalls: upstreamHits.length - l4Hits0, flowDelta: flowRows().length - l4Flow0, writesDelta: writesNow() - l4Writes0 })
+
+  /* L5 · AC-602② `data_url` 前缀/形态非法四发（每发独立 uid ＋ 独立金鑰，零状态串味）：
+     非 image 类 / 裸 base64 无前缀 / 缺 payload / 缺 `;base64` ⇒ 全 400 INVALID_ARGUMENT，
+     零写入零上游（值域门在⑤步、任何写入之前）。 */
+  const l5Shots = [
+    { uid: 'u-qa-l5-text-0001', rid: 'rid-l5-text-01', tag: '非image类', dataUrl: 'data:text/plain;base64,SGVsbG8=' },
+    { uid: 'u-qa-l5-bare-0001', rid: 'rid-l5-bare-01', tag: '裸base64', dataUrl: 'iVBORw0KGgo=' },
+    { uid: 'u-qa-l5-nopay-0001', rid: 'rid-l5-nopay-01', tag: '缺payload', dataUrl: 'data:image/png;base64' },
+    { uid: 'u-qa-l5-noenc-0001', rid: 'rid-l5-noenc-01', tag: '缺;base64', dataUrl: 'data:image/png,SGVsbG8=' }
+  ]
+  const l5Results = []
+  let l5AllPass = true
+  for (const shot of l5Shots) {
+    const shotIssued = await aiKeys.issueAiKey({ uid: shot.uid, label: '质检-L5-' + shot.tag, day_limit: 500, minute_limit: 120 })
+    fakeDb.bucketOf('xiai_balances').set(`bl-${shot.uid}`, { _id: `bl-${shot.uid}`, uid: shot.uid, points: 500, updated_at: 'seed' })
+    const h0 = upstreamHits.length
+    const f0 = flowRows().length
+    const w0 = writesNow()
+    const r = await callRelay({ key: shotIssued.key, requestId: shot.rid, routePath: '/api/ai/v1/images/edits', body: { prompt: 'L5', image: { data_url: shot.dataUrl } } })
+    const pass = r.status === 400 && r.body.reason === 'INVALID_ARGUMENT'
+      && upstreamHits.length === h0 && flowRows().length === f0 && writesNow() === w0
+    if (!pass) l5AllPass = false
+    l5Results.push({ tag: shot.tag, status: r.status, reason: r.body.reason,
+      upstreamCalls: upstreamHits.length - h0, flowDelta: flowRows().length - f0, writesDelta: writesNow() - w0 })
+  }
+  check('L', 'L5', 'AC-602② `data_url` 前缀/形态非法四发（每发独立 uid＋金鑰，零状态串味）：非 image 类（`data:text/plain`）／裸 base64 无前缀／缺 payload（`;base64` 后无逗号）／缺 `;base64`（明文）⇒ 全 400 INVALID_ARGUMENT ＋ 零写入零上游',
+    l5AllPass, { shots: l5Results })
 }
 
 /* ------------------------------------------------------------------ 收尾 */
