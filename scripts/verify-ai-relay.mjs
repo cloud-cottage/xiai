@@ -11,7 +11,7 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **41** 条，覆盖派单方点名的 ①〜⑭）：
+ * 断言面（本套 **48** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10，覆盖派单方点名的 ①〜⑭）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
  *      ⇒ 400 且**零扣费**。
@@ -29,6 +29,16 @@
  *   F. 交付面静态门：`@cloudbase/node-sdk` 落 dependencies、`vercel.json`
  *      `functions.maxDuration=60` 且既有段一字未动、路由默认导出是函数、本套为第 28 个脚本（基线 26 ＋ 本套 ai-relay ＋ ai-connect-page）、
  *      核心源码零 `data:image` 字面 / 零字节下载面。
+ *   G. **data_url 转存面（v1.74 AC-601〜603）**：① `data_url` 成功（上傳恰 1 次、
+ *      上游拿到的 `image` 是簽名鏈、回包恰 5 鍵、上傳字節＝解碼字節、鍵＝內容尋址族）；
+ *      ② `storage_key` ＋ `data_url` 同給 ⇒ 400 ＋ **零扣費**；③ 前綴非法
+ *      （`data:text/plain`）／mime 出封閉面（`image/jpg`）⇒ 400；④ 解碼後 > 2 MiB
+ *      （恰 2 MiB＋1 合成圖）⇒ 400 ＋ 零扣費，恰 2 MiB ⇒ 放行；⑤ 魔數與 mime 不一致
+ *      ⇒ 400；⑥ **全部回包与日志零命中 `data:` ＋ `image/` 拼裝前綴**（逐字搜索 count=0）；
+ *      ⑦ 上傳失敗 ⇒ 503 `CONFIG_MISSING` 且 `message` 含「存儲」**不含**「配置」＋
+ *      審計行 `{stage:'upload', key_prefix, bytes}`；另加：上游 500 ⇒ 502 ＋ 退款 ＋
+ *      **不刪已上傳對象**（源碼零刪除調用面）、generations 帶 `data_url` ⇒ 400、
+ *      base64 形態非法 ⇒ 400。
  *
  * 纪律：断言失败 ⇒ 退出码 1；**不打印任何明文金鑰 / 上游 key / 密文 / 令牌**（只打印长度与指纹）。
  */
@@ -302,7 +312,27 @@ const injectedFetch = async (url, init) => {
   return globalThis.fetch(target, init)
 }
 
-const injectedResolveImageUrl = async (storageKey) => `${SIGNED_BASE}/${encodeURIComponent(String(storageKey))}?sig=offline`
+const injectedResolveImageUrlCalls = []
+const injectedResolveImageUrl = async (storageKey) => {
+  injectedResolveImageUrlCalls.push(String(storageKey))
+  return `${SIGNED_BASE}/${encodeURIComponent(String(storageKey))}?sig=offline`
+}
+
+/* `data_url` 转存假体：**同内容寻址口径**（`xiai/images/` ＋ sha256 前 2 位 ＋ 斜線 ＋
+   sha256 ＋ 擴展名）；只记字节数与键面，**不打印任何字节**。 */
+const FAKE_ENV_ID = 'xiai-env-selfcheck'
+const sha256Bytes = (buf) => createHash('sha256').update(buf).digest('hex')
+const uploadCalls = []
+const injectedUploadImage = async (bytes, ext) => {
+  const buf = Buffer.from(bytes)
+  const digest = sha256Bytes(buf)
+  const cloudPath = `xiai/images/${digest.slice(0, 2)}/${digest}${ext}`
+  uploadCalls.push({ ext: String(ext), bytes: buf.length, cloudPath, head: buf.subarray(0, 8).toString('hex') })
+  return { fileID: `${FAKE_ENV_ID}/${cloudPath}`, cloudPath }
+}
+
+/* 全部回包原文（供 G 段「回包零命中」逐字搜索）。 */
+const allRaws = []
 
 const logs = []
 let fixedNowMs = 1_800_000_000_000
@@ -313,11 +343,20 @@ const deps = {
   fetch: injectedFetch,
   now: () => fixedNowMs,
   resolveImageUrl: injectedResolveImageUrl,
+  uploadImage: injectedUploadImage,
   logger: { log: (line) => logs.push(String(line)) }
 }
 
 const sutHandler = routeModule.createHandler(deps)
 const configMissingHandler = routeModule.createHandler(Object.assign({}, deps, { env: {} }))
+/* 上傳失敗面（G 段⑦）：同一份实现、只把 `uploadImage` 换成必抛假体（**不连云端**）。 */
+const uploadFailHandler = routeModule.createHandler(
+  Object.assign({}, deps, {
+    uploadImage: async () => {
+      throw new Error('FAKE_UPLOAD_UNAVAILABLE')
+    }
+  })
+)
 
 const sutServer = createServer((req, res) => {
   Promise.resolve(sutHandler(req, res)).catch(() => {
@@ -383,6 +422,7 @@ async function call(options = {}) {
         ? Object.fromEntries(res.headers.entries())
         : Object.assign({}, res.headers)
   }
+  allRaws.push(textBody)
   if (entry.reason) observed[entry.reason] = entry.status
   return entry
 }
@@ -597,6 +637,116 @@ check('E9', '核心源码：零 `data:image` 直塞字面、零图片字节下�
 
 /* E10：日志只给布尔与状态码（零 prompt、零图片链接）。 */
 check('E10', '日志零 prompt、零签名链、零 uid 之外的凭据形态（只给布尔与状态码）', { prompt: 0, signedLink: 0, hasTag: true }, { prompt: countIn(logText, '刻一枚'), signedLink: countIn(logText, SIGNED_BASE), hasTag: countIn(logText, 'xiai-ai-relay') >= 1 })
+
+/* ===========================================================================
+   G 段：data_url 转存面（v1.74 AC-601〜603）
+   =========================================================================== */
+section('G', 'data_url：三形态 / 兩者同給 400 / 前綴·mime·魔數門 / 2 MiB 界 / 上傳轉存 / 零命中')
+
+/* 专用金鑰与余额（**不占用 u-ok 的余额轨迹** ⇒ E 段既有断言不受影响）。 */
+issued.du = await aiKeys.issueAiKey({ uid: 'u-du', label: '自检-data_url', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-du', { _id: 'bl-u-du', uid: 'u-du', points: 100, updated_at: 'seed' })
+if (!issued.du || issued.du.ok !== true) {
+  console.log(JSON.stringify({ fatal: 'ISSUE_KEY_DU_FAILED' }))
+  process.exit(1)
+}
+const DU_KEY = issued.du.key
+const duBalance = () => balanceOf('u-du')
+
+/* 合成图（**真实 1×1 PNG**；另备恰好 2 MiB、2 MiB＋1 与「JPEG 魔數冒充 PNG」的合成字节）。 */
+const PNG_1PX_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const pngBytes = Buffer.from(PNG_1PX_B64, 'base64')
+const pngDataUrl = `data:image/png;base64,${PNG_1PX_B64}`
+const PNG_MAGIC_HEX = '89504e470d0a1a0a'
+const pngDigest = sha256Bytes(pngBytes)
+const pngCloudPath = `xiai/images/${pngDigest.slice(0, 2)}/${pngDigest}.png`
+const pngFileID = `${FAKE_ENV_ID}/${pngCloudPath}`
+
+/* G1：① `data_url` 成功（上傳恰 1 次、上游拿簽名鏈、回包恰 5 鍵）。 */
+upstreamMode = 'url'
+const g1UploadsBefore = uploadCalls.length
+const g1HitsBefore = upstreamHits.length
+const g1ResolvesBefore = injectedResolveImageUrlCalls.length
+const G1 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '參考圖走 data_url 轉存', image: { data_url: pngDataUrl } }, requestId: 'rid-G01-0001' })
+const g1Upload = uploadCalls[uploadCalls.length - 1]
+const g1Hit = upstreamHits[upstreamHits.length - 1]
+check('G1', '① `data_url` 成功 ⇒ 200 ＋ **上傳恰 1 次**（字節＝解碼字節、魔數＝PNG、鍵＝內容尋址族）＋ 上游 `image` 是**簽名鏈**（fileID 經 resolve 換鏈、非 `data:`、零 base64 字節）＋ 回包**恰 5 鍵** ＋ 扣 10 金', { status: 200, keys: 'charge,idempotent,image,ok,usage', uploads: 1, uploadedBytes: pngBytes.length, uploadedHead: PNG_MAGIC_HEX, cloudPathExact: true, family: 'xiai/images/', upstreamCalls: 1, upstreamImageExact: true, upstreamImageIsData: false, upstreamRawDataPrefix: 0, upstreamRawB64: 0, resolveGotFileID: true, points: 10, balanceAfter: 90 }, { status: G1.status, keys: shapeOf(G1.body), uploads: uploadCalls.length - g1UploadsBefore, uploadedBytes: g1Upload && g1Upload.bytes, uploadedHead: g1Upload && g1Upload.head, cloudPathExact: Boolean(g1Upload && g1Upload.cloudPath === pngCloudPath), family: String(g1Upload && g1Upload.cloudPath).slice(0, core.IMAGE_KEY_FAMILY.length), upstreamCalls: upstreamHits.length - g1HitsBefore, upstreamImageExact: g1Hit.body.image === `${SIGNED_BASE}/${encodeURIComponent(pngFileID)}?sig=offline`, upstreamImageIsData: String(g1Hit.body.image).slice(0, 5) === 'data:', upstreamRawDataPrefix: countIn(g1Hit.raw, 'data:' + 'image/'), upstreamRawB64: countIn(g1Hit.raw, PNG_1PX_B64), resolveGotFileID: injectedResolveImageUrlCalls[g1ResolvesBefore] === pngFileID, points: G1.body && G1.body.charge && G1.body.charge.points, balanceAfter: duBalance() })
+
+/* G2：② 两者同給 ⇒ 400 ＋ 零扣費（writes / flow / upload 三零）。 */
+const g2Writes = writeSnapshot()
+const g2Flow = flowSnapshot()
+const g2Uploads = uploadCalls.length
+const G2 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '兩鍵同給', image: { storage_key: 'cloud://env-selfcheck/relay/ref.png', data_url: pngDataUrl } }, requestId: 'rid-G02-0001' })
+check('G2', '② `storage_key` ＋ `data_url` 同給 ⇒ 400 INVALID_ARGUMENT ＋ **零扣費**（写计数 / 流水行 / 上傳调用均不变）', { status: 400, reason: 'INVALID_ARGUMENT', writes: 0, flow: 0, uploads: 0 }, { status: G2.status, reason: G2.reason, writes: writeSnapshot() - g2Writes, flow: flowSnapshot() - g2Flow, uploads: uploadCalls.length - g2Uploads })
+
+/* G3 / G3b：③ 前綴非法（`data:text/plain`）与 mime 出封闭面（`image/jpg`）⇒ 400。 */
+const g3Writes = writeSnapshot()
+const g3Flow = flowSnapshot()
+const g3Uploads = uploadCalls.length
+const G3 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '前綴非法', image: { data_url: 'data:text/plain;base64,SGVsbG8=' } }, requestId: 'rid-G03-0001' })
+const G3b = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: 'mime 出封閉面', image: { data_url: `data:image/jpg;base64,${PNG_1PX_B64}` } }, requestId: 'rid-G03b-001' })
+check('G3', '③ 前綴非法（`data:text/plain`）／mime 出封闭面（`image/jpg`）⇒ 均 400 ＋ **零扣費**（判定全在任何写入与上傳之前）', { prefix: [400, 'INVALID_ARGUMENT'], mime: [400, 'INVALID_ARGUMENT'], writes: 0, flow: 0, uploads: 0 }, { prefix: [G3.status, G3.reason], mime: [G3b.status, G3b.reason], writes: writeSnapshot() - g3Writes, flow: flowSnapshot() - g3Flow, uploads: uploadCalls.length - g3Uploads })
+
+/* G4 / G4b：④ 解碼後 > 2 MiB（恰 2 MiB＋1）⇒ 400 ＋ 零扣費；恰 2 MiB ⇒ 放行。 */
+const overBytes = Buffer.concat([pngBytes.subarray(0, 8), Buffer.alloc(core.IMAGE_DATA_URL_MAX_BYTES + 1 - 8, 0x41)])
+const exactBytes = Buffer.concat([pngBytes.subarray(0, 8), Buffer.alloc(core.IMAGE_DATA_URL_MAX_BYTES - 8, 0x41)])
+const g4Writes = writeSnapshot()
+const g4Flow = flowSnapshot()
+const g4Uploads = uploadCalls.length
+const G4 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '超過 2 MiB', image: { data_url: `data:image/png;base64,${overBytes.toString('base64')}` } }, requestId: 'rid-G04-0001' })
+/* **立刻**取 2 MiB＋1 那一发的零写入判据（再往下 G4b 是合法成功、会写入）。 */
+const g4OverWrites = writeSnapshot() - g4Writes
+const g4OverFlow = flowSnapshot() - g4Flow
+const g4OverUploads = uploadCalls.length - g4Uploads
+const g4bUploads = uploadCalls.length
+const G4b = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '恰 2 MiB 邊界', image: { data_url: `data:image/png;base64,${exactBytes.toString('base64')}` } }, requestId: 'rid-G04b-0001' })
+const g4bUpload = uploadCalls[uploadCalls.length - 1]
+check('G4', '④ 解碼後 2 MiB＋1（合成 PNG 魔數）⇒ 400 ＋ **零扣費·零上傳**；**恰 2 MiB ⇒ 放行**（200 ＋ 上傳 2097152 字節）', { over: [400, 'INVALID_ARGUMENT'], overWrites: 0, overFlow: 0, overUploads: 0, exactStatus: 200, exactUploads: 1, exactBytes: 2097152, exactBalanceAfter: 80 }, { over: [G4.status, G4.reason], overWrites: g4OverWrites, overFlow: g4OverFlow, overUploads: g4OverUploads, exactStatus: G4b.status, exactUploads: uploadCalls.length - g4bUploads, exactBytes: g4bUpload && g4bUpload.bytes, exactBalanceAfter: duBalance() })
+
+/* G5：⑤ 魔數與 mime 不一致（JPEG 魔數冒充 PNG）⇒ 400。 */
+const jpegMagicBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01])
+const g5Writes = writeSnapshot()
+const g5Flow = flowSnapshot()
+const g5Uploads = uploadCalls.length
+const G5 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '魔數與 mime 不符', image: { data_url: `data:image/png;base64,${jpegMagicBytes.toString('base64')}` } }, requestId: 'rid-G05-0001' })
+check('G5', '⑤ 魔數與 mime 不一致（JPEG 魔數冒充 `image/png`）⇒ 400 ＋ **零扣費·零上傳**', { status: 400, reason: 'INVALID_ARGUMENT', writes: 0, flow: 0, uploads: 0 }, { status: G5.status, reason: G5.reason, writes: writeSnapshot() - g5Writes, flow: flowSnapshot() - g5Flow, uploads: uploadCalls.length - g5Uploads })
+
+/* G10：base64 形態非法（字符面出封闭集）⇒ 400。 */
+const g10Writes = writeSnapshot()
+const G10 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: 'base64 形態非法', image: { data_url: 'data:image/png;base64,QUFB*QQ==' } }, requestId: 'rid-G10-0001' })
+check('G10', 'base64 形態非法（字符面出封闭集）⇒ 400 ＋ 零扣費', { status: 400, reason: 'INVALID_ARGUMENT', writes: 0 }, { status: G10.status, reason: G10.reason, writes: writeSnapshot() - g10Writes })
+
+/* G9：generations 帶 `data_url` ⇒ 400（保持現行：image 只適用 edits）。 */
+const g9Uploads = uploadCalls.length
+const G9 = await call({ key: DU_KEY, body: { prompt: 'generations 帶 data_url', image: { data_url: pngDataUrl } }, requestId: 'rid-G09-0001' })
+check('G9', '`images/generations` 帶 `data_url` ⇒ 400（保持現行：image 只適用 images/edits）＋ 零上傳', { status: 400, reason: 'INVALID_ARGUMENT', uploads: 0 }, { status: G9.status, reason: G9.reason, uploads: uploadCalls.length - g9Uploads })
+
+/* G7：⑦ 上傳失敗 ⇒ 503 折疊面（reason 仍是 CONFIG_MISSING）＋ message 含「存儲」不含「配置」＋ 零扣費 ＋ 審計行。 */
+const g7Writes = writeSnapshot()
+const g7Flow = flowSnapshot()
+const g7LogLen = logs.length
+const G7 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '上傳失敗面', image: { data_url: pngDataUrl } }, requestId: 'rid-G07-0001', handler: uploadFailHandler })
+const g7Audit = logs.slice(g7LogLen).filter((line) => countIn(line, '"stage":"upload"') >= 1)
+const g7Line = g7Audit[g7Audit.length - 1] || ''
+check('G7', '⑦ 上傳失敗 ⇒ **503** 且 reason 仍走既有 8 面（`CONFIG_MISSING`）＋ `message` 含「存儲」**不含**「配置」＋ **零扣費** ＋ 審計行恰 `{stage:upload, key_prefix, bytes}`（零 data_url 片段、零字节）', { status: 503, reason: 'CONFIG_MISSING', mentionsStorage: true, mentionsConfig: false, keys: 'message,ok,reason', writes: 0, flow: 0, auditLines: 1, keyPrefixOk: true, bytesOk: true, auditFragments: 0 }, { status: G7.status, reason: G7.reason, mentionsStorage: countIn(G7.body && G7.body.message, '存儲') >= 1, mentionsConfig: countIn(G7.body && G7.body.message, '配置') >= 1, keys: shapeOf(G7.body), writes: writeSnapshot() - g7Writes, flow: flowSnapshot() - g7Flow, auditLines: g7Audit.length, keyPrefixOk: countIn(g7Line, `"key_prefix":"xiai/images/${pngDigest.slice(0, 2)}"`) === 1, bytesOk: countIn(g7Line, `"bytes":${pngBytes.length},"detail"`) === 1, auditFragments: countIn(g7Line, 'data:') + countIn(g7Line, 'base64') + countIn(g7Line, PNG_1PX_B64.slice(0, 12)) })
+
+/* G8：上游 500（data_url 路径）⇒ 502 ＋ 退款 ＋ **不刪已上傳對象**（源碼零刪除調用面）＋ 審計行在場。 */
+upstreamMode = '500'
+const g8Uploads = uploadCalls.length
+const g8Hits = upstreamHits.length
+const g8LogLen = logs.length
+const G8 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '上游失敗不刪半成品', image: { data_url: pngDataUrl } }, requestId: 'rid-G08-0001' })
+upstreamMode = 'url'
+const g8Refund = flowRows().filter((r) => r.kind === 'REFUND' && String(r.ref_id).includes('rid-G08-0001'))
+const g8Audit = logs.slice(g8LogLen).filter((line) => countIn(line, '"stage":"upload"') >= 1)
+const g8Line = g8Audit[g8Audit.length - 1] || ''
+check('G8', '上游 500（data_url 路径）⇒ 502 ＋ 退款流水 ＋ 余额复原 ＋ **已上傳對象不刪**（源碼零刪除調用面）＋ 審計行 `{stage:upload, key_prefix, bytes}` 恆在場（回收半成品可溯源）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 500, uploads: 1, upstreamCalls: 1, refundRows: 1, refundDelta: 10, balance: 80, deleteCallsInCore: 0, auditLines: 1, keyPrefixOk: true, bytesOk: true, auditFragments: 0 }, { status: G8.status, reason: G8.reason, upstreamStatus: G8.body && G8.body.status, uploads: uploadCalls.length - g8Uploads, upstreamCalls: upstreamHits.length - g8Hits, refundRows: g8Refund.length, refundDelta: g8Refund[0] ? g8Refund[0].delta : null, balance: duBalance(), deleteCallsInCore: countIn(coreSource, 'deleteFile'), auditLines: g8Audit.length, keyPrefixOk: countIn(g8Line, `"key_prefix":"xiai/images/${pngDigest.slice(0, 2)}"`) === 1, bytesOk: countIn(g8Line, `"bytes":${pngBytes.length}}`) === 1, auditFragments: countIn(g8Line, 'data:') + countIn(g8Line, 'base64') + countIn(g8Line, PNG_1PX_B64.slice(0, 12)) })
+
+/* G6：⑥ 全部回包与日志**零命中** `data:image/`（逐字搜索 count=0）；上游请求体同尺。 */
+const g6RawAll = allRaws.join('\n')
+const g6LogAll = logs.join('\n')
+const g6UpstreamAll = upstreamHits.map((hit) => hit.raw).join('\n')
+check('G6', '⑥ **全部回包**（含成功 / 400 / 502 / 503 共用本会话全部回包）与**全部日志**逐字搜索 `data:image/` **count=0**；上游请求体同为 0（原始字节与 data_url 一律不外流）', { responses: 0, logs: 0, upstream: 0, pngB64InLogs: 0 }, { responses: countIn(g6RawAll, 'data:' + 'image/'), logs: countIn(g6LogAll, 'data:' + 'image/'), upstream: countIn(g6UpstreamAll, 'data:' + 'image/'), pngB64InLogs: countIn(g6LogAll, PNG_1PX_B64) })
 
 /* ===========================================================================
    F 段：交付面静态门

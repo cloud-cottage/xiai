@@ -14,12 +14,19 @@
  *      ⇒ 404 `PATH_NOT_ALLOWED`）
  *   ③ 鉴权：`Authorization` 头按 `Bearer` 方案取凭据，且值须以 `sk-xiai-` 开头
  *   ④ 必填头 `X-Request-Id`（8〜64 字；**幂等键的组成部分**）（400 `INVALID_ARGUMENT`）
- *   ⑤ 入参 JSON（封闭键面；**不接受 multipart、图片不得 base64 直塞**）
+ *   ⑤ 入参 JSON（封闭键面；**不接受 multipart**；`image` **三形态之一**：
+ *      恰一鍵 `storage_key` ／ 恰一鍵 `data_url`；**两者同給 ⇒ 400 ＋ 零扣费**）
  *      （400 `INVALID_ARGUMENT`）
  *   ⑥ `evaluateGate` 只读限额判定（429 `LIMIT_DAY` / `LIMIT_MINUTE` ＋ `Retry-After`；**零扣费**）
  *   ⑦ `resolveUpstreamSecret` 取上游（503 `CONFIG_MISSING`；**零扣费**）
- *   ⑧ 参考图 `storage_key` → 签名链（`@cloudbase/node-sdk::getTempFileURL`；
- *      **本函数不下载字节、不 base64 转发**；失败 ⇒ 503 `CONFIG_MISSING`，**零扣费**）
+ *   ⑧ 参考图 → 签名链（`@cloudbase/node-sdk::getTempFileURL`；
+ *      **本函数不下载字节、不 base64 转发**；失败 ⇒ 503 `CONFIG_MISSING`，**零扣费**）；
+ *      `data_url` 形态在此**转存**（凍結順序不得變：解碼 → 魔數與 mime 一致〔不一致 ⇒ 400〕
+ *      → 上傳 CloudBase `uploadFile`〔內容尋址鍵 `xiai/images/` 族〕→ `getTempFileURL`
+ *      簽名鏈 → 上游 `image` 欄**只拿簽名鏈**）；上傳失敗 ⇒ 折疊 503 `CONFIG_MISSING`
+ *      （`message` 寫明「存儲不可用」、**不說「配置」**）、**零扣费**；
+ *      上游後續失敗**不刪**已上傳對象（內容尋址可被後續重用），審計行只記
+ *      `{stage:'upload', key_prefix, bytes}`（**零字節、零 data_url 片段**）
  *   ⑨ **预扣 10 金**（`chargePoints`；kind=`CHARGE`、ref_type=`AI_IMAGE`、
  *      ref_id=上游请求标识、idem_key=`sha256(key_id ＋ 冒號 ＋ X-Request-Id)`）
  *      （余额不足 ⇒ 402 `INSUFFICIENT_POINTS`，**零写入**）
@@ -47,8 +54,10 @@
  *      本文件做 `day → today` 的**改名**，不改 lib）。
  *   D. `charge.points` ＝ **本次扣费金额 10**（lib 回的 `points` 是余额，已由
  *      `charge.balance_after` 承载；两键同值会让契约的两键失去意义）。
- *   E. `image` 物件的封闭鍵面按契約逐字实现为**恰 1 鍵 `storage_key`**
- *      （契約原文「僅兩個鍵：storage_key」只点名了一枚鍵 ⇒ 按点名实现，差异提请裁定）。
+ *   E. `image` 物件的封闭鍵面（規範 v1.74 AC-601〜603）＝ **三形态之一**：恰 1 鍵
+ *      `storage_key`（原行為）／ 恰 1 鍵 `data_url`（前綴 `data:` ＋ `image/` 拼裝、
+ *      mime 封閉四值 png / jpeg / webp / tiff、base64 解碼後 ≤ 2 MiB、魔數與 mime 一致）；
+ *      **两者同給 ⇒ 400 ＋ 零扣费**；`generations` 帶任一形态 ⇒ 400（见 F）。
  *   F. `images/generations` **不接受 `image`**（带 ⇒ 400；不静默丢、也不转发给不认该字段的上游）。
  *   G. 任何非 200 回包 ⇒ **净扣费为 0**（未扣的不扣、已扣的退款），这是本端点的自检不变式。
  *
@@ -105,8 +114,23 @@ export const DEFAULT_TIMEOUT_MS = 60000
 /** 参考图 `storage_key` 上限（只做形态护栏，不猜内容）。 */
 export const STORAGE_KEY_MAX_LENGTH = 512
 
-/** 请求体读入上限（超限 ⇒ 按非法 JSON 走 400；**不接受 multipart / 图片字节**）。 */
-export const MAX_BODY_BYTES = 512 * 1024
+/** 参考图 `data_url` 前綴（`data:` ＋ `image/` **拼裝**給出 ⇒ 源碼零連續字面，
+ *  自检静态门 E9 的口径不破；值域门只认这一个前綴）。 */
+export const IMAGE_DATA_URL_SCHEME = 'data:' + 'image/'
+
+/** `data_url` base64 **解码后**字节上限（2 MiB；規範 v1.74 AC-602）。 */
+export const IMAGE_DATA_URL_MAX_BYTES = 2 * 1024 * 1024
+
+/** `data_url` 允许的 mime（封閉四值；**無 `image/jpg`**；值取自 `data:` ＋ `image/` 之後、`;` 之前）。 */
+export const IMAGE_DATA_URL_MIMES = Object.freeze(['png', 'jpeg', 'webp', 'tiff'])
+
+/** `data_url` 转存的内容寻址鍵族（**唯一定义点**）：`xiai/images/` ＋ sha256 前 2 位 ＋ 斜線 ＋ sha256 ＋ 擴展名。 */
+export const IMAGE_KEY_FAMILY = 'xiai/images/'
+
+/** 请求体读入上限（超限 ⇒ 按非法 JSON 走 400；**不接受 multipart**）。
+ *  v1.74 起须容纳 2 MiB 图的 base64 形态（≈2.80 MB ＋ 前綴）⇒ 4 MiB，且不超过
+ *  Vercel 请求体上限（≈4.5 MB）。 */
+export const MAX_BODY_BYTES = 4 * 1024 * 1024
 
 /** 对外 reason 面（**只有这 9 个字面值 / 8 个错误面；429 占两个**）。 */
 export const REASONS = Object.freeze({
@@ -147,15 +171,22 @@ const MSG = Object.freeze({
   /* 401 三种失败情形**同一句**（不向客户端区分失败原因 ⇒ 防枚举）。 */
   KEY_INVALID: 'AI 金鑰無效或已失效；請重新簽發後再試。',
   REQUEST_ID: `缺少或格式不合法的要求標識（X-Request-Id，需 ${REQUEST_ID_MIN_LENGTH}〜${REQUEST_ID_MAX_LENGTH} 字）。`,
-  BODY: '請求體必須是 JSON 物件（不接受 multipart；圖片不得以 base64 直塞）。',
+  BODY: '請求體必須是 JSON 物件（不接受 multipart；圖片只能經 image.storage_key 或 image.data_url 傳入）。',
   PROMPT: `提示詞（prompt）必填且長度不得超過 ${PROMPT_MAX_LENGTH} 字。`,
-  IMAGE: '參考圖（image）必須是只含 storage_key 一個鍵的物件。',
-  IMAGE_B64: '圖片必須以 storage_key 引用，不得 base64 直塞。',
+  IMAGE: '參考圖（image）必須是只含 storage_key 或 data_url 其中一個鍵的物件。',
+  IMAGE_BOTH: '參考圖（image）同時給了 storage_key 與 data_url；請二選一。',
+  IMAGE_B64: 'storage_key 必須是雲存儲鍵；base64 圖片請改用 image.data_url。',
+  IMAGE_DATA_URL_PREFIX: '參考圖 data_url 不合法：前綴或 mime 不符（mime 只收 png / jpeg / webp / tiff）。',
+  IMAGE_DATA_URL_SHAPE: '參考圖 data_url 的 base64 形態不合法或解碼後為空。',
+  IMAGE_DATA_URL_SIZE: `參考圖解碼後不得超過 ${IMAGE_DATA_URL_MAX_BYTES} 字節（2 MiB）。`,
+  IMAGE_DATA_URL_MAGIC: '參考圖內容與所宣告的 mime 不符（魔數校驗失敗）。',
   IMAGE_GENERATIONS: '圖生圖（image）只適用於 images/edits。',
   SIZE: '尺寸（size）必須是非空字串。',
   N: '生成數量（n）只能為 1。',
   INSUFFICIENT_POINTS: '金餘額不足；本次零寫入。',
   CONFIG_MISSING: 'AI 中轉服務尚未配置完成；請稍後再試。',
+  /* 503 折疊面：**存儲**失敗與**上游配置**缺失分兩句（運維不得查錯方向）。 */
+  STORAGE: '參考圖存儲暫時不可用；請稍後再試。',
   UPSTREAM: 'AI 上游調用失敗；本次已退款。'
 })
 
@@ -230,7 +261,7 @@ export function retryAfterSeconds(reason, nowMs) {
 /**
  * 入参 JSON 解析 ＋ 值域门（**全部判定在任何写入之前**）。
  * @param {string|Buffer|object} raw 原始请求体（或已解析对象）
- * @returns {{ok:true, value:{prompt:string, image:null|{storage_key:string}, size?:string, n:1}}
+ * @returns {{ok:true, value:{prompt:string, image:null|{storage_key:string}|{data_url:string}, size?:string, n:1}}
  *          |{ok:false, message:string}}
  */
 export function parseBody(raw) {
@@ -260,13 +291,27 @@ export function parseBody(raw) {
     const candidate = value.image
     if (typeof candidate !== 'object' || Array.isArray(candidate)) return { ok: false, message: MSG.IMAGE }
     const keys = Object.keys(candidate)
-    if (keys.length !== 1 || keys[0] !== 'storage_key') return { ok: false, message: MSG.IMAGE }
-    const storageKey = candidate.storage_key
-    if (typeof storageKey !== 'string' || storageKey.trim().length < 1 || storageKey.length > STORAGE_KEY_MAX_LENGTH) {
-      return { ok: false, message: MSG.IMAGE }
+    /* 三形态之一（v1.74 AC-601）：恰一鍵 `storage_key` ／ 恰一鍵 `data_url`；
+       **两者同給 ⇒ 400**（本步在任何写入之前 ⇒ 零扣费）；其余键面 ⇒ 400。 */
+    const hasStorageKey = keys.indexOf('storage_key') !== -1
+    const hasDataUrl = keys.indexOf('data_url') !== -1
+    if (hasStorageKey && hasDataUrl) return { ok: false, message: MSG.IMAGE_BOTH }
+    if (keys.length !== 1 || (!hasStorageKey && !hasDataUrl)) return { ok: false, message: MSG.IMAGE }
+    if (hasStorageKey) {
+      const storageKey = candidate.storage_key
+      if (typeof storageKey !== 'string' || storageKey.trim().length < 1 || storageKey.length > STORAGE_KEY_MAX_LENGTH) {
+        return { ok: false, message: MSG.IMAGE }
+      }
+      if (storageKey.slice(0, 5).toLowerCase() === 'data:') return { ok: false, message: MSG.IMAGE_B64 }
+      image = { storage_key: storageKey }
+    } else {
+      /* `data_url` 值域门（**纯函数、零 I/O**）：前綴 → mime 封閉面 → base64 形態
+         → 解碼 → ≤ 2 MiB → 魔數與 mime 一致；任一不符 ⇒ 400（零扣费）。
+         原串只留在内存（**不进回包、不进日志、不进上游请求体**），转存在⑧。 */
+      const decoded = decodeImageDataUrl(candidate.data_url)
+      if (!decoded.ok) return { ok: false, message: decoded.message }
+      image = { data_url: candidate.data_url }
     }
-    if (storageKey.slice(0, 5).toLowerCase() === 'data:') return { ok: false, message: MSG.IMAGE_B64 }
-    image = { storage_key: storageKey }
   }
 
   let size
@@ -343,16 +388,120 @@ export async function defaultResolveImageUrl(storageKey, env) {
   return url
 }
 
+/* --------------------------------------------------------------------------- data_url 转存（默认实现）
+   --------------------------------------------------------------------------- */
+
+/** `data_url` mime → 存储鍵擴展名（封闭四值；**無 `image/jpg`**）。 */
+const EXT_OF_MIME = Object.freeze({ png: '.png', jpeg: '.jpg', webp: '.webp', tiff: '.tiff' })
+
+/**
+ * 字节魔數与所宣告 mime 的一致性（封闭四值；**只认前綴字节，不猜内容**）。
+ * @param {Buffer} bytes 解码后的图片字节
+ * @param {string} mime `data:` ＋ `image/` 之后、`;` 之前的小写 mime
+ * @returns {boolean}
+ */
+function magicMatches(bytes, mime) {
+  if (!Buffer.isBuffer(bytes)) return false
+  if (mime === 'png') return bytes.length >= 8 && bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a'
+  if (mime === 'jpeg') return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  if (mime === 'webp') {
+    return (
+      bytes.length >= 12 && bytes.subarray(0, 4).toString('hex') === '52494646' && bytes.subarray(8, 12).toString('hex') === '57454250'
+    )
+  }
+  if (mime === 'tiff') {
+    if (bytes.length < 4) return false
+    const head = bytes.subarray(0, 4).toString('hex')
+    return head === '49492a00' || head === '4d4d002a'
+  }
+  return false
+}
+
+/**
+ * `data_url` 解码 ＋ 值域门（**纯函数、零 I/O、零日志**；凍結順序不得變）：
+ * 前綴 → mime 封閉面 → `;base64` 形態 → 解碼 → 解碼後 ≤ 2 MiB → 魔數與 mime 一致。
+ * **不返回原串、不拼任何含字节的 message**（回包 / 日志零字节面）。
+ * @param {string} dataUrl `data:` ＋ `image/` 前綴的 data URL
+ * @returns {{ok:true, bytes:Buffer, mime:string, ext:string}|{ok:false, message:string}}
+ */
+export function decodeImageDataUrl(dataUrl) {
+  const scheme = IMAGE_DATA_URL_SCHEME
+  if (typeof dataUrl !== 'string' || dataUrl.slice(0, scheme.length).toLowerCase() !== scheme) {
+    return { ok: false, message: MSG.IMAGE_DATA_URL_PREFIX }
+  }
+  const rest = dataUrl.slice(scheme.length)
+  const semi = rest.indexOf(';')
+  if (semi <= 0) return { ok: false, message: MSG.IMAGE_DATA_URL_PREFIX }
+  const mime = rest.slice(0, semi).toLowerCase()
+  if (IMAGE_DATA_URL_MIMES.indexOf(mime) === -1) return { ok: false, message: MSG.IMAGE_DATA_URL_PREFIX }
+  const after = rest.slice(semi + 1)
+  const comma = after.indexOf(',')
+  if (comma < 1 || after.slice(0, comma).toLowerCase() !== 'base64') return { ok: false, message: MSG.IMAGE_DATA_URL_PREFIX }
+  const payload = after.slice(comma + 1)
+  /* base64 形態门：字符面封闭 ＋ 长度为 4 的倍数（Buffer.from 对非法输入是宽容的，此处收紧）。 */
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(payload) || payload.length % 4 !== 0) {
+    return { ok: false, message: MSG.IMAGE_DATA_URL_SHAPE }
+  }
+  const bytes = Buffer.from(payload, 'base64')
+  if (bytes.length < 1) return { ok: false, message: MSG.IMAGE_DATA_URL_SHAPE }
+  if (bytes.length > IMAGE_DATA_URL_MAX_BYTES) return { ok: false, message: MSG.IMAGE_DATA_URL_SIZE }
+  if (!magicMatches(bytes, mime)) return { ok: false, message: MSG.IMAGE_DATA_URL_MAGIC }
+  return { ok: true, bytes, mime, ext: EXT_OF_MIME[mime] }
+}
+
+/**
+ * 内容寻址鍵（**唯一定义点**）：`xiai/images/` ＋ sha256 前 2 位 ＋ 斜線 ＋ sha256 ＋ 擴展名。
+ * @param {Buffer} bytes 图片字节
+ * @param {string} ext 擴展名（含點；形態外一律落 `.bin`）
+ * @returns {string} 云存储 `cloudPath`
+ */
+export function imageKeyOf(bytes, ext) {
+  const digest = crypto.createHash('sha256').update(Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes))).digest('hex')
+  const safeExt = /^\.[a-z0-9]{1,8}$/.test(String(ext)) ? String(ext) : '.bin'
+  return `${IMAGE_KEY_FAMILY}${digest.slice(0, 2)}/${digest}${safeExt}`
+}
+
+/**
+ * **默认**转存：`data_url` 解码字节 → CloudBase 存储（`@cloudbase/node-sdk::uploadFile`）→ fileID。
+ * 硬口径：**不记录、不回传任何字节**；鍵走内容寻址族 ⇒ 同图重传可被复用；
+ * 任何失败（缺 SDK / 缺 env / 回包无 fileID）⇒ 抛错 ⇒ 调用方折叠 503（message 写明「存儲不可用」）；
+ * **绝不删除已上传对象**（内容寻址可被后续重用；源码零删除调用面）。
+ * 离线自检注入假实现（不连云端）。
+ * @param {Buffer} bytes 解码后的图片字节
+ * @param {string} ext 擴展名（含點）
+ * @param {object} env 环境（缺省 `process.env`）
+ * @returns {Promise<{fileID:string, cloudPath:string}>}
+ */
+export async function defaultUploadImage(bytes, ext, env) {
+  const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
+  const tcb = require('@cloudbase/node-sdk')
+  const envId = userConfig.readEnvId(source)
+  const init = { env: envId }
+  const secretId = text(source.TENCENTCLOUD_SECRETID)
+  const secretKey = text(source.TENCENTCLOUD_SECRETKEY)
+  if (secretId && secretKey) {
+    init.secretId = secretId
+    init.secretKey = secretKey
+  }
+  const app = tcb.init(init)
+  const cloudPath = imageKeyOf(bytes, ext)
+  const reply = await app.uploadFile({ cloudPath, fileContent: Buffer.from(bytes) })
+  const fileID = reply ? text(reply.fileID) : ''
+  if (!fileID) throw new Error('UPLOAD_FILE_ID_UNAVAILABLE')
+  return { fileID, cloudPath }
+}
+
 /* --------------------------------------------------------------------------- 处理器工厂（依赖注入 ⇒ 离线可测）
    --------------------------------------------------------------------------- */
 
 /**
  * @param {{env?:object, fetch?:function, now?:function, resolveImageUrl?:function,
- *          logger?:object, stores?:{balances?:object, flow?:object, keys?:object,
- *          upstream?:object, usage?:object}}} [options]
+ *          uploadImage?:function, logger?:object, stores?:{balances?:object, flow?:object,
+ *          keys?:object, upstream?:object, usage?:object}}} [options]
  *   · `stores` 给了 ⇒ 经四个 lib 的**既有注入缝**接上（同一只读 / 单文档更新面）；
  *     不给 ⇒ 生产路径走 `lib/ops.js::resolveAiStore` / `resolveLedgerStore` 的真句柄。
- *   · `fetch` / `now` / `resolveImageUrl` / `env` 缺省取全局实现。
+ *   · `fetch` / `now` / `resolveImageUrl` / `uploadImage` / `env` 缺省取全局实现
+ *     （`uploadImage` ＝ `data_url` 转存 CloudBase 的默认实现，离线自检注入假体）。
  * @returns {(request:{method?:string, path?:string, url?:string, headers?:object,
  *          body?:string|Buffer|object})=>Promise<{status:number, body:object, headers:object}>}
  */
@@ -362,6 +511,7 @@ export function createAiRelay(options = {}) {
     typeof options.fetch === 'function' ? options.fetch : typeof fetch === 'function' ? fetch : null
   const now = typeof options.now === 'function' ? options.now : () => Date.now()
   const resolveImageUrl = typeof options.resolveImageUrl === 'function' ? options.resolveImageUrl : defaultResolveImageUrl
+  const uploadImage = typeof options.uploadImage === 'function' ? options.uploadImage : defaultUploadImage
   const logger = options.logger || (typeof console !== 'undefined' ? console : null)
 
   const stores = options.stores
@@ -496,11 +646,43 @@ export function createAiRelay(options = {}) {
       return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
     }
 
-    /* ⑧ 参考图 → 签名链（**不下载字节、不 base64 转发**；失败 ⇒ 503、零扣费）。 */
+    /* ⑧ 参考图 → 签名链（**不下载字节、不 base64 转发**；失败 ⇒ 503、零扣费）。
+       `data_url` 形态在此**转存**（凍結順序不得變：解碼 → 魔數與 mime 一致〔不一致 ⇒ 400〕
+       → 上傳 CloudBase → `getTempFileURL` 簽名鏈 → 上游 `image` 欄只拿簽名鏈）：
+       解碼與魔數已在⑤ 的值域門判過（400 全在任何写入之前），此處重跑只为取字節；
+       上傳失敗 ⇒ **折疊 503**（reason 仍是 `CONFIG_MISSING`，`message` 寫明「存儲不可用」
+       而**非**「未配置」，運維不查錯方向）、**零扣费**；
+       **上游後續失敗不刪已上傳對象**（內容尋址可被後續重用；源碼零刪除調用面），
+       審計行恆記 `{stage:'upload', key_prefix, bytes}`（**零字節、零 data_url 片段**）。 */
     let imageUrl = ''
     if (payload.image) {
+      let storageKey = payload.image.storage_key || ''
+      if (payload.image.data_url) {
+        const decoded = decodeImageDataUrl(payload.image.data_url)
+        if (!decoded.ok) {
+          /* 防御面：⑤ 已判过 ⇒ 正常不可达；真到这一步仍在任何写入之前 ⇒ 400 零扣费。 */
+          audit({ outcome: REASONS.INVALID_ARGUMENT, stage: 'image-decode' })
+          return denyResult(400, REASONS.INVALID_ARGUMENT, decoded.message)
+        }
+        const uploadKey = imageKeyOf(decoded.bytes, decoded.ext)
+        const keyPrefix = uploadKey.slice(0, IMAGE_KEY_FAMILY.length + 2)
+        let stored = null
+        try {
+          stored = await uploadImage(decoded.bytes, decoded.ext, env)
+        } catch (error) {
+          audit({ outcome: REASONS.CONFIG_MISSING, stage: 'upload', key_prefix: keyPrefix, bytes: decoded.bytes.length, detail: (error && error.name) || 'upload-failed' })
+          return denyResult(503, REASONS.CONFIG_MISSING, MSG.STORAGE)
+        }
+        const fileID = stored ? text(stored.fileID) : ''
+        if (!fileID) {
+          audit({ outcome: REASONS.CONFIG_MISSING, stage: 'upload', key_prefix: keyPrefix, bytes: decoded.bytes.length, detail: 'no-file-id' })
+          return denyResult(503, REASONS.CONFIG_MISSING, MSG.STORAGE)
+        }
+        audit({ outcome: 'OK', stage: 'upload', key_prefix: keyPrefix, bytes: decoded.bytes.length })
+        storageKey = fileID
+      }
       try {
-        imageUrl = text(await resolveImageUrl(payload.image.storage_key, env))
+        imageUrl = text(await resolveImageUrl(storageKey, env))
       } catch {
         imageUrl = ''
       }
