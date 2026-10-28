@@ -52,6 +52,16 @@ const feicuiToken = require('./feicuiToken.js')
    字面仍只在本文件 ⇒ 静态门 A8 / A8b / D4 照旧成立）；② 在 `OPS` 注册两个**客户端可调**的
    只读 op（`getPointsBalance` / `listPointsFlow`，走既有登录令牌门）。本文件**不写第二套账本**。 */
 const ledger = require('./ledger.js')
+/* **AI 金鑰 / 上游 / 用量（本單）**：三件实现单点在 `lib/aiKeys.js` / `lib/aiUpstream.js` /
+   `lib/aiUsage.js`。本文件只做三件事：① 经 `resolveAiStore()` 给它们供**生产集合句柄**
+   （`collection(` 字面仍只在本文件 ⇒ 静态门 A8 / A8b / D4 / D1U / D1A 照旧成立）；② 在 `OPS`
+   注册 5 个**客户端可调**的 op（`issueAiKey` / `listAiKeys` / `revokeAiKey` / `updateAiKeyLimits`
+   / `getAiUsage`，走既有登录令牌门）；③ 在 `ADMIN_OPS` 注册 2 个**管理员** op
+   （`getAiUpstream` / `setAiUpstream`，走既有管理員門 `adminWhitelistDenial`）。
+   本文件**不写第二套** AI 金鑰 / 上游 / 用量逻辑。 */
+const aiKeys = require('./aiKeys.js')
+const aiUpstream = require('./aiUpstream.js')
+const aiUsage = require('./aiUsage.js')
 
 /* ---------------------------------------------------------------------------
    **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器 —— **本单修正**：自两 `index.js` **迁回本文件**
@@ -943,6 +953,24 @@ function resolveLedgerStore() {
   }
 }
 
+/**
+ * **AI 三面的集合句柄供給點（生產單點）**：`xiai_ai_keys` / `xiai_ai_upstream` / `xiai_ai_usage`
+ * 三集合**服务端专属私有** —— 参照 `COUNTERS_COLLECTION` / 账本两集合先例：**不进**本文件的
+ * `COLLECTIONS` 读写面登记表（那是既有 13 个集合的登记表；AI 三集合只由 `lib/aiKeys.js` /
+ * `lib/aiUpstream.js` / `lib/aiUsage.js` 三处读写，单点即审计点），**更不进**前端
+ * `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL` ⇒ 客户端零读面。
+ * 离线自检可经 `aiKeys.setAiKeyStoreProvider` / `aiUpstream.setUpstreamStoreProvider` /
+ * `aiUsage.setAiUsageStoreProvider` 注入假体（不经本函数）。
+ */
+function resolveAiStore() {
+  const db = resolveDb()
+  return {
+    keys: db.collection(aiKeys.AI_KEYS_COLLECTION),
+    upstream: db.collection(aiUpstream.AI_UPSTREAM_COLLECTION),
+    usage: db.collection(aiUsage.AI_USAGE_COLLECTION)
+  }
+}
+
 function makeId() {
   return `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 }
@@ -1678,6 +1706,28 @@ const FEICUI_TOKEN_ALLOWED_KEYS = Object.freeze(['target', 'role', 'ttl_seconds'
    --------------------------------------------------------------------------- */
 const POINTS_BALANCE_ALLOWED_KEYS = Object.freeze([])
 const POINTS_FLOW_ALLOWED_KEYS = Object.freeze(['limit', 'cursor'])
+
+/* ---------------------------------------------------------------------------
+   **AI 金鑰 / 用量面（本單新增 5 個用戶 op）**：载荷封闭键面 ＋ 键面门。
+   · `issueAiKey` 只认 `label` / `day_limit` / `minute_limit`；`listAiKeys` / `getAiUsage`
+     **零载荷键**（读本人数据，无参）；`revokeAiKey` 只认 `key_id`；`updateAiKeyLimits` 只认
+     `key_id` / `day_limit` / `minute_limit`；
+   · **身份类键（`uid` / `userId` / `user_id` / `role` / `phone` …）与明文 / 摘要类键
+     （`key` / `key_hash` …）一律不在白名单内** ⇒ `INVALID_FIELD` ＋ 零写入
+     （身份永远取自已验签令牌，不采信前端自报；明文金鑰只由服务端铸造）。
+   · 键面门复用 `pointsPayloadDenial`（形态 ＋ 封闭键面；判定早于任何读 / 写）。
+   --------------------------------------------------------------------------- */
+const AI_KEY_ISSUE_ALLOWED_KEYS = Object.freeze(['label', 'day_limit', 'minute_limit'])
+const AI_KEY_LIST_ALLOWED_KEYS = Object.freeze([])
+const AI_KEY_REVOKE_ALLOWED_KEYS = Object.freeze(['key_id'])
+const AI_KEY_LIMITS_ALLOWED_KEYS = Object.freeze(['key_id', 'day_limit', 'minute_limit'])
+const AI_USAGE_ALLOWED_KEYS = Object.freeze([])
+
+/* **AI 上游配置面（本單新增 2 個管理員 op）**：载荷封闭键面 —— `actor_uid` **不由载荷自称**
+   （服务端从 `identity.uid` 派生）；`key` 是**上游明文金鑰**（服务端加密落库，不回包）。 */
+const AI_UPSTREAM_ALLOWED_KEYS = Object.freeze(['base_url', 'model', 'key', 'timeout_ms'])
+/** 读面（`getAiUpstream`）**零允许键**（读配置无参；任何键 ⇒ `INVALID_FIELD` ＋ 零写入）。 */
+const AI_UPSTREAM_ALLOWED_KEYS_VIEW = Object.freeze([])
 
 /**
  * 积分两 op 的载荷键面门（形态 ＋ 封闭键面；判定早于任何读 / 写）。
@@ -2547,6 +2597,112 @@ const OPS = Object.freeze({
     const flow = await ledger.listFlow(identity.uid, { limit: payload.limit, cursor: payload.cursor })
     if (!flow.ok) return flow
     return { ok: true, rows: flow.rows, count: flow.count }
+  },
+
+  /**
+   * **簽發 AI 金鑰（「AI 金鑰」本單新增 op｜`issueAiKey`）**：服务端铸造明文、库内零明文。
+   * 回包**恰 8 键** `{ok, key_id, key, key_prefix, label, day_limit, minute_limit, created_at}`
+   * —— `key` 是**唯一一次明文**（`sk-xiai-` 拼 32 位十六进制）；`key_hash` / `_id` **不下发**。
+   * 顺序（**全部判定在任何写之前**；本 op 不产出 `plan` ⇒ `index.js` 落盘分支不触发）：
+   *   ① 载荷形态 ＋ 封闭键面（`label` / `day_limit` / `minute_limit`；身份 / 明文类键
+   *      ⇒ `INVALID_FIELD` ＋ 零写入）；② 身份取自已验签令牌（缺 ⇒ `FORBIDDEN`）；
+   *   ③ 值域门（label ≤ 40 字、日限 1〜1000 缺省 20、分鐘限 1〜120 缺省 5；越界 / 非整数
+   *      ⇒ `INVALID_VALUE` ＋ 零写入）；④ 每人 ACTIVE 上限 10 枚（超限 ⇒ `INVALID_VALUE`
+   *      ＋ 零写入；【登记】契约愿望字面值 `LIMIT_EXCEEDED` 不在冻结表 ⇒ 不自行新增）。
+   * @param {object} payload 载荷（允许键见 `AI_KEY_ISSUE_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   */
+  async issueAiKey(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, AI_KEY_ISSUE_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    return aiKeys.issueAiKey({
+      uid: identity.uid,
+      label: payload.label,
+      day_limit: payload.day_limit,
+      minute_limit: payload.minute_limit
+    })
+  },
+
+  /**
+   * **本人 AI 金鑰清單（本單新增 op｜`listAiKeys`）**：回 `{ok, rows, count}`，
+   * `rows` 逐行**恰 8 键** `{key_id, key_prefix, label, status, created_at, revoked_at,
+   * day_limit, minute_limit}` ⇒ **零 `key_hash`、零明文**（投影单点在 `lib/aiKeys.js`）。
+   * 本 op **只读、零写入**。
+   * @param {object} payload 载荷（**零允许键**）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   */
+  async listAiKeys(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, AI_KEY_LIST_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    const list = await aiKeys.listAiKeys({ uid: identity.uid })
+    if (!list.ok) return list
+    return { ok: true, rows: list.rows, count: list.count }
+  },
+
+  /**
+   * **吊銷 AI 金鑰（本單新增 op｜`revokeAiKey`）**：只許本人（行属他人 / `key_id` 不存在
+   * ⇒ **同一** `FORBIDDEN` ＋ 零写入 ⇒ 不洩露「該鍵是否存在」）；已吊销 ⇒ `ok:true` ＋
+   * `already:true`（**行不新增、一字不改**）。回包**恰 5 键**
+   * `{ok, key_id, status, revoked_at, already}`。
+   * @param {object} payload 载荷（允许键 `key_id`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   */
+  async revokeAiKey(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, AI_KEY_REVOKE_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    return aiKeys.revokeAiKey({ uid: identity.uid, key_id: payload.key_id })
+  },
+
+  /**
+   * **改寫 AI 金鑰限額（本單新增 op｜`updateAiKeyLimits`）**：只許本人（同吊销口径：行属
+   * 他人 / 不存在 ⇒ `FORBIDDEN` ＋ 零写入）；限额必须**同时给两个**且值域内（缺字段 ⇒
+   * `MISSING_REQUIRED`；越界 / 非整数 ⇒ `INVALID_VALUE` ＋ 零写入）。回包**恰 5 键**
+   * `{ok, key_id, day_limit, minute_limit, updated_at}`。
+   * @param {object} payload 载荷（允许键 `key_id` / `day_limit` / `minute_limit`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   */
+  async updateAiKeyLimits(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, AI_KEY_LIMITS_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    return aiKeys.updateAiKeyLimits({
+      uid: identity.uid,
+      key_id: payload.key_id,
+      day_limit: payload.day_limit,
+      minute_limit: payload.minute_limit
+    })
+  },
+
+  /**
+   * **本人 AI 用量 ＋ 金額（本單新增 op｜`getAiUsage`）**：回**恰 4 键**
+   * `{ok, points, today:{used,limit}, minute:{used,limit}}` —— `points` 取自**既有账本**
+   * `ledger.readBalance`（不自读余额集合）；两个窗口取自 `lib/aiUsage.peekUsage`
+   * （**只读、零写入**；限额 ＝ 本人 ACTIVE 金鑰的最小限额）。
+   * @param {object} payload 载荷（**零允许键**）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   */
+  async getAiUsage(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, AI_USAGE_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    const usage = await aiUsage.peekUsage({ uid: identity.uid })
+    if (usage && usage.ok === false) return usage
+    const balance = await ledger.readBalance(identity.uid)
+    if (!balance.ok) return balance
+    return { ok: true, points: balance.points, today: usage.day, minute: usage.minute }
   }
 })
 
@@ -5013,6 +5169,59 @@ const ADMIN_OPS = Object.freeze({
         }))
       }
     }
+  },
+
+  /**
+   * **读 AI 上游配置（本單新增 op｜`getAiUpstream`｜管理员面）**：回**恰 6 键**
+   * `{ok, base_url, model, key_mask, timeout_ms, updated_at}` —— **零 `key_cipher` /
+   * `key_iv` / `key_tag`、零上游明文**（投影单点在 `lib/aiUpstream.getUpstreamPublic`）。
+   * 顺序：① **管理員門**（`adminWhitelistDenial`：非管理员 ⇒ `FORBIDDEN` ＋ 零写入）
+   * → ② 载荷封闭键面（**零允许键** ⇒ 任何键 `INVALID_FIELD` ＋ 零写入）→ ③ 只读取行。
+   * @param {object} payload 载荷（**零允许键**）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async getAiUpstream(payload, identity, context) {
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    const payloadDenial = pointsPayloadDenial(payload, AI_UPSTREAM_ALLOWED_KEYS_VIEW)
+    if (payloadDenial) return payloadDenial
+    const view = await aiUpstream.getUpstreamPublic()
+    if (view && view.ok === false) return view
+    return {
+      ok: true,
+      base_url: view.base_url,
+      model: view.model,
+      key_mask: view.key_mask,
+      timeout_ms: view.timeout_ms,
+      updated_at: view.updated_at
+    }
+  },
+
+  /**
+   * **写 AI 上游配置（本單新增 op｜`setAiUpstream`｜管理员面）**：回**恰 6 键**
+   * `{ok, base_url, model, key_mask, timeout_ms, updated_at}`（＝写后公共面；**零密文、零明文**）。
+   * 顺序：① **管理員門**（`adminWhitelistDenial`：非管理员 ⇒ `FORBIDDEN` ＋ 零写入）
+   * → ② 载荷封闭键面（`base_url` / `model` / `key` / `timeout_ms`；`actor_uid` **不由载荷自称**
+   * —— 服务端取 `identity.uid`）→ ③ 模块侧：**先判主密钥 env**（缺 ⇒ `CONFIG_MISSING` ＋ 零写入，
+   * 不得静默用空密钥、不得明文落库）→ base_url 协议值域（https 协议、host 非空）→ `timeout_ms` ∈ [1000,120000] 缺省 60000
+   * → `key` 省略则沿用旧密文 → 整行 set。
+   * @param {object} payload 载荷（允许键 `base_url` / `model` / `key` / `timeout_ms`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async setAiUpstream(payload, identity, context) {
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    const payloadDenial = pointsPayloadDenial(payload, AI_UPSTREAM_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    return aiUpstream.setUpstream({
+      actor_uid: identity.uid,
+      base_url: payload.base_url,
+      model: payload.model,
+      key: payload.key,
+      timeout_ms: payload.timeout_ms
+    })
   }
 })
 
@@ -5218,6 +5427,20 @@ module.exports = {
   POINTS_FLOW_ALLOWED_KEYS,
   pointsPayloadDenial,
   ledger,
+  /* **AI 金鑰 / 上游 / 用量（本單）**：集合句柄供給點 ＋ 载荷封闭键面 ＋ 三模块本体
+     （供离线自检注入假体直接断言；实现单点在 `lib/aiKeys.js` / `lib/aiUpstream.js` /
+     `lib/aiUsage.js`）。 */
+  resolveAiStore,
+  AI_KEY_ISSUE_ALLOWED_KEYS,
+  AI_KEY_LIST_ALLOWED_KEYS,
+  AI_KEY_REVOKE_ALLOWED_KEYS,
+  AI_KEY_LIMITS_ALLOWED_KEYS,
+  AI_USAGE_ALLOWED_KEYS,
+  AI_UPSTREAM_ALLOWED_KEYS,
+  AI_UPSTREAM_ALLOWED_KEYS_VIEW,
+  aiKeys,
+  aiUpstream,
+  aiUsage,
   setOpsDbProvider,
   opsDbInjected,
   setOpsStorageProvider,

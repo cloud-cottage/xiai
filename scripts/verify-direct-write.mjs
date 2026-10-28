@@ -451,8 +451,9 @@ console.log(JSON.stringify({ section: 'E', title: '号域：seal_no 推到 5,153
    F 段：注册面 ＋ 回包纪律 ＋ env 只登记名字
    =========================================================================== */
 console.log(JSON.stringify({ section: 'F', title: '注册面 / 回包纪律 / reason 零新增' }))
-check('F1', '`ADMIN_OPS` 恰含 14 项（原 12 ＋ 两个新 op）', sorted([
+check('F1', '`ADMIN_OPS` 恰含 16 项（原 12 ＋ 直写两 op ＋ AI 上游两 op）', sorted([
   'createSealWithFaceDirect',
+  'getAiUpstream',
   'issueFeicuiToken',
   'migrateCodeNumbers',
   'migrateDynastyValues',
@@ -465,6 +466,7 @@ check('F1', '`ADMIN_OPS` 恰含 14 项（原 12 ＋ 两个新 op）', sorted([
   'reviewPersonImport',
   'reviewPersonProposal',
   'reviewSealImport',
+  'setAiUpstream',
   'setInviteReward'
 ]), sorted(Object.keys(ops.ADMIN_OPS)))
 check('F2', '两个新 op **未混入**用户写面 `OPS`（不开新的用户级面）', { direct: false, query: false }, { direct: Object.prototype.hasOwnProperty.call(ops.OPS, 'createSealWithFaceDirect'), query: Object.prototype.hasOwnProperty.call(ops.OPS, 'querySealByFingerprint') })

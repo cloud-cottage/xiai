@@ -40,7 +40,24 @@ const REASONS = Object.freeze({
    * 只由 `lib/ledger.js` 的扣费路径产出，且恒为**零写入**（预检早于任何流水写入）。
    * 逐字登记在此，与前 7 个同表管理（改名只改本表 ＋引用处）。
    */
-  INSUFFICIENT_POINTS: 'INSUFFICIENT_POINTS'
+  INSUFFICIENT_POINTS: 'INSUFFICIENT_POINTS',
+  /**
+   * **AI 金鑰 / 上游 / 用量面**（本單新增 4 個字面值；**派單方凍結契約逐字點名**，非本單自造）：
+   *   · `KEY_INVALID`  —— `lib/aiKeys.js::resolveAiKey` 服務端校驗失敗（金鑰不存在 / 已吊銷 /
+   *     摘要不匹配）；恒**零寫入**、恒**不洩露具體原因**（三種情形同一條 ⇒ 防枚舉）。
+   *   · `CONFIG_MISSING`—— AI 上游配置缺失（缺環境變量 `XIAI_AI_UPSTREAM_SECRET` / 缺配置行）；
+   *     **fail-closed**：不得靜默用空密鑰、不得明文落庫；與 `api/feicui/v1` 既有的
+   *     `CONFIG_MISSING`（503 配置缺失）**同字面值、同語義**。
+   *   · `LIMIT_DAY` / `LIMIT_MINUTE` —— `lib/aiUsage.js::evaluateGate` 的**只讀判定**結果
+   *     （超日限 / 超分鐘限）；判定路徑**零寫入**。
+   * 另：每人 ACTIVE 金鑰 10 枚上限（契約原字面值 `LIMIT_EXCEEDED`）**不在本表** ⇒ 按派單方
+   * 指示**不自行新增**，一律回落既有 `INVALID_VALUE`（已在交付報告登記該願望值）。
+   * 逐字登記在此，與前 8 個同表管理（改名只改本表 ＋ 引用處）。
+   */
+  KEY_INVALID: 'KEY_INVALID',
+  CONFIG_MISSING: 'CONFIG_MISSING',
+  LIMIT_DAY: 'LIMIT_DAY',
+  LIMIT_MINUTE: 'LIMIT_MINUTE'
 })
 
 /** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。

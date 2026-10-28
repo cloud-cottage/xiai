@@ -103,7 +103,13 @@ const FROZEN_REASONS = [
   'ALREADY_ENDORSED',
   'DUPLICATE_VALUE',
   /* 「金」上雲單（派單方 2026-10-28 裁定）新增的唯一 reason 字面值 ⇒ 冻结表取并集。 */
-  'INSUFFICIENT_POINTS'
+  'INSUFFICIENT_POINTS',
+  /* 「AI 金鑰 / 上游 / 用量」單（派單方 2026-10-28 凍結契約逐字點名）新增的四個 reason
+     字面值 ⇒ 冻结表取并集（原判据一字不动）。 */
+  'KEY_INVALID',
+  'CONFIG_MISSING',
+  'LIMIT_DAY',
+  'LIMIT_MINUTE'
 ]
 /* **uid 派生单点**：客户端 `src/data/uid.js::uidOf`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。
    自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */

@@ -451,6 +451,54 @@ async function handleVerify(event, config, callContext) {
     response.rows = opResult.rows
     response.count = opResult.count
   }
+  /* **AI 金鑰 / 用量面（additive 透傳｜**按 `op` 收窄**｜本單「AI 金鑰」）**：每个新 op 只透传
+     **自己那一组**键，键名与 op 回包逐字一致；**其余任何 op 一律不透传这些键**（序列化后
+     亦不出现 ⇒ 既有回包逐字不变）。逐 op 封闭（**键集不多不少**）：
+     · `issueAiKey`          → `key_id` / `key`（**唯一一次明文**）/ `key_prefix` / `label` /
+                               `day_limit` / `minute_limit` / `created_at`（＝恰 8 键含 `ok`）；
+     · `listAiKeys`          → `rows` / `count`（`rows` 逐行已由 `lib/aiKeys.js` 投影为恰 8 键
+                               ⇒ **零 `key_hash`、零明文**）；
+     · `revokeAiKey`         → `key_id` / `status` / `revoked_at` / `already`（＝恰 5 键含 `ok`）；
+     · `updateAiKeyLimits`   → `key_id` / `day_limit` / `minute_limit` / `updated_at`（＝恰 5 键）；
+     · `getAiUsage`          → `points` / `today` / `minute`（＝恰 4 键；`points` 来自账本）。
+     既有字段一律不刪、不改。 */
+  if (op === 'issueAiKey') {
+    const AI_KEY_ISSUE_READOUT_KEYS = ['key_id', 'key', 'key_prefix', 'label', 'day_limit', 'minute_limit', 'created_at']
+    for (const key of AI_KEY_ISSUE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  if (op === 'listAiKeys') {
+    response.rows = opResult.rows
+    response.count = opResult.count
+  }
+  if (op === 'revokeAiKey') {
+    const AI_KEY_REVOKE_READOUT_KEYS = ['key_id', 'status', 'revoked_at', 'already']
+    for (const key of AI_KEY_REVOKE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  if (op === 'updateAiKeyLimits') {
+    const AI_KEY_LIMITS_READOUT_KEYS = ['key_id', 'day_limit', 'minute_limit', 'updated_at']
+    for (const key of AI_KEY_LIMITS_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  if (op === 'getAiUsage') {
+    const AI_USAGE_READOUT_KEYS = ['points', 'today', 'minute']
+    for (const key of AI_USAGE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **AI 上游配置面（additive 透傳｜**按 `op` 收窄**｜本單「AI 金鑰」）**：`getAiUpstream` /
+     `setAiUpstream` 各回**恰 6 键**（`ok` ＋ 下列 5 键）——**零 `key_cipher` / `key_iv` /
+     `key_tag`、零上游明文**；**其余任何 op 一律不透传这 5 个键**。既有字段一律不刪、不改。 */
+  if (op === 'getAiUpstream' || op === 'setAiUpstream') {
+    const AI_UPSTREAM_READOUT_KEYS = ['base_url', 'model', 'key_mask', 'timeout_ms', 'updated_at']
+    for (const key of AI_UPSTREAM_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   return response
 }
 

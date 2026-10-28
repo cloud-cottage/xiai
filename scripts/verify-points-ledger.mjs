@@ -553,8 +553,11 @@ section('C', '静态门：账本零取句柄字面 / 两集合不进任何云读
       prefix: Object.values(ledger.LEDGER_COLLECTIONS).every((name) => name.indexOf('xiai_') === 0),
       names: [ledger.LEDGER_COLLECTIONS.balances, ledger.LEDGER_COLLECTIONS.flow]
     })
+  /* 【AI 金鑰單 合法过期（2026-10-28）】配置面冻结表扩至 12 键（新增 4 个由派单方凍結契約
+     逐字点名的字面值：KEY_INVALID / CONFIG_MISSING / LIMIT_DAY / LIMIT_MINUTE）；
+     本判据的**机制一字未动**（仍钉 INSUFFICIENT_POINTS 逐字在表 ＋ 钉表长）。 */
   check('C4', 'reason 字面值：INSUFFICIENT_POINTS 逐字登记于配置面冻结表（本单唯一新字面值）',
-    { value: 'INSUFFICIENT_POINTS', tableSize: 8 },
+    { value: 'INSUFFICIENT_POINTS', tableSize: 12 },
     { value: userConfig.REASONS.INSUFFICIENT_POINTS, tableSize: Object.keys(userConfig.REASONS).length })
   const indexSource = readFileSync(path.join(FN_DIR, 'index.js'), 'utf8')
   check('C5', 'index.js 透传块按 op 收窄（两 op 名各恰 1 处）且既有判据未动（动态派发 / row 透传 / plan 不外传 / 空计划守门仍在）',
