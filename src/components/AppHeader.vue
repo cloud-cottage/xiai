@@ -4,11 +4,15 @@ import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { currentUser, goldBalance, isLoggedIn } from '../data/session.js'
 import { auth } from '../services/index.js'
+/* **頁頭單框雙態搜索**（交互重構單）：普通關鍵詞框 ＋ 識別編碼 OTP（首字符判型），
+   全站唯一搜索入口；`SquareView` 不再另設獨立 OTP 控件。 */
+import HeaderSearch from '../components/HeaderSearch.vue'
 
 const router = useRouter()
 const route = useRoute()
 
-const keyword = ref(typeof route.query.q === 'string' ? route.query.q : '')
+/* 只在掛載時帶入一次當前關鍵詞（原行為同此；不與路由做後續雙向同步）。 */
+const initialQuery = typeof route.query.q === 'string' ? route.query.q : ''
 const menuOpen = ref(false)
 const userRef = ref(null)
 
@@ -21,8 +25,14 @@ const avatarGlyph = computed(() => {
   return u.role === 'admin' ? '守' : '友'
 })
 
-function submitSearch() {
-  router.push({ name: 'square', query: keyword.value ? { q: keyword.value } : {} })
+/** 關鍵詞提交（普通態按回車）：維持原 `{ q }` 口徑。 */
+function submitKeyword(keyword) {
+  router.push({ name: 'square', query: keyword ? { q: keyword } : {} })
+}
+
+/** 識別編碼提交（OTP 填滿 / 回車）：**只帶 `code`**（不帶 `q`），由 SquareView 精確查。 */
+function submitCode(code) {
+  router.push({ name: 'square', query: { code } })
 }
 
 function toggleMenu() {
@@ -63,12 +73,11 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
     </router-link>
 
     <div class="app-header__search">
-      <input
-        v-model="keyword"
-        type="search"
-        placeholder="搜索印文、作者（印人姓名／字號／別名）或藏品編號"
-        aria-label="全局搜索"
-        @keyup.enter="submitSearch"
+      <!-- 單框雙態：普通態＝關鍵詞輸入框；首字符為數字 / 22 字母 ⇒ 就地變 OTP 格。 -->
+      <HeaderSearch
+        :initial-query="initialQuery"
+        @submit-keyword="submitKeyword"
+        @submit-code="submitCode"
       />
     </div>
 

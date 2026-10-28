@@ -1,6 +1,6 @@
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import FilterBar from '../components/FilterBar.vue'
 import SealCard from '../components/SealCard.vue'
@@ -8,8 +8,9 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import UploadSealDialog from '../components/UploadSealDialog.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
-import CodeSearchOtp from '../components/CodeSearchOtp.vue'
-/* **識別編碼精確查**（§5）：服務層單點（decode ⇒ 按 `no` 等值匹配；查無即「查無此印」）。 */
+/* **識別編碼精確查**（§5）：服務層單點（decode ⇒ 按 `no` 等值匹配；查無即「查無此印」）。
+   編碼入口已上收**頁頭單框雙態搜索**（`HeaderSearch`）—— 本頁只按 `route.query.code` 精確查，
+   不再另設獨立 OTP 控件（全站唯一入口，任何頁面可用、鏈接可分享）。 */
 import { findSealByCode } from '../services/seals.js'
 import { seals, corrections, points, imageFaces } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
@@ -57,28 +58,41 @@ function retryDataSource() {
 /* ============================================================================
    識別編碼精確查（口径件 §5｜R-4）
    ----------------------------------------------------------------------------
-   · 唯一入口 ＝ `CodeSearchOtp`（5 / 8 格、首字符自動判型、非法字符就地拒）；
-   · decode ⇒ **按 `no` 精確等值匹配**；查無 ⇒ `查無此印` **空態**，
-     **絕不回落關鍵詞 `q`、絕不模糊匹配**（服務層 `findSealByCode` 同口徑）；
-   · 命中 ⇒ 直達該印章詳情（`stamp_id` 精確等值路由；R-6：舊碼不受理、不加兼容分支）。
+   · 唯一入口 ＝ **頁頭單框雙態搜索**（`HeaderSearch.vue`：5 / 8 格、首字符自動判型、
+     非法字符就地拒、退格至空復原）；本頁**不再渲染**獨立 OTP 控件。
+   · 本頁只讀 `route.query.code` ⇒ 服務層 `findSealByCode` decode ⇒ **按 `no` 精確等值匹配**；
+     查無 ⇒ `查無此印` **空態**，**絕不回落關鍵詞 `q`、絕不模糊匹配**。
+   · 命中 ⇒ 就地 `replace` 直達該印章詳情（`stamp_id` 精確等值路由；R-6：舊碼不受理、
+     不加兼容分支；`replace` 使返回鍵不會回到已命中的 `?code=` 頁、避免重導航迴環）。
    ============================================================================ */
-const codeMiss = ref(false)
-const codeMessage = ref('')
+const codeQuery = computed(() =>
+  typeof route.query.code === 'string' ? route.query.code.trim().toUpperCase() : ''
+)
+/* 任何一次寫入後 +1 ⇒ 與列表同源重算（服務層讀的是已落盤數據）。 */
+const codeLookup = computed(() => {
+  void dataVersion.value
+  if (!codeQuery.value) return null
+  return findSealByCode(codeQuery.value)
+})
+const codeMiss = computed(() => !!codeLookup.value && !codeLookup.value.ok)
+const codeMissDesc = computed(() => {
+  const lookup = codeLookup.value
+  if (!lookup || lookup.ok) return ''
+  return lookup.reason === 'NOT_FOUND'
+    ? '查無此印：請核對識別編碼後再試；本入口不會改用關鍵詞檢索，也不做近似匹配。'
+    : lookup.message
+})
 
-function onCodeSearch(code) {
-  codeMiss.value = false
-  codeMessage.value = ''
-  const found = findSealByCode(code)
-  if (found.ok) {
-    router.push({ name: 'seal-detail', params: { id: found.seal.stamp_id } })
-    return
-  }
-  if (found.reason === 'NOT_FOUND') {
-    codeMiss.value = true
-    return
-  }
-  codeMessage.value = found.message
-}
+/* `?code=` 落地（頁頭 OTP 提交 / 分享鏈接打開）⇒ 命中即直達詳情；查無則留在本頁顯示空態。
+   **與數據層同源重算**：雲端快照是 `shallowRef`（`data/cloudbase.js`），`codeLookup` 讀它 ⇒ 依賴
+   被自然追蹤 —— 水合**晚到**時本效應會再跑一次並補做直達（掛載時只查一次的 `watch` 會漏掉這一拍）。 */
+watchEffect(() => {
+  const lookup = codeLookup.value
+  if (!lookup || !lookup.ok) return
+  const nav = router.replace({ name: 'seal-detail', params: { id: lookup.seal.stamp_id } })
+  /* 冗余導航（本就在目標頁）不製造未處理拒絕；非冗余導航的失敗仍由路由層失敗面承接。 */
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+})
 /* ============================================================================
    筛选条四维度值集（R-21 / R-30 / R-31 / R-34）
    ----------------------------------------------------------------------------
@@ -285,11 +299,8 @@ function onSealSaved() {}
       @reset="resetFilter"
     />
 
-    <!-- 識別編碼入口（§5｜R-4）：單框自動判型；**精確查、查無即空態**，不回落關鍵詞 `q`、不模糊匹配。 -->
-    <div class="square__code">
-      <CodeSearchOtp @submit="onCodeSearch" />
-      <p v-if="codeMessage" class="square__keyword">{{ codeMessage }}</p>
-    </div>
+    <!-- 識別編碼入口（§5｜R-4）：**已上收頁頭單框雙態搜索**（`HeaderSearch`），本頁不再另設入口。
+         本頁只按 `route.query.code` 精確查、查無即空態，不回落關鍵詞 `q`、不模糊匹配。 -->
 
     <p v-if="keyword" class="square__keyword">當前檢索「{{ keyword }}」，共 {{ list.length }} 枚</p>
 
@@ -301,12 +312,12 @@ function onSealSaved() {}
 
     <!-- 縮略圖走**縮略面**（規範 §3.27.6：256 長邊**單件**、不經切分內核；卡片內不再按塊渲染）；
          存量 / 非 TIFF 存儲件仍由瀏覽器原生解碼顯示（存量面不得回歸）。 -->
-    <!-- 識別編碼查無 ⇒ **明確空態「查無此印」**（不回落關鍵詞、不模糊匹配）。 -->
+    <!-- 識別編碼查無 ⇒ **明確空態「查無此印」**（不回落關鍵詞、不模糊匹配；描述取自服務層讀數）。 -->
     <PlaceholderPanel
       v-if="codeMiss"
       glyph="查"
       title="查無此印"
-      desc="查無此印：請核對識別編碼後再試；本入口不會改用關鍵詞檢索，也不做近似匹配。"
+      :desc="codeMissDesc"
     />
 
     <div v-else-if="list.length" class="square__grid">
@@ -377,10 +388,6 @@ function onSealSaved() {}
 }
 .square__notice {
   margin-bottom: var(--s-4);
-}
-
-.square__code {
-  margin: var(--s-4) 0;
 }
 
 .square__keyword {
