@@ -11,7 +11,7 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **48** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10，覆盖派单方点名的 ①〜⑭）：
+ * 断言面（本套 **53** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5，覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
  *      ⇒ 400 且**零扣费**。
@@ -39,6 +39,13 @@
  *      審計行 `{stage:'upload', key_prefix, bytes}`；另加：上游 500 ⇒ 502 ＋ 退款 ＋
  *      **不刪已上傳對象**（源碼零刪除調用面）、generations 帶 `data_url` ⇒ 400、
  *      base64 形態非法 ⇒ 400。
+ *   H. **嘗試序號冪等鍵（v1.75 §3.67.7 補登注①(b)；AC-604 / AC-605）**：① 首筆**已退款**
+ *      ⇒ 同 `X-Request-Id` 再到 ＝ **全新可計費嘗試**（重扣 10 金、`idempotent` 假、重新調
+ *      上游 ——「先製造失敗拿退款、再重放拿成功圖」的 0 成本白嫖面封堵）；② 首筆**未退款**
+ *      重放 ⇒ 不重扣、`idempotent` 真（旧行為不回退）；③ 連敗 N 次後成功 ⇒ **淨扣恰 10**
+ *      （每敗一條 `REFUND`、原 `CHARGE` 行保留，流水逐字可審計）；④ 分 `X-Request-Id`
+ *      互不影響 ＋「rid ＋ `:序號`」偽造鍵對抗樣本（派生鏈折一輪 sha256 ⇒ 不撞鍵）；
+ *      ⑤ 嘗試序號讀不出（流水面故障）⇒ fail-closed 503 ＋ 零扣費（**絕不猜序號**）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；**不打印任何明文金鑰 / 上游 key / 密文 / 令牌**（只打印长度与指纹）。
  */
@@ -747,6 +754,105 @@ const g6RawAll = allRaws.join('\n')
 const g6LogAll = logs.join('\n')
 const g6UpstreamAll = upstreamHits.map((hit) => hit.raw).join('\n')
 check('G6', '⑥ **全部回包**（含成功 / 400 / 502 / 503 共用本会话全部回包）与**全部日志**逐字搜索 `data:image/` **count=0**；上游请求体同为 0（原始字节与 data_url 一律不外流）', { responses: 0, logs: 0, upstream: 0, pngB64InLogs: 0 }, { responses: countIn(g6RawAll, 'data:' + 'image/'), logs: countIn(g6LogAll, 'data:' + 'image/'), upstream: countIn(g6UpstreamAll, 'data:' + 'image/'), pngB64InLogs: countIn(g6LogAll, PNG_1PX_B64) })
+
+/* ===========================================================================
+  M 段：嘗試序號冪等鍵（v1.75 §3.67.7 補登注①(b)；AC-604 / AC-605）
+  ——「首筆已退款 ⇒ 同 X-Request-Id 再到＝全新可計費嘗試」＋ 未退款重放不回退
+  =========================================================================== */
+section('M', '嘗試序號冪等鍵：退款後重放重扣（H5 白嫖面）/ 未退款重放不重扣 / 連敗 N 次淨扣恰 10 / 分 rid 隔離')
+
+/* 專用金鑰與餘額（**不佔用 u-ok / u-du 的軌跡** ⇒ 既有斷言不受影響；限額取合法域：日 100 / 分 30）。 */
+issued.m = await aiKeys.issueAiKey({ uid: 'u-m-idem', label: '自检-尝试序号', day_limit: 100, minute_limit: 30 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-m-idem', { _id: 'bl-u-m-idem', uid: 'u-m-idem', points: 100, updated_at: 'seed' })
+if (!issued.m || issued.m.ok !== true) {
+  console.log(JSON.stringify({ fatal: 'ISSUE_KEY_M_FAILED' }))
+  process.exit(1)
+}
+const M_KEY = issued.m.key
+const mBalance = () => balanceOf('u-m-idem')
+const mRows = (rid) => flowRows().filter((r) => r.ref_id === `images/generations:${issued.m.key_id}:${rid}`)
+
+/* M1：H5 白嫖場景 —— 上游先 500（502 ＋ 退款、餘額復原）⇒ 同 request_id 再發且上游 200。 */
+const M1_RID = 'rid-M01-0001'
+upstreamMode = '500'
+const m1HitsBefore = upstreamHits.length
+const M1a = await call({ key: M_KEY, body: { prompt: 'M1 先敗' }, requestId: M1_RID })
+const m1BalanceAfterFail = mBalance()
+upstreamMode = 'url'
+const M1b = await call({ key: M_KEY, body: { prompt: 'M1 再發轉成功' }, requestId: M1_RID })
+const m1RowsAll = mRows(M1_RID)
+const m1Charges = m1RowsAll.filter((r) => r.kind === 'CHARGE')
+const m1Refunds = m1RowsAll.filter((r) => r.kind === 'REFUND')
+check('M1', '① H5 場景：上游 500（502 ＋ 退款、餘額復原 100）⇒ **同 X-Request-Id 再發**且上游 200 ⇒ 餘額比初始**少恰 10**（90）、回包 `idempotent` **假**、帶圖、上游**被重調**；流水 2 CHARGE（首筆鍵＝sha256(key_id:rid)、次筆＝派生新鍵）＋ 1 REFUND（只退首筆、原 CHARGE 行保留）', { failStatus: 502, failUpstreamStatus: 500, balanceAfterFail: 100, replayStatus: 200, replayIdempotent: false, balanceFinal: 90, netFromInitial: 10, imageUrl: IMG_URL, upstreamCalls: 2, chargeRows: 2, refundRows: 1, firstKeyIsBase: true, secondKeyIsDerived: true, refundOnlyFirst: true }, { failStatus: M1a.status, failUpstreamStatus: M1a.body && M1a.body.status, balanceAfterFail: m1BalanceAfterFail, replayStatus: M1b.status, replayIdempotent: M1b.body && M1b.body.idempotent, balanceFinal: mBalance(), netFromInitial: 100 - mBalance(), imageUrl: M1b.body && M1b.body.image && M1b.body.image.url, upstreamCalls: upstreamHits.length - m1HitsBefore, chargeRows: m1Charges.length, refundRows: m1Refunds.length, firstKeyIsBase: Boolean(m1Charges[0] && m1Charges[0].idem_key === sha256(`${issued.m.key_id}:${M1_RID}`)), secondKeyIsDerived: Boolean(m1Charges[1] && m1Charges[1].idem_key === core.chargeIdemKeyOf(issued.m.key_id, M1_RID, 2) && m1Charges[1].idem_key !== m1Charges[0].idem_key), refundOnlyFirst: Boolean(m1Refunds[0] && m1Charges[0] && m1Refunds[0].idem_key === `${m1Charges[0].idem_key}:refund` && m1Refunds[0].delta === 10 && m1Refunds[0].ref_id === m1Charges[0].ref_id) })
+
+/* M2：首筆直接成功 ⇒ 同鍵重放（AC-604 回歸保護：旧行為不回退）。 */
+const M2_RID = 'rid-M02-0001'
+const m2FlowBefore = flowSnapshot()
+const m2HitsBefore = upstreamHits.length
+const M2a = await call({ key: M_KEY, body: { prompt: 'M2 首筆成功' }, requestId: M2_RID })
+const m2BalanceFirst = mBalance()
+const m2FlowAfterFirst = flowSnapshot()
+const m2HitsAfterFirst = upstreamHits.length
+const M2b = await call({ key: M_KEY, body: { prompt: 'M2 同鍵重放' }, requestId: M2_RID })
+const m2Charges = mRows(M2_RID).filter((r) => r.kind === 'CHARGE')
+check('M2', '② 首筆直接成功 ⇒ 同鍵重放 ⇒ 餘額**再未減少**（80→80）、`idempotent` 真、零新流水行、上游**仍被重調**；首筆鍵逐字＝ sha256(key_id:rid)（旧行為不回退）', { firstStatus: 200, firstIdempotent: false, balanceFirst: 80, replayStatus: 200, replayIdempotent: true, balanceReplay: 80, flowDeltaFirst: 1, flowDeltaReplay: 0, chargeRows: 1, upstreamCalls: [1, 1], keyIsBase: true }, { firstStatus: M2a.status, firstIdempotent: M2a.body && M2a.body.idempotent, balanceFirst: m2BalanceFirst, replayStatus: M2b.status, replayIdempotent: M2b.body && M2b.body.idempotent, balanceReplay: mBalance(), flowDeltaFirst: m2FlowAfterFirst - m2FlowBefore, flowDeltaReplay: flowSnapshot() - m2FlowAfterFirst, chargeRows: m2Charges.length, upstreamCalls: [m2HitsAfterFirst - m2HitsBefore, upstreamHits.length - m2HitsAfterFirst], keyIsBase: Boolean(m2Charges[0] && m2Charges[0].idem_key === sha256(`${issued.m.key_id}:${M2_RID}`)) })
+
+/* M3：連續兩敗（各一條退款行、原 CHARGE 行不刪）後成功 ⇒ 淨扣恰 10。 */
+const M3_RID = 'rid-M03-0001'
+const m3BalanceBefore = mBalance()
+upstreamMode = '500'
+const M3a = await call({ key: M_KEY, body: { prompt: 'M3 第一敗' }, requestId: M3_RID })
+const M3b = await call({ key: M_KEY, body: { prompt: 'M3 第二敗' }, requestId: M3_RID })
+upstreamMode = 'url'
+const M3c = await call({ key: M_KEY, body: { prompt: 'M3 第三發成功' }, requestId: M3_RID })
+const m3RowsAll = mRows(M3_RID)
+const m3Lines = m3RowsAll.map((r) => `${r.kind} ${r.delta > 0 ? '+' : ''}${r.delta}`)
+const m3Charges = m3RowsAll.filter((r) => r.kind === 'CHARGE')
+const m3Refunds = m3RowsAll.filter((r) => r.kind === 'REFUND')
+const m3ChargeKeys = m3Charges.map((r) => r.idem_key)
+const m3RefundKeys = m3Refunds.map((r) => r.idem_key)
+check('M3', '③ 連續兩敗（各一條 REFUND、原 CHARGE 行保留不刪）後成功 ⇒ **淨扣恰 10**（80→70，不是 10×3）；流水**恰 5 行逐字**＝「CHARGE -10, REFUND +10, CHARGE -10, REFUND +10, CHARGE -10」；3 個 CHARGE 各自新鍵、2 個 REFUND 各退各的、ref_id 五行同一', { statuses: [502, 502, 200], idempotentThird: false, balanceBefore: 80, balanceFinal: 70, netDeducted: 10, rows: 5, lines: 'CHARGE -10,REFUND +10,CHARGE -10,REFUND +10,CHARGE -10', chargeRows: 3, refundRows: 2, distinctChargeKeys: 3, refundKeysMatch: true, sameRefId: true }, { statuses: [M3a.status, M3b.status, M3c.status], idempotentThird: M3c.body && M3c.body.idempotent, balanceBefore: m3BalanceBefore, balanceFinal: mBalance(), netDeducted: m3BalanceBefore - mBalance(), rows: m3RowsAll.length, lines: m3Lines.join(','), chargeRows: m3Charges.length, refundRows: m3Refunds.length, distinctChargeKeys: new Set(m3ChargeKeys).size, refundKeysMatch: m3Refunds.every((r) => m3ChargeKeys.some((k) => r.idem_key === `${k}:refund`)) && m3RefundKeys.every((k) => m3ChargeKeys.some((c) => k === `${c}:refund`)), sameRefId: new Set(m3RowsAll.map((r) => r.ref_id)).size === 1 })
+
+/* M4：不同 X-Request-Id 互不影響（兩發各扣 10）＋「rid ＋ ":序號"」偽造鍵對抗樣本。 */
+const M4_R1 = 'rid-M04-0001'
+const M4_R2 = 'rid-M04-0002'
+const m4BalanceBefore = mBalance()
+const M4a = await call({ key: M_KEY, body: { prompt: 'M4 甲' }, requestId: M4_R1 })
+const m4aDeducted = m4BalanceBefore - mBalance()
+const m4BalanceMid = mBalance()
+const M4b = await call({ key: M_KEY, body: { prompt: 'M4 乙' }, requestId: M4_R2 })
+const m4bDeducted = m4BalanceMid - mBalance()
+/* 對抗樣本：rid' ＝ M1 的 rid ＋ ":2"。若序號**直拼**在 rid 之後，此 rid 的序號 1 鍵會撞
+   M1 序號 2 的鍵（該筆未退款 ⇒ 回放免扣）⇒ 白嫖面重開；派生鏈折一輪 sha256 ⇒ 必為全新鍵。 */
+const M4_FORGED_RID = `${M1_RID}:2`
+const m4BalanceBeforeForged = mBalance()
+const M4c = await call({ key: M_KEY, body: { prompt: 'M4 偽造 rid' }, requestId: M4_FORGED_RID })
+const m4cDeducted = m4BalanceBeforeForged - mBalance()
+const m4cCharges = mRows(M4_FORGED_RID).filter((r) => r.kind === 'CHARGE')
+check('M4', '④ 不同 X-Request-Id 互不影響（兩發各扣 10、各恰 1 行 CHARGE、各自 `idempotent` 假）；「rid ＋ `:序號`」偽造鍵（`rid-M01-0001:2`）**撞不出** M1 序號 2 的鍵 ⇒ 仍是全新扣費（不重放、不免扣）', { pairStatuses: [200, 200], pairDeducted: [10, 10], pairChargeRows: [1, 1], pairIdempotent: [false, false], forgedStatus: 200, forgedIdempotent: false, forgedDeducted: 10, forgedKeyIsBase: true, forgedKeyNotM1A2: true, forgedChargeRows: 1, balanceFinal: 40 }, { pairStatuses: [M4a.status, M4b.status], pairDeducted: [m4aDeducted, m4bDeducted], pairChargeRows: [mRows(M4_R1).filter((r) => r.kind === 'CHARGE').length, mRows(M4_R2).filter((r) => r.kind === 'CHARGE').length], pairIdempotent: [M4a.body && M4a.body.idempotent, M4b.body && M4b.body.idempotent], forgedStatus: M4c.status, forgedIdempotent: M4c.body && M4c.body.idempotent, forgedDeducted: m4cDeducted, forgedKeyIsBase: Boolean(m4cCharges[0] && m4cCharges[0].idem_key === sha256(`${issued.m.key_id}:${M4_FORGED_RID}`)), forgedKeyNotM1A2: Boolean(m4cCharges[0] && m1Charges[1] && m4cCharges[0].idem_key !== m1Charges[1].idem_key), forgedChargeRows: m4cCharges.length, balanceFinal: mBalance() })
+
+/* M5（加固面）：嘗試序號讀不出 ⇒ fail-closed 503 ＋ 零扣費（**絕不猜序號** —— 猜 1 會重放
+   已退款鍵 ⇒ 白嫖面重開）。同一份實現示，只把 `flow` 換成必拋假體（`listFlow` 讀不出）。
+   **本段放最後**：建構該 handler 會以故障流水面重接全局注入縫，其後不得再打真路由。 */
+const brokenFlowHandler = routeModule.createHandler(
+  Object.assign({}, deps, {
+    stores: Object.assign({}, stores, {
+      flow: {
+        where() {
+          return {
+            async get() {
+              throw new Error('FAKE_FLOW_UNAVAILABLE')
+            }
+          }
+        }
+      }
+    })
+  })
+)
+const m5Writes = writeSnapshot()
+const m5Flow = flowSnapshot()
+const M5 = await call({ requestId: 'rid-M05-0001', handler: brokenFlowHandler })
+check('M5', '⑤ 嘗試序號讀不出（流水面故障）⇒ **fail-closed 503** CONFIG_MISSING ＋ 零扣費（寫計數與流水行數均不變）；不新增第九個 reason', { status: 503, reason: 'CONFIG_MISSING', writes: 0, flow: 0, keys: 'message,ok,reason' }, { status: M5.status, reason: M5.reason, writes: writeSnapshot() - m5Writes, flow: flowSnapshot() - m5Flow, keys: shapeOf(M5.body) })
 
 /* ===========================================================================
    F 段：交付面静态门

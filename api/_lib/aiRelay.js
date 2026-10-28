@@ -28,7 +28,9 @@
  *      上游後續失敗**不刪**已上傳對象（內容尋址可被後續重用），審計行只記
  *      `{stage:'upload', key_prefix, bytes}`（**零字節、零 data_url 片段**）
  *   ⑨ **预扣 10 金**（`chargePoints`；kind=`CHARGE`、ref_type=`AI_IMAGE`、
- *      ref_id=上游请求标识、idem_key=`sha256(key_id ＋ 冒號 ＋ X-Request-Id)`）
+ *      ref_id=上游请求标识、idem_key=`chargeIdemKeyOf(key_id, X-Request-Id, 嘗試序號)`
+ *      —— 序號推導在**预扣之前**完成、見已知項 A；序號 1 的鍵與既有
+ *      `sha256(key_id ＋ 冒號 ＋ X-Request-Id)` **逐字相同**）
  *      （余额不足 ⇒ 402 `INSUFFICIENT_POINTS`，**零写入**）
  *   ⑩ 调上游（凭据按 `Bearer` 方案放进 `Authorization` 头、JSON body、超时取 `timeout_ms` 缺省 60000）
  *      失败 / 超时 / 非 2xx / 非 JSON / 缺图片字段 ⇒ **退款**（`refundPoints` 同 `ref_id`、
@@ -44,9 +46,18 @@
  *   502 `UPSTREAM_ERROR`（带 `status`：上游状态码，网络错为 0）／ 503 `CONFIG_MISSING`
  *
  * 【已知项 · 逐条登记（派单方要求）】
- *   A. **幂等只保证「不重复扣金」**：同 `idem_key` 重放时 `chargePoints` 回**首次结果**
- *      （余额只扣一次、不新增第二行 CHARGE 流水），但**仍会重新调上游**，回包
- *      `idempotent: true`；用量 `commitUsage` 亦会再次 +1（由 `lib/aiUsage.js` 语义决定）。
+ *   A. **冪等按「嘗試序號」讀（v1.75 §3.67.7 補登注①(b)；AC-604 / AC-605）**：同一
+ *      `X-Request-Id` 的冪等鍵 ＝ `chargeIdemKeyOf(key_id, X-Request-Id, 嘗試序號)`：
+ *      · 首筆（序號 1）**未退款** ⇒ 同鍵重放 `chargePoints` 回**首次結果**（余额只扣一次、
+ *        不新增第二行 CHARGE 流水），回包 `idempotent: true`；**仍会重新调上游**，用量
+ *        `commitUsage` 亦会再次 +1（由 `lib/aiUsage.js` 语义决定）—— 既有行為逐字不變。
+ *      · 首筆**已退款**（該 `ref_id` 存在 `kind=REFUND` 行）⇒ 同鍵再次到達 ＝ **一次全新的
+ *        可計費嘗試**：序號 ＝ 該 `ref_id` 既有 `CHARGE` 行數 ＋ 1（**必為新鍵** ⇒ 必重扣
+ *        10 金、必重新調上游）、回包 `idempotent: false`；連續失敗 N 次後成功 ⇒ **淨扣恰 10**
+ *        （每次失敗各一條 `REFUND` 行、退款鍵派生自**本次嘗試** ⇒ 失敗只退本次那一筆，
+ *        原 `CHARGE` 行保留不刪）。
+ *      · 嘗試序號在**預扣之前**經 `ledger.listFlow` 只讀面推導（讀不出 ⇒ fail-closed 503
+ *        ＋ **零扣費、絕不猜序號**：猜 1 會重放已退款鍵 ⇒ 白嫖面重開）。
  *   B. lib 侧的内部原因（`STORAGE_UNAVAILABLE`、账本非 402 的拒绝、`commitUsage` 失败）
  *      在本端点**折叠**为 503 `CONFIG_MISSING` —— 封閉錯誤面只有那 8 个码，**不新增第九个
  *      reason 字面值**（fail-closed，绝不伪装成 4xx 越权）。
@@ -199,6 +210,72 @@ function text(value) {
 
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex')
+}
+
+/** 嘗試計數的分頁護欄（`ledger.listFlow` 單頁上限 1000 行；64 頁 ＝ 64000 行；超限 fail-closed）。 */
+export const ATTEMPT_COUNT_MAX_PAGES = 64
+
+/**
+ * **冪等鍵按「嘗試序號」派生**（唯一定義點；v1.75 §3.67.7 補登注①(b)）：
+ *   · 序號 1 ⇒ `sha256(key_id ＋ 冒號 ＋ X-Request-Id)` —— 與本端點既有鍵**逐字相同**
+ *     （AC-604 回歸保護：首筆未退款的重放仍命中同一鍵 ⇒ 不重扣）；
+ *   · 序號 ≥2 ⇒ `sha256(序號 1 之鍵 ＋ 冒號 ＋ 序號)` —— **經 sha256 折一輪的派生鏈**：
+ *     `X-Request-Id` 是**客戶端可控**面（8〜64 字、字符面不封閉），若把序號直拼在原串後
+ *     （`…:rid:序號`），偽造方可用 `rid' ＝ rid ＋ ":2"`（長度門內合法）撞出序號 2 的鍵
+ *     ⇒ 已退款重放又變免扣、白嫖面重開；折一輪 sha256 後要撞中序號 1 的鍵需 2^64 原像
+ *     磨算 ⇒ 鍵面不可偽造。
+ * 本函式**只做鍵派生、不推導序號**（序號推導見 `nextAttemptNumber`，恆在預扣之前）。
+ * @param {string} keyId 金鑰標識（`key_id`）
+ * @param {string} requestId `X-Request-Id`（8〜64 字，已在 ④ 過門）
+ * @param {number} attempt 嘗試序號（1 起；非整數 / ≤1 一律按 1 读）
+ * @returns {string} 64 位十六進制冪等鍵
+ */
+export function chargeIdemKeyOf(keyId, requestId, attempt) {
+  const base = sha256(`${keyId}:${requestId}`)
+  const n = Number(attempt)
+  if (!Number.isInteger(n) || n <= 1) return base
+  return sha256(`${base}:${n}`)
+}
+
+/**
+ * **本次請求的嘗試序號**（v1.75 §3.67.7 補登注①(b)；**推導恆在預扣之前**完成）。
+ * 讀本人流水（`ledger.listFlow` 既有導出、**只讀**、分頁掃描）中 `ref_id` 相符的行：
+ *   · **零 `REFUND` 行**（首筆未退款）⇒ 序號恆 1 ⇒ 同鍵重放回首次結果、不重扣（既有語義不變）；
+ *   · **存在 `REFUND` 行**（首筆已退款）⇒ 序號 ＝ 該 `ref_id` 既有 `CHARGE` 行數 ＋ 1
+ *     ⇒ 必為**全新鍵**（不與任何既有 `CHARGE` 行相撞 ⇒ 必重扣、`idempotent` 假）；
+ *   · **讀不出 / 超分頁護欄** ⇒ `null` ⇒ 調用方 fail-closed 503（**零扣費、絕不猜序號**）。
+ * 已退款的 `CHARGE` 行**保留原樣**（本函式只讀；帳本側退款只新增 `REFUND` 行、不刪不改）。
+ * @param {string} uid 用戶標識
+ * @param {string} refId 參照鍵（`route:key_id:X-Request-Id`；跨鍵、跨 rid 隔離）
+ * @returns {Promise<number|null>} 嘗試序號（≥1）；讀不出 ⇒ `null`
+ */
+export async function nextAttemptNumber(uid, refId) {
+  try {
+    let cursor = 0
+    let charges = 0
+    let refunds = 0
+    let previousPage = ''
+    for (let page = 0; page < ATTEMPT_COUNT_MAX_PAGES; page += 1) {
+      const reply = await ledger.listFlow(uid, { limit: ledger.LIST_FLOW_MAX_LIMIT, cursor })
+      if (!reply || reply.ok !== true || !Array.isArray(reply.rows)) return null
+      for (const row of reply.rows) {
+        if (text(row.ref_id) !== refId) continue
+        if (row.kind === ledger.FLOW_KINDS.CHARGE) charges += 1
+        else if (row.kind === ledger.FLOW_KINDS.REFUND) refunds += 1
+      }
+      const serialized = JSON.stringify(reply.rows)
+      /* 末頁（行數 < 單頁上限）或分頁游標未被存儲面採納（回同一頁）⇒ 掃描已完成。 */
+      if (reply.rows.length < ledger.LIST_FLOW_MAX_LIMIT || serialized === previousPage) {
+        return refunds > 0 ? charges + 1 : 1
+      }
+      previousPage = serialized
+      cursor += ledger.LIST_FLOW_MAX_LIMIT
+    }
+    /* 超分頁護欄：行數多到掃不完 ⇒ 不猜序號（猜錯會撞既有鍵 ⇒ 白嫖面重開）。 */
+    return null
+  } catch {
+    return null
+  }
 }
 
 /** 大小写不敏感取头（Node 入站头已小写；直调 / 测试面保持同样宽容）。 */
@@ -538,7 +615,8 @@ export function createAiRelay(options = {}) {
     return { status, body, headers: headers || {} }
   }
 
-  /** 退款（**同 `ref_id`、kind=`REFUND`、确定性 `idem_key`** ⇒ 重复失败不重复退款）。 */
+  /** 退款（**同 `ref_id`、kind=`REFUND`、退款鍵派生自本次嘗試的 `chargeIdemKey`** ⇒
+   *  只退**本次**那一筆；重試 / 重放撞同一退款鍵才不重複退同一筆）。 */
   async function safeRefund(uid, refId, chargeIdemKey) {
     try {
       const reply = await ledger.refundPoints({
@@ -697,9 +775,16 @@ export function createAiRelay(options = {}) {
       return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
     }
 
-    /* ⑨ 预扣 10 金（幂等键 = sha256(key_id ＋ 冒號 ＋ X-Request-Id)；余额不足 ⇒ 402 零写入）。 */
-    const chargeIdemKey = sha256(`${keyInfo.key_id}:${requestId}`)
+    /* ⑨ 预扣 10 金（**冪等鍵按嘗試序號派生**，見 `chargeIdemKeyOf` ／ 已知項 A；
+       序號推導**在预扣之前**完成，讀不出 ⇒ fail-closed 503 零扣費；余额不足 ⇒ 402 零写入）。 */
     const refId = `${route}:${keyInfo.key_id}:${requestId}`
+    const attempt = await nextAttemptNumber(keyInfo.uid, refId)
+    if (!Number.isInteger(attempt) || attempt < 1) {
+      /* 嘗試序號讀不出 ⇒ **絕不猜**（猜序號 1 會重放已退款鍵 ⇒ 白嫖面重開）；零扣費。 */
+      audit({ outcome: REASONS.CONFIG_MISSING, stage: 'attempt-count' })
+      return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
+    }
+    const chargeIdemKey = chargeIdemKeyOf(keyInfo.key_id, requestId, attempt)
     const charge = await ledger.chargePoints({
       uid: keyInfo.uid,
       amount: CHARGE_AMOUNT,
