@@ -248,6 +248,35 @@ function readConfig(env) {
   }
 }
 
+/**
+ * **「文档不存在」类错误判据**（供各 `doc(id).get()` 读点安全包裹用）。
+ *
+ * 背景：CloudBase node-sdk 的 `collection.doc(id).get()` 在**目标文档不存在**时并不回空 ——
+ * `@cloudbase/database` 的 `DocumentReference.get()` 走 `database.getDocument`（`queryType: DOC`），
+ * 服务端对不存在的文档回 **HTTP 404**；`@cloudbase/node-sdk` 的 `tcbapirequester` 收到非 200
+ * 会 `throw E({ code: statusCode, message: '404 Not Found | [url]' })` ⇒ 抛出的
+ * `TcbError.code === 404`（**数字**）。故「首次配置 / 读不存在的行」在生产必抛。
+ *
+ * 判据**只看错误码 / 错误名，绝不做 message 文本匹配**（message 会随 SDK / 语言版本漂移，
+ * 文本匹配既脆又可能把真存储故障吞成「未配置」）。逐条（命中其一即判「不存在」）：
+ *   · `error.code === 404`（数字）—— 生产实测的抛错形态（HTTP not-found ⇒ 文档不存在）；
+ *   · `error.code === 'DATABASE_QUERY_DOC_NONEXIST' | 'DOCUMENT_NOT_EXIST' | 'RESOURCE_NOT_FOUND'`
+ *     —— 部分 SDK / 服务端版本以字符串错误码回「文档不存在」（HTTP 200 body 带 code）；
+ *   · `error.errCode === -502005` —— wx-server-sdk 家族「database.document not exist」。
+ * 其余任何错误（连接失败 / 超时 / 权限 / 非 404 的 5xx …）一律**判否** ⇒ 由调用方**照旧上抛**，
+ * 绝不吞成「未配置」（守「真存储故障不得伪装成空」这条硬口径）。
+ * @param {any} error 捕获到的错误
+ * @returns {boolean} 是否属「文档不存在」类
+ */
+function isDocNotExistError(error) {
+  if (!error || typeof error !== 'object') return false
+  if (error.code === 404) return true
+  const code = typeof error.code === 'string' ? error.code : ''
+  if (code === 'DATABASE_QUERY_DOC_NONEXIST' || code === 'DOCUMENT_NOT_EXIST' || code === 'RESOURCE_NOT_FOUND') return true
+  if (error.errCode === -502005) return true
+  return false
+}
+
 module.exports = {
   REASONS,
   ENV_NAMES,
@@ -267,5 +296,6 @@ module.exports = {
   secretPairOf,
   fingerprint,
   maskedPhone,
+  isDocNotExistError,
   readConfig
 }

@@ -7,7 +7,7 @@
  *     （`getPointsBalance` / `listPointsFlow`；走既有登录令牌门）
  *   · `cloudfunctions/xiai-user-token/index.js` 信封（op 收窄的 additive 透传）
  *
- * 断言面（≥ 10；本套 27 条：A 段 14 ＋ B 段 4 ＋ C 段 9）：
+ * 断言面（≥ 10；本套 28 条：A 段 15 ＋ B 段 4 ＋ C 段 9）：
  *   A. 账本单点（注入假存储，直接跑真函数）
  *      ① 同 uid **并发**两笔 charge 各 5 金、初始 50 ⇒ **恒 40（不得 45）** —— 并附
  *         **负对照**（同一交错下朴素读改写 ⇒ 45 ⇒ 证明测试台真能测出丢更新）；
@@ -454,6 +454,48 @@ const KEY = (label) => `idem-${label}-${Math.random().toString(36).slice(2, 8)}`
   check('A13', 'readBalance：新用户首次读即幂等发初始 50（INITIAL 流水 1 行）；回包恰 3 键 {ok,points,updated_at}',
     { points: 50, keys: ['ok', 'points', 'updated_at'], initialRows: 1, stable: 50 },
     { points: balance.points, keys: Object.keys(balance).sort(), initialRows: flowRowsOf(uid).length, stable: again.points })
+}
+
+/* A14（本单新增 · 「读不存在的文档会抛错」收尾）：readBalanceRow / readFlowRow 在 doc().get()
+   抛「不存在」类（code 404；生产 SDK 真实形态：文档不存在 ⇒ HTTP 404 ⇒ TcbError.code === 404）
+   时**不抛、回 null**；非不存在类（code 500）仍照旧上抛（不吞真存储故障）。 */
+{
+  const notExistCollection = (real, docError) => ({
+    doc() {
+      return {
+        async get() {
+          await tick()
+          throw docError
+        }
+      }
+    },
+    where(match) {
+      return real.where(match)
+    }
+  })
+  const notExist404 = Object.assign(new Error('404 Not Found | [synthetic]'), { code: 404 })
+  const realFault500 = Object.assign(new Error('storage internal error | [synthetic]'), { code: 500 })
+  const throwingStore = (docError) => () => ({
+    balances: notExistCollection(fakeDb.collection('xiai_balances'), docError),
+    flow: notExistCollection(fakeDb.collection('xiai_points_flow'), docError)
+  })
+  ledger.setLedgerStoreProvider(throwingStore(notExist404))
+  const balanceRow = await ledger.readBalanceRow('u-a14-no-such-user')
+  const flowRow = await ledger.readFlowRow('pf-no-such-flow')
+  ledger.setLedgerStoreProvider(throwingStore(realFault500))
+  let caught = null
+  try {
+    await ledger.readBalanceRow('u-a14-no-such-user')
+  } catch (error) {
+    caught = error
+  }
+  ledger.setLedgerStoreProvider(() => ({
+    balances: fakeDb.collection('xiai_balances'),
+    flow: fakeDb.collection('xiai_points_flow')
+  }))
+  check('A14', 'doc().get() 抛不存在类（code 404）⇒ readBalanceRow / readFlowRow 回 null（不抛）；抛非不存在类（code 500）⇒ 照旧上抛',
+    { balance: null, flow: null, faultRethrown: 500 },
+    { balance: balanceRow, flow: flowRow, faultRethrown: caught === null ? null : caught.code })
 }
 
 /* ===========================================================================

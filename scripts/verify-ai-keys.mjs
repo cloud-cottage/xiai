@@ -10,7 +10,7 @@
  *     ＋ 2 个新管理员 op（`getAiUpstream` / `setAiUpstream`，走 `adminWhitelistDenial`）
  *   · `cloudfunctions/xiai-user-token/index.js` 信封（op 收窄的 additive 透传）
  *
- * 断言面（本套 **38** 条，覆盖派单方点名的 ①〜⑫）：
+ * 断言面（本套 **30** 条，覆盖派单方点名的 ①〜⑫；本单新增 B5〜B8 共 4 条 —— 头注旧写「38」与实际不符，按实际枚举数订正）：
  *   A. 金鑰单点（真函数 ＋ 注入假存储）
  *      ① 签发回包带明文、库内**零明文零完整 hash**（只落前 16 位 hash ＋ 8 位前缀）；
  *      ② `listAiKeys` 逐行**零 hash 零明文**、键集恰 8 键；
@@ -517,6 +517,145 @@ const adminEnv = { XIAI_AI_UPSTREAM_SECRET: UPSTREAM_SECRET }
     plainStill: still.key === UPSTREAM_KEY,
     firstNoKey: firstWithoutKey.reason,
     zeroWriteDuringDenials: writesAfterDenials === before && notHttps.ok === false && badHost.ok === false
+  })
+}
+
+/* ---------------------------------------------------------------------------
+   B5〜B8（本单新增 · 「读不存在的文档会抛错」缺陷在上游读点上的收尾断言）
+   背景：CloudBase node-sdk 的 `doc(id).get()` 在**文档不存在**时抛错（HTTP 404 ⇒
+   `TcbError.code === 404`）而非回空 ⇒ 读点必须 try/catch ＋ `isDocNotExistError` 谓词保护。
+   --------------------------------------------------------------------------- */
+
+/* 「doc().get() 必抛」的集合替身（复现生产 SDK 的存在性语义；`where` / `set` 委托真假 DB）。 */
+const docThrowingCollection = (real, docError) => ({
+  doc() {
+    return {
+      async get() {
+        await tick()
+        throw docError
+      },
+      async set(doc) {
+        return real.doc.apply(real, arguments).set(doc)
+      }
+    }
+  },
+  where(match) {
+    return real.where(match)
+  }
+})
+const NOT_EXIST_404 = Object.assign(new Error('404 Not Found | [synthetic]'), { code: 404 })
+const REAL_FAULT_500 = Object.assign(new Error('storage internal error | [synthetic]'), { code: 500 })
+const restoreUpstreamProvider = () => aiUpstream.setUpstreamStoreProvider(() => ({ upstream: fakeDb.collection('xiai_ai_upstream') }))
+
+/* B5（①）：doc().get() 抛「不存在」类（code 404）⇒ readUpstreamRow 回退 where 并返回既有行（不抛）。 */
+{
+  const seeded = fakeDb.bucketOf('xiai_ai_upstream').get(aiUpstream.UPSTREAM_ID)
+  aiUpstream.setUpstreamStoreProvider(() => ({ upstream: docThrowingCollection(fakeDb.collection('xiai_ai_upstream'), NOT_EXIST_404) }))
+  const row = await aiUpstream.readUpstreamRow()
+  const view = await aiUpstream.getUpstreamPublic()
+  restoreUpstreamProvider()
+  check('B5', '① doc().get() 抛不存在类（code 404）⇒ readUpstreamRow 回退 where() 并返回行（不抛）；getUpstreamPublic 同路仍回恰 5 键公共面', {
+    rowFound: true,
+    docId: 'upstream-default',
+    sameAsSeeded: true,
+    publicKeys: 'base_url,key_mask,model,timeout_ms,updated_at'
+  }, {
+    rowFound: row !== null,
+    docId: row && row._id,
+    sameAsSeeded: row !== null && row.model === seeded.model && row.key_mask === seeded.key_mask,
+    publicKeys: shapeOf(view)
+  })
+}
+
+/* B6（②）：doc 与 where 都抛**非不存在类**（code 500）⇒ **必须上抛**（证明没吞真故障、判据非「凡错都算不存在」）。 */
+{
+  const bothThrowing = {
+    doc() {
+      return {
+        async get() {
+          await tick()
+          throw REAL_FAULT_500
+        }
+      }
+    },
+    where() {
+      return {
+        async get() {
+          await tick()
+          throw REAL_FAULT_500
+        }
+      }
+    }
+  }
+  aiUpstream.setUpstreamStoreProvider(() => ({ upstream: bothThrowing }))
+  let caught = null
+  try {
+    await aiUpstream.readUpstreamRow()
+  } catch (error) {
+    caught = error
+  }
+  restoreUpstreamProvider()
+  check('B6', '② doc 与 where 都抛**非不存在类**（code 500）⇒ 必须上抛（不吞真存储故障；catch 到的正是同一个错）', {
+    threw: 500,
+    sameError: true
+  }, {
+    threw: caught === null ? null : caught.code,
+    sameError: caught === REAL_FAULT_500
+  })
+}
+
+/* B7（③）：两读都空（doc 抛不存在类、where 回空数组）⇒ 回 `null`；
+   在此空库上 setUpstream 首次配置（无行、给齐 base_url / model / key）⇒ ok:true ＋ 公共面 5 键。 */
+{
+  const B7_KEY = 'B7-first-time-secret-2026'
+  const freshDb = createFakeDb()
+  aiUpstream.setUpstreamStoreProvider(() => ({ upstream: docThrowingCollection(freshDb.collection('xiai_ai_upstream'), NOT_EXIST_404) }))
+  const emptyRow = await aiUpstream.readUpstreamRow()
+  const setFirst = await aiUpstream.setUpstream(
+    { actor_uid: A_UID, base_url: 'https://api.first.example/v1', model: 'm-first', key: B7_KEY, timeout_ms: 20000 },
+    adminEnv
+  )
+  const firstView = await aiUpstream.getUpstreamPublic()
+  const roundTrip = await aiUpstream.resolveUpstreamSecret(adminEnv)
+  restoreUpstreamProvider()
+  check('B7', '③ 两读都空（doc 抛不存在类、where 回空）⇒ readUpstreamRow 回 null；空库上首次配置（无行、给齐 base_url/model/key）⇒ ok:true；公共面恰 5 键；加密往返仍逐字相等', {
+    emptyRow: null,
+    setOk: true,
+    publicKeys: 'base_url,key_mask,model,timeout_ms,updated_at',
+    base: 'https://api.first.example/v1',
+    model: 'm-first',
+    timeout: 20000,
+    maskMatches: true,
+    roundTripEqual: true
+  }, {
+    emptyRow,
+    setOk: setFirst.ok,
+    publicKeys: shapeOf(firstView),
+    base: firstView.base_url,
+    model: firstView.model,
+    timeout: firstView.timeout_ms,
+    maskMatches: firstView.key_mask === aiUpstream.maskOf(B7_KEY),
+    roundTripEqual: roundTrip.key === B7_KEY
+  })
+}
+
+/* B8（④）：判据自身的正 / 负对照 —— `isDocNotExistError` 对「不存在」类判 true、对其余判 false
+   （证明不是「凡错都算不存在」；负对照含**只带 message 无 code** 的形态，杜绝文本匹配）。 */
+{
+  check('B8', '④ 判据正/负对照：isDocNotExistError 对 {code:404} / {errCode:-502005} / {code:"DOCUMENT_NOT_EXIST"} ⇒ true；对 {code:500} / {message:"does not exist"}（无 code）⇒ false', {
+    code404: true,
+    errCodeM502005: true,
+    stringDocNonexist: true,
+    code500: false,
+    messageOnly: false,
+    nonObject: false
+  }, {
+    code404: userConfig.isDocNotExistError({ code: 404 }),
+    errCodeM502005: userConfig.isDocNotExistError({ errCode: -502005 }),
+    stringDocNonexist: userConfig.isDocNotExistError({ code: 'DOCUMENT_NOT_EXIST' }),
+    code500: userConfig.isDocNotExistError({ code: 500 }),
+    messageOnly: userConfig.isDocNotExistError({ message: 'does not exist' }),
+    nonObject: userConfig.isDocNotExistError(null)
   })
 }
 

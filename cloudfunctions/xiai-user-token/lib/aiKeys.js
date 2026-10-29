@@ -43,7 +43,7 @@
  */
 
 const crypto = require('crypto')
-const { REASONS, deny } = require('./config.js')
+const { REASONS, deny, isDocNotExistError } = require('./config.js')
 
 /* ---------------------------------------------------------------------------
   常量面（封闭）
@@ -241,10 +241,24 @@ function limitOf(value, policy) {
   读点（**只读，不写**）
   --------------------------------------------------------------------------- */
 
-/** 按确定性文档键读一行金鑰（无行 ⇒ `null`）。 */
+/**
+ * 按确定性文档键读一行金鑰（无行 ⇒ `null`）。
+ *
+ * **存在性语义**：`doc(id).get()` 在**文档不存在**时 CloudBase node-sdk 会**抛错**
+ * （服务端回 404 ⇒ `TcbError.code === 404`），而不是回 `{data:[]}`。
+ * 故这里**不依赖 `doc().get()` 的存在性语义**：`try/catch` 包住，**仅**把「文档不存在」类错误
+ * 当空（判据见 `lib/config.js::isDocNotExistError` —— 只看错误码 / errCode，不做 message 文本匹配），
+ * **其它错误照旧上抛**（真存储故障绝不吞成「无行」）。
+ */
 async function readKeyRow(keyId) {
   const store = resolveStore()
-  const rows = rowsOf(await store.keys.doc(keyDocIdOf(keyId)).get())
+  let rows = []
+  try {
+    rows = rowsOf(await store.keys.doc(keyDocIdOf(keyId)).get())
+  } catch (error) {
+    /* 只吞「文档不存在」；其余（连接 / 权限 / 5xx …）照旧上抛。 */
+    if (!isDocNotExistError(error)) throw error
+  }
   return rows.length > 0 ? rows[0] : null
 }
 

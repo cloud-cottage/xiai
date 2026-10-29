@@ -20,6 +20,9 @@
  * 另加：服务端 `ADMIN_OPS` 口径副本与 `xiai-admin-token/lib/ops.js` **逐字对账**（不让副本静默漂移）。
  * ⑨ `migrateDynastyValues` 一次性朝代值迁移（§3.53.5）：预演（零写入）/ 执行（只改点名值）/ 重放
  *    （零改动 ＋ 幂等）三态 ＋ 相邻值不动 ＋ 白名单门（非白名单 FORBIDDEN / 缺 env 安全拒，均零写入）。
+ * ⑩ **「读不存在的文档会抛错」收尾（本单）**：管理员侧 `readCorrectionRow` 的 doc() 兜底在
+ *    `doc().get()` 抛「不存在」类（code 404）⇒ 回 `null`（不抛）；抛**非不存在类**（code 500）
+ *    ⇒ 照旧上抛（不吞真存储故障）—— 走本脚本既有的 `adminOps.setOpsDbProvider` 注入缝。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 环境变量缺省用**合成值**（非真实凭据；可用 env 覆盖）：XIAI_ADMIN_PHONE / XIAI_ADMIN_TOKEN_SECRET。
@@ -571,6 +574,48 @@ check('J6c', '未知载荷键 ⇒ INVALID_FIELD ＋ 零写入', true, isDenial(b
 /* J7：真实入口（fn.main）预演 ⇒ ok:true ＋ 零写入。 */
 const viaMain = await fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'migrateDynastyValues', payload: { dry_run: true } })
 check('J7', '真实入口（fn.main）预演 ⇒ ok:true ＋ 零写入', true, viaMain.ok === true && store.stats.writes.length === 0)
+
+/* ===========================================================================
+   K 段（本单新增 · 「读不存在的文档会抛错」收尾）：管理员侧 `readCorrectionRow` 的
+   doc() 兜底 —— 抛「不存在」类（code 404）⇒ 回 `null`（不抛）；非不存在类（code 500）
+   ⇒ 照旧上抛。走本脚本既有注入缝（`adminOps.setOpsDbProvider`）；测毕恢复未注入态（零残留）。
+   =========================================================================== */
+{
+  const docThrowingCollection = (real, docError) => ({
+    doc() {
+      return {
+        async get() {
+          throw docError
+        },
+        async set(doc) {
+          return real.doc.apply(real, arguments).set(doc)
+        }
+      }
+    },
+    where(match) {
+      return real.where(match)
+    }
+  })
+  const notExist404 = Object.assign(new Error('404 Not Found | [synthetic]'), { code: 404 })
+  const realFault500 = Object.assign(new Error('storage internal error | [synthetic]'), { code: 500 })
+  const adminThrowingProvider = (docError) => () => ({
+    collection(name) {
+      return docThrowingCollection(store.provider().collection(name), docError)
+    }
+  })
+  adminOps.setOpsDbProvider(adminThrowingProvider(notExist404))
+  const missingRow = await adminOps.readCorrectionRow('cr-doc-not-exist')
+  adminOps.setOpsDbProvider(adminThrowingProvider(realFault500))
+  let caught = null
+  try {
+    await adminOps.readCorrectionRow('cr-real-fault')
+  } catch (error) {
+    caught = error
+  }
+  adminOps.setOpsDbProvider(null) /* 恢复未注入态（本脚本对 adminOps 本就零直注）。 */
+  check('K1', '管理员侧 readCorrectionRow：where 已空、doc().get() 抛不存在类（code 404）⇒ 回 null（不抛；「不存在」不再变 500）', null, missingRow)
+  check('K2', '管理员侧 readCorrectionRow：doc().get() 抛非不存在类（code 500）⇒ 照旧上抛（不吞真存储故障）', 500, caught === null ? null : caught.code)
+}
 
 /* ===========================================================================
    汇总

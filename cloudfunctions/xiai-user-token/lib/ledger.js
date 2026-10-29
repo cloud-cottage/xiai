@@ -54,7 +54,7 @@
  */
 
 const crypto = require('crypto')
-const { REASONS, deny } = require('./config.js')
+const { REASONS, deny, isDocNotExistError } = require('./config.js')
 
 /* ---------------------------------------------------------------------------
    常量面（封闭）
@@ -222,17 +222,41 @@ function projectFlowRow(row) {
    读点
    --------------------------------------------------------------------------- */
 
-/** 按确定性文档键读**余额行**（无行 ⇒ `null`；**只读**）。 */
+/**
+ * 按确定性文档键读**余额行**（无行 ⇒ `null`；**只读**）。
+ *
+ * **存在性语义**：`doc(id).get()` 在**文档不存在**时 CloudBase node-sdk 会**抛错**
+ * （服务端回 404 ⇒ `TcbError.code === 404`），而不是回 `{data:[]}`。
+ * 故这里**不依赖 `doc().get()` 的存在性语义**：`try/catch` 包住，**仅**把「文档不存在」类错误
+ * 当空（判据见 `lib/config.js::isDocNotExistError`），**其它错误照旧上抛**（真存储故障绝不吞成「无行」）。
+ */
 async function readBalanceRow(uid) {
   const store = resolveStore()
-  const rows = rowsOf(await store.balances.doc(balanceIdOf(uid)).get())
+  let rows = []
+  try {
+    rows = rowsOf(await store.balances.doc(balanceIdOf(uid)).get())
+  } catch (error) {
+    /* 只吞「文档不存在」；其余（连接 / 权限 / 5xx …）照旧上抛。 */
+    if (!isDocNotExistError(error)) throw error
+  }
   return rows.length > 0 ? rows[0] : null
 }
 
-/** 按确定性文档键读**流水行**（无行 ⇒ `null`；**只读**）。 */
+/**
+ * 按确定性文档键读**流水行**（无行 ⇒ `null`；**只读**）。
+ *
+ * **存在性语义**：同 `readBalanceRow` —— `doc(id).get()` 在文档不存在时抛错而非回空，
+ * 故 `try/catch` 包住，**仅**把「文档不存在」类错误当空，**其它错误照旧上抛**。
+ */
 async function readFlowRow(flowId) {
   const store = resolveStore()
-  const rows = rowsOf(await store.flow.doc(flowId).get())
+  let rows = []
+  try {
+    rows = rowsOf(await store.flow.doc(flowId).get())
+  } catch (error) {
+    /* 只吞「文档不存在」；其余（连接 / 权限 / 5xx …）照旧上抛。 */
+    if (!isDocNotExistError(error)) throw error
+  }
   return rows.length > 0 ? rows[0] : null
 }
 
@@ -632,6 +656,8 @@ module.exports = {
   projectFlowRow,
   setLedgerStoreProvider,
   ledgerStoreInjected,
+  readBalanceRow,
+  readFlowRow,
   ensureBalance,
   readBalance,
   chargePoints,

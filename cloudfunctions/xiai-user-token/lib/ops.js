@@ -44,7 +44,7 @@
 const crypto = require('crypto')
 /* **2026-10-29 应急修单**：本文件**不再引入** config 的凭据对解析器（它带平台族回退）——
    云函数侧的凭据名解析改由本文件本地的 `cloudbaseKeyPairFromEnv()` 单点负责（只认 `CLOUDBASE_*`）。 */
-const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf, readEnvId } = require('./config.js')
+const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf, readEnvId, isDocNotExistError } = require('./config.js')
 /* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`
    **逐字节相同**（`scripts/verify-code-id.mjs` 机械断言）；本文件只经它编 / 解码，不自写第二套。 */
 const codeId = require('./codeId.js')
@@ -1163,8 +1163,15 @@ async function readRoleRow(uid) {
   const byField = await collection.where({ uid: id }).get()
   const rowsByField = rowsOfReply(byField)
   if (rowsByField.length > 0) return rowsByField[0]
-  const byDoc = await collection.doc(id).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError —— 只看错误码 / errCode），其余（连接 / 权限 / 5xx …）
+     照旧上抛，绝不把真存储故障吞成「无行」。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return rowsByDoc[0]
   return null
 }
@@ -1185,8 +1192,15 @@ async function readPersonRow(ref) {
   const byCode = await collection.where({ code: id }).get()
   const rowsByCode = rowsOf(byCode)
   if (rowsByCode.length > 0) return rowsByCode[0]
-  const byDoc = await collection.doc(id).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError —— 只看错误码 / errCode），其余（连接 / 权限 / 5xx …）
+     照旧上抛，绝不把真存储故障吞成「无行」。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return rowsByDoc[0]
   return null
 }
@@ -1204,8 +1218,15 @@ async function readPersonProposalRow(proposalId) {
   const byId = await collection.where({ id }).get()
   const rowsById = rowsOf(byId)
   if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
-  const byDoc = await collection.doc(id).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError —— 只看错误码 / errCode），其余（连接 / 权限 / 5xx …）
+     照旧上抛，绝不把真存储故障吞成「无行」。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
   return null
 }
@@ -1223,8 +1244,15 @@ async function readPersonImportRow(importId) {
   const byId = await collection.where({ id }).get()
   const rowsById = rowsOf(byId)
   if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
-  const byDoc = await collection.doc(id).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError —— 只看错误码 / errCode），其余（连接 / 权限 / 5xx …）
+     照旧上抛，绝不把真存储故障吞成「无行」。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
   return null
 }
@@ -1246,8 +1274,15 @@ async function readSealImportRow(importId) {
   const byId = await collection.where({ id }).get()
   const rowsById = rowsOf(byId)
   if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
-  const byDoc = await collection.doc(id).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError —— 只看错误码 / errCode），其余（连接 / 权限 / 5xx …）
+     照旧上抛，绝不把真存储故障吞成「无行」。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
   return null
 }
@@ -1539,8 +1574,15 @@ async function readItemImportRow(importId) {
   const byId = await collection.where({ id }).get()
   const rowsById = rowsOf(byId)
   if (rowsById.length > 0) return { row: rowsById[0], match: { id } }
-  const byDoc = await collection.doc(id).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError —— 只看错误码 / errCode），其余（连接 / 权限 / 5xx …）
+     照旧上抛，绝不把真存储故障吞成「无行」。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
   return null
 }
@@ -1721,8 +1763,14 @@ async function readCorrectionRow(correctionId) {
   const byId = await collection.where({ id: correctionId }).get()
   const rowsById = rowsOf(byId)
   if (rowsById.length > 0) return { row: rowsById[0], match: { id: correctionId } }
-  const byDoc = await collection.doc(correctionId).get()
-  const rowsByDoc = rowsOf(byDoc)
+  /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
+     （判据见 lib/config.js::isDocNotExistError），其余照旧上抛（绝不把真故障吞成「无行」）。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(correctionId).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
   if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: correctionId } }
   return null
 }

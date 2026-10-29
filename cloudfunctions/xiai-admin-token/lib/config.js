@@ -159,6 +159,29 @@ function readConfig(env) {
   }
 }
 
+/**
+ * **「文档不存在」类错误判据**（供各 `doc(id).get()` 读点安全包裹用）。
+ *
+ * **与 user-token 侧 `xiai-user-token/lib/config.js::isDocNotExistError` 逐字同义**；
+ * 因**部署单元独立**（两函数分目录、逐目录部署，跨函数 `require` 会在逐目录部署下断）
+ * 而**各存一份**。语义（命中其一即判「不存在」；只看错误码 / errCode，绝不做 message 文本匹配）：
+ *   · `error.code === 404`（数字）—— CloudBase 服務端 SDK 生产实测抛错形态（HTTP not-found）；
+ *   · `error.code === 'DATABASE_QUERY_DOC_NONEXIST' | 'DOCUMENT_NOT_EXIST' | 'RESOURCE_NOT_FOUND'`；
+ *   · `error.errCode === -502005` —— wx-server-sdk 家族「database.document not exist」。
+ * 其余任何错误（连接 / 超时 / 权限 / 非 404 的 5xx …）一律**判否** ⇒ 调用方**照旧上抛**，
+ * 绝不吞成「无行」（守「真存储故障不得伪装成空」这条硬口径）。
+ * @param {any} error 捕获到的错误
+ * @returns {boolean} 是否属「文档不存在」类
+ */
+function isDocNotExistError(error) {
+  if (!error || typeof error !== 'object') return false
+  if (error.code === 404) return true
+  const code = typeof error.code === 'string' ? error.code : ''
+  if (code === 'DATABASE_QUERY_DOC_NONEXIST' || code === 'DOCUMENT_NOT_EXIST' || code === 'RESOURCE_NOT_FOUND') return true
+  if (error.errCode === -502005) return true
+  return false
+}
+
 module.exports = {
   REASONS,
   ENV_NAMES,
@@ -176,5 +199,6 @@ module.exports = {
   readEnvId,
   fingerprint,
   maskedPhone,
+  isDocNotExistError,
   readConfig
 }

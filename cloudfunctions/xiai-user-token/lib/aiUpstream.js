@@ -34,7 +34,7 @@
  */
 
 const crypto = require('crypto')
-const { REASONS, deny } = require('./config.js')
+const { REASONS, deny, isDocNotExistError } = require('./config.js')
 
 /* ---------------------------------------------------------------------------
   常量面（封闭）
@@ -223,11 +223,28 @@ function baseUrlDenial(value) {
   读点
   --------------------------------------------------------------------------- */
 
-/** 读**恰一行**配置（无行 ⇒ `null`；**只读**）。 */
+/**
+ * 读**恰一行**配置（无行 ⇒ `null`；**只读**）。
+ *
+ * **存在性语义（本单修生产缺陷）**：`doc(id).get()` 在**文档不存在**时 CloudBase node-sdk 会**抛错**
+ * （服务端回 404 ⇒ `TcbError.code === 404`），而不是回 `{data:[]}` ⇒ 首次配置（库里无行）必抛，
+ * 被上层 catch 折成 `STORAGE_UNAVAILABLE`。故这里**不依赖 `doc().get()` 的存在性语义**：
+ *   · `doc().get()` 只当**快路径**，用 `try/catch` 包住，**仅**把「文档不存在」类错误当空
+ *     （判据见 `lib/config.js::isDocNotExistError` —— 只看错误码 / errCode，不做 message 文本匹配），
+ *     **其它错误照旧上抛**（真存储故障绝不吞成「未配置」）；
+ *   · 命中「不存在」或快路径空 ⇒ 落到 `where({ _id })` 兜底 —— `where().get()` 不命中回**空数组**
+ *     ⇒ 天然安全，恒不因「行不存在」抛错。
+ * 两条读**任一**抛出非「不存在」类错误都直接上抛（不掩盖真故障）。
+ */
 async function readUpstreamRow() {
   const store = resolveStore()
-  const byDoc = rowsOf(await store.upstream.doc(UPSTREAM_ID).get())
-  if (byDoc.length > 0) return byDoc[0]
+  try {
+    const byDoc = rowsOf(await store.upstream.doc(UPSTREAM_ID).get())
+    if (byDoc.length > 0) return byDoc[0]
+  } catch (error) {
+    /* 只吞「文档不存在」；其余（连接 / 权限 / 5xx …）照旧上抛。 */
+    if (!isDocNotExistError(error)) throw error
+  }
   const all = rowsOf(await store.upstream.where({ _id: UPSTREAM_ID }).get())
   return all.length > 0 ? all[0] : null
 }
