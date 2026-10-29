@@ -8,6 +8,14 @@
  * `setAiKeyStoreProvider` / `setUpstreamStoreProvider` / `setAiUsageStoreProvider`），
  * 本文件**不改** `cloudfunctions/**` 的任何既有方法语义与行形状（本单未改 cloudfunctions 一字）。
  *
+ * CloudBase 凭据环境变量（**成对不混用**；唯一解析点 `secretPairOf`，两个默认实现
+ * `defaultResolveImageUrl` / `defaultUploadImage` 一律走它、不各自直读 env）：
+ *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
+ *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）
+ *   ·两族名**必须成对命中**（甲族 id ＋ 乙族 key **不得拼成一对** ⇒ 混给回空对）；
+ *   ·两族都缺 ⇒ 回空对 ⇒ 调用方仍按旧行为「不带 `secretId` / `secretKey` 地 `init`」
+ *     （不报错、不抛）。
+ *
  * 流程（**顺序不得变**；每步的失败面写在括号里）：
  *   ① 方法面：只认 `POST`（405 `METHOD_NOT_ALLOWED`）
  *   ② path 白名单（封闭两值：`images/edits` / `images/generations`；含多段、空、`models`
@@ -434,6 +442,30 @@ export function imageOf(parsed) {
   return null
 }
 
+/* --------------------------------------------------------------------------- CloudBase 凭据对（唯一解析点）
+   --------------------------------------------------------------------------- */
+
+/**
+ * **CloudBase 凭据对解析**（唯一定义点；纯函数、零 I/O、不碰网络）。
+ * 优先序（**成对不混用**：甲族 id ＋ 乙族 key **不得拼成一对**）：
+ *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
+ *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）
+ * 两族都缺（或只有单族一半 / 两族各一半的混给）⇒ 回空对 ⇒ 调用方仍按旧行为
+ * 「不带 `secretId` / `secretKey` 地 `init`」（不报错、不抛）。
+ * @param {object} env 环境（缺省 `process.env`）
+ * @returns {{secretId:string, secretKey:string}}
+ */
+export function secretPairOf(env) {
+  const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
+  const id = text(source.CLOUDBASE_SECRET_ID)
+  const key = text(source.CLOUDBASE_SECRET_KEY)
+  if (id && key) return { secretId: id, secretKey: key }
+  const fallbackId = text(source.TENCENTCLOUD_SECRETID)
+  const fallbackKey = text(source.TENCENTCLOUD_SECRETKEY)
+  if (fallbackId && fallbackKey) return { secretId: fallbackId, secretKey: fallbackKey }
+  return { secretId: '', secretKey: '' }
+}
+
 /* --------------------------------------------------------------------------- 参考图签名链（默认实现）
    --------------------------------------------------------------------------- */
 
@@ -450,12 +482,11 @@ export async function defaultResolveImageUrl(storageKey, env) {
   const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
   const tcb = require('@cloudbase/node-sdk')
   const envId = userConfig.readEnvId(source)
+  const pair = secretPairOf(source)
   const init = { env: envId }
-  const secretId = text(source.TENCENTCLOUD_SECRETID)
-  const secretKey = text(source.TENCENTCLOUD_SECRETKEY)
-  if (secretId && secretKey) {
-    init.secretId = secretId
-    init.secretKey = secretKey
+  if (pair.secretId && pair.secretKey) {
+    init.secretId = pair.secretId
+    init.secretKey = pair.secretKey
   }
   const app = tcb.init(init)
   const reply = await app.getTempFileURL({ fileList: [String(storageKey)] })
@@ -553,12 +584,11 @@ export async function defaultUploadImage(bytes, ext, env) {
   const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
   const tcb = require('@cloudbase/node-sdk')
   const envId = userConfig.readEnvId(source)
+  const pair = secretPairOf(source)
   const init = { env: envId }
-  const secretId = text(source.TENCENTCLOUD_SECRETID)
-  const secretKey = text(source.TENCENTCLOUD_SECRETKEY)
-  if (secretId && secretKey) {
-    init.secretId = secretId
-    init.secretKey = secretKey
+  if (pair.secretId && pair.secretKey) {
+    init.secretId = pair.secretId
+    init.secretKey = pair.secretKey
   }
   const app = tcb.init(init)
   const cloudPath = imageKeyOf(bytes, ext)

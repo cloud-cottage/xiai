@@ -11,8 +11,9 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **55** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
- * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕，
+ * 断言面（本套 **58** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
+ * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕，
  * 覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
@@ -48,6 +49,12 @@
  *      （每敗一條 `REFUND`、原 `CHARGE` 行保留，流水逐字可審計）；④ 分 `X-Request-Id`
  *      互不影響 ＋「rid ＋ `:序號`」偽造鍵對抗樣本（派生鏈折一輪 sha256 ⇒ 不撞鍵）；
  *      ⑤ 嘗試序號讀不出（流水面故障）⇒ fail-closed 503 ＋ 零扣費（**絕不猜序號**）。
+ *   S. **密鑰變量名（`secretPairOf` 純函數層、零 I/O、不連雲）**：① 只給
+ *      `CLOUDBASE_SECRET_ID/KEY` ⇒ 解析出該對（兩族同給仍取 CLOUDBASE 優先）；
+ *      ② 只給 `TENCENTCLOUD_SECRETID/KEY` ⇒ 回退成功（兩族都缺 ⇒ 空對、不拋）；
+ *      ③ 兩族混給（甲族 id ＋ 乙族 key，兩方向）⇒ **不得拼成一對**（均回空對）＋
+ *      兩個調用點只經唯一解析點、只在同族成對時帶憑據（無可用對時與舊版一致：
+ *      不帶 `secretId` / `secretKey` 地 init）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；**不打印任何明文金鑰 / 上游 key / 密文 / 令牌**（只打印长度与指纹）。
  */
@@ -889,6 +896,42 @@ const f7GenRes = await runDirect(generationsRouteModule.default, { method: 'POST
 const f7Edits = { status: f7EditsRes.status, body: await f7Parse(f7EditsRes) }
 const f7Gen = { status: f7GenRes.status, body: await f7Parse(f7GenRes) }
 check('F7', '`fixedPath` 分支被走：真薄壳 handler 直调（url 给非白名单 `/api/ai/v1/models`、无凭据）⇒ path 恆为文件名编码的白名单值 ⇒ 越过 404 path 门、落在 401 KEY_INVALID（两壳一致；零扣费）', { edits: [401, 'KEY_INVALID'], generations: [401, 'KEY_INVALID'] }, { edits: [f7Edits.status, f7Edits.body && f7Edits.body.reason], generations: [f7Gen.status, f7Gen.body && f7Gen.body.reason] })
+
+/* ===========================================================================
+  S 段：密鑰變量名解析（`secretPairOf` 唯一解析點；**純函數層、零 I/O、不連雲**）
+   ① CLOUDBASE 優先 ② TENCENTCLOUD 回退 ③ 兩族混給不得拼成一對
+   （`defaultResolveImageUrl` / `defaultUploadImage` 兩調用點已改走它）
+  =========================================================================== */
+section('S', '密鑰變量名：CLOUDBASE 優先 ／ TENCENTCLOUD 回退 ／ 兩族混給不成對（純函數、不連雲）')
+
+/* 合成凭据字面（**非真实密钥**；只用于解析面断言，不进任何网络面）。 */
+const CB_ID = 'offline-' + 'cloudbase-secret-id'
+const CB_KEY = 'offline-' + 'cloudbase-secret-key'
+const TC_ID = 'offline-' + 'tencent-secret-id'
+const TC_KEY = 'offline-' + 'tencent-secret-key'
+
+/* S1：① 只給 CLOUDBASE 對 ⇒ 解析出該對；兩族同給 ⇒ 仍取 CLOUDBASE 對（優先序 ① 恆先）。 */
+const s1Only = core.secretPairOf({ CLOUDBASE_SECRET_ID: CB_ID, CLOUDBASE_SECRET_KEY: CB_KEY })
+const s1Both = core.secretPairOf({
+  CLOUDBASE_SECRET_ID: CB_ID,
+  CLOUDBASE_SECRET_KEY: CB_KEY,
+  TENCENTCLOUD_SECRETID: TC_ID,
+  TENCENTCLOUD_SECRETKEY: TC_KEY
+})
+check('S1', '只給 `CLOUDBASE_SECRET_ID/KEY` ⇒ 解析出該對；兩族同給 ⇒ 仍取 CLOUDBASE 對（優先序 ① 恆先、不被回退族覆蓋）', { only: { secretId: CB_ID, secretKey: CB_KEY }, both: { secretId: CB_ID, secretKey: CB_KEY } }, { only: s1Only, both: s1Both })
+
+/* S2：② 只給 TENCENTCLOUD 對 ⇒ 回退成功；兩族都缺 ⇒ 空對（不報錯、不拋 ⇒ 舊行為）。 */
+const s2Fallback = core.secretPairOf({ TENCENTCLOUD_SECRETID: TC_ID, TENCENTCLOUD_SECRETKEY: TC_KEY })
+const s2None = core.secretPairOf({})
+check('S2', '只給 `TENCENTCLOUD_SECRETID/KEY` ⇒ 回退成功；兩族都缺 ⇒ 空對（調用方仍不帶 secretId / secretKey 地 init，與舊版一致、零拋錯）', { fallback: { secretId: TC_ID, secretKey: TC_KEY }, none: { secretId: '', secretKey: '' } }, { fallback: s2Fallback, none: s2None })
+
+/* S3：③ 兩族混給（甲族 id ＋ 乙族 key，兩方向）⇒ **不得拼成一對**（均回空對）；
+   另以靜態門釘住「唯一解析點＋成對守衛」：`source.*SECRETKEY` 直讀各恰 1 處（只在
+   `secretPairOf` 內）、`secretPairOf(source)` 調用恰 2 處（兩個默認實現）、成對守衛
+   `if (pair.secretId && pair.secretKey)` 恆 2 處 ⇒ 無可用對時 init 與舊版逐字一致。 */
+const s3MixA = core.secretPairOf({ CLOUDBASE_SECRET_ID: CB_ID, TENCENTCLOUD_SECRETKEY: TC_KEY })
+const s3MixB = core.secretPairOf({ TENCENTCLOUD_SECRETID: TC_ID, CLOUDBASE_SECRET_KEY: CB_KEY })
+check('S3', '兩族混給（CLOUDBASE id ＋ TENCENT key ／ 反之）⇒ **不得拼成一對**（均回空對）＋ 兩調用點只經唯一解析點（`source.*SECRETKEY` 直讀各恰 1 處、`secretPairOf(source)` 恆 2 處、成對守衛恆 2 處 ⇒ 無對即不帶憑據 init，與舊版一致）', { mixCloudbaseIdTencentKey: { secretId: '', secretKey: '' }, mixTencentIdCloudbaseKey: { secretId: '', secretKey: '' }, callSitesViaPairOf: 2, cloudbaseKeyDirectReads: 1, tencentKeyDirectReads: 1, pairGuards: 2 }, { mixCloudbaseIdTencentKey: s3MixA, mixTencentIdCloudbaseKey: s3MixB, callSitesViaPairOf: countIn(coreSource, 'secretPairOf(source)'), cloudbaseKeyDirectReads: countIn(coreSource, 'source.CLOUDBASE_SECRET_KEY'), tencentKeyDirectReads: countIn(coreSource, 'source.TENCENTCLOUD_SECRETKEY'), pairGuards: countIn(coreSource, 'if (pair.secretId && pair.secretKey)') })
 
 /* --------------------------------------------------------------------------- 收尾
    --------------------------------------------------------------------------- */

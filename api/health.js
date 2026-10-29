@@ -8,11 +8,19 @@
  *     曾被本探针一眼判死；正式路由已改为显式文件名。）
  *
  * 用途二：`?diag=1` **环境自检**。硬口径：
- *   只回**布尔**与**抹掉长串后的短错误信息**，**绝不回任何密钥值、环境 id 原文、
+ *   只回**布尔**、**来源名**与**抹掉长串后的短错误信息**，**绝不回任何密钥值、环境 id 原文、
  *   令牌、密文**。它回答的是「中转端点为什么 503 CONFIG_MISSING」这类问题，
  *   不必去翻运行日志猜。
  */
 const ENV_ID_NAMES = ['TCB_ENV', 'SCF_NAMESPACE', 'CLOUDBASE_ENV_ID']
+
+/* 密钥环境变量两族（**成对不混用**；与 `api/_lib/aiRelay.js::secretPairOf` 同一优先序）：
+   ① `CLOUDBASE_SECRET_ID` / `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
+   ② `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）。 */
+const SECRET_FAMILIES = Object.freeze([
+  Object.freeze({ id: 'CLOUDBASE_SECRET_ID', key: 'CLOUDBASE_SECRET_KEY' }),
+  Object.freeze({ id: 'TENCENTCLOUD_SECRETID', key: 'TENCENTCLOUD_SECRETKEY' })
+])
 
 function present(source, name) {
   const value = source ? source[name] : ''
@@ -24,6 +32,24 @@ function envIdSource(source) {
     if (present(source, name)) return name
   }
   return ''
+}
+
+/** 某一半（`id` / `key`）的**来源名**（值域封闭：族名或空串；**不回值**）。 */
+function secretSourceOf(source, half) {
+  for (const family of SECRET_FAMILIES) {
+    if (present(source, family[half])) return family[half]
+  }
+  return ''
+}
+
+/** 成对解析（**成对不混用**：甲族 id ＋ 乙族 key 不得拼成一对；无对 ⇒ 空对、不抛）。 */
+function secretPair(source) {
+  for (const family of SECRET_FAMILIES) {
+    if (present(source, family.id) && present(source, family.key)) {
+      return { source: family.id, id: source[family.id], key: source[family.key] }
+    }
+  }
+  return { source: '', id: '', key: '' }
 }
 
 /** 错误信息只保留「形状」：抹掉疑似长串（≥40 位 base64 块）并截断。 */
@@ -50,10 +76,18 @@ export default async function handler(req, res) {
   }
 
   const source = typeof process !== 'undefined' ? process.env : {}
+  const secretIdSourceName = secretSourceOf(source, 'id')
+  const secretKeySourceName = secretSourceOf(source, 'key')
+  const pair = secretPair(source)
   const diag = {
     envIdSource: envIdSource(source),
-    secretIdPresent: present(source, 'TENCENTCLOUD_SECRETID'),
-    secretKeyPresent: present(source, 'TENCENTCLOUD_SECRETKEY'),
+    /* 来源名（值域封闭：族名或空串；**不回值**）；两个布尔保留（便于人眼）；
+       `secretPairConsistent` ＝ 两族名成对命中（同族不混用）。 */
+    secretIdSource: secretIdSourceName,
+    secretKeySource: secretKeySourceName,
+    secretIdPresent: secretIdSourceName !== '',
+    secretKeyPresent: secretKeySourceName !== '',
+    secretPairConsistent: pair.source !== '',
     upstreamSecretPresent: present(source, 'XIAI_AI_UPSTREAM_SECRET'),
     nodeVersion: typeof process !== 'undefined' && process.version ? process.version : '',
     sdk: null,
@@ -66,9 +100,9 @@ export default async function handler(req, res) {
     const tcbModule = await import('@cloudbase/node-sdk')
     const tcb = tcbModule.default || tcbModule
     const init = { env: source[envIdSource(source) || ''] || '' }
-    if (present(source, 'TENCENTCLOUD_SECRETID') && present(source, 'TENCENTCLOUD_SECRETKEY')) {
-      init.secretId = source.TENCENTCLOUD_SECRETID
-      init.secretKey = source.TENCENTCLOUD_SECRETKEY
+    if (pair.id && pair.key) {
+      init.secretId = pair.id
+      init.secretKey = pair.key
     }
     app = tcb.init(init)
     diag.sdk = { step: 'init', ok: true }
