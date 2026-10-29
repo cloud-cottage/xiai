@@ -163,10 +163,10 @@ export default async function handler(req, res) {
       const ledgerStore = mod.resolveLedgerStore(source)
       diag.steps.ledgerStore = { ok: true, keys: Object.keys(ledgerStore || {}) }
       try {
-        const ledgerModule = await import('../cloudfunctions/xiai-user-token/lib/ledger.js')
-        const ledger = ledgerModule.default || ledgerModule
-        const balance = await ledger.readBalance('u-diag-probe', source)
-        diag.steps.readBalance = { ok: true, points: balance && balance.points }
+        /* **只读**：按 _id 直取（不用 readBalance —— 那个会触发新用户初始金发放，
+           探针不该有写副作用）。文档不存在时按 ok:false 记 shape，不抛。 */
+        const doc = await ledgerStore.balances.doc('bl-u-health-probe-readonly').get()
+        diag.steps.readBalance = { ok: true, created: false, hasDoc: Boolean(doc && doc.data && doc.data.length) }
       } catch (error) {
         diag.steps.readBalance = Object.assign({ ok: false }, shapeOf(error))
       }
