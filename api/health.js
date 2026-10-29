@@ -154,5 +154,36 @@ export default async function handler(req, res) {
     diag.store = Object.assign({ ok: false }, shapeOf(error))
   }
 
+  /* 只读逐步打：账本句柄 / 余额读 / 金鑰解析（零写入、零扣费）。 */
+  diag.steps = {}
+  try {
+    const opsModule = await import('../cloudfunctions/xiai-user-token/lib/ops.js')
+    const mod = opsModule.default || opsModule
+    try {
+      const ledgerStore = mod.resolveLedgerStore(source)
+      diag.steps.ledgerStore = { ok: true, keys: Object.keys(ledgerStore || {}) }
+      try {
+        const ledgerModule = await import('../cloudfunctions/xiai-user-token/lib/ledger.js')
+        const ledger = ledgerModule.default || ledgerModule
+        const balance = await ledger.readBalance('u-diag-probe', source)
+        diag.steps.readBalance = { ok: true, points: balance && balance.points }
+      } catch (error) {
+        diag.steps.readBalance = Object.assign({ ok: false }, shapeOf(error))
+      }
+    } catch (error) {
+      diag.steps.ledgerStore = Object.assign({ ok: false }, shapeOf(error))
+    }
+    try {
+      const keysModule = await import('../cloudfunctions/xiai-user-token/lib/aiKeys.js')
+      const aiKeys = keysModule.default || keysModule
+      const resolved = await aiKeys.resolveAiKey('sk-xiai-0000000000000000000000000000dead')
+      diag.steps.resolveAiKey = { ok: true, hit: Boolean(resolved && resolved.ok), reason: (resolved && resolved.reason) || '' }
+    } catch (error) {
+      diag.steps.resolveAiKey = Object.assign({ ok: false }, shapeOf(error))
+    }
+  } catch (error) {
+    diag.steps = Object.assign({ ok: false }, shapeOf(error))
+  }
+
   res.status(200).send(JSON.stringify(Object.assign(base, { diag })))
 }
