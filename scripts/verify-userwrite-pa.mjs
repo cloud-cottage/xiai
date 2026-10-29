@@ -375,6 +375,86 @@ check('A7', '落盘抛错 ⇒ STORAGE_UNAVAILABLE', 'STORAGE_UNAVAILABLE', stora
 check('A7b', '存储失败 ≠ FORBIDDEN', true, storageDown.reason !== 'FORBIDDEN')
 check('A7c', '存储失败 ⇒ 未产生行', beforeA7, bucket.adds.length)
 
+/* A9 / A10（本单·诊断面）：`STORAGE_UNAVAILABLE` 回包的**短错误指纹** —— 只在 `message`
+   末尾追加 `（診斷：name / code / message 前 60 字（≥40 位长串抹 <redacted>））`；
+   `reason` 字面值与**恰 3 键**形状**逐字不变**（零新增 reason）。 */
+{
+  /* ① 注入一个会抛的读路径（假 DB provider 直接抛 `code:500` 的 boom）⇒ 指纹带 name / code / message。 */
+  const beforeA9 = bucket.adds.length
+  ops.setOpsDbProvider(() => {
+    throw Object.assign(new Error('boom'), { code: 500 })
+  })
+  const boom = await fn.main({ action: 'verify', token: tokenOk, op: 'submitCorrection', payload: VALID_PAYLOAD })
+  ops.setOpsDbProvider(fakeDbProvider)
+  check('A9', '诊断指纹①：op 抛错 ⇒ reason 仍 STORAGE_UNAVAILABLE（不新增字面值）', 'STORAGE_UNAVAILABLE', boom.reason)
+  check('A9b', '诊断指纹① ⇒ 形状仍恰 3 键', 'message,ok,reason', shapeOf(boom))
+  check('A9c', '诊断指纹① ⇒ message 含 boom 与 500（name / code 进指纹）', true, String(boom.message).includes('boom') && String(boom.message).includes('500'))
+  check('A9d', '诊断指纹① ⇒ 零写入', beforeA9, bucket.adds.length)
+  console.log(JSON.stringify({ A9_readout: boom.message }))
+}
+{
+  /* ② 注入含 40 位长串的异常 ⇒ 长串必须被 `<redacted>` 抹掉（零密钥 / 零令牌泄漏）。 */
+  const beforeA10 = bucket.adds.length
+  ops.setOpsDbProvider(() => {
+    throw new Error(`leak sk-xiai-${'a'.repeat(40)}`)
+  })
+  const leak = await fn.main({ action: 'verify', token: tokenOk, op: 'submitCorrection', payload: VALID_PAYLOAD })
+  ops.setOpsDbProvider(fakeDbProvider)
+  check('A10', '诊断指纹②：40 位长串被 <redacted>（message 不含原串）', true, !String(leak.message).includes('a'.repeat(40)) && String(leak.message).includes('<redacted>'))
+  check('A10b', '诊断指纹② ⇒ reason / 键集仍逐字不变', true, leak.reason === 'STORAGE_UNAVAILABLE' && shapeOf(leak) === 'message,ok,reason')
+  check('A10c', '诊断指纹② ⇒ 零写入', beforeA10, bucket.adds.length)
+  console.log(JSON.stringify({ A10_readout: leak.message }))
+}
+
+/* A7h（追加单·调用形态面）：`lib/ops.js::initClientFromEnv()` 对 SDK 的 init **实参形态** ——
+   假 SDK 记录每次 init 收到的实参：① envId 三候选与密钥对**全缺 ⇒ 零参**（实参数 0，
+   与老代码无 envId 分支的零参形态逐字等价；传空对象会被 SDK 当成「给了配置」而覆盖内部
+   默认推断）；② 只给 envId ⇒ 收到 `{env}`；③ 给密钥对 ⇒ 收到含 `secretId` / `secretKey`
+   的对象。env 即用即还；假模块只挂在 require.cache，不动真 SDK。 */
+{
+  const sdkPath = require.resolve('@cloudbase/node-sdk')
+  const realSdkModule = require.cache[sdkPath]
+  const initCalls = []
+  require.cache[sdkPath] = {
+    id: sdkPath,
+    filename: sdkPath,
+    loaded: true,
+    exports: {
+      init: (...args) => {
+        initCalls.push(args)
+        return { database: () => 'FAKE_DB' }
+      }
+    }
+  }
+  const ENV_KEYS = ['TCB_ENV', 'SCF_NAMESPACE', 'CLOUDBASE_ENV_ID', 'CLOUDBASE_SECRET_ID', 'CLOUDBASE_SECRET_KEY']
+  const savedEnv = {}
+  for (const key of ENV_KEYS) {
+    savedEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+  ops.setOpsDbProvider(null) // 清除注入 ⇒ resolveDb 走真实 initClientFromEnv
+  try {
+    ops.resolveDb() // ① 三候选与密钥对全缺 ⇒ 零参
+    process.env.TCB_ENV = 'env-fake-1'
+    ops.resolveDb() // ② 只给 envId
+    delete process.env.TCB_ENV
+    process.env.CLOUDBASE_SECRET_ID = 'offline-fake-id'
+    process.env.CLOUDBASE_SECRET_KEY = 'offline-fake-key'
+    ops.resolveDb() // ③ 给密钥对
+  } finally {
+    ops.setOpsDbProvider(fakeDbProvider)
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key]
+      else process.env[key] = savedEnv[key]
+    }
+    if (realSdkModule === undefined) delete require.cache[sdkPath]
+    else require.cache[sdkPath] = realSdkModule
+  }
+  check('A7h', 'init 形态①：envId 三候选与密钥对全缺 ⇒ 零参 init（实参数 0、首参 undefined）', { argc: 0, first: undefined }, { argc: initCalls[0].length, first: initCalls[0][0] })
+  check('A7h2', 'init 形态②：只给 envId ⇒ 收到恰 1 参、键面恰 {env}', { argc: 1, keys: ['env'], env: 'env-fake-1' }, { argc: initCalls[1].length, keys: Object.keys(initCalls[1][0] || {}).sort(), env: (initCalls[1][0] || {}).env })
+  check('A7h3', 'init 形态③：给密钥对（无 envId）⇒ 收到含 secretId / secretKey 的对象（零 env 键）', { argc: 1, keys: ['secretId', 'secretKey'], id: 'offline-fake-id' }, { argc: initCalls[2].length, keys: Object.keys(initCalls[2][0] || {}).sort(), id: (initCalls[2][0] || {}).secretId })
+}
+
 /* A8：静态扫描（唯一持久化路径 / 集合名前缀 / 零密钥字面值） */
 const functionDir = path.join(ROOT, 'cloudfunctions/xiai-user-token')
 function walk(dir) {

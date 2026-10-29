@@ -122,7 +122,17 @@ function initClientFromEnv() {
     init.secretId = pair.secretId
     init.secretKey = pair.secretKey
   }
-  return tcb.init(init)
+  /* **调用形态（本单追加修）**：既无 envId、也无密钥对 ⇒ **零参 init** —— 与老代码
+     的条件式形态逐字等价（有 envId 传 `{env}`、无 envId **零参**）：「传空对象」与
+     「零参」对 SDK 是**两种不同形态** —— 空对象会被当成「调用方给了配置」而覆盖 SDK
+     内部默认推断；运行时 `TCB_ENV` / `SCF_NAMESPACE` / `CLOUDBASE_ENV_ID` 三者全缺时，
+     空对象形态整体拿不到环境 ⇒ 所有 DB op 抛错 ⇒ 被折叠成 `STORAGE_UNAVAILABLE`
+     （生产「上游配置存不进去」的候选根因之一）。
+     经 `...args` 展开实现：空数组展开＝零参调用（与老代码零参分支同义）、单元素数组
+     展开＝单参调用；保持全文件 SDK init 调用 **恰 1 处**（`scripts/verify-points-ledger.mjs`
+     C7 单点门的既有判据只增不减）。自检：`scripts/verify-userwrite-pa.mjs` A7h（假 SDK 记录实参）。 */
+  const hasInit = init.env !== undefined || init.secretId !== undefined
+  return tcb.init(...(hasInit ? [init] : []))
 }
 
 /* ---------------------------------------------------------------------------

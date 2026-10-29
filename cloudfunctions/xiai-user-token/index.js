@@ -103,6 +103,33 @@ function serverNowSeconds() {
 }
 
 /**
+ * **面向管理员的诊断指纹**（写面 `STORAGE_UNAVAILABLE` 回包 message 末尾追加的那段；
+ * **非临时补丁，上线后保留**）：把抛出的异常压成 `name / code / message 前 60 字` 三段，
+ * 供运维在客户端回包里直接看到真因（否则只有「權威存儲不可用」一句，无从定位）。
+ * 硬口径：
+ *  · **零密钥 / 零令牌 / 零用户隐私**：≥40 位连续字母数字长串（base64 / hex 形态的
+ *    密钥、令牌、密文）一律抹成 `<redacted>`；message 只取前 60 字。
+ *  · **纯函数、绝不自抛**：异常对象取不到值（null / 非对象 / 无 name / 无 message）⇒
+ *    对应段回 `'unknown'`；本函数任何分支都不得抛错（诊断面不得反噬主路）。
+ *  · 只进 `message`（仍是 `{ok,reason,message}` 恰 3 键），**不新增 reason 字面值**。
+ * @param {*} error 抛出的异常（任意形态）
+ * @returns {string} 形如 `TcbError / code=404 / storage timeout after 60000ms`
+ */
+function errorFingerprint(error) {
+  try {
+    const source = error !== null && typeof error === 'object' ? error : {}
+    const name = typeof source.name === 'string' && source.name !== '' ? source.name : 'unknown'
+    const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
+    const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
+    const rawMessage = typeof source.message === 'string' ? source.message : ''
+    const scrubbed = rawMessage.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 60)
+    return `${name} / code=${code} / ${scrubbed === '' ? 'unknown' : scrubbed}`
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
  * 动作：签发（**服务端验证登录**）。
  * 判定顺序（**两条都必须在任何签发之前**）：① 手机号形态；② 验证码 ∈ 环境变量。
  * 两者不合一律 `FORBIDDEN`（**不区分「号不对」与「码不对」** ⇒ 防枚举）。
@@ -259,7 +286,10 @@ async function handleVerify(event, config, callContext) {
       detail: (error && error.message) || 'unknown',
       serverNow: now
     })
-    return deny(REASONS.STORAGE_UNAVAILABLE, '用戶寫入服務的權威存儲不可用；本次零寫入。')
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `用戶寫入服務的權威存儲不可用；本次零寫入。（診斷：${errorFingerprint(error)}）`
+    )
   }
   if (!opResult.ok) {
     audit({ action: 'verify', outcome: opResult.reason, op, uid: identity.uid, serverNow: now })
@@ -303,7 +333,10 @@ async function handleVerify(event, config, callContext) {
           `寫入中斷：第 ${failedStep} / ${totalSteps} 步落盤失敗 ⇒ 已停止後續步驟；**已發生 ${completedSteps} 步寫入（未回退）**，本次**非零寫入**。請重放本操作（正式行按冪等鍵去重）以自愈。`
         )
       }
-      return deny(REASONS.STORAGE_UNAVAILABLE, '用戶寫入服務的權威存儲不可用；本次零寫入。')
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `用戶寫入服務的權威存儲不可用；本次零寫入。（診斷：${errorFingerprint(error)}）`
+      )
     }
     if (!docId) {
       audit({ action: 'verify', outcome: REASONS.STORAGE_UNAVAILABLE, op, uid: identity.uid, stage: 'persist-id', serverNow: now })
