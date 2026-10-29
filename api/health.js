@@ -26,10 +26,10 @@ function envIdSource(source) {
   return ''
 }
 
-/** 错误信息只保留「形状」：抹掉疑似长串（≥16 位十六进制 / base64 块）并截断。 */
+/** 错误信息只保留「形状」：抹掉疑似长串（≥40 位 base64 块）并截断。 */
 function shapeOf(error) {
   const raw = error && error.message ? String(error.message) : ''
-  const cleaned = raw.replace(/[A-Za-z0-9+/=_-]{16,}/g, '<redacted>').slice(0, 160)
+  const cleaned = raw.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 160)
   return { name: (error && error.name) || 'Error', message: cleaned }
 }
 
@@ -86,7 +86,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const opsModule = await import('../../../cloudfunctions/xiai-user-token/lib/ops.js')
+    const opsModule = await import('../../cloudfunctions/xiai-user-token/lib/ops.js')
     const mod = opsModule.default || opsModule
     if (typeof mod.resolveAiStore === 'function') {
       const store = mod.resolveAiStore(source)
