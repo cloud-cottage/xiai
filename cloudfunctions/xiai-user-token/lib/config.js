@@ -14,11 +14,15 @@
  *      （若把 uid 塞进令牌由客户端在签发时自选，等于把身份交回客户端 ⇒ 本单显式不那样做）。
  *      明文：uid **不是密码学保密**（单向、可复算）—— 它的作用只是**不把手机号写进数据行 /
  *      不直接露出**；手机号只活在**服务端环境变量**与**本人本地会话**里。
- *  **2026-10-29 单追加**：`secretPairOf`（CloudBase 凭据对的**唯一解析点**；自
- *  `api/_lib/aiRelay.js` 迁入本文件并导出 —— `lib/ops.js::initClientFromEnv` 与
- *  `aiRelay.js` 两个默认实现共用它）。只登记**环境变量名**（`CLOUDBASE_SECRET_ID` ＋
+ *  **2026-10-29 单追加**：`secretPairOf`（CloudBase 凭据对解析；自
+ *  `api/_lib/aiRelay.js` 迁入本文件并导出）。只登记**环境变量名**（`CLOUDBASE_SECRET_ID` ＋
  *  `CLOUDBASE_SECRET_KEY`，回退 `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`，
  *  成对不混用），**本文件不写任何密钥值**（口径 ① 照旧）。
+ *  **2026-10-29 应急修单**：本函数现**只服务 Vercel 侧**（`api/_lib/aiRelay.js`：两族皆可、
+ *  成对不混用；回退只供本地 / CI）；云函数侧 `lib/ops.js` 已改走自己的
+ *  `cloudbaseKeyPairFromEnv()`（**只认 `CLOUDBASE_*`** —— 平台族变量在 SCF / CloudBase
+ *  运行时是**临时凭据、需 session token**，只传 id / key ⇒ `SIGN_PARAM_INVALID`）
+ *  ⇒ 两处**不共用**解析点。
  */
 
 const crypto = require('crypto')
@@ -170,11 +174,13 @@ function text(value) {
 }
 
 /**
- * **CloudBase 凭据对解析**（唯一定义点；纯函数、零 I/O、不碰网络）。
- * **2026-10-29 单**：自 `api/_lib/aiRelay.js` **迁入本文件**并导出 —— 原因：`lib/ops.js`
- * 的 `initClientFromEnv()`（Vercel 无平台角色凭据 ⇒ 有密钥对时显式传入 `tcb.init`）
- * 也要用**同一个**解析点 ⇒ 单一定义点、不许两处各写一份；`aiRelay.js` 改为从本文件
- * 引入并**重新导出**（`scripts/verify-ai-relay.mjs` 的 S1〜S3 现行引用路径继续可用）。
+ * **CloudBase 凭据对解析**（纯函数、零 I/O、不碰网络）。
+ * **2026-10-29 单**：自 `api/_lib/aiRelay.js` **迁入本文件**并导出 —— 当时 `aiRelay.js` 的
+ * 两个默认实现改为从本文件引入并**重新导出**（`scripts/verify-ai-relay.mjs` 的 S1〜S3
+ * 现行引用路径继续可用）。
+ * **2026-10-29 应急修单**：云函数侧 `lib/ops.js::initClientFromEnv` **已退出共用**（改走
+ * 自己的 `cloudbaseKeyPairFromEnv()`，只认 `CLOUDBASE_*`）⇒ 本函数现**只服务 Vercel 侧**；
+ * 下面的平台族**回退**语义一字不变（Vercel 不注入平台族变量 ⇒ 回退只供本地 / CI）。
  * 优先序（**成对不混用**：甲族 id ＋ 乙族 key **不得拼成一对**）：
  *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
  *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）

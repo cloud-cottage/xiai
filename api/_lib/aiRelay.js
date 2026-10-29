@@ -17,6 +17,15 @@
  *   ·两族都缺 ⇒ 回空对 ⇒ 调用方仍按旧行为「不带 `secretId` / `secretKey` 地 `init`」
  *     （不报错、不抛）。
  *
+ * **职责差异（2026-10-29 应急修单；两处不共用解析点）**：
+ *   · 本文件跑在 **Vercel**：平台**不注入**平台族变量 ⇒ 回退那条只服务**本地 / CI**，
+ *     两族皆可、成对不混用（**本文件语义一字不变**）；
+ *   · 云函数侧 `cloudfunctions/xiai-user-token/lib/ops.js` 跑在 **SCF / CloudBase 运行时**：
+ *     运行时注入的平台族 id / key 是**临时凭据、必须连 session token 一起送**，只传 id / key
+ *     而不带 token ⇒ `SIGN_PARAM_INVALID`（2026-10-29 生产回归根因）⇒ 那边**只认
+ *     `CLOUDBASE_*`**、平台族变量**一律不参与**（交给 `@cloudbase/node-sdk` 自取），
+ *     取值点是它自己的 `cloudbaseKeyPairFromEnv()`，**不引**本侧解析器。
+ *
  * 流程（**顺序不得变**；每步的失败面写在括号里）：
  *   ① 方法面：只认 `POST`（405 `METHOD_NOT_ALLOWED`）
  *   ② path 白名单（封闭两值：`images/edits` / `images/generations`；含多段、空、`models`

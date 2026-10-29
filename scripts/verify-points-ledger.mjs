@@ -7,7 +7,7 @@
  *     （`getPointsBalance` / `listPointsFlow`；走既有登录令牌门）
  *   · `cloudfunctions/xiai-user-token/index.js` 信封（op 收窄的 additive 透传）
  *
- * 断言面（≥ 10；本套 25 条：A 段 14 ＋ B 段 4 ＋ C 段 7）：
+ * 断言面（≥ 10；本套 27 条：A 段 14 ＋ B 段 4 ＋ C 段 9）：
  *   A. 账本单点（注入假存储，直接跑真函数）
  *      ① 同 uid **并发**两笔 charge 各 5 金、初始 50 ⇒ **恒 40（不得 45）** —— 并附
  *         **负对照**（同一交错下朴素读改写 ⇒ 45 ⇒ 证明测试台真能测出丢更新）；
@@ -26,10 +26,17 @@
  *   C. 静态门：账本文件**零取句柄字面**（守既有 A8 / A8b / D4 同尺）、两个新集合
  *      **不进** `COLLECTIONS` / `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS`（仍 8 键）、
  *      新 reason 字面值逐字登记、`index.js` 透传块按 op 收窄；
- *      **＋ C7（2026-10-29 单新增）**：`lib/ops.js` 客户端初始化**单点门** ——
+ *      **＋ C7（2026-10-29 单新增；应急修单加严）**：`lib/ops.js` 客户端初始化**单点门** ——
  *      `tcb.init(` 的每个调用点都经同一个本地函数 `initClientFromEnv()`（全文件恰 1 处、
  *      只在该函数体内；无裸 `tcb.init({ env: envId })`）、`secretId` / `secretKey` 显式
- *      赋值语句在场（无密钥对 ⇒ 不带凭据 init ⇒ 云函数环境行为不变）。
+ *      赋值语句在场（无密钥对 ⇒ 不带凭据 init ⇒ 云函数环境行为不变）；**加严**：`lib/ops.js`
+ *      全文零命中 `TENCENTCLOUD_`、`CLOUDBASE_SECRET_ID` / `CLOUDBASE_SECRET_KEY`
+ *      各恰 1 处且就在 `process.env.` 取值处、取值单点 `cloudbaseKeyPairFromEnv()`
+ *      定义／调用各恰 1、旧解析器引用 0（云函数侧只认 `CLOUDBASE_*`：平台族凭据是
+ *      **临时凭据、需 session token**，只传 id / key ⇒ `SIGN_PARAM_INVALID`）；
+ *      **＋ C8 负对照**：真源码副本注入一行平台族变量取值 ⇒ **同一扫描谓词必判红**
+ *      （判据非恒绿）；**＋ C9 取值面**：导出的 `cloudbaseKeyPairFromEnv()` 直接跑
+ *      （两族均在成对／只给平台族空对／两族各半空对／全缺空对）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何密钥 / 令牌原文。
  */
@@ -531,7 +538,7 @@ await ledger.chargePoints({ uid: envelopeUid, amount: 5, kind: 'CHARGE', ref_typ
 /* ===========================================================================
    C 段：静态门
    =========================================================================== */
-section('C', '静态门：账本零取句柄字面 / 两集合不进任何云读面 / reason 逐字登记 / 透传块按 op 收窄')
+section('C', '静态门：账本零取句柄字面 / 两集合不进任何云读面 / reason 逐字登记 / 透传块按 op 收窄 / 凭据名只认 CLOUDBASE_*（＋负对照＋取值面）')
 
 {
   const ledgerSource = readFileSync(path.join(FN_DIR, 'lib/ledger.js'), 'utf8')
@@ -584,27 +591,106 @@ section('C', '静态门：账本零取句柄字面 / 两集合不进任何云读
      通道 `.auth()` ＋ `const app = initClientFromEnv()` 恰 3 处〔存储回读 / 存储上传 /
      取 DB〕）；envId 名解析（`process.env.TCB_ENV ||`）第二套计数 0（一律走
      `config.readEnvId`）；`@cloudbase/node-sdk` 的 require 落点恰 1 处（内聚于该函数）；
-     `secretId` / `secretKey` **显式赋值语句**两条在场（有密钥对才显式传入 ⇒ 两族都缺时
-     不带凭据 init、云函数环境行为不变）。 */
+     `secretId` / `secretKey` **显式赋值语句**两条在场（有密钥对才显式传入 ⇒ 无密钥对时
+     不带凭据 init、云函数环境行为不变）。
+     **【2026-10-29 应急修单 · 加严（只增不减）】云函数侧凭据名只认 `CLOUDBASE_*`**：
+     · `lib/ops.js` 全文**零命中平台族变量前缀**（`TENCENTCLOUD_` ＝ 0）—— SCF / CloudBase
+       运行时注入的平台族 id / key 是**临时凭据、需 session token**，只传 id / key 而不带
+       token ⇒ `SIGN_PARAM_INVALID`（本次生产回滚的根因）；
+     · `CLOUDBASE_SECRET_ID` 与 `CLOUDBASE_SECRET_KEY` 各**恰命中 1 处、且就在取值处**
+       （`process.env.` 直读各恰 1 处 ⇒ 不再经带回退的 config 解析器）；
+     · 取值单点 `function cloudbaseKeyPairFromEnv(` 恰 1 处、调用点恰 1 处、
+       对旧解析器的引用 0 处；`tcb.init(` **仍恰 1 处**。
+     整块读数由**同一个**扫描谓词产出（C8 的负对照喂同一谓词 ⇒ 证明判据非恒绿）。 */
   const opsInitSource = readFileSync(path.join(FN_DIR, 'lib/ops.js'), 'utf8')
-  const initFnStart = opsInitSource.indexOf('function initClientFromEnv(')
-  const initFnEnd = initFnStart >= 0 ? opsInitSource.indexOf('\n}', initFnStart) : -1
-  const initFnBody = initFnEnd > initFnStart ? opsInitSource.slice(initFnStart, initFnEnd) : ''
   const countIn = (text, needle) => text.split(needle).length - 1
-  check('C7', '客户端初始化单点（2026-10-29）：ops.js 内 `tcb.init(` 恰 1 处且只在 `initClientFromEnv()` 函数体内；四处消费点全经它（探针 `.auth()` 1 ＋ `const app = initClientFromEnv()` 3）；无裸 `tcb.init({ env: … })`、无第二套 envId 名解析、SDK require 落点恰 1；`init.secretId = pair.secretId` / `init.secretKey = pair.secretKey` 显式赋值在场',
-    { tcbInitCallSites: 1, tcbInitInsideInitFn: 1, initFnDefs: 1, channelCallSites: 1, appCallSites: 3, bareEnvInit: 0, secondNameResolution: 0, sdkRequireSites: 1, secretAssignments: 2, envKeyWhenNoEnvId: 1 },
-    {
-      tcbInitCallSites: countIn(opsInitSource, 'tcb.init('),
+
+  /* **扫描谓词（单点）**：真实源码（C7）与负对照人造源码（C8）都喂它 —— 同一份判据。 */
+  const scanCloudFunctionCreds = (text) => {
+    const initFnStart = text.indexOf('function initClientFromEnv(')
+    const initFnEnd = initFnStart >= 0 ? text.indexOf('\n}', initFnStart) : -1
+    const initFnBody = initFnEnd > initFnStart ? text.slice(initFnStart, initFnEnd) : ''
+    const readings = {
+      tcbInitCallSites: countIn(text, 'tcb.init('),
       tcbInitInsideInitFn: countIn(initFnBody, 'tcb.init('),
-      initFnDefs: countIn(opsInitSource, 'function initClientFromEnv('),
-      channelCallSites: countIn(opsInitSource, 'initClientFromEnv().auth()'),
-      appCallSites: countIn(opsInitSource, 'const app = initClientFromEnv()'),
-      bareEnvInit: countIn(opsInitSource, 'tcb.init({ env'),
-      secondNameResolution: countIn(opsInitSource, 'process.env.TCB_ENV ||'),
-      sdkRequireSites: countIn(opsInitSource, "require('@cloudbase/node-sdk')"),
-      secretAssignments: countIn(opsInitSource, 'init.secretId = pair.secretId') + countIn(opsInitSource, 'init.secretKey = pair.secretKey'),
-      envKeyWhenNoEnvId: countIn(opsInitSource, 'const init = envId ? { env: envId } : {}')
-    })
+      initFnDefs: countIn(text, 'function initClientFromEnv('),
+      channelCallSites: countIn(text, 'initClientFromEnv().auth()'),
+      appCallSites: countIn(text, 'const app = initClientFromEnv()'),
+      bareEnvInit: countIn(text, 'tcb.init({ env'),
+      secondNameResolution: countIn(text, 'process.env.TCB_ENV ||'),
+      sdkRequireSites: countIn(text, "require('@cloudbase/node-sdk')"),
+      secretAssignments: countIn(text, 'init.secretId = pair.secretId') + countIn(text, 'init.secretKey = pair.secretKey'),
+      envKeyWhenNoEnvId: countIn(text, 'const init = envId ? { env: envId } : {}'),
+      keyPairFnDefs: countIn(text, 'function cloudbaseKeyPairFromEnv('),
+      keyPairCallSites: countIn(text, 'const pair = cloudbaseKeyPairFromEnv()'),
+      cloudbaseIdHits: countIn(text, 'CLOUDBASE_SECRET_ID'),
+      cloudbaseIdReads: countIn(text, 'process.env.CLOUDBASE_SECRET_ID'),
+      cloudbaseKeyHits: countIn(text, 'CLOUDBASE_SECRET_KEY'),
+      cloudbaseKeyReads: countIn(text, 'process.env.CLOUDBASE_SECRET_KEY'),
+      tencentcloudRefs: countIn(text, 'TENCENTCLOUD_'),
+      legacyPairResolverRefs: countIn(text, 'secretPairOf')
+    }
+    const green = readings.tcbInitCallSites === 1
+      && readings.tcbInitInsideInitFn === 1
+      && readings.initFnDefs === 1
+      && readings.channelCallSites === 1
+      && readings.appCallSites === 3
+      && readings.bareEnvInit === 0
+      && readings.secondNameResolution === 0
+      && readings.sdkRequireSites === 1
+      && readings.secretAssignments === 2
+      && readings.envKeyWhenNoEnvId === 1
+      && readings.keyPairFnDefs === 1
+      && readings.keyPairCallSites === 1
+      && readings.cloudbaseIdHits === 1
+      && readings.cloudbaseIdReads === 1
+      && readings.cloudbaseKeyHits === 1
+      && readings.cloudbaseKeyReads === 1
+      && readings.tencentcloudRefs === 0
+      && readings.legacyPairResolverRefs === 0
+    return { ...readings, verdict: green ? 'green' : 'red' }
+  }
+  const scan = scanCloudFunctionCreds(opsInitSource)
+  check('C7', '客户端初始化单点（2026-10-29）＋ 应急修单加严：ops.js 内 `tcb.init(` 恰 1 处且只在 `initClientFromEnv()` 函数体内；四处消费点全经它（探针 `.auth()` 1 ＋ `const app = initClientFromEnv()` 3）；无裸 `tcb.init({ env: … })`、无第二套 envId 名解析、SDK require 落点恰 1；`init.secretId = pair.secretId` / `init.secretKey = pair.secretKey` 显式赋值在场；**平台族变量前缀全文零命中**（`TENCENTCLOUD_`＝0）；`CLOUDBASE_SECRET_ID` / `CLOUDBASE_SECRET_KEY` 各恰 1 处且就在 `process.env.` 取值处；取值单点 `cloudbaseKeyPairFromEnv()` 定义／调用各恰 1、旧解析器引用 0 ⇒ 整体判绿',
+    { tcbInitCallSites: 1, tcbInitInsideInitFn: 1, initFnDefs: 1, channelCallSites: 1, appCallSites: 3, bareEnvInit: 0, secondNameResolution: 0, sdkRequireSites: 1, secretAssignments: 2, envKeyWhenNoEnvId: 1, keyPairFnDefs: 1, keyPairCallSites: 1, cloudbaseIdHits: 1, cloudbaseIdReads: 1, cloudbaseKeyHits: 1, cloudbaseKeyReads: 1, tencentcloudRefs: 0, legacyPairResolverRefs: 0, verdict: 'green' },
+    scan)
+
+  /* C8 **负对照**（证明判据非恒绿）：把**一行**平台族变量取值注入真源码的副本 ⇒ 同一个
+     谓词必判红；除该门以外的读数与真源码**逐项相同** ⇒ 红点确实由「零命中平台族」这道门
+     产生。夹具只是内存字符串：不读 git / HEAD、不写任何文件。 */
+  const injectedLegacySource = `${opsInitSource}\nconst leakedLegacyId = process.env.TENCENTCLOUD_SECRETID\n`
+  const injectedScan = scanCloudFunctionCreds(injectedLegacySource)
+  const readingsWithoutLegacyGate = (s) => JSON.stringify({ ...s, verdict: undefined, tencentcloudRefs: 0 })
+  check('C8', '负对照（判据非恒绿）：真源码副本注入一行 `process.env.TENCENTCLOUD_SECRETID` ⇒ 同一扫描谓词必判红（tencentcloudRefs 0→1、其余读数逐项不变）；真源码仍判绿',
+    { real: { verdict: 'green', tencentcloudRefs: 0 }, injected: { verdict: 'red', tencentcloudRefs: 1 }, otherReadingsUnchanged: true },
+    { real: { verdict: scan.verdict, tencentcloudRefs: scan.tencentcloudRefs }, injected: { verdict: injectedScan.verdict, tencentcloudRefs: injectedScan.tencentcloudRefs }, otherReadingsUnchanged: readingsWithoutLegacyGate(scan) === readingsWithoutLegacyGate(injectedScan) })
+
+  /* C9 **取值面**（导出的 `cloudbaseKeyPairFromEnv()` 直接跑；env 存取即用即还）：
+     · 两族均在 ⇒ 成对；· **只给平台族（生产运行时的危险形态）⇒ 空对** ⇒ 调用方不带
+     `secretId` / `secretKey` 地 init（与旧版一致、且不触发 `SIGN_PARAM_INVALID`）；
+     · 两族各半 ⇒ 空对（成对不混用）；· 全缺 ⇒ 空对。 */
+  const savedCredsEnv = { id: process.env.CLOUDBASE_SECRET_ID, key: process.env.CLOUDBASE_SECRET_KEY, legacyId: process.env.TENCENTCLOUD_SECRETID, legacyKey: process.env.TENCENTCLOUD_SECRETKEY }
+  const setCredsEnv = (id, key, legacyId, legacyKey) => {
+    const pairs = [['CLOUDBASE_SECRET_ID', id], ['CLOUDBASE_SECRET_KEY', key], ['TENCENTCLOUD_SECRETID', legacyId], ['TENCENTCLOUD_SECRETKEY', legacyKey]]
+    for (const [name, value] of pairs) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+  setCredsEnv('offline-cloudbase-id', 'offline-cloudbase-key', undefined, undefined)
+  const pairBoth = ops.cloudbaseKeyPairFromEnv()
+  setCredsEnv(undefined, undefined, 'offline-legacy-id', 'offline-legacy-key')
+  const pairLegacyOnly = ops.cloudbaseKeyPairFromEnv()
+  setCredsEnv('offline-cloudbase-id', undefined, undefined, undefined)
+  const pairHalfCb = ops.cloudbaseKeyPairFromEnv()
+  setCredsEnv(undefined, 'offline-cloudbase-key', undefined, undefined)
+  const pairHalfOther = ops.cloudbaseKeyPairFromEnv()
+  setCredsEnv(undefined, undefined, undefined, undefined)
+  const pairNone = ops.cloudbaseKeyPairFromEnv()
+  setCredsEnv(savedCredsEnv.id, savedCredsEnv.key, savedCredsEnv.legacyId, savedCredsEnv.legacyKey)
+  check('C9', '取值面（导出的 `cloudbaseKeyPairFromEnv()` 直接跑、env 即用即还）：两族均在 ⇒ 成对；**只给平台族 ⇒ 空对**（⇒ 不带凭据 init、不触发 SIGN_PARAM_INVALID）；两族各半 ⇒ 空对；全缺 ⇒ 空对',
+    { both: { secretId: 'offline-cloudbase-id', secretKey: 'offline-cloudbase-key' }, legacyOnly: { secretId: '', secretKey: '' }, halfCb: { secretId: '', secretKey: '' }, halfOther: { secretId: '', secretKey: '' }, none: { secretId: '', secretKey: '' } },
+    { both: pairBoth, legacyOnly: pairLegacyOnly, halfCb: pairHalfCb, halfOther: pairHalfOther, none: pairNone })
 }
 
 /* ===========================================================================
