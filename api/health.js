@@ -90,9 +90,31 @@ export default async function handler(req, res) {
     secretPairConsistent: pair.source !== '',
     upstreamSecretPresent: present(source, 'XIAI_AI_UPSTREAM_SECRET'),
     nodeVersion: typeof process !== 'undefined' && process.version ? process.version : '',
+    /* 只回布尔：共享模块是否真的被打进函数包（Vercel 按 import 图打包，惰性 require 可能不被追踪）。 */
+    bundle: null,
     sdk: null,
     store: null,
     balanceRead: null
+  }
+
+  /* 包内文件存在性（只回布尔；路径由 import.meta.url 推导，不猜 cwd）。 */
+  try {
+    const { existsSync } = await import('node:fs')
+    const probePath = (relative) => {
+      try {
+        return existsSync(new URL(relative, import.meta.url))
+      } catch {
+        return false
+      }
+    }
+    diag.bundle = {
+      ops: probePath('../cloudfunctions/xiai-user-token/lib/ops.js'),
+      ledger: probePath('../cloudfunctions/xiai-user-token/lib/ledger.js'),
+      aiKeys: probePath('../cloudfunctions/xiai-user-token/lib/aiKeys.js'),
+      aiRelay: probePath('./_lib/aiRelay.js')
+    }
+  } catch (error) {
+    diag.bundle = Object.assign({ ok: false }, shapeOf(error))
   }
 
   let app = null
@@ -120,7 +142,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const opsModule = await import('../../cloudfunctions/xiai-user-token/lib/ops.js')
+    const opsModule = await import('../cloudfunctions/xiai-user-token/lib/ops.js')
     const mod = opsModule.default || opsModule
     if (typeof mod.resolveAiStore === 'function') {
       const store = mod.resolveAiStore(source)
