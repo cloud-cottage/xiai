@@ -1,11 +1,13 @@
 /**
- * 玺爱 · **AI 中转路由**（Vercel Serverless Function）
+ * 玺爱 · **AI 中转路由共享件**（`api/_lib/` 下划线目录 ⇒ **不**被 Vercel 当函数；函数文件是
+ * `api/ai/v1/images/{edits,generations}.js` 两个薄壳，白名单**直接编码进文件名**、不依赖方括号 catch-all）
  * ============================================================================
  * 路由：`POST /api/ai/v1/images/edits`（有参考图）／ `POST /api/ai/v1/images/generations`
  *
- * 职责（**薄壳**）：读方法 / path / 头 / 请求体 → 交给 `api/_lib/aiRelay.js` 的纯 handler
+ * 职责（**薄壳的共享实现**）：读方法 / path / 头 / 请求体 → 交给 `api/_lib/aiRelay.js` 的纯 handler
  * （`{status, body, headers}`）→ 写回响应。**判定逻辑一律不在本文件**（同一份实现、
- * 两条入口：生产走本文件、离线自检 `scripts/verify-ai-relay.mjs` 直调 handler）。
+ * 两个入口：生产走 `api/ai/v1/images/*.js` 薄壳〔`createHandler(deps, fixedPath)`〕、
+ * 离线自检 `scripts/verify-ai-relay.mjs` 直调 handler）。
  *
  * 硬口径（逐条）：
  *   ① **只认 POST**；path 白名单封闭两值（`images/edits` / `images/generations`）；
@@ -25,7 +27,7 @@
  * ＋ 注入 store / clock / fetch。
  */
 
-import { createAiRelay, MAX_BODY_BYTES } from '../../_lib/aiRelay.js'
+import { createAiRelay, MAX_BODY_BYTES } from './aiRelay.js'
 
 /** 路由前缀（Vercel catch-all 的 path 段拼回完整路径用）。 */
 export const ROUTE_PREFIX = '/api/ai/v1'
@@ -106,15 +108,18 @@ export function send(res, result) {
 /**
  * 路由处理器工厂（**注入缝**：`fetch` / `now` / `resolveImageUrl` / `env` / `stores`）。
  * @param {object} [deps] 透传给 `createAiRelay`
+ * @param {string} [fixedPath] 白名单内的**固定路由段**（`images/edits` / `images/generations`；
+ *   由 `api/ai/v1/images/*.js` 两个薄壳各自传死 ⇒ path 由文件名表达，不依赖任何路由魔法）；
+ *   省略时回落 `pathOf(req)`（离线自检打任意 path 走这条）。
  * @returns {(req:object, res:object)=>Promise<void>}
  */
-export function createHandler(deps) {
+export function createHandler(deps, fixedPath) {
   const handle = createAiRelay(deps)
   return async function routeHandler(req, res) {
     const body = await readBody(req)
     const result = await handle({
       method: req && req.method,
-      path: pathOf(req),
+      path: fixedPath || pathOf(req),
       headers: (req && req.headers) || {},
       body
     })

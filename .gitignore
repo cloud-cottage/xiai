@@ -4,8 +4,10 @@
 node_modules/
 dist/
 # yinyuan/ 与 feicui/ 现为**独立仓**的活副本（各自带 .git）：不忽略会让 `git add -A` 产生 gitlink 条目。
-yinyuan/
-feicui/
+# （2026-10-29）两条模式**锚定根目录**：无锚点的 `feicui/` 会匹配**任意层级**同名目录，
+# 实例：`api/feicui/v1/[...path].js` 被 `feicui/` 一并吞掉、该路由**从未入库**（生产 404）。
+/yinyuan/
+/feicui/
 # 原 `yinyuan/node_modules/`、`yinyuan/dist/` 两条已被上方 `yinyuan/` 覆盖，就地合并（2026-10-02）。
 qa-recheck/
 .DS_Store

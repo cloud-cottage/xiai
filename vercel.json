@@ -5,7 +5,7 @@
   "buildCommand": "npm run build -- --outDir dist/xiai",
   "outputDirectory": "dist",
   "functions": {
-    "api/ai/v1/*.js": {
+    "api/ai/v1/images/*.js": {
       "maxDuration": 60
     }
   },

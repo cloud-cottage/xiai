@@ -1,5 +1,5 @@
 /**
- * 玺爱 · **自检：AI 中转端点**（`api/ai/v1/[...path].js` ＋ `api/_lib/aiRelay.js`）
+ * 玺爱 · **自检：AI 中转端点**（`api/ai/v1/images/*.js` 两个薄壳 ＋ `api/_lib/aiRoute.js` ＋ `api/_lib/aiRelay.js`）
  * ============================================================================ *
  * **本地、离线**（除本机回环上自起的「假上游」外零外部网络、零云端、零生产数据）：
  *
@@ -11,7 +11,9 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **53** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5，覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
+ * 断言面（本套 **55** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕，
+ * 覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
  *      ⇒ 400 且**零扣费**。
@@ -52,7 +54,7 @@
 
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -66,8 +68,10 @@ const aiKeys = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/aiKey
 const aiUpstream = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/aiUpstream.js'))
 const aiUsage = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/aiUsage.js'))
 
-/* 被测件（ESM；`[...]` 文件名经 file URL 导入）。 */
-const routeModule = await import(pathToFileURL(path.join(ROOT, 'api/ai/v1/[...path].js')).href)
+/* 被测件（ESM）：共享路由工厂 ＋ 两个白名单薄壳路由（path 编码在文件名里）。 */
+const routeModule = await import(pathToFileURL(path.join(ROOT, 'api/_lib/aiRoute.js')).href)
+const editsRouteModule = await import(pathToFileURL(path.join(ROOT, 'api/ai/v1/images/edits.js')).href)
+const generationsRouteModule = await import(pathToFileURL(path.join(ROOT, 'api/ai/v1/images/generations.js')).href)
 const core = await import(pathToFileURL(path.join(ROOT, 'api/_lib/aiRelay.js')).href)
 
 /* --------------------------------------------------------------------------- 0. 断言 / 读数
@@ -863,7 +867,7 @@ const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 check('F1', '`@cloudbase/node-sdk` 已从 devDependencies 移入 dependencies（版本沿用 ^3.18.3）', { inDeps: '^3.18.3', notInDev: true }, { inDeps: (pkg.dependencies || {})['@cloudbase/node-sdk'], notInDev: !((pkg.devDependencies || {})['@cloudbase/node-sdk']) })
 
 const vercel = JSON.parse(readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'))
-check('F2', '`vercel.json` 新增 `functions` 段（maxDuration 60）且既有 framework / installCommand / buildCommand / outputDirectory / rewrites 一字未动', { maxDuration: 60, installCommand: 'npm install', buildCommand: 'npm run build -- --outDir dist/xiai', outputDirectory: 'dist', rewriteCount: 3, framework: 'vite' }, { maxDuration: vercel.functions && vercel.functions['api/ai/v1/*.js'] && vercel.functions['api/ai/v1/*.js'].maxDuration, installCommand: vercel.installCommand, buildCommand: vercel.buildCommand, outputDirectory: vercel.outputDirectory, rewriteCount: Array.isArray(vercel.rewrites) ? vercel.rewrites.length : -1, framework: vercel.framework })
+check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDuration 60）且既有 framework / installCommand / buildCommand / outputDirectory / rewrites 一字未动', { maxDuration: 60, glob: 'api/ai/v1/images/*.js', oldGlobGone: true, installCommand: 'npm install', buildCommand: 'npm run build -- --outDir dist/xiai', outputDirectory: 'dist', rewriteCount: 3, framework: 'vite' }, { maxDuration: vercel.functions && vercel.functions['api/ai/v1/images/*.js'] && vercel.functions['api/ai/v1/images/*.js'].maxDuration, glob: Object.keys(vercel.functions || {})[0], oldGlobGone: !((vercel.functions || {})['api/ai/v1/*.js']), installCommand: vercel.installCommand, buildCommand: vercel.buildCommand, outputDirectory: vercel.outputDirectory, rewriteCount: Array.isArray(vercel.rewrites) ? vercel.rewrites.length : -1, framework: vercel.framework })
 
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
@@ -872,6 +876,19 @@ check('F4', '本套为第 28 个 `scripts/verify-*.mjs`（基线 26 ＋ 本套 a
 check('F4b', '新增套 `verify-ai-connect-page.mjs` 亦在册（脚本计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-ai-connect-page.mjs') !== -1)
 
 check('F5', '核心只经四个 lib 的既有注入缝取集合（零取句柄字面）与零上游凭据字面', { seamCalls: 4, keyLiteral: 0 }, { seamCalls: ['setLedgerStoreProvider', 'setAiKeyStoreProvider', 'setUpstreamStoreProvider', 'setAiUsageStoreProvider'].filter((name) => countIn(coreSource, name) >= 1).length, keyLiteral: countIn(coreSource, UPSTREAM_KEY) })
+
+/* F6：路由形態面 —— 白名單**直接編碼進文件名**：兩個薄殼文件在場且各自導出真 handler。 */
+check('F6', '路由形態面：`api/ai/v1/images/{edits,generations}.js` 两个薄壳在场且各自默认导出真 handler 函数（方括号 catch-all 已迁 `api/_lib/aiRoute.js`，不再是函数文件）', { edits: 'function', generations: 'function', sharedFactory: 'function', catchAllGone: true }, { edits: typeof editsRouteModule.default, generations: typeof generationsRouteModule.default, sharedFactory: typeof routeModule.createHandler, catchAllGone: !existsSync(path.join(ROOT, 'api/ai/v1/[...path].js')) })
+
+/* F7：`fixedPath` 分支被走 —— 用真薄殼 handler 直调：url 故意给**非白名單**（`/api/ai/v1/models`），
+   若 path 仍从 `pathOf(req)` 推 ⇒ 404 PATH_NOT_ALLOWED；fixedPath 生效 ⇒ path 恆为白名單值 ⇒ 越過
+   path 门、落在鉴权门 ⇒ **401 KEY_INVALID**（无 Authorization 头，stage=header 早退、零 store 访问）。 */
+const f7Parse = async (res) => JSON.parse(await res.text())
+const f7EditsRes = await runDirect(editsRouteModule.default, { method: 'POST', url: '/api/ai/v1/models', headers: {} }, JSON.stringify({ prompt: 'x' }))
+const f7GenRes = await runDirect(generationsRouteModule.default, { method: 'POST', url: '/api/ai/v1/models', headers: {} }, JSON.stringify({ prompt: 'x' }))
+const f7Edits = { status: f7EditsRes.status, body: await f7Parse(f7EditsRes) }
+const f7Gen = { status: f7GenRes.status, body: await f7Parse(f7GenRes) }
+check('F7', '`fixedPath` 分支被走：真薄壳 handler 直调（url 给非白名单 `/api/ai/v1/models`、无凭据）⇒ path 恆为文件名编码的白名单值 ⇒ 越过 404 path 门、落在 401 KEY_INVALID（两壳一致；零扣费）', { edits: [401, 'KEY_INVALID'], generations: [401, 'KEY_INVALID'] }, { edits: [f7Edits.status, f7Edits.body && f7Edits.body.reason], generations: [f7Gen.status, f7Gen.body && f7Gen.body.reason] })
 
 /* --------------------------------------------------------------------------- 收尾
    --------------------------------------------------------------------------- */
