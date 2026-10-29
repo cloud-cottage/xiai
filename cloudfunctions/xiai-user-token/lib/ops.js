@@ -10,7 +10,12 @@
  *      （`uid = uidOf(sub)`、`phone = sub`），载荷里的任何身份类键一律 ⇒ `INVALID_FIELD` ＋ 零写入；
  *      **落盘行只落不透明 uid（`u-`＋sha256 前 16 位），不落手机号**（人类口径 ①②）。
  *   ② **判定全部在写之前**（缺字段 / 值域 / 字段面任一不过 ⇒ 返回拒绝，**不触库写**）；
- *   ③ **落库用管理端凭据**（`@cloudbase/node-sdk` 在函数运行环境内取凭据，**不入仓、不下发前端**）；
+ *   ③ **落库用管理端凭据**（`@cloudbase/node-sdk` 在函数运行环境内取凭据，**不入仓、不下发前端**）
+ *      —— **已被 2026-10-29 单取代**：Vercel 无平台角色凭据 ⇒ 有密钥对时经
+ *      `initClientFromEnv()`（本文件唯一的 SDK 客户端初始化点）**显式传入**
+ *      （`CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`，回退 `TENCENTCLOUD_SECRETID` ＋
+ *      `TENCENTCLOUD_SECRETKEY`，成对不混用）；**云函数环境无两族变量时行为不变**
+ *      （仍不传密钥、凭据仍由运行环境注入；密钥**不入仓、不下发前端**照旧）；
  *      `xiai_corrections` / `xiai_endorsements` 的 ACL 是 `PRIVATE` ⇒ **只能这样写**，前端直连 SDK 写必被拒；
  *   ④ **本文件不写任何密钥 / 手机号字面值**；`row` 里只落**派生结果**（uid / 手机号）。
  *
@@ -34,7 +39,7 @@
  */
 
 const crypto = require('crypto')
-const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf } = require('./config.js')
+const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf, readEnvId, secretPairOf } = require('./config.js')
 /* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`
    **逐字节相同**（`scripts/verify-code-id.mjs` 机械断言）；本文件只经它编 / 解码，不自写第二套。 */
 const codeId = require('./codeId.js')
@@ -64,6 +69,33 @@ const aiUpstream = require('./aiUpstream.js')
 const aiUsage = require('./aiUsage.js')
 
 /* ---------------------------------------------------------------------------
+   **客户端初始化单点（2026-10-29 单）**：`initClientFromEnv()`
+   —— 本文件**唯一**的 SDK 客户端初始化（`init`）调用点：会话探针通道（`resolveAuthApiChannel`）/
+   存储回读（`readArtifactBytes`）/ 存储上传（`uploadDisplayArtifactBytes`）/
+   取 DB（`resolveDb`）**四处一律经它**；**不许留下第二套** envId / 密钥名解析。
+   口径：
+   ① envId 走 `config.readEnvId`（`TCB_ENV` → `SCF_NAMESPACE` → `CLOUDBASE_ENV_ID`；
+      缺位 ⇒ **不带 `env` 键** ⇒ 保持「无参 init」语义、不写死）；
+   ② 密钥对走 `config.secretPairOf`（**唯一解析点**：优先 `CLOUDBASE_SECRET_ID` ＋
+      `CLOUDBASE_SECRET_KEY`，回退 `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`，
+      **两族成对不混用**；两族都缺 ⇒ 空对 ⇒ **不带** `secretId` / `secretKey` 地 init
+      ⇒ **云函数环境行为与旧版逐字不变**）—— Vercel 无平台注入角色凭据 ⇒ 有密钥对时
+      **显式传入**；
+   ③ 延迟 require：离线自检（注入缝）时**不需要**装 `@cloudbase/node-sdk`。
+   --------------------------------------------------------------------------- */
+function initClientFromEnv() {
+  const tcb = require('@cloudbase/node-sdk')
+  const envId = readEnvId(process.env)
+  const pair = secretPairOf(process.env)
+  const init = envId ? { env: envId } : {}
+  if (pair.secretId && pair.secretKey) {
+    init.secretId = pair.secretId
+    init.secretKey = pair.secretKey
+  }
+  return tcb.init(init)
+}
+
+/* ---------------------------------------------------------------------------
    **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器 —— **本单修正**：自两 `index.js` **迁回本文件**
    （`lib/ops.js`），使 `index.js` 保持**零 SDK 字面**、**恢复 C3 / C6 / A15 三条静态门**；
    探针语义与两 `sessionAuthority.js` 副本逐字节同不变。本文件因此＝两个写面函数**唯一的 SDK 落点**。
@@ -80,9 +112,8 @@ function resolveAuthApiChannel() {
   if (!authApiChannelResolved) {
     authApiChannelResolved = true
     try {
-      const tcb = require('@cloudbase/node-sdk')
-      const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
-      authApiChannel = (envId ? tcb.init({ env: envId }) : tcb.init()).auth()
+      /* 客户端句柄一律经 `initClientFromEnv()`（本文件唯一的 SDK 客户端初始化点）。 */
+      authApiChannel = initClientFromEnv().auth()
     } catch {
       authApiChannel = null
     }
@@ -887,10 +918,8 @@ async function readArtifactBytes(cloudPath) {
     if (!bytes) throw new Error('STORAGE_INJECTED_SHAPE_INVALID')
     return bytes
   }
-  /* 延迟 require：离线自检（注入存储）时**不需要**装 `@cloudbase/node-sdk`。 */
-  const tcb = require('@cloudbase/node-sdk')
-  const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
-  const app = envId ? tcb.init({ env: envId }) : tcb.init()
+  /* 客户端句柄经 `initClientFromEnv()`（延迟 require 已内聚其中；离线自检走注入存储缝、不经此处）。 */
+  const app = initClientFromEnv()
   const fileID = await resolveFileId(app, cloudPath)
   const reply = await app.downloadFile({ fileID })
   const bytes = bufferOf(reply && reply.fileContent)
@@ -916,10 +945,8 @@ async function uploadDisplayArtifactBytes(cloudPath, bytes) {
     await storageUploadProvider({ cloudPath, bytes: payload })
     return
   }
-  /* 延迟 require：离线自检（注入上传缝）时**不需要**装 `@cloudbase/node-sdk`。 */
-  const tcb = require('@cloudbase/node-sdk')
-  const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
-  const app = envId ? tcb.init({ env: envId }) : tcb.init()
+  /* 客户端句柄经 `initClientFromEnv()`（延迟 require 已内聚其中；离线自检走注入上传缝、不经此处）。 */
+  const app = initClientFromEnv()
   await app.uploadFile({ cloudPath, fileContent: payload })
 }
 
@@ -927,13 +954,13 @@ async function uploadDisplayArtifactBytes(cloudPath, bytes) {
  * 取 DB 句柄。
  * 凭据来源：**函数运行环境注入的角色凭据**（node-sdk 自行读取）——本文件**不传任何密钥**；
  * envId 取运行期环境变量（缺位 ⇒ 交给 SDK 的「当前环境」语义，**不写死**）。
+ * （上两句为原口径，**已被 2026-10-29 单取代**：Vercel 无平台角色凭据 ⇒ 经
+ *  `initClientFromEnv()` 在**有密钥对时显式传入** `secretId` / `secretKey`；
+ *  **云函数环境无两族变量时行为不变**——仍不传密钥、`envId` 缺位仍不带 `env` 键。）
  */
 function resolveDb() {
   if (dbProvider) return dbProvider()
-  /* 延迟 require：离线自检（注入 DB）时**不需要**装 `@cloudbase/node-sdk`。 */
-  const tcb = require('@cloudbase/node-sdk')
-  const envId = process.env.TCB_ENV || process.env.SCF_NAMESPACE || process.env.CLOUDBASE_ENV_ID || ''
-  const app = envId ? tcb.init({ env: envId }) : tcb.init()
+  const app = initClientFromEnv()
   return app.database()
 }
 

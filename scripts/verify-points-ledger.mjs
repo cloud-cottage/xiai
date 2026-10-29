@@ -7,7 +7,7 @@
  *     （`getPointsBalance` / `listPointsFlow`；走既有登录令牌门）
  *   · `cloudfunctions/xiai-user-token/index.js` 信封（op 收窄的 additive 透传）
  *
- * 断言面（≥ 10；本套 24 条：A 段 14 ＋ B 段 4 ＋ C 段 6）：
+ * 断言面（≥ 10；本套 25 条：A 段 14 ＋ B 段 4 ＋ C 段 7）：
  *   A. 账本单点（注入假存储，直接跑真函数）
  *      ① 同 uid **并发**两笔 charge 各 5 金、初始 50 ⇒ **恒 40（不得 45）** —— 并附
  *         **负对照**（同一交错下朴素读改写 ⇒ 45 ⇒ 证明测试台真能测出丢更新）；
@@ -25,7 +25,11 @@
  *      未知 op ⇒ 结构化拒、无令牌 ⇒ `FORBIDDEN`。
  *   C. 静态门：账本文件**零取句柄字面**（守既有 A8 / A8b / D4 同尺）、两个新集合
  *      **不进** `COLLECTIONS` / `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS`（仍 8 键）、
- *      新 reason 字面值逐字登记、`index.js` 透传块按 op 收窄。
+ *      新 reason 字面值逐字登记、`index.js` 透传块按 op 收窄；
+ *      **＋ C7（2026-10-29 单新增）**：`lib/ops.js` 客户端初始化**单点门** ——
+ *      `tcb.init(` 的每个调用点都经同一个本地函数 `initClientFromEnv()`（全文件恰 1 处、
+ *      只在该函数体内；无裸 `tcb.init({ env: envId })`）、`secretId` / `secretKey` 显式
+ *      赋值语句在场（无密钥对 ⇒ 不带凭据 init ⇒ 云函数环境行为不变）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何密钥 / 令牌原文。
  */
@@ -573,6 +577,34 @@ section('C', '静态门：账本零取句柄字面 / 两集合不进任何云读
   check('C6', '文档键派生：流水 _id ＝ pf- + sha256(idem_key) 前 32 位；余额 _id ＝ bl- + uid（确定性 ⇒ 幂等裁决的根基）',
     { flowId: `pf-${sha('k1').slice(0, 32)}`, flowLen: 35, balanceId: 'bl-u-0123456789abcdef' },
     { flowId: ledger.flowIdOf('k1'), flowLen: ledger.flowIdOf('k1').length, balanceId: ledger.balanceIdOf('u-0123456789abcdef') })
+  /* 【2026-10-29 单 · Vercel 凭据显式传入】客户端初始化**单点门**（新增，只增不减）：
+     `lib/ops.js` 内 `tcb.init(` 的**每个**调用点都经同一个本地初始化函数
+     `initClientFromEnv()` —— 全文件 `tcb.init(` 恰 1 处、且该处就在 `initClientFromEnv()`
+     函数体内；**不允许**再出现裸 `tcb.init({ env: envId })` 形态（四处消费点：会话探针
+     通道 `.auth()` ＋ `const app = initClientFromEnv()` 恰 3 处〔存储回读 / 存储上传 /
+     取 DB〕）；envId 名解析（`process.env.TCB_ENV ||`）第二套计数 0（一律走
+     `config.readEnvId`）；`@cloudbase/node-sdk` 的 require 落点恰 1 处（内聚于该函数）；
+     `secretId` / `secretKey` **显式赋值语句**两条在场（有密钥对才显式传入 ⇒ 两族都缺时
+     不带凭据 init、云函数环境行为不变）。 */
+  const opsInitSource = readFileSync(path.join(FN_DIR, 'lib/ops.js'), 'utf8')
+  const initFnStart = opsInitSource.indexOf('function initClientFromEnv(')
+  const initFnEnd = initFnStart >= 0 ? opsInitSource.indexOf('\n}', initFnStart) : -1
+  const initFnBody = initFnEnd > initFnStart ? opsInitSource.slice(initFnStart, initFnEnd) : ''
+  const countIn = (text, needle) => text.split(needle).length - 1
+  check('C7', '客户端初始化单点（2026-10-29）：ops.js 内 `tcb.init(` 恰 1 处且只在 `initClientFromEnv()` 函数体内；四处消费点全经它（探针 `.auth()` 1 ＋ `const app = initClientFromEnv()` 3）；无裸 `tcb.init({ env: … })`、无第二套 envId 名解析、SDK require 落点恰 1；`init.secretId = pair.secretId` / `init.secretKey = pair.secretKey` 显式赋值在场',
+    { tcbInitCallSites: 1, tcbInitInsideInitFn: 1, initFnDefs: 1, channelCallSites: 1, appCallSites: 3, bareEnvInit: 0, secondNameResolution: 0, sdkRequireSites: 1, secretAssignments: 2, envKeyWhenNoEnvId: 1 },
+    {
+      tcbInitCallSites: countIn(opsInitSource, 'tcb.init('),
+      tcbInitInsideInitFn: countIn(initFnBody, 'tcb.init('),
+      initFnDefs: countIn(opsInitSource, 'function initClientFromEnv('),
+      channelCallSites: countIn(opsInitSource, 'initClientFromEnv().auth()'),
+      appCallSites: countIn(opsInitSource, 'const app = initClientFromEnv()'),
+      bareEnvInit: countIn(opsInitSource, 'tcb.init({ env'),
+      secondNameResolution: countIn(opsInitSource, 'process.env.TCB_ENV ||'),
+      sdkRequireSites: countIn(opsInitSource, "require('@cloudbase/node-sdk')"),
+      secretAssignments: countIn(opsInitSource, 'init.secretId = pair.secretId') + countIn(opsInitSource, 'init.secretKey = pair.secretKey'),
+      envKeyWhenNoEnvId: countIn(opsInitSource, 'const init = envId ? { env: envId } : {}')
+    })
 }
 
 /* ===========================================================================

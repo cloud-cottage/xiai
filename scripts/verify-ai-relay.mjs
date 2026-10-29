@@ -928,10 +928,15 @@ check('S2', '只給 `TENCENTCLOUD_SECRETID/KEY` ⇒ 回退成功；兩族都缺 
 /* S3：③ 兩族混給（甲族 id ＋ 乙族 key，兩方向）⇒ **不得拼成一對**（均回空對）；
    另以靜態門釘住「唯一解析點＋成對守衛」：`source.*SECRETKEY` 直讀各恰 1 處（只在
    `secretPairOf` 內）、`secretPairOf(source)` 調用恰 2 處（兩個默認實現）、成對守衛
-   `if (pair.secretId && pair.secretKey)` 恆 2 處 ⇒ 無可用對時 init 與舊版逐字一致。 */
+   `if (pair.secretId && pair.secretKey)` 恆 2 處 ⇒ 無可用對時 init 與舊版逐字一致。
+   **2026-10-29 单**：`secretPairOf` 定義點遷至 `cloudfunctions/xiai-user-token/lib/config.js`
+   （`lib/ops.js::initClientFromEnv` 共用同一解析点）—— 本判据**机制一字不动**，只把
+   「直讀 / 定義點」兩組計數改指新家（`configSource`），`core.secretPairOf` 現行引用
+   路径（重新导出）继续可用。 */
+const configSource = readFileSync(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/config.js'), 'utf8')
 const s3MixA = core.secretPairOf({ CLOUDBASE_SECRET_ID: CB_ID, TENCENTCLOUD_SECRETKEY: TC_KEY })
 const s3MixB = core.secretPairOf({ TENCENTCLOUD_SECRETID: TC_ID, CLOUDBASE_SECRET_KEY: CB_KEY })
-check('S3', '兩族混給（CLOUDBASE id ＋ TENCENT key ／ 反之）⇒ **不得拼成一對**（均回空對）＋ 兩調用點只經唯一解析點（`source.*SECRETKEY` 直讀各恰 1 處、`secretPairOf(source)` 恆 2 處、成對守衛恆 2 處 ⇒ 無對即不帶憑據 init，與舊版一致）', { mixCloudbaseIdTencentKey: { secretId: '', secretKey: '' }, mixTencentIdCloudbaseKey: { secretId: '', secretKey: '' }, callSitesViaPairOf: 2, cloudbaseKeyDirectReads: 1, tencentKeyDirectReads: 1, pairGuards: 2 }, { mixCloudbaseIdTencentKey: s3MixA, mixTencentIdCloudbaseKey: s3MixB, callSitesViaPairOf: countIn(coreSource, 'secretPairOf(source)'), cloudbaseKeyDirectReads: countIn(coreSource, 'source.CLOUDBASE_SECRET_KEY'), tencentKeyDirectReads: countIn(coreSource, 'source.TENCENTCLOUD_SECRETKEY'), pairGuards: countIn(coreSource, 'if (pair.secretId && pair.secretKey)') })
+check('S3', '兩族混給（CLOUDBASE id ＋ TENCENT key ／ 反之）⇒ **不得拼成一對**（均回空對）＋ 兩調用點只經唯一解析點（`source.*SECRETKEY` 直讀各恰 1 處〔新家 `lib/config.js`〕、`secretPairOf(source)` 恆 2 處、成對守衛恆 2 處 ⇒ 無對即不帶憑據 init，與舊版一致；定義點恰 1 處於 config、核心零重複定義）', { mixCloudbaseIdTencentKey: { secretId: '', secretKey: '' }, mixTencentIdCloudbaseKey: { secretId: '', secretKey: '' }, callSitesViaPairOf: 2, cloudbaseKeyDirectReads: 1, tencentKeyDirectReads: 1, pairGuards: 2, definedInConfig: 1, definedInCore: 0 }, { mixCloudbaseIdTencentKey: s3MixA, mixTencentIdCloudbaseKey: s3MixB, callSitesViaPairOf: countIn(coreSource, 'secretPairOf(source)'), cloudbaseKeyDirectReads: countIn(configSource, 'source.CLOUDBASE_SECRET_KEY'), tencentKeyDirectReads: countIn(configSource, 'source.TENCENTCLOUD_SECRETKEY'), pairGuards: countIn(coreSource, 'if (pair.secretId && pair.secretKey)'), definedInConfig: countIn(configSource, 'function secretPairOf('), definedInCore: countIn(coreSource, 'function secretPairOf(') })
 
 /* --------------------------------------------------------------------------- 收尾
    --------------------------------------------------------------------------- */

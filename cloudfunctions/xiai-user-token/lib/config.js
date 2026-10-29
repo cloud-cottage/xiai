@@ -14,6 +14,11 @@
  *      （若把 uid 塞进令牌由客户端在签发时自选，等于把身份交回客户端 ⇒ 本单显式不那样做）。
  *      明文：uid **不是密码学保密**（单向、可复算）—— 它的作用只是**不把手机号写进数据行 /
  *      不直接露出**；手机号只活在**服务端环境变量**与**本人本地会话**里。
+ *  **2026-10-29 单追加**：`secretPairOf`（CloudBase 凭据对的**唯一解析点**；自
+ *  `api/_lib/aiRelay.js` 迁入本文件并导出 —— `lib/ops.js::initClientFromEnv` 与
+ *  `aiRelay.js` 两个默认实现共用它）。只登记**环境变量名**（`CLOUDBASE_SECRET_ID` ＋
+ *  `CLOUDBASE_SECRET_KEY`，回退 `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`，
+ *  成对不混用），**本文件不写任何密钥值**（口径 ① 照旧）。
  */
 
 const crypto = require('crypto')
@@ -159,6 +164,36 @@ function readEnvId(env) {
   return ''
 }
 
+/** 空值归一（与 `api/_lib/aiRelay.js` 的 `text` 逐字同语义；`secretPairOf` 的取值助手）。 */
+function text(value) {
+  return String(value === undefined || value === null ? '' : value).trim()
+}
+
+/**
+ * **CloudBase 凭据对解析**（唯一定义点；纯函数、零 I/O、不碰网络）。
+ * **2026-10-29 单**：自 `api/_lib/aiRelay.js` **迁入本文件**并导出 —— 原因：`lib/ops.js`
+ * 的 `initClientFromEnv()`（Vercel 无平台角色凭据 ⇒ 有密钥对时显式传入 `tcb.init`）
+ * 也要用**同一个**解析点 ⇒ 单一定义点、不许两处各写一份；`aiRelay.js` 改为从本文件
+ * 引入并**重新导出**（`scripts/verify-ai-relay.mjs` 的 S1〜S3 现行引用路径继续可用）。
+ * 优先序（**成对不混用**：甲族 id ＋ 乙族 key **不得拼成一对**）：
+ *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
+ *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）
+ * 两族都缺（或只有单族一半 / 两族各一半的混给）⇒ 回空对 ⇒ 调用方仍按旧行为
+ * 「不带 `secretId` / `secretKey` 地 `init`」（不报错、不抛）。
+ * @param {object} env 环境（缺省 `process.env`）
+ * @returns {{secretId:string, secretKey:string}}
+ */
+function secretPairOf(env) {
+  const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
+  const id = text(source.CLOUDBASE_SECRET_ID)
+  const key = text(source.CLOUDBASE_SECRET_KEY)
+  if (id && key) return { secretId: id, secretKey: key }
+  const fallbackId = text(source.TENCENTCLOUD_SECRETID)
+  const fallbackKey = text(source.TENCENTCLOUD_SECRETKEY)
+  if (fallbackId && fallbackKey) return { secretId: fallbackId, secretKey: fallbackKey }
+  return { secretId: '', secretKey: '' }
+}
+
 /** 不可逆诊断指纹（sha256 前 12 位十六进制）；**绝不用于任何判定**。 */
 function fingerprint(value) {
   return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex').slice(0, 12)
@@ -223,6 +258,7 @@ module.exports = {
   isPhoneLike,
   uidOf,
   readEnvId,
+  secretPairOf,
   fingerprint,
   maskedPhone,
   readConfig

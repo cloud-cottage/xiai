@@ -9,7 +9,8 @@
  * 本文件**不改** `cloudfunctions/**` 的任何既有方法语义与行形状（本单未改 cloudfunctions 一字）。
  *
  * CloudBase 凭据环境变量（**成对不混用**；唯一解析点 `secretPairOf`，两个默认实现
- * `defaultResolveImageUrl` / `defaultUploadImage` 一律走它、不各自直读 env）：
+ * `defaultResolveImageUrl` / `defaultUploadImage` 一律走它、不各自直读 env；定义点
+ * **2026-10-29 起**在 `cloudfunctions/xiai-user-token/lib/config.js`，本文件重新导出）：
  *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
  *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）
  *   ·两族名**必须成对命中**（甲族 id ＋ 乙族 key **不得拼成一对** ⇒ 混给回空对）；
@@ -442,29 +443,16 @@ export function imageOf(parsed) {
   return null
 }
 
-/* --------------------------------------------------------------------------- CloudBase 凭据对（唯一解析点）
+/* --------------------------------------------------------------------------- CloudBase 凭据对（唯一解析点 → `lib/config.js`）
    --------------------------------------------------------------------------- */
 
-/**
- * **CloudBase 凭据对解析**（唯一定义点；纯函数、零 I/O、不碰网络）。
- * 优先序（**成对不混用**：甲族 id ＋ 乙族 key **不得拼成一对**）：
- *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
- *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）
- * 两族都缺（或只有单族一半 / 两族各一半的混给）⇒ 回空对 ⇒ 调用方仍按旧行为
- * 「不带 `secretId` / `secretKey` 地 `init`」（不报错、不抛）。
- * @param {object} env 环境（缺省 `process.env`）
- * @returns {{secretId:string, secretKey:string}}
- */
-export function secretPairOf(env) {
-  const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
-  const id = text(source.CLOUDBASE_SECRET_ID)
-  const key = text(source.CLOUDBASE_SECRET_KEY)
-  if (id && key) return { secretId: id, secretKey: key }
-  const fallbackId = text(source.TENCENTCLOUD_SECRETID)
-  const fallbackKey = text(source.TENCENTCLOUD_SECRETKEY)
-  if (fallbackId && fallbackKey) return { secretId: fallbackId, secretKey: fallbackKey }
-  return { secretId: '', secretKey: '' }
-}
+/* **唯一定义点已迁至** `cloudfunctions/xiai-user-token/lib/config.js::secretPairOf`
+   （2026-10-29 单：`lib/ops.js::initClientFromEnv()` 也要用**同一个**解析点 ⇒ 不许
+   两处各写一份）；本文件从 config **引入并重新导出** ⇒ `scripts/verify-ai-relay.mjs`
+   现行引用路径（`core.secretPairOf`）继续可用，语义一字不变（S1〜S3 逐条照旧：
+   ① CLOUDBASE 优先 ② TENCENTCLOUD 回退 ③ 两族混给不得拼成一对、都缺回空对）。 */
+const { secretPairOf } = userConfig
+export { secretPairOf }
 
 /* --------------------------------------------------------------------------- 参考图签名链（默认实现）
    --------------------------------------------------------------------------- */
