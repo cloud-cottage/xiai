@@ -11,14 +11,18 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **66** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 断言面（本套 **72** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
  * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
  * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕
  * ＋ 形狀診斷面 4〔T1〜T4：上游 2xx 無圖 ⇒ message 只帶**鍵名輪廓**（`shapeOutlineOf` 零值泄露、
  * 鍵集不變）、正常回包透傳不破〕
  * ＋ 非 2xx 錯誤體摘要面 4〔U1〜U4：上游非 2xx 且拿到響應體 ⇒ message 末尾附**錯誤體摘要**
  * （`upstreamErrorDigestOf`：可讀 message / code / type、長隨機串/base64 一律 `<redacted>`、
- * 截 120 字、零敏感）；非 JSON（純文本）⇒ 不附、文案逐字不變；超時/網絡錯 ⇒ 文案逐字不變〕，
+ * 截 120 字、零敏感）；非 JSON（純文本）⇒ 不附、文案逐字不變；超時/網絡錯 ⇒ 文案逐字不變〕
+ * ＋ **參數如實透傳面 6〔P1〜P6（2026-10-30 單）：`size` / `resolution` 有給就逐字送上游、
+ * 不給就不帶、不替調用方補缺省值；成功回包 `upstream_request.sent_keys` **逐字等於**
+ * 實際上游體鍵集（只回鍵名、零值）；`resolution` 1〜16 字非空字符串的值域門（17 字 /
+ * 非字符串 ⇒ 400 ＋ 零扣費）〕**，
  * 覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
@@ -29,7 +33,8 @@
  *      ⑥ 分钟限满 ⇒ 429 `LIMIT_MINUTE` ＋ 零写入；⑦ 余额不足 ⇒ 402 ＋ **零写入**。
  *   D. 上游失败与退款：⑧ 上游 5xx ⇒ 502 ＋ **退款流水存在且余额复原**；⑨ 超时 ⇒ 502
  *      （`status:0`）同理退款；另加缺配置 ⇒ 503、200 缺图片字段 ⇒ 502。
- *   E. 成功与幂等：⑩ 200 ＋ 扣 10 金 ＋ usage 日 / 分钟各 +1 ＋ 回包**恰 5 键**；
+ *   E. 成功与幂等：⑩ 200 ＋ 扣 10 金 ＋ usage 日 / 分钟各 +1 ＋ 回包**恰 6 键**
+ *      （**v-next：新增 `upstream_request.sent_keys`**）；
  *      ⑪ 同 `X-Request-Id` 重放 ⇒ **余额只扣一次**（流水行数不增）＋ `idempotent:true`
  *      ＋ **上游被重新调用**；⑫ 回包 / 响应头 / 日志**零上游 key 字面**（逐字搜索 count=0）；
  *      ⑬ 400 / 401 / 429 三类错误回包键集**恰 3**；⑭ 上游请求体的 `image` 是**签名链**
@@ -38,7 +43,7 @@
  *      `functions.maxDuration=60` 且既有段一字未动、路由默认导出是函数、本套为第 28 个脚本（基线 26 ＋ 本套 ai-relay ＋ ai-connect-page）、
  *      核心源码零 `data:image` 字面 / 零字节下载面。
  *   G. **data_url 转存面（v1.74 AC-601〜603）**：① `data_url` 成功（上傳恰 1 次、
- *      上游拿到的 `image` 是簽名鏈、回包恰 5 鍵、上傳字節＝解碼字節、鍵＝內容尋址族）；
+ *      上游拿到的 `image` 是簽名鏈、回包恰 6 鍵、上傳字節＝解碼字節、鍵＝內容尋址族）；
  *      ② `storage_key` ＋ `data_url` 同給 ⇒ 400 ＋ **零扣費**；③ 前綴非法
  *      （`data:text/plain`）／mime 出封閉面（`image/jpg`）⇒ 400；④ 解碼後 > 2 MiB
  *      （恰 2 MiB＋1 合成圖）⇒ 400 ＋ 零扣費，恰 2 MiB ⇒ 放行；⑤ 魔數與 mime 不一致
@@ -650,7 +655,7 @@ check('T3', '③ 零泄露：兩份診斷回包（錯誤體 ＋ 響應頭序列�
 upstreamMode = 'shape-ok'
 const T4 = await call({ key: issued.shape.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-T04-0001' })
 upstreamMode = 'url'
-check('T4', '④ 正常 `{data:[{url}]}` 回包 ⇒ 仍 200 且 `image.url` 逐字透傳（成功面恰 5 鍵、診斷面零侵擾）', { status: 200, keys: 'charge,idempotent,image,ok,usage', url: 'https://x/y.png', ok: true }, { status: T4.status, keys: shapeOf(T4.body), url: T4.body && T4.body.image && T4.body.image.url, ok: T4.body && T4.body.ok })
+check('T4', '④ 正常 `{data:[{url}]}` 回包 ⇒ 仍 200 且 `image.url` 逐字透傳（成功面恰 6 鍵 **v-next：新增 upstream_request.sent_keys**、診斷面零侵擾）', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', url: 'https://x/y.png', ok: true }, { status: T4.status, keys: shapeOf(T4.body), url: T4.body && T4.body.image && T4.body.image.url, ok: T4.body && T4.body.ok })
 
 /* ===========================================================================
   U 段：上游**非 2xx 錯誤體摘要**（派單方診斷單 · `upstreamErrorDigestOf` 純函數、
@@ -697,17 +702,17 @@ check('U4', '④ 上游超時（fetch catch 分支；網絡錯同支）⇒ 502�
 /* ===========================================================================
    E 段：成功 / 幂等 / 回包形状 / 零泄露 / 图片不 base64 直塞
    =========================================================================== */
-section('E', '成功回包恰 5 键 / 扣 10 金 / usage 各 +1 / 幂等只扣一次 / 零 key 字面 / 签名链')
+section('E', '成功回包恰 6 键（v-next：新增 upstream_request.sent_keys） / 扣 10 金 / usage 各 +1 / 幂等只扣一次 / 零 key 字面 / 签名链')
 
 /* E1：url 形成功。 */
 const E1 = await call({ body: { prompt: '刻一枚白文閒章' }, requestId: 'rid-E01-0001' })
-check('E1', '⑩ 成功 ⇒ 200 ＋ 回包**恰 5 键** ＋ charge.points=10 ＋ 余额 50→40 ＋ usage 日 / 分钟各 +1 ＋ 图 url 逐字透传', { status: 200, keys: 'charge,idempotent,image,ok,usage', points: 10, balanceAfter: 40, todayUsed: 1, minuteUsed: 1, url: IMG_URL, idempotent: false, ok: true }, { status: E1.status, keys: shapeOf(E1.body), points: E1.body && E1.body.charge && E1.body.charge.points, balanceAfter: E1.body && E1.body.charge && E1.body.charge.balance_after, todayUsed: E1.body && E1.body.usage && E1.body.usage.today && E1.body.usage.today.used, minuteUsed: E1.body && E1.body.usage && E1.body.usage.minute && E1.body.usage.minute.used, url: E1.body && E1.body.image && E1.body.image.url, idempotent: E1.body && E1.body.idempotent, ok: E1.body && E1.body.ok })
+check('E1', '⑩ 成功 ⇒ 200 ＋ 回包**恰 6 键**（**v-next：新增 upstream_request.sent_keys**） ＋ charge.points=10 ＋ 余额 50→40 ＋ usage 日 / 分钟各 +1 ＋ 图 url 逐字透传', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', points: 10, balanceAfter: 40, todayUsed: 1, minuteUsed: 1, url: IMG_URL, idempotent: false, ok: true }, { status: E1.status, keys: shapeOf(E1.body), points: E1.body && E1.body.charge && E1.body.charge.points, balanceAfter: E1.body && E1.body.charge && E1.body.charge.balance_after, todayUsed: E1.body && E1.body.usage && E1.body.usage.today && E1.body.usage.today.used, minuteUsed: E1.body && E1.body.usage && E1.body.usage.minute && E1.body.usage.minute.used, url: E1.body && E1.body.image && E1.body.image.url, idempotent: E1.body && E1.body.idempotent, ok: E1.body && E1.body.ok })
 
 /* E2：b64 形成功（**不重编码**）。 */
 upstreamMode = 'b64'
 const E2 = await call({ body: { prompt: '刻一枚朱文閒章' }, requestId: 'rid-E02-0001' })
 upstreamMode = 'url'
-check('E2', '上游回 b64 ⇒ 回包 `image.b64` **逐字等于**上游值（不自己再编码一次）＋ 恰 5 键 ＋ 余额 40→30 ＋ usage 日 +1', { status: 200, keys: 'charge,idempotent,image,ok,usage', b64: UPSTREAM_B64, b64CountInRaw: 1, balanceAfter: 30, todayUsed: 2, mime: 'image/png' }, { status: E2.status, keys: shapeOf(E2.body), b64: E2.body && E2.body.image && E2.body.image.b64, b64CountInRaw: countIn(E2.raw, UPSTREAM_B64), balanceAfter: E2.body && E2.body.charge && E2.body.charge.balance_after, todayUsed: E2.body && E2.body.usage && E2.body.usage.today && E2.body.usage.today.used, mime: E2.body && E2.body.image && E2.body.image.mime })
+check('E2', '上游回 b64 ⇒ 回包 `image.b64` **逐字等于**上游值（不自己再编码一次）＋ 恰 6 键（**v-next：新增 upstream_request.sent_keys**） ＋ 余额 40→30 ＋ usage 日 +1', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', b64: UPSTREAM_B64, b64CountInRaw: 1, balanceAfter: 30, todayUsed: 2, mime: 'image/png' }, { status: E2.status, keys: shapeOf(E2.body), b64: E2.body && E2.body.image && E2.body.image.b64, b64CountInRaw: countIn(E2.raw, UPSTREAM_B64), balanceAfter: E2.body && E2.body.charge && E2.body.charge.balance_after, todayUsed: E2.body && E2.body.usage && E2.body.usage.today && E2.body.usage.today.used, mime: E2.body && E2.body.image && E2.body.image.mime })
 
 /* E3：同 X-Request-Id 重放。 */
 const E3_RID = 'rid-E03-0001'
@@ -718,7 +723,7 @@ const flowAfterFirst = flowSnapshot()
 const hitsAfterFirst = upstreamHits.length
 const E3b = await call({ body: { prompt: '刻一枚長方印' }, requestId: E3_RID })
 const e3Charge = flowRows().filter((r) => r.kind === 'CHARGE' && String(r.ref_id).includes(E3_RID))
-check('E3', '⑪ 同 X-Request-Id 重放 ⇒ **余额只扣一次**（流水行数不增、CHARGE 恰 1 行）＋ idempotent:true ＋ **上游被重新调用** ＋ idem_key=sha256(key_id:rid)', { firstStatus: 200, firstBalance: 20, replayStatus: 200, replayBalance: 20, replayIdempotent: true, flowDeltaFirst: 1, flowDeltaReplay: 0, chargeRows: 1, upstreamCalls: [1, 1], idemKeyOk: true, todayUsed: 4 }, { firstStatus: E3a.status, firstBalance: E3a.body && E3a.body.charge && E3a.body.charge.balance_after, replayStatus: E3b.status, replayBalance: E3b.body && E3b.body.charge && E3b.body.charge.balance_after, replayIdempotent: E3b.body && E3b.body.idempotent, flowDeltaFirst: flowAfterFirst - flowBeforeE3, flowDeltaReplay: flowSnapshot() - flowAfterFirst, chargeRows: e3Charge.length, upstreamCalls: [hitsAfterFirst - hitsBeforeE3, upstreamHits.length - hitsAfterFirst], idemKeyOk: Boolean(e3Charge[0] && e3Charge[0].idem_key === sha256(`${issued.ok.key_id}:${E3_RID}`)), todayUsed: E3b.body && E3b.body.usage && E3b.body.usage.today && E3b.body.usage.today.used })
+check('E3', '⑪ 同 X-Request-Id 重放 ⇒ **余额只扣一次**（流水行数不增、CHARGE 恰 1 行）＋ idempotent:true ＋ **上游被重新调用** ＋ idem_key=sha256(key_id:rid)；重放回包亦**恰 6 键**（**v-next：新增 upstream_request.sent_keys**）', { firstStatus: 200, firstBalance: 20, replayStatus: 200, replayBalance: 20, replayIdempotent: true, replayKeys: 'charge,idempotent,image,ok,upstream_request,usage', flowDeltaFirst: 1, flowDeltaReplay: 0, chargeRows: 1, upstreamCalls: [1, 1], idemKeyOk: true, todayUsed: 4 }, { firstStatus: E3a.status, firstBalance: E3a.body && E3a.body.charge && E3a.body.charge.balance_after, replayStatus: E3b.status, replayBalance: E3b.body && E3b.body.charge && E3b.body.charge.balance_after, replayIdempotent: E3b.body && E3b.body.idempotent, replayKeys: shapeOf(E3b.body), flowDeltaFirst: flowAfterFirst - flowBeforeE3, flowDeltaReplay: flowSnapshot() - flowAfterFirst, chargeRows: e3Charge.length, upstreamCalls: [hitsAfterFirst - hitsBeforeE3, upstreamHits.length - hitsAfterFirst], idemKeyOk: Boolean(e3Charge[0] && e3Charge[0].idem_key === sha256(`${issued.ok.key_id}:${E3_RID}`)), todayUsed: E3b.body && E3b.body.usage && E3b.body.usage.today && E3b.body.usage.today.used })
 
 /* E4：回包 ＋ 响应头 ＋ 日志零上游 key 字面（成功与失败各一发）。 */
 const e3RawAll = E3b.raw + JSON.stringify(E3b.headers)
@@ -779,7 +784,7 @@ const pngDigest = sha256Bytes(pngBytes)
 const pngCloudPath = `xiai/images/${pngDigest.slice(0, 2)}/${pngDigest}.png`
 const pngFileID = `${FAKE_ENV_ID}/${pngCloudPath}`
 
-/* G1：① `data_url` 成功（上傳恰 1 次、上游拿簽名鏈、回包恰 5 鍵）。 */
+/* G1：① `data_url` 成功（上傳恰 1 次、上游拿簽名鏈、回包恰 6 鍵）。 */
 upstreamMode = 'url'
 const g1UploadsBefore = uploadCalls.length
 const g1HitsBefore = upstreamHits.length
@@ -787,7 +792,7 @@ const g1ResolvesBefore = injectedResolveImageUrlCalls.length
 const G1 = await call({ routePath: EDITS, key: DU_KEY, body: { prompt: '參考圖走 data_url 轉存', image: { data_url: pngDataUrl } }, requestId: 'rid-G01-0001' })
 const g1Upload = uploadCalls[uploadCalls.length - 1]
 const g1Hit = upstreamHits[upstreamHits.length - 1]
-check('G1', '① `data_url` 成功 ⇒ 200 ＋ **上傳恰 1 次**（字節＝解碼字節、魔數＝PNG、鍵＝內容尋址族）＋ 上游 `image` 是**簽名鏈**（fileID 經 resolve 換鏈、非 `data:`、零 base64 字節）＋ 回包**恰 5 鍵** ＋ 扣 10 金', { status: 200, keys: 'charge,idempotent,image,ok,usage', uploads: 1, uploadedBytes: pngBytes.length, uploadedHead: PNG_MAGIC_HEX, cloudPathExact: true, family: 'xiai/images/', upstreamCalls: 1, upstreamImageExact: true, upstreamImageIsData: false, upstreamRawDataPrefix: 0, upstreamRawB64: 0, resolveGotFileID: true, points: 10, balanceAfter: 90 }, { status: G1.status, keys: shapeOf(G1.body), uploads: uploadCalls.length - g1UploadsBefore, uploadedBytes: g1Upload && g1Upload.bytes, uploadedHead: g1Upload && g1Upload.head, cloudPathExact: Boolean(g1Upload && g1Upload.cloudPath === pngCloudPath), family: String(g1Upload && g1Upload.cloudPath).slice(0, core.IMAGE_KEY_FAMILY.length), upstreamCalls: upstreamHits.length - g1HitsBefore, upstreamImageExact: g1Hit.body.image === `${SIGNED_BASE}/${encodeURIComponent(pngFileID)}?sig=offline`, upstreamImageIsData: String(g1Hit.body.image).slice(0, 5) === 'data:', upstreamRawDataPrefix: countIn(g1Hit.raw, 'data:' + 'image/'), upstreamRawB64: countIn(g1Hit.raw, PNG_1PX_B64), resolveGotFileID: injectedResolveImageUrlCalls[g1ResolvesBefore] === pngFileID, points: G1.body && G1.body.charge && G1.body.charge.points, balanceAfter: duBalance() })
+check('G1', '① `data_url` 成功 ⇒ 200 ＋ **上傳恰 1 次**（字節＝解碼字節、魔數＝PNG、鍵＝內容尋址族）＋ 上游 `image` 是**簽名鏈**（fileID 經 resolve 換鏈、非 `data:`、零 base64 字節）＋ 回包**恰 6 鍵**（**v-next：新增 upstream_request.sent_keys**） ＋ 扣 10 金', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', uploads: 1, uploadedBytes: pngBytes.length, uploadedHead: PNG_MAGIC_HEX, cloudPathExact: true, family: 'xiai/images/', upstreamCalls: 1, upstreamImageExact: true, upstreamImageIsData: false, upstreamRawDataPrefix: 0, upstreamRawB64: 0, resolveGotFileID: true, points: 10, balanceAfter: 90 }, { status: G1.status, keys: shapeOf(G1.body), uploads: uploadCalls.length - g1UploadsBefore, uploadedBytes: g1Upload && g1Upload.bytes, uploadedHead: g1Upload && g1Upload.head, cloudPathExact: Boolean(g1Upload && g1Upload.cloudPath === pngCloudPath), family: String(g1Upload && g1Upload.cloudPath).slice(0, core.IMAGE_KEY_FAMILY.length), upstreamCalls: upstreamHits.length - g1HitsBefore, upstreamImageExact: g1Hit.body.image === `${SIGNED_BASE}/${encodeURIComponent(pngFileID)}?sig=offline`, upstreamImageIsData: String(g1Hit.body.image).slice(0, 5) === 'data:', upstreamRawDataPrefix: countIn(g1Hit.raw, 'data:' + 'image/'), upstreamRawB64: countIn(g1Hit.raw, PNG_1PX_B64), resolveGotFileID: injectedResolveImageUrlCalls[g1ResolvesBefore] === pngFileID, points: G1.body && G1.body.charge && G1.body.charge.points, balanceAfter: duBalance() })
 
 /* G2：② 两者同給 ⇒ 400 ＋ 零扣費（writes / flow / upload 三零）。 */
 const g2Writes = writeSnapshot()
@@ -864,6 +869,69 @@ const g6RawAll = allRaws.join('\n')
 const g6LogAll = logs.join('\n')
 const g6UpstreamAll = upstreamHits.map((hit) => hit.raw).join('\n')
 check('G6', '⑥ **全部回包**（含成功 / 400 / 502 / 503 共用本会话全部回包）与**全部日志**逐字搜索 `data:image/` **count=0**；上游请求体同为 0（原始字节与 data_url 一律不外流）', { responses: 0, logs: 0, upstream: 0, pngB64InLogs: 0 }, { responses: countIn(g6RawAll, 'data:' + 'image/'), logs: countIn(g6LogAll, 'data:' + 'image/'), upstream: countIn(g6UpstreamAll, 'data:' + 'image/'), pngB64InLogs: countIn(g6LogAll, PNG_1PX_B64) })
+
+/* ===========================================================================
+  P 段：**參數如實透傳**（2026-10-30 單：`size` / `resolution` 逐字送上游
+  ＋ 成功回包回顯實際上游體的**鍵名清單** `upstream_request.sent_keys`）
+  ——①只給 size ②只給 resolution ③兩者都給 ④兩者都不給 ⑤回顯鍵集逐字等於實際上游體
+  ⑥ resolution 值域門（17 字 / 非字符串 ⇒ 400 ＋ 零扣費）
+  =========================================================================== */
+section('P', '參數如實透傳：size / resolution 逐字送上游（有給就帶、不給就不帶）＋ 回包 upstream_request.sent_keys 逐字等於實際上游體鍵集 ＋ resolution 值域門零扣費')
+
+/* 專用金鑰與餘額（**不佔用 u-ok / u-du / u-m-idem 的軌跡** ⇒ 既有斷言不受影響）。 */
+issued.pass = await aiKeys.issueAiKey({ uid: 'u-pass', label: '自检-参数透传', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-pass', { _id: 'bl-u-pass', uid: 'u-pass', points: 200, updated_at: 'seed' })
+if (!issued.pass || issued.pass.ok !== true) {
+  console.log(JSON.stringify({ fatal: 'ISSUE_KEY_PASS_FAILED' }))
+  process.exit(1)
+}
+const P_KEY = issued.pass.key
+const pBalance = () => balanceOf('u-pass')
+const hasKey = (obj, key) => Boolean(obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key))
+
+/* P1：① 只給 `size` ⇒ 上游體**含** `size`（逐字）且**不含** `resolution`。 */
+upstreamMode = 'url'
+const p1HitsBefore = upstreamHits.length
+const P1 = await call({ key: P_KEY, body: { prompt: 'P1 只給 size', size: '1024x1024' }, requestId: 'rid-P01-0001' })
+const p1Hit = upstreamHits[upstreamHits.length - 1]
+check('P1', '① 只給 `size` ⇒ 200 ＋ 上游體**含** `size`（值逐字透傳、不轉換）且**不含** `resolution`（不替調用方補、不猜）', { status: 200, upstreamCalls: 1, hasSize: true, sizeExact: true, hasResolution: false, sentKeys: ['prompt', 'model', 'n', 'size'] }, { status: P1.status, upstreamCalls: upstreamHits.length - p1HitsBefore, hasSize: hasKey(p1Hit.body, 'size'), sizeExact: p1Hit.body && p1Hit.body.size === '1024x1024', hasResolution: hasKey(p1Hit.body, 'resolution'), sentKeys: P1.body && P1.body.upstream_request && P1.body.upstream_request.sent_keys })
+
+/* P2：② 只給 `resolution` ⇒ 反之（含 resolution、不含 size）。 */
+const p2HitsBefore = upstreamHits.length
+const P2 = await call({ key: P_KEY, body: { prompt: 'P2 只給 resolution', resolution: '1K' }, requestId: 'rid-P02-0001' })
+const p2Hit = upstreamHits[upstreamHits.length - 1]
+check('P2', '② 只給 `resolution` ⇒ 200 ＋ 上游體**含** `resolution`（值逐字透傳、不轉換成 `size`）且**不含** `size`', { status: 200, upstreamCalls: 1, hasResolution: true, resolutionExact: true, hasSize: false, sentKeys: ['prompt', 'model', 'n', 'resolution'] }, { status: P2.status, upstreamCalls: upstreamHits.length - p2HitsBefore, hasResolution: hasKey(p2Hit.body, 'resolution'), resolutionExact: p2Hit.body && p2Hit.body.resolution === '1K', hasSize: hasKey(p2Hit.body, 'size'), sentKeys: P2.body && P2.body.upstream_request && P2.body.upstream_request.sent_keys })
+
+/* P3：③ 兩者都給 ⇒ 兩者都在上游體（各自逐字）。 */
+const P3 = await call({ key: P_KEY, body: { prompt: 'P3 兩者都給', size: '1:1', resolution: '2K' }, requestId: 'rid-P03-0001' })
+const p3Hit = upstreamHits[upstreamHits.length - 1]
+check('P3', '③ `size` ＋ `resolution` 都給 ⇒ 200 ＋ 上游體**兩者都在**（各自逐字透傳；`1:1` / `2K` 這種上游自家形態亦不被改寫）', { status: 200, hasSize: true, hasResolution: true, sizeExact: true, resolutionExact: true, hasImage: false }, { status: P3.status, hasSize: hasKey(p3Hit.body, 'size'), hasResolution: hasKey(p3Hit.body, 'resolution'), sizeExact: p3Hit.body && p3Hit.body.size === '1:1', resolutionExact: p3Hit.body && p3Hit.body.resolution === '2K', hasImage: hasKey(p3Hit.body, 'image') })
+
+/* P4：④ 兩者都不給 ⇒ 上游體**兩者都不在**（不替調用方補缺省值）。 */
+const P4 = await call({ key: P_KEY, body: { prompt: 'P4 兩者都不給' }, requestId: 'rid-P04-0001' })
+const p4Hit = upstreamHits[upstreamHits.length - 1]
+check('P4', '④ 兩者都不給 ⇒ 200 ＋ 上游體**兩者都不在**（恆帶 prompt / model / n:1；不替調用方補缺省值）', { status: 200, hasSize: false, hasResolution: false, hasPrompt: true, hasModel: true, n: 1, keys: 'model,n,prompt' }, { status: P4.status, hasSize: hasKey(p4Hit.body, 'size'), hasResolution: hasKey(p4Hit.body, 'resolution'), hasPrompt: hasKey(p4Hit.body, 'prompt'), hasModel: hasKey(p4Hit.body, 'model'), n: p4Hit.body && p4Hit.body.n, keys: p4Hit.body ? Object.keys(p4Hit.body).sort().join(',') : null })
+
+/* P5：⑤ 成功回包 `upstream_request.sent_keys` **逐字等於**實際上游體的鍵集（P3 那發：
+   `prompt` / `model` / `n` / `size` / `resolution` 恰 5 鍵；**只回鍵名、零值**）。 */
+const p3SentKeys = P3.body && P3.body.upstream_request && P3.body.upstream_request.sent_keys
+check('P5', '⑤ 成功回包 `upstream_request.sent_keys` **逐字等於實際上游體的鍵集**（P3 發：prompt/model/n/size/resolution 恰 5 鍵、順序亦同）＋ 回包鍵面恰 6 鍵（v-next：新增 upstream_request.sent_keys）＋ 回包內零 `1:1` / `2K` 值', { sentKeysExact: true, upstreamKeys: 'model,n,prompt,resolution,size', sentKeys: ['prompt', 'model', 'n', 'size', 'resolution'], replyKeys: 'charge,idempotent,image,ok,upstream_request,usage', valueLeaks: 0 }, { sentKeysExact: JSON.stringify(p3SentKeys) === JSON.stringify(Object.keys(p3Hit.body)), upstreamKeys: Object.keys(p3Hit.body).sort().join(','), sentKeys: p3SentKeys, replyKeys: shapeOf(P3.body), valueLeaks: countIn(P3.raw, '1:1') + countIn(P3.raw, '"2K"') })
+
+/* P6：⑥ `resolution` 值域門：17 字 / 非字符串 ⇒ 400 `INVALID_ARGUMENT` ＋ **零扣費**
+   （寫計數 / 流水行 / 上游呼叫 / 餘額四面嚴格不變）；恰 16 字 ⇒ 放行（界 1〜16）。 */
+const p6Writes = writeSnapshot()
+const p6Flow = flowSnapshot()
+const p6Hits = upstreamHits.length
+const p6Balance = pBalance()
+const P6a = await call({ key: P_KEY, body: { prompt: 'P6a 超 16 字', resolution: 'a'.repeat(17) }, requestId: 'rid-P06-0001' })
+const P6b = await call({ key: P_KEY, body: { prompt: 'P6b 非字符串', resolution: 1 }, requestId: 'rid-P06-0002' })
+const p6RejectWrites = writeSnapshot() - p6Writes
+const p6RejectFlow = flowSnapshot() - p6Flow
+const p6RejectUpstream = upstreamHits.length - p6Hits
+const p6RejectBalance = pBalance() - p6Balance
+const P6c = await call({ key: P_KEY, body: { prompt: 'P6c 恰 16 字', resolution: 'b'.repeat(16) }, requestId: 'rid-P06-0003' })
+const p6cHit = upstreamHits[upstreamHits.length - 1]
+check('P6', '⑥ `resolution` 17 字 / 非字符串 ⇒ 均 400 `INVALID_ARGUMENT` ＋ **零扣費**（寫計數、流水行、上游呼叫、餘額四面嚴格不變）；恰 16 字 ⇒ 放行（界是 1〜16）且逐字送上游', { over17: [400, 'INVALID_ARGUMENT'], nonString: [400, 'INVALID_ARGUMENT'], writes: 0, flow: 0, upstreamCalls: 0, balanceDelta: 0, exact16: 200, exact16ResolutionExact: true }, { over17: [P6a.status, P6a.reason], nonString: [P6b.status, P6b.reason], writes: p6RejectWrites, flow: p6RejectFlow, upstreamCalls: p6RejectUpstream, balanceDelta: p6RejectBalance, exact16: P6c.status, exact16ResolutionExact: p6cHit.body && p6cHit.body.resolution === 'b'.repeat(16) })
 
 /* ===========================================================================
   M 段：嘗試序號冪等鍵（v1.75 §3.67.7 補登注①(b)；AC-604 / AC-605）

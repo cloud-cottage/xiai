@@ -30,7 +30,7 @@
  *      **同 rid 连败两次 ⇒ 2 CHARGE ＋ 2 REFUND、净扣 0**（H4 已按 Zang 裁定 · v1.75 / AC-605
  *      改判，旧断言「恰 1 CHARGE ＋ 1 REFUND」编码的是修复前语义、已在标题明写取代）；
  *      **败后重放转成功 ⇒ 净扣 10**；**连败两次后第三次成功 ⇒ 净扣恰 10**（H6 新增，AC-605 ③）。
- *   I 丙9 封闭面：reason 恰 8 面 9 字面、成功恰 5 键、400/401/429 恰 3 键、
+ *   I 丙9 封闭面：reason 恰 8 面 9 字面、成功恰 6 键（v-next：新增 upstream_request.sent_keys）、400/401/429 恰 3 键、
  *      `n` 各怪值、未知体键（含 image 子键）全拒。
  *   J 丙10：`X-Request-Id` 缺/7/65/纯空白 ⇒ 400 零扣费、8/64 边界放行；
  *      `idem_key` 逐字＝ `sha256(key_id:rid)`。
@@ -830,7 +830,7 @@ const RKEY = relayKey.key
   check('I', 'I2', '丙9 封闭面：8 个错误面（429 占二）实测 status 与冻结表逐条相等',
     mismatch.length === 0, { observed, mismatch })
 
-  /* 成功恰 5 键；400/401/429 恰 3 键；502 恰 4 键。 */
+  /* 成功恰 6 键（v-next：新增 upstream_request.sent_keys）；400/401/429 恰 3 键；502 恰 4 键。 */
   const ok200 = await callRelay({ key: RKEY, requestId: 'rid-i-200-0001' })
   const e400 = await callRelay({ key: RKEY, requestId: 'rid-i-400-0000', body: { prompt: 'x', foo: 1 } })
   const e401 = await callRelay({ key: null, requestId: 'rid-i-401-0000' })
@@ -841,8 +841,8 @@ const RKEY = relayKey.key
   const b429 = aiUsage.dayBucketOf(new Date())
   fakeDb.bucketOf('xiai_ai_usage').set(aiUsage.usageIdOf('u-qa-i-429-0001', 'DAY', b429), { _id: aiUsage.usageIdOf('u-qa-i-429-0001', 'DAY', b429), uid: 'u-qa-i-429-0001', window: 'DAY', bucket: String(b429), count: 1, updated_at: 'seed' })
   const e429 = await callRelay({ key: edgeKeyI.key, requestId: 'rid-i-429-0000' })
-  check('I', 'I3', '丙9 键面：成功回包恰 5 键；400/401/429 恰 3 键；502 恰 4 键（多 status）',
-    shapeOf(ok200.body) === 'charge,idempotent,image,ok,usage'
+  check('I', 'I3', '丙9 键面：成功回包恰 6 键（**v-next：新增 upstream_request.sent_keys**）；400/401/429 恰 3 键；502 恰 4 键（多 status）',
+    shapeOf(ok200.body) === 'charge,idempotent,image,ok,upstream_request,usage'
       && shapeOf(e400.body) === 'message,ok,reason' && shapeOf(e401.body) === 'message,ok,reason' && shapeOf(e429.body) === 'message,ok,reason'
       && shapeOf(e502.body) === 'message,ok,reason,status',
     { ok: shapeOf(ok200.body), e400: shapeOf(e400.body), e401: shapeOf(e401.body), e429: shapeOf(e429.body), e502: shapeOf(e502.body) })

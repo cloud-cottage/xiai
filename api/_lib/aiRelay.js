@@ -32,8 +32,10 @@
  *      ⇒ 404 `PATH_NOT_ALLOWED`）
  *   ③ 鉴权：`Authorization` 头按 `Bearer` 方案取凭据，且值须以 `sk-xiai-` 开头
  *   ④ 必填头 `X-Request-Id`（8〜64 字；**幂等键的组成部分**）（400 `INVALID_ARGUMENT`）
- *   ⑤ 入参 JSON（封闭键面；**不接受 multipart**；`image` **三形态之一**：
- *      恰一鍵 `storage_key` ／ 恰一鍵 `data_url`；**两者同給 ⇒ 400 ＋ 零扣费**）
+ *   ⑤ 入参 JSON（封闭键面**恰 5 鍵**：`prompt` / `image` / `size` / `resolution` / `n`；
+ *      **不接受 multipart**；`image` **三形态之一**：
+ *      恰一鍵 `storage_key` ／ 恰一鍵 `data_url`；**两者同給 ⇒ 400 ＋ 零扣费**；
+ *      `resolution` 若給 ⇒ 必须是 1〜16 字非空字符串 —— **只验形态、不猜值域**）
  *      （400 `INVALID_ARGUMENT`）
  *   ⑥ `evaluateGate` 只读限额判定（429 `LIMIT_DAY` / `LIMIT_MINUTE` ＋ `Retry-After`；**零扣费**）
  *   ⑦ `resolveUpstreamSecret` 取上游（503 `CONFIG_MISSING`；**零扣费**）
@@ -50,12 +52,15 @@
  *      —— 序號推導在**预扣之前**完成、見已知項 A；序號 1 的鍵與既有
  *      `sha256(key_id ＋ 冒號 ＋ X-Request-Id)` **逐字相同**）
  *      （余额不足 ⇒ 402 `INSUFFICIENT_POINTS`，**零写入**）
- *   ⑩ 调上游（凭据按 `Bearer` 方案放进 `Authorization` 头、JSON body、超时取 `timeout_ms` 缺省 60000）
+ *   ⑩ 调上游（凭据按 `Bearer` 方案放进 `Authorization` 头、JSON body、超时取 `timeout_ms` 缺省 60000；
+ *      body 恆帶 `prompt` / `model` / `n:1`，**有给就逐字透传** `size` / `resolution`
+ *      （2026-10-30 单：不转换、不因上游可能不认就丢掉；`edits` 另带 `image` 签名链））
  *      失败 / 超时 / 非 2xx / 非 JSON / 缺图片字段 ⇒ **退款**（`refundPoints` 同 `ref_id`、
  *      kind=`REFUND`）＋ 502 `UPSTREAM_ERROR`（带上游状态码；网络错与超时为 `0`）
- *   ⑪ 成功 ⇒ `commitUsage` ＋ 200；回包**恰 5 键**
- *      `{ok, image, charge, usage, idempotent}`（上游回 url 就回 url、回 b64 就回 b64，
- *      **不再自己编码一次**）
+ *   ⑪ 成功 ⇒ `commitUsage` ＋ 200；回包**恰 6 键**
+ *      `{ok, image, charge, usage, idempotent, upstream_request}`（上游回 url 就回 url、回 b64 就回 b64，
+ *      **不再自己编码一次**；`upstream_request.sent_keys` ＝ 本次实际上游体的**键名清单**，
+ *      只回键名不回值 —— 一眼看出「到底发了什么」）
  *
  * 错误面（**只这 8 个 HTTP 码 / 9 个 reason 字面值；不新增第九个 reason**）：
  *   400 `INVALID_ARGUMENT` ／ 401 `KEY_INVALID` ／ 402 `INSUFFICIENT_POINTS` ／
@@ -127,8 +132,9 @@ export const CHARGE_AMOUNT = 10
 /** path 白名单（封闭两值；**唯一一处定义点**）。 */
 export const ALLOWED_ROUTES = Object.freeze(['images/edits', 'images/generations'])
 
-/** 入参 JSON 封闭键面（出现其它键 ⇒ 400，**不静默丢**）。 */
-export const ALLOWED_BODY_KEYS = Object.freeze(['prompt', 'image', 'size', 'n'])
+/** 入参 JSON 封闭键面（出现其它键 ⇒ 400，**不静默丢**；**恰 5 鍵**：
+ *  `prompt` / `image` / `size` / `resolution` / `n`）。 */
+export const ALLOWED_BODY_KEYS = Object.freeze(['prompt', 'image', 'size', 'resolution', 'n'])
 
 /** `X-Request-Id` 长度界（幂等键的组成部分；**必填**）。 */
 export const REQUEST_ID_MIN_LENGTH = 8
@@ -136,6 +142,12 @@ export const REQUEST_ID_MAX_LENGTH = 64
 
 /** `prompt` 长度界。 */
 export const PROMPT_MAX_LENGTH = 2000
+
+/** `resolution` 长度界（**只验形态**：1〜16 字非空字符串；**不猜值域、不白名单具体分辨率**）。 */
+export const RESOLUTION_MAX_LENGTH = 16
+
+/** `size` 长度界（**只验形态**：非空字符串 ≤ 64 字；**不猜值域**）。 */
+export const SIZE_MAX_LENGTH = 64
 
 /** 上游超时缺省（`resolveUpstreamSecret` 未给时兜底；与 `lib/aiUpstream.TIMEOUT_DEFAULT_MS` 同值）。 */
 export const DEFAULT_TIMEOUT_MS = 60000
@@ -174,8 +186,9 @@ export const REASONS = Object.freeze({
   CONFIG_MISSING: 'CONFIG_MISSING'
 })
 
-/** 成功回包键面（**恰 5 键**）。 */
-export const SUCCESS_KEYS = Object.freeze(['charge', 'idempotent', 'image', 'ok', 'usage'])
+/** 成功回包键面（**恰 6 键**；v-next 2026-10-30：新增 `upstream_request.sent_keys` —— 回显
+ *  实际上游体的键名清单，只回键名不回值）。 */
+export const SUCCESS_KEYS = Object.freeze(['charge', 'idempotent', 'image', 'ok', 'upstream_request', 'usage'])
 
 /** 错误回包键面（400/401/402/404/405/429/503 恰 3 键；502 另带 `status`）。 */
 export const ERROR_KEYS = Object.freeze(['message', 'ok', 'reason'])
@@ -211,6 +224,7 @@ const MSG = Object.freeze({
   IMAGE_DATA_URL_MAGIC: '參考圖內容與所宣告的 mime 不符（魔數校驗失敗）。',
   IMAGE_GENERATIONS: '圖生圖（image）只適用於 images/edits。',
   SIZE: '尺寸（size）必須是非空字串。',
+  RESOLUTION: `分辨率（resolution）必須是 1〜${RESOLUTION_MAX_LENGTH} 字的非空字串。`,
   N: '生成數量（n）只能為 1。',
   INSUFFICIENT_POINTS: '金餘額不足；本次零寫入。',
   CONFIG_MISSING: 'AI 中轉服務尚未配置完成；請稍後再試。',
@@ -411,16 +425,31 @@ export function parseBody(raw) {
 
   let size
   if (value.size !== undefined && value.size !== null) {
-    if (typeof value.size !== 'string' || value.size.trim().length < 1 || value.size.length > 64) {
+    if (typeof value.size !== 'string' || value.size.trim().length < 1 || value.size.length > SIZE_MAX_LENGTH) {
       return { ok: false, message: MSG.SIZE }
     }
     size = value.size
+  }
+
+  /* `resolution`：**只验形态**（1〜16 字非空字符串）；**逐字透传给上游**、不猜值域、
+     不白名单具体分辨率（上游认不认由上游报错，不替调用方丢参数）。 */
+  let resolution
+  if (value.resolution !== undefined && value.resolution !== null) {
+    if (
+      typeof value.resolution !== 'string' ||
+      value.resolution.trim().length < 1 ||
+      value.resolution.length > RESOLUTION_MAX_LENGTH
+    ) {
+      return { ok: false, message: MSG.RESOLUTION }
+    }
+    resolution = value.resolution
   }
 
   if (value.n !== undefined && value.n !== null && value.n !== 1) return { ok: false, message: MSG.N }
 
   const out = { prompt, image, n: 1 }
   if (size !== undefined) out.size = size
+  if (resolution !== undefined) out.resolution = resolution
   return { ok: true, value: out }
 }
 
@@ -914,11 +943,17 @@ export function createAiRelay(options = {}) {
       return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
     }
 
-    /* ⑩ 调上游（**失败一律退款 ＋ 502**，绝不伪装成功）。 */
+    /* ⑩ 调上游（**失败一律退款 ＋ 502**，绝不伪装成功）。
+       **参数如实透传（2026-10-30 单）**：`size` / `resolution` 有给就**逐字**带上（不转换、
+       不猜值域；上游认不认由上游报错，**不得**因上游可能不认就把调用方给的东西丢掉）。
+       实际发出的**键名清单**随成功回包带回（`upstream_request.sent_keys`，值不求）。 */
     const upstreamUrl = `${resolved.base_url.replace(/\/+$/, '')}/${route}`
     const upstreamBody = { prompt: payload.prompt, model: text(resolved.model), n: 1 }
     if (payload.size !== undefined) upstreamBody.size = payload.size
+    if (payload.resolution !== undefined) upstreamBody.resolution = payload.resolution
     if (imageUrl) upstreamBody.image = imageUrl
+    /** 本次实际上游体的键名清单（**逐字**取自已组装的 body；成功回包回显、值不求）。 */
+    const upstreamSentKeys = Object.keys(upstreamBody)
     const timeoutMs = Number(resolved.timeout_ms) > 0 ? Number(resolved.timeout_ms) : DEFAULT_TIMEOUT_MS
     /* 凭据只在此组装、只进上游请求头；**不进日志、不进回包**。 */
     const upstreamAuth = ['Bearer', resolved.key].join(' ')
@@ -1004,7 +1039,9 @@ export function createAiRelay(options = {}) {
         image,
         charge: { points: CHARGE_AMOUNT, balance_after: charge.balance_after },
         usage: { today: usage.day, minute: usage.minute },
-        idempotent: charge.idempotent === true
+        idempotent: charge.idempotent === true,
+        /* v-next（2026-10-30 参数透传单）：**只回键名、值不求** —— 一眼看出到底发了什么。 */
+        upstream_request: { sent_keys: upstreamSentKeys }
       },
       headers: {}
     }
