@@ -11,11 +11,14 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **62** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 断言面（本套 **66** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
  * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
  * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕
  * ＋ 形狀診斷面 4〔T1〜T4：上游 2xx 無圖 ⇒ message 只帶**鍵名輪廓**（`shapeOutlineOf` 零值泄露、
- * 鍵集不變）、正常回包透傳不破〕，
+ * 鍵集不變）、正常回包透傳不破〕
+ * ＋ 非 2xx 錯誤體摘要面 4〔U1〜U4：上游非 2xx 且拿到響應體 ⇒ message 末尾附**錯誤體摘要**
+ * （`upstreamErrorDigestOf`：可讀 message / code / type、長隨機串/base64 一律 `<redacted>`、
+ * 截 120 字、零敏感）；非 JSON（純文本）⇒ 不附、文案逐字不變；超時/網絡錯 ⇒ 文案逐字不變〕，
  * 覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
@@ -312,6 +315,13 @@ const upstreamServer = createServer(async (req, res) => {
     return res.end('<html>not json</html>')
   }
   if (upstreamMode === 'no-image') return json(200, { data: [] })
+  /* U 段（非 2xx 錯誤體摘要面）：402 帶錯誤 JSON ／ 400 純文本（非 JSON）／402 帶 48 位長隨機串。 */
+  if (upstreamMode === 'err-402') return json(402, { error: { message: 'insufficient quota', type: 'insufficient_quota', code: '402' } })
+  if (upstreamMode === 'err-400-text') {
+    res.writeHead(400, { 'Content-Type': 'text/plain' })
+    return res.end('<html>upstream bad request</html>')
+  }
+  if (upstreamMode === 'err-402-leak') return json(402, { message: 'sk-' + 'a'.repeat(48) })
   if (upstreamMode === 'b64') return json(200, { data: [{ b64_json: UPSTREAM_B64, mime: 'image/png', sha256: sha256('offline') }] })
   /* T 段（形狀診斷面）：两份 2xx 無圖回包 ＋ 一份正常回包（鍵名診斷 / 零值泄露 / 既有行為不破）。 */
   if (upstreamMode === 'shape-task') return json(200, { code: 0, message: 'ok', data: { task_id: 't-1', status: 'pending' } })
@@ -641,6 +651,48 @@ upstreamMode = 'shape-ok'
 const T4 = await call({ key: issued.shape.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-T04-0001' })
 upstreamMode = 'url'
 check('T4', '④ 正常 `{data:[{url}]}` 回包 ⇒ 仍 200 且 `image.url` 逐字透傳（成功面恰 5 鍵、診斷面零侵擾）', { status: 200, keys: 'charge,idempotent,image,ok,usage', url: 'https://x/y.png', ok: true }, { status: T4.status, keys: shapeOf(T4.body), url: T4.body && T4.body.image && T4.body.image.url, ok: T4.body && T4.body.ok })
+
+/* ===========================================================================
+  U 段：上游**非 2xx 錯誤體摘要**（派單方診斷單 · `upstreamErrorDigestOf` 純函數、
+  零敏感：長隨機串/base64 一律 `<redacted>`、截 120 字；非 JSON / 超時不附、文案不變）
+  =========================================================================== */
+section('U', '上游非 2xx：message 附錯誤體摘要（可讀 message / code / type；零敏感、鍵集仍恰 4、超時文案逐字不變）')
+
+/* 獨立 uid ＋ 預置 50 金（不動 u-ok / u-shape 的餘額與用量軌跡；四發均失敗退款 ⇒ 淨額 50）。 */
+issued.diag = await aiKeys.issueAiKey({ uid: 'u-diag', label: '自检-错误体摘要', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-diag', { _id: 'bl-u-diag', uid: 'u-diag', points: 50, updated_at: 'seed' })
+
+/* U1：上游 402 ＋ 錯誤 JSON ⇒ 502（status=402）＋ message 含 `insufficient quota` 與 `insufficient_quota`。 */
+upstreamMode = 'err-402'
+const U1 = await call({ key: issued.diag.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-U01-0001' })
+upstreamMode = 'url'
+check('U1', '① 上游 402（`{error:{message,type,code}}`）⇒ 502 UPSTREAM_ERROR（status=402）＋ message 含 `insufficient quota` 與 `insufficient_quota` ＋ 鍵集不變', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 402, keys: 'message,ok,reason,status', hasMessage: true, hasType: true }, { status: U1.status, reason: U1.reason, upstreamStatus: U1.body && U1.body.status, keys: shapeOf(U1.body), hasMessage: countIn(U1.body && U1.body.message, 'insufficient quota') >= 1, hasType: countIn(U1.body && U1.body.message, 'insufficient_quota') >= 1 })
+
+/* U2：上游 400 ＋ 純文本（非 JSON）⇒ 502 且 message 逐字＝現有文案（不附摘要、不崩、無亂碼/巨型原文）。 */
+upstreamMode = 'err-400-text'
+const U2 = await call({ key: issued.diag.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-U02-0001' })
+upstreamMode = 'url'
+check('U2', '② 上游 400 ＋ 純文本（非 JSON）⇒ 502 且 message **逐字等於現有文案**（零摘要、零亂碼、零巨型原文、不崩）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 400, message: 'AI 上游調用失敗；本次已退款。', htmlLeaks: 0 }, { status: U2.status, reason: U2.reason, upstreamStatus: U2.body && U2.body.status, message: U2.body && U2.body.message, htmlLeaks: countIn(U2.body && U2.body.message, '<html>') + countIn(U2.body && U2.body.message, 'upstream bad request') })
+
+/* U3：上游 402 ＋ `{message:"sk-"+48×a}` ⇒ message 裡那串 48 位**必須被 `<redacted>`**。 */
+const LEAK_NEEDLE = 'a'.repeat(48)
+upstreamMode = 'err-402-leak'
+const U3 = await call({ key: issued.diag.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-U03-0001' })
+upstreamMode = 'url'
+check('U3', '③ 上游 402（message 帶 `sk-`＋48 位長隨機串）⇒ message 含 `<redacted>` 且 48 位串逐字搜索 count=0（零敏感）', { status: 502, upstreamStatus: 402, hasRedacted: true, leakHits: 0, skHits: 0 }, { status: U3.status, upstreamStatus: U3.body && U3.body.status, hasRedacted: countIn(U3.body && U3.body.message, '<redacted>') >= 1, leakHits: countIn(U3.body && U3.body.message, LEAK_NEEDLE), skHits: countIn(U3.body && U3.body.message, 'sk-' + LEAK_NEEDLE) })
+
+/* U4：超時（永不回 ⇒ `timeout_ms` 觸發中止 ⇒ fetch catch 分支）⇒ message **逐字等於**現有文案。 */
+upstreamMode = 'hang'
+const U4 = await call({ key: issued.diag.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-U04-0001' })
+upstreamMode = 'url'
+for (const res of hangingResponses.splice(0)) {
+  try {
+    res.destroy()
+  } catch {
+    /* 已断开 */
+  }
+}
+check('U4', '④ 上游超時（fetch catch 分支；網絡錯同支）⇒ 502（status=0）＋ message **逐字等於現有文案**（不得被新診斷污染）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 0, message: 'AI 上游調用失敗；本次已退款。' }, { status: U4.status, reason: U4.reason, upstreamStatus: U4.body && U4.body.status, message: U4.body && U4.body.message })
 
 /* ===========================================================================
    E 段：成功 / 幂等 / 回包形状 / 零泄露 / 图片不 base64 直塞

@@ -1018,17 +1018,21 @@ const RKEY = relayKey.key
   const l502 = await callRelay({ key: LKEY, requestId: 'rid-l-502-00001', routePath: '/api/ai/v1/images/edits', body: { prompt: 'L 段', image: { storage_key: 'cloud://qa/r.png' } } })
   upstreamMode = 'url'
   const raw502 = JSON.stringify(l502.body)
-  check('L', 'L1', 'AC-593 中转端点契约：无图 ⇒ `<base>/images/generations`、有图 ⇒ `<base>/images/edits`；换 `base_url`（**零改代码**）⇒ 跟随新上游；上游原始错误体（`upstream exploded`）**零透传**（502 归一化 4 键）',
+  /* 【2026-10-30 派單方改判】原判据「`upstream exploded` 零透传」编码的是**摘要单之前**的
+     语义：非 2xx 现按 `upstreamErrorDigestOf` 附**截 120 字、长随机串抹除的可读摘要**
+     （见 verify-ai-relay U1〜U4）。AC-593 的「不透传原始错误体」收窄为：
+     ① 原始 JSON 体**不整段透传**（`{"error"` 原文 count=0）；② 502 仍恰 4 键归一化。 */
+  check('L', 'L1', 'AC-593 中转端点契约：无图 ⇒ `<base>/images/generations`、有图 ⇒ `<base>/images/edits`；换 `base_url`（**零改代码**）⇒ 跟随新上游；上游**原始 JSON 错误体不整段透传**（`{\"error\"` 原文 count=0；可读摘要按 2026-10-30 摘要单允许，502 归一化 4 键不变）',
     Boolean(genHit && editHit && newHit && switched && switched.ok === true)
       && genHit.url === `${baseBefore}/images/generations`
       && editHit.url === `${baseBefore}/images/edits`
       && newHit.url === 'https://switched.example/v2/images/generations'
       && l502.status === 502 && l502.body.reason === 'UPSTREAM_ERROR'
       && shapeOf(l502.body) === 'message,ok,reason,status'
-      && countIn(raw502, 'upstream exploded') === 0,
+      && countIn(raw502, '{"error"') === 0,
     { generationsUrl: genHit && genHit.url, editsUrl: editHit && editHit.url, afterSwitchUrl: newHit && newHit.url,
       switchOk: Boolean(switched && switched.ok === true), status502: l502.status, reason502: l502.body.reason,
-      bodyShape502: shapeOf(l502.body), upstreamTextLeaks: countIn(raw502, 'upstream exploded') })
+      bodyShape502: shapeOf(l502.body), rawJsonLeaks: countIn(raw502, '{"error"') })
 
   /* L2 · AC-601 ② `image` 白名單恰兩值：第三鍵 ⇒ 400 ＋ 零写入（在任何写入之前）。 */
   const wL2 = writesNow()
