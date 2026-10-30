@@ -10,7 +10,8 @@
  *     ＋ 2 个新管理员 op（`getAiUpstream` / `setAiUpstream`，走 `adminWhitelistDenial`）
  *   · `cloudfunctions/xiai-user-token/index.js` 信封（op 收窄的 additive 透传）
  *
- * 断言面（本套 **30** 条，覆盖派单方点名的 ①〜⑫；本单新增 B5〜B8 共 4 条 —— 头注旧写「38」与实际不符，按实际枚举数订正）：
+ * 断言面（本套 **33** 条，覆盖派单方点名的 ①〜⑫；B5〜B8 ＝ 「读不存在文档抛错」缺陷收尾，B9〜B11
+ * ＝ 本单「set() 载荷零 _id」修复的正向 / 负对照 / 静态门 —— 头注旧写「38」与实际不符，按实际枚举数订正）：
  *   A. 金鑰单点（真函数 ＋ 注入假存储）
  *      ① 签发回包带明文、库内**零明文零完整 hash**（只落前 16 位 hash ＋ 8 位前缀）；
  *      ② `listAiKeys` 逐行**零 hash 零明文**、键集恰 8 键；
@@ -153,6 +154,15 @@ function createFakeDb() {
             },
             async set(doc) {
               await tick()
+              /* SDK 同款约束（本单防回退门）：真 SDK `@cloudbase/database/dist/commonjs/document.js`
+                 的 `set(data)` 见载荷带 `_id` 鍵 ⇒ 抛「不能更新_id的值」`code='INVALID_PARAM'`
+                 —— `_id` 由 `doc(id)` 表达，载荷不得自带（生产炸点即此）。`.add()` 不拦（真 SDK 的
+                 add 允许指定 `_id`）。 */
+              if (doc && typeof doc === 'object' && Object.prototype.hasOwnProperty.call(doc, '_id')) {
+                const error = new Error('不能更新_id的值')
+                error.code = 'INVALID_PARAM'
+                throw error
+              }
               map.set(id, Object.assign({ _id: id }, doc))
               stats.writes += 1
               stats.writeLog.push({ action: 'set', id })
@@ -526,16 +536,19 @@ const adminEnv = { XIAI_AI_UPSTREAM_SECRET: UPSTREAM_SECRET }
    `TcbError.code === 404`）而非回空 ⇒ 读点必须 try/catch ＋ `isDocNotExistError` 谓词保护。
    --------------------------------------------------------------------------- */
 
-/* 「doc().get() 必抛」的集合替身（复现生产 SDK 的存在性语义；`where` / `set` 委托真假 DB）。 */
+/* 「doc().get() 必抛」的集合替身（复现生产 SDK 的存在性语义；`where` / `set` 委托真假 DB）。
+   【本单夹具修正】`doc(id)` 必须把文档键透传给 `set` 委托 —— 旧写法在 `set(doc)` 里取的
+   `arguments` 是 `set` 自己的实参（＝载荷），等于把整份载荷当 doc id；那在旧代码下被载荷里的
+   `_id` 碰巧盖对，生产修掉载荷 `_id` 后即暴露 ⇒ 按 SDK 语义改为显式透传 `id`。 */
 const docThrowingCollection = (real, docError) => ({
-  doc() {
+  doc(id) {
     return {
       async get() {
         await tick()
         throw docError
       },
       async set(doc) {
-        return real.doc.apply(real, arguments).set(doc)
+        return real.doc(id).set(doc)
       }
     }
   },
@@ -656,6 +669,114 @@ const restoreUpstreamProvider = () => aiUpstream.setUpstreamStoreProvider(() => 
     code500: userConfig.isDocNotExistError({ code: 500 }),
     messageOnly: userConfig.isDocNotExistError({ message: 'does not exist' }),
     nonObject: userConfig.isDocNotExistError(null)
+  })
+}
+
+/* ---------------------------------------------------------------------------
+   B9〜B11（本单新增 · 「set() 载荷零 _id」修复的正向 / 负对照 / 静态门）
+   背景：真 SDK `@cloudbase/database/dist/commonjs/document.js` 的 `set(data)` 见载荷带 `_id`
+   鍵 ⇒ 抛「不能更新_id的值」`code='INVALID_PARAM'`（生产炸点：被上层折成 STORAGE_UNAVAILABLE）。
+   本套的假 store `.set()` 已加**同款约束**（见 createFakeDb）⇒ 下面①在加了约束的假 store 上跑。
+   --------------------------------------------------------------------------- */
+
+/* B9（①）：真 setUpstream() 首次配置（库里无行、给齐 base_url/model/key）对**加了 SDK 同款
+   _id 约束的假 store** ⇒ ok:true ＋ 公共面恰 5 键（若载荷仍带 `_id` ⇒ 假 store 抛 INVALID_PARAM
+   ⇒ 本条必红 ⇒ 证明修复后 set() 载荷已零 `_id`）。 */
+{
+  const freshDb = createFakeDb()
+  aiUpstream.setUpstreamStoreProvider(() => ({ upstream: freshDb.collection('xiai_ai_upstream') }))
+  const B9_KEY = 'B9-zero-id-payload-2026'
+  const setFirst = await aiUpstream.setUpstream(
+    { actor_uid: A_UID, base_url: 'https://api.b9.example/v1', model: 'm-b9', key: B9_KEY, timeout_ms: 25000 },
+    adminEnv
+  )
+  const view = await aiUpstream.getUpstreamPublic()
+  const storedRow = freshDb.bucketOf('xiai_ai_upstream').get(aiUpstream.UPSTREAM_ID)
+  restoreUpstreamProvider()
+  check('B9', '① 首次配置（无行、给齐 base_url/model/key）对**带 SDK 同款 _id 约束的假 store** ⇒ ok:true ＋ 公共面恰 5 键（载荷带 _id 会抛 INVALID_PARAM ⇒ 本条证明 set() 载荷零 _id）；落库行由 SDK 按 doc(id) 补 _id ⇒ 仍恰 10 键', {
+    setOk: true,
+    replyKeys: 'base_url,key_mask,model,ok,timeout_ms,updated_at',
+    publicKeys: 'base_url,key_mask,model,timeout_ms,updated_at',
+    base: 'https://api.b9.example/v1',
+    model: 'm-b9',
+    timeout: 25000,
+    storedRowKeys: aiUpstream.UPSTREAM_ROW_KEYS.slice().sort(),
+    storedDocId: 'upstream-default',
+    writes: 1
+  }, {
+    setOk: setFirst.ok,
+    replyKeys: shapeOf(setFirst),
+    publicKeys: shapeOf(view),
+    base: view.base_url,
+    model: view.model,
+    timeout: view.timeout_ms,
+    storedRowKeys: storedRow ? Object.keys(storedRow).sort() : [],
+    storedDocId: storedRow && storedRow._id,
+    writes: freshDb.stats.writes
+  })
+}
+
+/* B10（②）【负对照】：手工用一份**带 `_id`** 的载荷直接调假 store 的 `.set()` ⇒ 必抛
+   `不能更新_id的值` ＋ `code='INVALID_PARAM'`（证明 B9 的绿不是「约束恒放行」的假绿）。 */
+{
+  const freshDb = createFakeDb()
+  const collection = freshDb.collection('xiai_ai_upstream')
+  let caught = null
+  try {
+    await collection.doc(aiUpstream.UPSTREAM_ID).set({
+      _id: aiUpstream.UPSTREAM_ID,
+      base_url: 'https://api.evil.example/v1',
+      model: 'm-evil'
+    })
+  } catch (error) {
+    caught = { message: error.message, code: error.code }
+  }
+  const rowAfter = freshDb.bucketOf('xiai_ai_upstream').get(aiUpstream.UPSTREAM_ID)
+  check('B10', '② 负对照：手工用**带 `_id`** 的载荷调假 store 的 `.set()` ⇒ 必抛「不能更新_id的值」＋ code=INVALID_PARAM（模仿真 SDK document.js 判据）＋ 零落库（证明约束真生效、B9 非恒绿）', {
+    threw: { message: '不能更新_id的值', code: 'INVALID_PARAM' },
+    zeroWrite: true,
+    writes: 0
+  }, {
+    threw: caught,
+    zeroWrite: rowAfter === undefined,
+    writes: freshDb.stats.writes
+  })
+}
+
+/* B11（③）静态门：`aiUpstream.js` 里 `.set(` 调用前 20 行内的对象字面量**零 `_id:` 命中**
+   （同一扫描谓词 ＋ 负对照：把带 `_id:` 的源码片段喂进谓词必须判红 —— 证明谓词非恒绿）。 */
+{
+  const upstreamSource = readFileSync(path.join(FN_DIR, 'lib/aiUpstream.js'), 'utf8')
+  /** 扫描谓词：每个 `.set(` 出现处，回看 20 行，数 `_id:`（对象字面量键）命中。 */
+  const idKeyHitsNearSet = (source) => {
+    const lines = String(source).split('\n')
+    let hits = 0
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].indexOf('.set(') === -1) continue
+      const start = Math.max(0, i - 20)
+      for (let j = start; j <= i; j += 1) {
+        hits += (lines[j].match(/(?:^|[^A-Za-z0-9_$.])_id\s*:/g) || []).length
+      }
+    }
+    return hits
+  }
+  const NEGATIVE_SNIPPET = [
+    'async function apply() {',
+    '  const row = {',
+    '    _id: UPSTREAM_ID,',
+    '    base_url: "https://x.example/v1"',
+    '  }',
+    '  await store.upstream.doc(UPSTREAM_ID).set(row)',
+    '}'
+  ].join('\n')
+  check('B11', '③ 静态门：aiUpstream.js 内每个 `.set(` 调用前 20 行内对象字面量零 `_id:` 命中（生产代码）；负对照：带 `_id:` 的源码片段喂同一谓词必须判红（hits≥1，证明谓词非恒绿）', {
+    productionHits: 0,
+    negativeControlHits: 1,
+    negativeControlRed: true
+  }, {
+    productionHits: idKeyHitsNearSet(upstreamSource),
+    negativeControlHits: idKeyHitsNearSet(NEGATIVE_SNIPPET),
+    negativeControlRed: idKeyHitsNearSet(NEGATIVE_SNIPPET) >= 1
   })
 }
 

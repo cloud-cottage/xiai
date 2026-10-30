@@ -23,8 +23,13 @@
  *  ④ **`resolveUpstreamSecret` 的返回值永远不得进入任何 op 回包**（明文只在服务端内部 /
  *     中转面内存中流转）；本文件不打印、不日志任何密文或明文。
  *  ⑤ `key_mask` ＝ 前 3 字元 ＋ `****` ＋ 後 4 位（例：`sk-****xxxx`）；不足 7 字元 ⇒ `***`。
- *  ⑥ **写入形态**：`_id` 固定 `upstream-default`，整行 `doc(id).set(…)`（**恒为恰 10 键**，
- *     不留旧键残留）；`updated_by_uid` ＝ 服务端派生的管理员 uid（**不由载荷自称**）。
+ *  ⑥ **写入形态**：文档键 `upstream-default` 由 `doc(id)` 表达 —— **传给 `doc(id).set()` 的载荷
+ *     不得含 `_id` 鍵**（真 SDK 判据：CloudBase 数据库 SDK 的 `document.js`（行 72-73）`set(data)`
+ *     见 `data` 带 `_id` 鍵 ⇒ 直接抛「不能更新_id的值」`INVALID_PARAM`；`update` 同判 —— 生产
+ *     炸點即此）；整行 `doc(id).set(…)` 落库後**恆為恰 10 鍵**（`_id` 由 SDK 按 doc(id) 落、
+ *     不留舊鍵殘留）；`updated_by_uid` ＝ 服務端派生的管理員 uid（**不由載荷自稱**）。
+ *     【生产实证】2026-10 生产炸点：`setUpstream` 曾把 `_id` 放进 `set()` 载荷 ⇒ SDK 抛
+ *     `不能更新_id的值`（code=INVALID_PARAM）⇒ 被上层折成 `STORAGE_UNAVAILABLE`。
  *  ⑦ **值域门全部在写之前**：`base_url` 必须 https 协议（`https:` 加 `//`）开头且 host 非空
  *     （否则 `INVALID_VALUE`）；
  *     `timeout_ms` ∈ [1000,120000]、缺省 60000（越界 / 非整数 ⇒ `INVALID_VALUE`，零写入）；
@@ -271,6 +276,8 @@ async function getUpstreamPublic() {
 
 /**
  * **写上游配置**（唯一写点；整行 `doc('upstream-default').set(…)` ⇒ 键面恒为恰 10 键）。
+ * **载荷纪律（本单生产炸点修复）**：传给 `doc(id).set()` 的对象**不得含 `_id` 鍵** —— 真 SDK
+ * `document.js` 见载荷带 `_id` 即抛「不能更新_id的值」`INVALID_PARAM`（`_id` 由 `doc(id)` 表达）。
  * 判定顺序（**全部在任何写入之前**）：① 主密钥 env 在场（缺 ⇒ `CONFIG_MISSING` ＋ 零写入）
  * → ② `actor_uid` 非空 → ③ `base_url` 值域 → ④ `model` 非空 → ⑤ `timeout_ms` 值域
  * → ⑥ `key` 给则加密、省则沿用旧密文（无旧密文 ⇒ `MISSING_REQUIRED`）→ ⑦ 整行 set。
@@ -325,8 +332,11 @@ async function setUpstream(params, env) {
     return deny(REASONS.MISSING_REQUIRED, '首次配置 AI 上游必須提供金鑰（key）；本次零寫入。')
   }
   const at = nowIso()
+  /* **载荷零 `_id`（本单生产炸点修复）**：文档键已由 `doc(UPSTREAM_ID)` 表达；真 SDK
+     `document.js` 的 `set(data)` 见载荷带 `_id` 鍵 ⇒ 直接抛「不能更新_id的值」`INVALID_PARAM`
+     ⇒ 被上层折成 `STORAGE_UNAVAILABLE`（生产实证炸点）。落库行的 `_id` 由 SDK 按 doc(id) 补齐
+     ⇒ 行仍恒 10 鍵；返回的公共面 5 鍵取自本对象，与 `_id` 无关。 */
   const row = {
-    _id: UPSTREAM_ID,
     base_url: text(input.base_url),
     model,
     key_cipher: cipherBody,

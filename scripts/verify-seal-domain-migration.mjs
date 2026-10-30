@@ -129,6 +129,13 @@ function createStore(seed) {
               return { data: row ? [Object.assign({}, row)] : [] }
             },
             async set(doc) {
+              /* SDK 同款约束（与 verify-ai-keys 同尺）：载荷带 `_id` ⇒ 抛「不能更新_id的值」
+                 `code='INVALID_PARAM'`（真 SDK document.js 判据）；`add()` 不拦。 */
+              if (doc && typeof doc === 'object' && Object.prototype.hasOwnProperty.call(doc, '_id')) {
+                const error = new Error('不能更新_id的值')
+                error.code = 'INVALID_PARAM'
+                throw error
+              }
               map.set(id, Object.assign({ _id: id }, doc))
               stats.writes.push({ collection: name, action: 'set', id })
               return { updated: 1 }
