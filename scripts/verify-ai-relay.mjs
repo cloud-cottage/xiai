@@ -11,14 +11,18 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **72** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 断言面（本套 **76** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
  * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
  * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕
  * ＋ 形狀診斷面 4〔T1〜T4：上游 2xx 無圖 ⇒ message 只帶**鍵名輪廓**（`shapeOutlineOf` 零值泄露、
  * 鍵集不變）、正常回包透傳不破〕
  * ＋ 非 2xx 錯誤體摘要面 4〔U1〜U4：上游非 2xx 且拿到響應體 ⇒ message 末尾附**錯誤體摘要**
  * （`upstreamErrorDigestOf`：可讀 message / code / type、長隨機串/base64 一律 `<redacted>`、
- * 截 120 字、零敏感）；非 JSON（純文本）⇒ 不附、文案逐字不變；超時/網絡錯 ⇒ 文案逐字不變〕
+ * 截 120 字、零敏感）；摘要空 ⇒ **診斷回退**：體空 `body=empty`、體非空附抹除後原文前 80 字
+ * （U2；2026-10-30 診斷補丁單改判）；超時/網絡錯 ⇒ 文案逐字不變〕
+ * ＋ FastAPI 風格錯誤體與空體回退面 4〔Q1〜Q4（2026-10-30 診斷補丁單）：`{"detail":…}` 末位回退
+ * ⇒ 摘要含 `Insufficient balance`；空體 ⇒ `body=empty`；非 JSON ⇒ 原文前 80 字回退生效；
+ * 摘要非空（`{error:{message,code}}`）⇒ **仍只走摘要**（含 `code=9`、零 `body=`、不疊加）〕
  * ＋ **參數如實透傳面 6〔P1〜P6（2026-10-30 單）：`size` / `resolution` 有給就逐字送上游、
  * 不給就不帶、不替調用方補缺省值；成功回包 `upstream_request.sent_keys` **逐字等於**
  * 實際上游體鍵集（只回鍵名、零值）；`resolution` 1〜16 字非空字符串的值域門（17 字 /
@@ -327,6 +331,17 @@ const upstreamServer = createServer(async (req, res) => {
     return res.end('<html>upstream bad request</html>')
   }
   if (upstreamMode === 'err-402-leak') return json(402, { message: 'sk-' + 'a'.repeat(48) })
+  /* Q 段（2026-10-30 診斷補丁單）：FastAPI `detail` / 空體 / 非 JSON / `error` 字符串 —— 四發均 402。 */
+  if (upstreamMode === 'err-402-detail') return json(402, { detail: 'Insufficient balance' })
+  if (upstreamMode === 'err-402-empty') {
+    res.writeHead(402, { 'Content-Type': 'text/plain' })
+    return res.end('')
+  }
+  if (upstreamMode === 'err-402-text') {
+    res.writeHead(402, { 'Content-Type': 'text/plain' })
+    return res.end('Internal error')
+  }
+  if (upstreamMode === 'err-402-error') return json(402, { error: { message: 'x', code: '9' } })
   if (upstreamMode === 'b64') return json(200, { data: [{ b64_json: UPSTREAM_B64, mime: 'image/png', sha256: sha256('offline') }] })
   /* T 段（形狀診斷面）：两份 2xx 無圖回包 ＋ 一份正常回包（鍵名診斷 / 零值泄露 / 既有行為不破）。 */
   if (upstreamMode === 'shape-task') return json(200, { code: 0, message: 'ok', data: { task_id: 't-1', status: 'pending' } })
@@ -673,11 +688,13 @@ const U1 = await call({ key: issued.diag.key, routePath: EDITS, body: EDITS_BODY
 upstreamMode = 'url'
 check('U1', '① 上游 402（`{error:{message,type,code}}`）⇒ 502 UPSTREAM_ERROR（status=402）＋ message 含 `insufficient quota` 與 `insufficient_quota` ＋ 鍵集不變', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 402, keys: 'message,ok,reason,status', hasMessage: true, hasType: true }, { status: U1.status, reason: U1.reason, upstreamStatus: U1.body && U1.body.status, keys: shapeOf(U1.body), hasMessage: countIn(U1.body && U1.body.message, 'insufficient quota') >= 1, hasType: countIn(U1.body && U1.body.message, 'insufficient_quota') >= 1 })
 
-/* U2：上游 400 ＋ 純文本（非 JSON）⇒ 502 且 message 逐字＝現有文案（不附摘要、不崩、無亂碼/巨型原文）。 */
+/* U2：上游 400 ＋ 純文本（非 JSON、摘要空）⇒ 502，message ＝ 現有文案＋**原文前 80 字回退**
+   （2026-10-30 診斷補丁單改判：原「逐字等於現有文案」編碼的是摘要單之前的語義 —— 體非空但摘要空
+   時現在必須附 `body=` 回退，否則「空體」與「有體讀不懂」無法區分；仍不崩、無巨型原文）。 */
 upstreamMode = 'err-400-text'
 const U2 = await call({ key: issued.diag.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-U02-0001' })
 upstreamMode = 'url'
-check('U2', '② 上游 400 ＋ 純文本（非 JSON）⇒ 502 且 message **逐字等於現有文案**（零摘要、零亂碼、零巨型原文、不崩）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 400, message: 'AI 上游調用失敗；本次已退款。', htmlLeaks: 0 }, { status: U2.status, reason: U2.reason, upstreamStatus: U2.body && U2.body.status, message: U2.body && U2.body.message, htmlLeaks: countIn(U2.body && U2.body.message, '<html>') + countIn(U2.body && U2.body.message, 'upstream bad request') })
+check('U2', '② 上游 400 ＋ 純文本（非 JSON、摘要空）⇒ 502 且 message ＝ 現有文案＋`（診斷：上游 400；body=…）` 原文回退（截 80 字、抹除後；有界、零亂碼、不崩）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 400, hasBaseCopy: true, hasBodyFallback: true, bounded: true }, { status: U2.status, reason: U2.reason, upstreamStatus: U2.body && U2.body.status, hasBaseCopy: countIn(U2.body && U2.body.message, 'AI 上游調用失敗；本次已退款。') >= 1, hasBodyFallback: countIn(U2.body && U2.body.message, '（診斷：上游 400；body=') >= 1 && countIn(U2.body && U2.body.message, 'upstream bad request') >= 1, bounded: String(U2.body && U2.body.message).length <= 160 })
 
 /* U3：上游 402 ＋ `{message:"sk-"+48×a}` ⇒ message 裡那串 48 位**必須被 `<redacted>`**。 */
 const LEAK_NEEDLE = 'a'.repeat(48)
@@ -698,6 +715,42 @@ for (const res of hangingResponses.splice(0)) {
   }
 }
 check('U4', '④ 上游超時（fetch catch 分支；網絡錯同支）⇒ 502（status=0）＋ message **逐字等於現有文案**（不得被新診斷污染）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 0, message: 'AI 上游調用失敗；本次已退款。' }, { status: U4.status, reason: U4.reason, upstreamStatus: U4.body && U4.body.status, message: U4.body && U4.body.message })
+
+/* ===========================================================================
+  Q 段：FastAPI 風格錯誤體與空體診斷回退（2026-10-30 診斷補丁單）
+  `upstreamErrorDigestOf` 末位追加 `detail` / 字符串 `error` 兩檔；摘要空 ⇒
+  `body=empty`（體空）/ 抹除後原文前 80 字（體非空）——**有摘要只用摘要、不疊加**）
+  =========================================================================== */
+section('Q', 'FastAPI detail ／ 字符串 error ／ 空體 body=empty ／ 原文前 80 字回退（有摘要仍只走摘要、不疊加）')
+
+/* 專用 uid ＋ 預置 50 金（四發均失敗退款 ⇒ 淨額 50；不動 u-ok / u-diag / u-shape 餘額與用量軌跡）。 */
+issued.q = await aiKeys.issueAiKey({ uid: 'u-diag-q', label: '自检-detail回退', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-diag-q', { _id: 'bl-u-diag-q', uid: 'u-diag-q', points: 50, updated_at: 'seed' })
+
+/* Q1：上游 402 ＋ `{"detail":"Insufficient balance"}`（FastAPI 風格）⇒ 摘要取 `detail` 檔。 */
+upstreamMode = 'err-402-detail'
+const Q1 = await call({ key: issued.q.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-Q01-0001' })
+upstreamMode = 'url'
+check('Q1', '① 上游 402 ＋ `{\"detail\":\"Insufficient balance\"}`（FastAPI 風格）⇒ 502 UPSTREAM_ERROR（status=402）＋ message 含 `Insufficient balance`（`detail` 末位回退生效）', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 402, hasDetail: true, bodyFallbackHits: 0 }, { status: Q1.status, reason: Q1.reason, upstreamStatus: Q1.body && Q1.body.status, hasDetail: countIn(Q1.body && Q1.body.message, 'Insufficient balance') >= 1, bodyFallbackHits: countIn(Q1.body && Q1.body.message, 'body=') })
+
+/* Q2：上游 402 ＋ **空體** ⇒ 摘要空 ＋ 體空 ⇒ message 含 `body=empty`（空體可與「有體讀不懂」區分）。 */
+upstreamMode = 'err-402-empty'
+const Q2 = await call({ key: issued.q.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-Q02-0001' })
+upstreamMode = 'url'
+check('Q2', '② 上游 402 ＋ 空體 ⇒ 502 ＋ message 含 `body=empty`（「空體」與「有體但我讀不懂」可區分）', { status: 502, upstreamStatus: 402, hasBodyEmpty: true }, { status: Q2.status, upstreamStatus: Q2.body && Q2.body.status, hasBodyEmpty: countIn(Q2.body && Q2.body.message, 'body=empty') >= 1 })
+
+/* Q3：上游 402 ＋ 非 JSON `Internal error` ⇒ 摘要空 ＋ 體非空 ⇒ **原文前 80 字回退**。 */
+upstreamMode = 'err-402-text'
+const Q3 = await call({ key: issued.q.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-Q03-0001' })
+upstreamMode = 'url'
+check('Q3', '③ 上游 402 ＋ 非 JSON `Internal error` ⇒ 502 ＋ message 含 `Internal error`（原文前 80 字回退生效）', { status: 502, upstreamStatus: 402, hasRawHead: true }, { status: Q3.status, upstreamStatus: Q3.body && Q3.body.status, hasRawHead: countIn(Q3.body && Q3.body.message, 'Internal error') >= 1 })
+
+/* Q4：上游 402 ＋ `{error:{message:"x",code:"9"}}` ⇒ 摘要**非空**（`code=9; message=x`）⇒
+   仍優先走摘要：message 含 `code=9`、**不得**出現 `body=`（證明新加的原文回退不降級既有摘要面）。 */
+upstreamMode = 'err-402-error'
+const Q4 = await call({ key: issued.q.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-Q04-0001' })
+upstreamMode = 'url'
+check('Q4', '④ 上游 402 ＋ `{\"error\":{\"message\":\"x\",\"code\":\"9\"}}` ⇒ 摘要非空 ⇒ **仍優先走摘要**（message 含 `code=9`、**不含** `body=`；原文回退不疊加、不降級）', { status: 502, upstreamStatus: 402, hasCode: true, bodyFallbackHits: 0 }, { status: Q4.status, upstreamStatus: Q4.body && Q4.body.status, hasCode: countIn(Q4.body && Q4.body.message, 'code=9') >= 1, bodyFallbackHits: countIn(Q4.body && Q4.body.message, 'body=') })
 
 /* ===========================================================================
    E 段：成功 / 幂等 / 回包形状 / 零泄露 / 图片不 base64 直塞

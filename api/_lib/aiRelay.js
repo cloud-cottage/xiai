@@ -529,11 +529,15 @@ export function shapeOutlineOf(parsed) {
  *
  * 生产实测上游（如 402）只回状态码不带可读线索时无从定位 ⇒ 非 2xx 且**拿到了响应体**
  * 时把错误体的**摘要**带进 `message` 末尾（**不改 reason / status / 键集**）：
- *   · 按序取 `error.message` / `message` / `msg`（可读线索）＋ `error.code` / `code`
- *     ＋ `error.type` / `type`，拼成 `code=…; type=…; message=…`（**只带找到的段**）；
+ *   · 按序取 `error.message` / `message` / `msg` / `detail` /（字符串）`error`
+ *     （可读线索；`detail` 为 FastAPI 风格 —— 字符串直取、对象取 `message`/`msg`/`code`；
+ *     字符串 `error` 直取 —— **两档均为末位回退，不动既有优先级**）
+ *     ＋ `error.code` / `code` ＋ `error.type` / `type`，
+ *     拼成 `code=…; type=…; message=…`（**只带找到的段**）；
  *   · **任何值先过抹除规则** `/[A-Za-z0-9+/=]{40,}/g` → `<redacted>`（base64 / 长随机串
  *     形态一律抹掉 ⇒ 零敏感信息），单段再截 120 字、整段亦截 120 字；
- *   · 找不到任何段 / 非 JSON（调用方解析失败传空对象亦同）⇒ 回 `''`（调用方**不附**）；
+ *   · 找不到任何段 / 非 JSON（调用方解析失败传空对象亦同）⇒ 回 `''`（调用方**不附摘要**，
+ *     改走 `body=empty` / 原文前 80 字的诊断回退，见非 2xx 分支）；
  *   · **异常一律回 `''`、不自抛**（诊断面绝不影响 502 主判定）。
  * @param {*} parsed 上游错误体（已 `JSON.parse` 的对象；非对象 ⇒ `''`）
  * @returns {string}
@@ -541,19 +545,25 @@ export function shapeOutlineOf(parsed) {
 export function upstreamErrorDigestOf(parsed) {
   const LIMIT = 120
   const REDACT = /[A-Za-z0-9+/=]{40,}/g
-  const field = (obj, key) => {
-    if (!obj || typeof obj !== 'object') return ''
-    const value = obj[key]
+  const scalar = (value) => {
     if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return ''
     const safe = String(value).replace(REDACT, '<redacted>')
     return safe.length > LIMIT ? safe.slice(0, LIMIT) : safe
   }
+  const field = (obj, key) => {
+    if (!obj || typeof obj !== 'object') return ''
+    return scalar(obj[key])
+  }
   try {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return ''
     const error = parsed.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error) ? parsed.error : null
+    /* 末位回退①：`detail`（FastAPI 风格）—— 字符串直取；对象取 `message`/`msg`/`code`。 */
+    const detail = scalar(parsed.detail) || field(parsed.detail, 'message') || field(parsed.detail, 'msg') || field(parsed.detail, 'code')
+    /* 末位回退②：`error` 为**字符串**时直接用（对象形态已由上面 `error.*` 档处理）。 */
+    const errorText = scalar(parsed.error)
     const code = field(error, 'code') || field(parsed, 'code')
     const type = field(error, 'type') || field(parsed, 'type')
-    const message = field(error, 'message') || field(parsed, 'message') || field(parsed, 'msg')
+    const message = field(error, 'message') || field(parsed, 'message') || field(parsed, 'msg') || detail || errorText
     const parts = []
     if (code) parts.push(`code=${code}`)
     if (type) parts.push(`type=${type}`)
@@ -994,19 +1004,29 @@ export function createAiRelay(options = {}) {
     }
     if (!response || upstreamStatus < 200 || upstreamStatus >= 300) {
       /* 非 2xx：拿到响应体就把**错误体摘要**附在 message 末尾（`upstreamErrorDigestOf`
-         零敏感：长随机串/base64 一律抹除、截 120 字；非 JSON ⇒ 摘要空 ⇒ **不附**、
-         现有文案逐字不变；超时/网络错走上面的 fetch catch，本就不带体、文案亦不变）。 */
+         零敏感：长随机串/base64 一律抹除、截 120 字；超时/网络错走上面的 fetch catch，本就不带体、
+         文案亦不变）。**摘要为空时的诊断回退**（2026-10-30 診斷補丁單）—— 让「空体」与
+         「有体但我读不懂」可区分：
+         · 体为空（0 字节或纯空白）⇒ 附 `（診斷：上游 <status>；body=empty）`；
+         · 体非空但摘要为空 ⇒ 附 `（診斷：上游 <status>；body=<抹除后原文前 80 字>）`；
+         **只在摘要为空时**才回退到原文前 80 字 —— 有摘要就只用摘要（不叠加）。 */
       let digest = ''
       try {
         digest = upstreamErrorDigestOf(JSON.parse(raw))
       } catch {
         digest = ''
       }
-      return failUpstream(
-        'status',
-        upstreamStatus,
-        digest ? `${MSG.UPSTREAM}（診斷：上游 ${upstreamStatus}；${digest}）` : undefined
-      )
+      const bodyText = typeof raw === 'string' ? raw : String(raw)
+      let diagnostic = ''
+      if (digest) {
+        diagnostic = `${MSG.UPSTREAM}（診斷：上游 ${upstreamStatus}；${digest}）`
+      } else if (bodyText.trim() === '') {
+        diagnostic = `${MSG.UPSTREAM}（診斷：上游 ${upstreamStatus}；body=empty）`
+      } else {
+        const head = bodyText.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 80)
+        diagnostic = `${MSG.UPSTREAM}（診斷：上游 ${upstreamStatus}；body=${head}）`
+      }
+      return failUpstream('status', upstreamStatus, diagnostic)
     }
     let upstreamJson = null
     try {
