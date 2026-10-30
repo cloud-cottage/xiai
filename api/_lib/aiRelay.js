@@ -452,6 +452,49 @@ export function imageOf(parsed) {
   return null
 }
 
+/**
+ * 上游 2xx 回包的**形状轮廓**（纯函数；本文件唯一定义点）。
+ *
+ * 「上游 2xx 但 `imageOf` 认不出图」时把形状带进错误 `message` 供排障（**零值泄露**）：
+ *   · 顶层键名逗号分隔（最多 8 个、每个最长 24 字、非字符串键名丢弃）；
+ *   · `parsed.data` 是数组 ⇒ 追加 `; data[0] 键=（…）`（同样规则；空数组则写 `data[]`）；
+ *     `parsed.data` 是对象 ⇒ 追加 `; data 键=（…）`；
+ *   · `output` / `result` / `images` 存在，同样追加一层键名（数组同 `data` 形态）；
+ *   · **绝不包含任何值**（不序列化，只取 `Object.keys`）；总长截 240 字；异常 ⇒ 回 `unknown`（不自抛）。
+ * @param {*} parsed 上游 2xx 回包（已 `JSON.parse`）
+ * @returns {string}
+ */
+export function shapeOutlineOf(parsed) {
+  const LIMIT = 240
+  const keysOf = (value) => {
+    if (!value || typeof value !== 'object') return null
+    return Object.keys(value)
+      .filter((key) => typeof key === 'string')
+      .slice(0, 8)
+      .map((key) => (key.length > 24 ? key.slice(0, 24) : key))
+      .join(',')
+  }
+  const layerOf = (name, value) => {
+    if (Array.isArray(value)) {
+      if (value.length === 0) return `; ${name}[]`
+      return `; ${name}[0] 键=（${keysOf(value[0]) || ''}）`
+    }
+    if (value && typeof value === 'object') return `; ${name} 键=（${keysOf(value) || ''}）`
+    return ''
+  }
+  try {
+    if (!parsed || typeof parsed !== 'object') return 'unknown'
+    let out = keysOf(parsed)
+    if (out === null) return 'unknown'
+    for (const name of ['data', 'output', 'result', 'images']) {
+      if (Object.prototype.hasOwnProperty.call(parsed, name)) out += layerOf(name, parsed[name])
+    }
+    return out.length > LIMIT ? out.slice(0, LIMIT) : out
+  } catch {
+    return 'unknown'
+  }
+}
+
 /* --------------------------------------------------------------------------- CloudBase 凭据对（唯一解析点 → `lib/config.js`）
    --------------------------------------------------------------------------- */
 
@@ -860,10 +903,10 @@ export function createAiRelay(options = {}) {
     if (timer) clearTimeout(timer)
 
     const upstreamStatus = Number(response && response.status) || 0
-    const failUpstream = async (stage, status) => {
+    const failUpstream = async (stage, status, message) => {
       const refunded = await safeRefund(keyInfo.uid, refId, chargeIdemKey)
       audit({ outcome: REASONS.UPSTREAM_ERROR, stage, status, refunded })
-      return denyResult(502, REASONS.UPSTREAM_ERROR, MSG.UPSTREAM, {}, { status })
+      return denyResult(502, REASONS.UPSTREAM_ERROR, message || MSG.UPSTREAM, {}, { status })
     }
 
     let raw = ''
@@ -880,7 +923,14 @@ export function createAiRelay(options = {}) {
       return failUpstream('non-json', upstreamStatus)
     }
     const image = imageOf(upstreamJson)
-    if (!image) return failUpstream('no-image', upstreamStatus)
+    if (!image) {
+      /* 2xx 但无图：message 末尾附**键名轮廓**诊断（`shapeOutlineOf` 零值泄露；键集不变）。 */
+      return failUpstream(
+        'no-image',
+        upstreamStatus,
+        `${MSG.UPSTREAM}（診斷：上游 200 但無圖；形狀＝${shapeOutlineOf(upstreamJson)}）`
+      )
+    }
 
     /* ⑪ 成功：`commitUsage`（日 / 分鐘各 +1）→ 200。commitUsage 失败 ⇒ 退款 ＋ 503（已知项 B/G）。 */
     const usage = await aiUsage.commitUsage({ uid: keyInfo.uid })

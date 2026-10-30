@@ -11,9 +11,11 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **58** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 断言面（本套 **62** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
  * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
- * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕，
+ * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕
+ * ＋ 形狀診斷面 4〔T1〜T4：上游 2xx 無圖 ⇒ message 只帶**鍵名輪廓**（`shapeOutlineOf` 零值泄露、
+ * 鍵集不變）、正常回包透傳不破〕，
  * 覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
@@ -311,6 +313,10 @@ const upstreamServer = createServer(async (req, res) => {
   }
   if (upstreamMode === 'no-image') return json(200, { data: [] })
   if (upstreamMode === 'b64') return json(200, { data: [{ b64_json: UPSTREAM_B64, mime: 'image/png', sha256: sha256('offline') }] })
+  /* T 段（形狀診斷面）：两份 2xx 無圖回包 ＋ 一份正常回包（鍵名診斷 / 零值泄露 / 既有行為不破）。 */
+  if (upstreamMode === 'shape-task') return json(200, { code: 0, message: 'ok', data: { task_id: 't-1', status: 'pending' } })
+  if (upstreamMode === 'shape-item') return json(200, { data: [{ image_url: 'https://x/y.png' }] })
+  if (upstreamMode === 'shape-ok') return json(200, { data: [{ url: 'https://x/y.png' }] })
   return json(200, { data: [{ url: IMG_URL }] })
 })
 
@@ -601,6 +607,40 @@ const D4 = await call({ routePath: EDITS, body: EDITS_BODY, requestId: 'rid-D04-
 upstreamMode = 'url'
 const d4Refund = flowRows().filter((r) => r.kind === 'REFUND' && String(r.ref_id).includes('rid-D04-0001'))
 check('D4', '上游 200 却缺图片字段 ⇒ 502（status=200，不伪装成功）＋ 退款 ＋ 余额复原 50', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 200, refundRows: 1, balance: 50 }, { status: D4.status, reason: D4.reason, upstreamStatus: D4.body && D4.body.status, refundRows: d4Refund.length, balance: balanceOf('u-ok') })
+
+/* ===========================================================================
+  T 段：上游 2xx 無圖的**鍵名診斷**（派單方診斷單 · `shapeOutlineOf` 純函數零值泄露）
+  =========================================================================== */
+section('T', '上游 200 但無圖：message 附鍵名輪廓（只帶鍵名、零值泄露、鍵集仍恰 4、成功面不破）')
+
+/* 獨立 uid ＋ 預置 50 金（不動 u-ok 的餘額 / 用量基線）。 */
+issued.shape = await aiKeys.issueAiKey({ uid: 'u-shape', label: '自检-形状诊断', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-shape', { _id: 'bl-u-shape', uid: 'u-shape', points: 50, updated_at: 'seed' })
+
+/* T1：上游 200 回「任務輪詢形」（`data` 是物件、無圖）⇒ 502，message 帶 `data` 與
+   `task_id` / `status` **鍵名**；回包鍵集仍恰 `message,ok,reason,status`（診斷不加鍵）。 */
+upstreamMode = 'shape-task'
+const T1 = await call({ key: issued.shape.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-T01-0001' })
+upstreamMode = 'url'
+console.log(JSON.stringify({ DEBUG_T1_LOGS: logs.slice(-6) }))
+check('T1', '① 上游 200 但回「任務輪詢形」（無圖）⇒ 502 UPSTREAM_ERROR（status=200）＋ message 含 `data` 與 `task_id` / `status` **鍵名**＋ 回包鍵集不變', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 200, keys: 'message,ok,reason,status', hasData: true, hasTaskId: true, hasStatusKey: true }, { status: T1.status, reason: T1.reason, upstreamStatus: T1.body && T1.body.status, keys: shapeOf(T1.body), hasData: countIn(T1.body && T1.body.message, 'data') >= 1, hasTaskId: countIn(T1.body && T1.body.message, 'task_id') >= 1, hasStatusKey: countIn(T1.body && T1.body.message, 'status') >= 1 })
+
+/* T2：上游 200 回 `{data:[{image_url}]}`（`imageOf` 不認此鍵）⇒ 502，message 帶 `image_url` 鍵名。 */
+upstreamMode = 'shape-item'
+const T2 = await call({ key: issued.shape.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-T02-0001' })
+upstreamMode = 'url'
+check('T2', '② 上游 200 但回 `{data:[{image_url}]}`（`imageOf` 不認）⇒ 502 ＋ message 含 `image_url` 鍵名', { status: 502, reason: 'UPSTREAM_ERROR', upstreamStatus: 200, hasImageUrl: true }, { status: T2.status, reason: T2.reason, upstreamStatus: T2.body && T2.body.status, hasImageUrl: countIn(T2.body && T2.body.message, 'image_url') >= 1 })
+
+/* T3：**零泄露**：上述兩份 502 回包（錯誤體 ＋ 響應頭序列化成字符串）逐字搜索
+   `https://x/y.png`（shape-item 的值）與 `t-1`（shape-task 的值）⇒ count=0（證明只帶鍵名）。 */
+const t3LeakText = JSON.stringify(T1.body) + JSON.stringify(T1.headers) + JSON.stringify(T2.body) + JSON.stringify(T2.headers)
+check('T3', '③ 零泄露：兩份診斷回包（錯誤體 ＋ 響應頭序列化）逐字搜索 `https://x/y.png` 與 `t-1` ⇒ count=0（只帶鍵名、絕無值）', { imageUrlValues: 0, taskIdValues: 0 }, { imageUrlValues: countIn(t3LeakText, 'https://x/y.png'), taskIdValues: countIn(t3LeakText, 't-1') })
+
+/* T4：正常回包（`{data:[{url}]}`）⇒ 仍 200 且 `image.url` 逐字透傳（既有行為不被診斷改動破壞）。 */
+upstreamMode = 'shape-ok'
+const T4 = await call({ key: issued.shape.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-T04-0001' })
+upstreamMode = 'url'
+check('T4', '④ 正常 `{data:[{url}]}` 回包 ⇒ 仍 200 且 `image.url` 逐字透傳（成功面恰 5 鍵、診斷面零侵擾）', { status: 200, keys: 'charge,idempotent,image,ok,usage', url: 'https://x/y.png', ok: true }, { status: T4.status, keys: shapeOf(T4.body), url: T4.body && T4.body.image && T4.body.image.url, ok: T4.body && T4.body.ok })
 
 /* ===========================================================================
    E 段：成功 / 幂等 / 回包形状 / 零泄露 / 图片不 base64 直塞
