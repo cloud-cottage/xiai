@@ -1262,6 +1262,8 @@ async function submitReplaceFaceImage() {
      face_id）—— 与勘误 / 采纳同一用户令牌通道（含补签自愈）。**服务端是唯一判据**。
    - 弹窗：左格「原圖」＝当前影像、右格「修復圖」＝回包候选影像（两者都走
      `seals.imageDisplaySourceOf`，不自写第二套取图路径）。
+   - **先確認再扣金**（Kevin 亲定）：点入口按钮**只开窗、不调 op** —— 弹窗以「待確認」态打开
+     （右格「尚未開始」＋ 成本一行明示）；点【開始修復】才真正发请求（**此时才扣金**）。
    - 计费明示：**每张 10 金**（`aiEnhance.AI_ENHANCE_COST`；调用前弹窗内一行小字；
      实际扣费以回包 `charge.amount` 爲准）。
    - 取消：只停止等待，**不撤回服务端请求**（前端无该能力）⇒ 在途回包仍由 `runAiEnhance`
@@ -1269,13 +1271,22 @@ async function submitReplaceFaceImage() {
    - 【取】：**复用现有换图写面** `seals.updateSealFixedAttributes(null, faceId,
      { face_image_id })`（与「編輯固定屬性」同一入口 ⇒ 与 replace-face-image 同语义：
      只改印面指向、**旧行不删**）；**不新增写面 op、不新增影像行**。
+   - 【棄】：op `ai-enhance-discard`（载荷封闭一键 image_id；经 `aiEnhance.discardFaceImage`
+     **同一条**用户令牌通道；**不涉及退款** —— 修復金在上游成功时已花掉）。
+     待办中禁点并显示「正在棄置…」；成功 ⇒ 顶部反馈＋关窗（`deleted_objects` 为真补一句
+     「影像物件亦已清除」）；失败 ⇒ **弹窗内**原文透出服务端 message（`FORBIDDEN` /
+     `INVALID_VALUE` 等一字不改写）、**不关窗、【取】仍可用**；已棄置态下【棄】disabled
+     且文案「已棄置」（**绝不发第二次 discard**）。
    ============================================================================ */
 
 /** 弹窗宿主印面（按 id 挂到 faces 上；空串 ⇒ 不渲染弹窗）。 */
 const aiEnhanceFaceId = ref('')
 const aiEnhanceFace = computed(() => faces.value.find((item) => item.id === aiEnhanceFaceId.value) || null)
-/** 弹窗状态（右格四态）：`idle`（未发起）/ `running` / `done` / `failed`；`cancelled` ＝ 调用中被取消。 */
-const aiEnhanceStatus = ref('idle')
+/**
+ * 弹窗状态（右格五态）：`confirm`（待確認：开窗未调用、零扣金）/ `running` / `done` / `failed`；
+ * `cancelled` ＝ 调用中被取消。
+ */
+const aiEnhanceStatus = ref('confirm')
 /** 回包成功读数（`aiEnhance.enhanceFaceImage` 的成功形状）。 */
 const aiEnhanceResult = ref(null)
 /** 失败可读文案（**含服务端 message 原文**）。 */
@@ -1286,6 +1297,12 @@ const aiEnhanceRefunded = ref(false)
 const aiEnhanceFeedback = ref('')
 /** 【取】写面中（防重复点击）。 */
 const aiEnhanceAccepting = ref(false)
+/** 【棄】弃置中（待办中禁点、文案「正在棄置…」；防重复点击 ⇒ 绝不发第二次 discard）。 */
+const aiEnhanceDiscarding = ref(false)
+/** 【棄】失败可读文案（**含服务端 message 原文**；弹窗内可见位置上屏）。 */
+const aiEnhanceDiscardError = ref('')
+/** 【棄】已弃置（成功后置真 ⇒ 【棄】disabled 且文案「已棄置」；`discardAiEnhance` 首行再拦一道）。 */
+const aiEnhanceDiscarded = ref(false)
 /** 左格（原圖）/ 右格（修復圖）的取图读数：`{state, id, dataUrl, row, message}`。 */
 const aiSourcePane = ref(null)
 const aiCandidatePane = ref(null)
@@ -1304,6 +1321,21 @@ const canAiEnhanceFace = computed(() => seals.canEditFixedAttributes())
 const aiEnhanceAcceptable = computed(
   () => aiEnhanceStatus.value === 'done' && Boolean(aiEnhanceResult.value && aiEnhanceResult.value.imageId)
 )
+
+/**
+ * 【棄】可用性：与【取】同一前提（**仅回包成功**才有候选件可弃）＋ 未在途 ＋ 未已弃置
+ * （已弃置 ⇒ 按钮 disabled、文案「已棄置」，**绝不发第二次 discard**）。
+ */
+const aiEnhanceDiscardable = computed(
+  () => aiEnhanceAcceptable.value && !aiEnhanceDiscarding.value && !aiEnhanceDiscarded.value
+)
+
+/** 【棄】按钮文案（待办 / 已弃置 / 默认三档；computed 化 ⇒ 模板零嵌套三元）。 */
+const aiEnhanceDiscardLabel = computed(() => {
+  if (aiEnhanceDiscarding.value) return '正在棄置…'
+  if (aiEnhanceDiscarded.value) return '已棄置'
+  return '棄'
+})
 
 /** 扣费读数（**不编造数字**：回包未附 charge ⇒ 如实写「未記載」）。 */
 const aiEnhanceChargeText = computed(() => {
@@ -1343,7 +1375,7 @@ async function aiPaneOf(imageId) {
   }
 }
 
-/** 发起一次修復调用（**开窗即调用**；弹窗内只有【取】/【關閉】两个底部动作）。 */
+/** 发起一次修復调用（**只由【開始修復】触发**；此时才扣金；弹窗内另有可取消入口）。 */
 async function runAiEnhance(face) {
   const seq = (aiEnhanceRequestSeq += 1)
   aiEnhanceStatus.value = 'running'
@@ -1351,6 +1383,9 @@ async function runAiEnhance(face) {
   aiEnhanceError.value = ''
   aiEnhanceRefunded.value = false
   aiEnhanceLateReply.value = null
+  aiEnhanceDiscarding.value = false
+  aiEnhanceDiscardError.value = ''
+  aiEnhanceDiscarded.value = false
   const sealId = seal.value ? seal.value.stamp_id : face.sealId || face.stamp_id || ''
   const reply = await aiEnhance.enhanceFaceImage({
     image_id: face.face_image_id,
@@ -1376,20 +1411,35 @@ async function runAiEnhance(face) {
   aiCandidatePane.value = await aiPaneOf(reply.imageId)
 }
 
+/**
+ * 开窗：**只开窗、不调 op、零扣金** —— 弹窗以「待確認」态打开（右格「尚未開始」，
+ * 左格原圖照常取图）。真正发请求由【開始修復】（`startAiEnhance`）触发。
+ */
 function openAiEnhance(face) {
   aiEnhanceFeedback.value = ''
   aiEnhanceResult.value = null
   aiEnhanceError.value = ''
   aiEnhanceRefunded.value = false
   aiEnhanceLateReply.value = null
+  aiEnhanceDiscarding.value = false
+  aiEnhanceDiscardError.value = ''
+  aiEnhanceDiscarded.value = false
+  aiEnhanceStatus.value = 'confirm'
   aiEnhanceFaceId.value = face.id
-  /* 左格：当前影像（原圖）；右格：开窗即发起修復请求（骨架 + 可取消）。 */
+  /* 左格：当前影像（原圖，开窗即取）；右格：待確認态不取图（尚未發出任何請求）。 */
   aiSourcePane.value = { state: 'loading', id: String(face.face_image_id || ''), dataUrl: '', row: null, message: '' }
-  aiCandidatePane.value = { state: 'loading', id: '', dataUrl: '', row: null, message: '' }
+  aiCandidatePane.value = null
   void aiPaneOf(face.face_image_id).then((pane) => {
     if (aiEnhanceFaceId.value === face.id) aiSourcePane.value = pane
   })
-  void runAiEnhance(face)
+}
+
+/** 【開始修復】：确认成本后才真正发起修復调用（**此时才扣金**；只在待確認态可点）。 */
+function startAiEnhance() {
+  const face = aiEnhanceFace.value
+  if (!face || aiEnhanceStatus.value !== 'confirm') return
+  aiCandidatePane.value = { state: 'loading', id: '', dataUrl: '', row: null, message: '' }
+  runAiEnhance(face)
 }
 
 /** 取消：只停止等待（**服务端请求不撤回**）；在途回包仍被收取 ⇒ 不丢未收的回包。 */
@@ -1404,6 +1454,42 @@ function closeAiEnhance() {
   aiEnhanceFaceId.value = ''
   aiSourcePane.value = null
   aiCandidatePane.value = null
+}
+
+/**
+ * 【棄】：弃置刚得到的候选修復影像 —— op `ai-enhance-discard`（**载荷恰一键 image_id**；
+ * 经 `aiEnhance.discardFaceImage` 走**同一条**用户令牌通道）。**不涉及退款**（修復金已在
+ * 上游成功时花掉 ⇒ 文案里不承诺退金）。
+ *  · 待办中：禁点 ＋ 文案「正在棄置…」（首行拦截 ⇒ **绝不发第二次 discard**）；
+ *  · 成功（`ok === true`）：顶部反馈「候選圖已棄置（影像編號 X）」＋ `deleted_objects`
+ *    为真补一句「影像物件亦已清除」⇒ **关窗**（印面指向不变 —— 候选件从未被【取】采纳）；
+ *  · 失败：**弹窗内**原文透出服务端 `message`（`FORBIDDEN` / `INVALID_VALUE` 等一字不改写）、
+ *    **不关窗**、【取】仍可用（候选影像行是否已被移除的判定权在服务端）。
+ */
+async function discardAiEnhance() {
+  const result = aiEnhanceResult.value
+  const imageId = result && result.imageId ? String(result.imageId) : ''
+  /* 首行拦截：已弃置 / 在途 / 无候选编号 ⇒ 零请求（【關閉】永不触发本函数 ⇒ 关窗不会补发 discard）。 */
+  if (!imageId || aiEnhanceDiscarding.value || aiEnhanceDiscarded.value) return
+  aiEnhanceDiscarding.value = true
+  aiEnhanceDiscardError.value = ''
+  try {
+    const reply = await aiEnhance.discardFaceImage(imageId)
+    if (!reply.ok) {
+      /* 失败：服务端 message **原文上屏**（不吞真因、不改写）；弹窗不关、【取】仍可用。 */
+      aiEnhanceDiscardError.value = reply.message || '棄置候選圖未生效（請稍後再試）。'
+      return
+    }
+    aiEnhanceDiscarded.value = true
+    aiEnhanceFeedback.value = reply.deletedObjects
+      ? `候選圖已棄置（影像編號 ${reply.imageId}）；影像物件亦已清除。印面指向未變。`
+      : `候選圖已棄置（影像編號 ${reply.imageId}）。印面指向未變。`
+    /* 派生读数立即刷新（候选件已移除，右格不再渲染它）。 */
+    dataVersion.value += 1
+    closeAiEnhance()
+  } finally {
+    aiEnhanceDiscarding.value = false
+  }
 }
 
 /**
@@ -2153,7 +2239,8 @@ onBeforeUnmount(() => {
 
     <!-- 管理员专属弹窗：**人工智能修復**（左格「原圖」／右格「修復圖」并列对比）。
          弹窗内按钮**只用 `data-action`**（**不得**复用 `data-admin-action`，否则取值集合被撑破）。
-         底部只有【取】（仅回包成功可用）与【關閉】；**没有【弃】** —— 调用中的取消入口在右格内。 -->
+         开窗＝**待確認态**（右格「尚未開始」＋成本一行；零请求、零扣金）；【開始修復】才发起调用；
+         回包成功后底部三粒【取】/【棄】/【關閉】；调用中的取消入口在右格内。 -->
     <div
       v-if="aiEnhanceFace"
       class="ai-face-mask"
@@ -2166,11 +2253,12 @@ onBeforeUnmount(() => {
         <h3 class="ai-face-box__title">人工智能修復 · {{ faceLabel(aiEnhanceFace) }}</h3>
         <p class="ai-face-box__lede">
           印面編號 {{ aiEnhanceFace.id }} · 當前影像編號 {{ aiEnhanceFace.face_image_id || '（暫無）' }}。
-          修復在服務端進行，產出**新影像**；按【取】才把本印面指向新影像，**舊影像與二進制保留**（不刪除、可回溯）。
+          修復在服務端進行，產出**新影像**；按【取】才把本印面指向新影像，**舊影像與二進制保留**（不刪除、可回溯）；
+          不滿意可按【棄】棄置候選圖（**不涉及退款** —— 修復金已於修復成功時花掉）。
         </p>
-        <!-- 成本明示（**调用前**一行小字）：每张 10 金；实际扣费以回包 charge 爲准。 -->
+        <!-- 成本明示（**调用前**一行小字）：确认后才扣金；每张 10 金；实际扣费以回包 charge 爲准。 -->
         <p class="ai-face-box__cost" data-ai-enhance-cost>
-          本次修復每張消耗 {{ aiEnhanceCost }} 金（調用前明示；實際扣費以服務端回包記載爲準）。
+          本次修復將消耗 {{ aiEnhanceCost }} 金（失敗全額退回）；按下【開始修復】才會扣金與發出請求。
         </p>
 
         <div class="ai-face-compare">
@@ -2202,11 +2290,15 @@ onBeforeUnmount(() => {
             </p>
           </section>
 
-          <!-- 右格：修復圖（四态：调用中骨架 / 成功候选影像 / 失败可读文案 / 取消）。 -->
+          <!-- 右格：修復圖（五态：待確認 / 调用中骨架 / 成功候选影像 / 失败可读文案 / 取消）。 -->
           <section class="ai-face-pane" data-ai-enhance-pane="candidate">
             <h4 class="ai-face-pane__title">修復圖</h4>
+            <!-- 待確認：开窗即此态 —— **零请求、零扣金**；成本与请求都等【開始修復】。 -->
+            <p v-if="aiEnhanceStatus === 'confirm'" class="ai-face-pane__state" data-ai-enhance-state="confirm">
+              尚未開始。確認成本後按【開始修復】，才會發出請求並扣金。
+            </p>
             <!-- 调用中：骨架 ＋ 可取消入口（取消只停止等待，**不撤回服务端请求**；回包仍被收取）。 -->
-            <div v-if="aiEnhanceStatus === 'running'" class="ai-face-pane__skeleton" data-ai-enhance-state="running">
+            <div v-else-if="aiEnhanceStatus === 'running'" class="ai-face-pane__skeleton" data-ai-enhance-state="running">
               <p class="ai-face-pane__state">正在修復，約需 20–60 秒…</p>
               <button class="btn btn--ghost" type="button" data-action="ai-enhance-cancel" @click="cancelAiEnhanceRun">
                 取消
@@ -2259,27 +2351,64 @@ onBeforeUnmount(() => {
               </p>
               <p class="ai-face-pane__meta" data-ai-enhance-charge>{{ aiEnhanceChargeText }}</p>
             </template>
-            <p v-else class="ai-face-pane__state" data-ai-enhance-state="idle">尚未發起修復請求。</p>
+            <p v-else class="ai-face-pane__state" data-ai-enhance-state="idle">修復尚未就緒（無可渲染的狀態）。</p>
           </section>
         </div>
+
+        <!-- 【棄】失败：服务端 message **原文上屏**（FORBIDDEN / INVALID_VALUE 等一字不改写）；
+             弹窗不关、【取】仍可用；**不承诺退金**（弃置不涉及退款）。 -->
+        <p
+          v-if="aiEnhanceDiscardError"
+          class="ai-face-box__feedback ai-face-box__feedback--error"
+          data-ai-enhance-discard-error
+        >
+          棄置候選圖未生效：{{ aiEnhanceDiscardError }}（候選圖仍在，可按【取】採用或再按【棄】重試。）
+        </p>
 
         <p v-if="aiEnhanceFeedback" class="ai-face-box__feedback" data-admin-feedback="ai-enhance-dialog">
           {{ aiEnhanceFeedback }}
         </p>
 
         <div class="ai-face-box__foot">
-          <button class="btn btn--ghost" type="button" data-action="ai-enhance-close" @click="closeAiEnhance()">
+          <!-- 待確認态：【開始修復】（确认成本后才扣金发请求）＋【關閉】（零请求退出）。 -->
+          <template v-if="aiEnhanceStatus === 'confirm'">
+            <button class="btn btn--ghost" type="button" data-action="ai-enhance-close" @click="closeAiEnhance()">
+              關閉
+            </button>
+            <button class="btn btn--primary" type="button" data-action="ai-enhance-start" @click="startAiEnhance">
+              開始修復
+            </button>
+          </template>
+          <!-- 回包成功态：三粒【取】/【棄】/【關閉】。 -->
+          <template v-else-if="aiEnhanceStatus === 'done'">
+            <button class="btn btn--ghost" type="button" data-action="ai-enhance-close" @click="closeAiEnhance()">
+              關閉
+            </button>
+            <!-- 【棄】：棄置候選影像（不退款）；待辦中禁點＋「正在棄置…」；已棄置 ⇒ disabled＋「已棄置」。 -->
+            <button
+              class="btn btn--ghost"
+              type="button"
+              data-action="ai-enhance-discard"
+              :disabled="!aiEnhanceDiscardable"
+              @click="discardAiEnhance"
+            >
+              {{ aiEnhanceDiscardLabel }}
+            </button>
+            <!-- 【取】：**仅回包成功可用**（复用现有换图写面改写 face_image_id；旧行不删）。
+                 棄置在途 ⇒ 一并禁点（避免「正被删除的候选件」被改写指向）。 -->
+            <button
+              class="btn btn--primary"
+              type="button"
+              data-action="ai-enhance-accept"
+              :disabled="!aiEnhanceAcceptable || aiEnhanceAccepting || aiEnhanceDiscarding"
+              @click="acceptAiEnhance"
+            >
+              {{ aiEnhanceAccepting ? '正在取用…' : '取' }}
+            </button>
+          </template>
+          <!-- 其余态（调用中 / 已取消 / 失败）：只有【關閉】（取消入口在右格内）。 -->
+          <button v-else class="btn btn--ghost" type="button" data-action="ai-enhance-close" @click="closeAiEnhance()">
             關閉
-          </button>
-          <!-- 【取】：**仅回包成功可用**（复用现有换图写面改写 face_image_id；旧行不删）。 -->
-          <button
-            class="btn btn--primary"
-            type="button"
-            data-action="ai-enhance-accept"
-            :disabled="!aiEnhanceAcceptable || aiEnhanceAccepting"
-            @click="acceptAiEnhance"
-          >
-            {{ aiEnhanceAccepting ? '正在取用…' : '取' }}
           </button>
         </div>
       </div>
@@ -3184,6 +3313,11 @@ onBeforeUnmount(() => {
   border-radius: var(--r-md);
   color: var(--c-text);
   font-size: var(--t-sm);
+}
+
+/* 【棄】失败的弹窗内可见落点（服务端 message 原文上屏）。 */
+.ai-face-box__feedback--error {
+  color: var(--c-danger);
 }
 
 .ai-face-box__foot {

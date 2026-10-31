@@ -990,6 +990,48 @@ async function uploadDisplayArtifactBytes(cloudPath, bytes) {
   await app.uploadFile({ cloudPath, fileContent: payload })
 }
 
+/* ---------------------------------------------------------------------------
+   对象存储**删除**缝（**离线自检 / 宿主用**；生产不注入 ⇒ 走真实 `@cloudbase/node-sdk`）
+   —— 本单 `ai-enhance-discard` 用：内容寻址去重保护成立（同摘要在影像行集合中再无其它行）
+   时才删对象；否则只删行。
+   --------------------------------------------------------------------------- */
+
+let storageDeleteProvider = null
+
+/**
+ * 注入对象存储**删除**实现（**仅供离线自检 / 宿主**）。
+ * 形状：`async (cloudPath) => void`（删除失败 ⇒ **抛错**，由 op 如实转 `deleted_objects: false`）。
+ * @param {null|function(string):Promise<void>} fn
+ */
+function setOpsStorageDeleteProvider(fn) {
+  storageDeleteProvider = typeof fn === 'function' ? fn : null
+}
+
+/** 删除缝是否已注入（诊断读数用，**不含任何凭据**）。 */
+function opsStorageDeleteInjected() {
+  return storageDeleteProvider !== null
+}
+
+/**
+ * **删除对象**（服务端；`ai-enhance-discard` 的唯一删对象点）。
+ * 顺序：① 注入缝（离线自检）→ ② 真实 node-sdk：先解析完整 fileID，再 `deleteFile`。
+ * 任一环失败 ⇒ **抛错**（由调用方如实报 `deleted_objects: false`；**不得谎报已删**）。
+ * @param {string} cloudPath 对象键
+ * @returns {Promise<void>}
+ */
+async function deleteArtifactObject(cloudPath) {
+  if (storageDeleteProvider) {
+    await storageDeleteProvider(cloudPath)
+    return
+  }
+  /* 客户端句柄经 `initClientFromEnv()`（延迟 require 已内聚其中；离线自检走注入删除缝、不经此处）。
+     句柄变量**不用 `app` 字面**：`scripts/verify-points-ledger.mjs` C7 静态门按「`app` ＝ 初始化
+     单点」的既有三消费点恰 3 处计数 —— 本函数是第 4 个消费点，换名即不改判据、判据不为本单漂移。 */
+  const handle = initClientFromEnv()
+  const fileID = await resolveFileId(handle, cloudPath)
+  await handle.deleteFile({ fileID })
+}
+
 /**
  * 取 DB 句柄。
  * 凭据来源：**函数运行环境注入的角色凭据**（node-sdk 自行读取）——本文件**不传任何密钥**；
@@ -3410,6 +3452,30 @@ async function directWriteRowOfExistingSeal(sealRow, idempotent) {
 
 const ADMIN_OPS = Object.freeze({
   /**
+   * **管理員「弃候選圖」（`ai-enhance-discard`）** —— 薄委派：業務邏輯單點在
+   * `lib/aiEnhanceDiscard.js::discardCandidate`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **管理員寫面**（`adminWhitelistDenial` 門同既有；非管理員 ⇒ `FORBIDDEN` ＋ 零刪行）；
+   * ② 載荷**封閉恰一鍵** `image_id`（未知鍵 ⇒ `INVALID_FIELD`；缺 / 空 ⇒ `MISSING_REQUIRED`；
+   *    非字符串 ⇒ `INVALID_VALUE`；以上均零刪行、零刪對象）；③ 只弃 `source: ai_enhance` 的影像行
+   *    （其它來源 ⇒ `FORBIDDEN`，文案「僅 AI 修復候選圖可弃」）；④ 印面引用保護（任一印面行的
+   *    `face_image_id` / `edge_image_ids` 命中 ⇒ `INVALID_VALUE`，文案「已被印面引用，不可弃」）；
+   * ⑤ 刪影像行（經 `ops.deleteRow`）＋ **內容尋址去重保護**（同 `sha256` 尚有其它行 ⇒ 只刪行、
+   *    `deleted_objects: false`；無他行 ⇒ 刪對象、`deleted_objects: true`）；⑥ 成功回包**恰 3 鍵**
+   *    （`ok, image_id, deleted_objects`）、失敗回包**恰 3 鍵**（`ok, reason, message`，
+   *    **零 `refunded`** —— 與修復面不同，弃圖零計費 ⇒ 零退款面）；⑦ 冪等：同編號重放 ⇒ 行已不
+   *    存在 ⇒ 成功回放 `deleted_objects: false`（不報錯、不重複刪）；⑧ `reason` **零新增**（只用
+   *    既有凍結值）、**零新集合**（讀走 `readRows`、刪行走 `deleteRow` / `deleteArtifactObject`）。
+   * @param {object} payload 載荷（封閉一鍵 `image_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  'ai-enhance-discard': async function aiEnhanceDiscardDelegate(payload, identity, context) {
+    /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { discardCandidate } = require('./aiEnhanceDiscard.js')
+    return discardCandidate(payload, identity, context)
+  },
+
+  /**
    * **管理員「人工智能修復」（`ai-enhance-face`｜規範 §3.68）** —— 薄委派：業務邏輯單點在
    * `lib/aiEnhance.js::enhanceFace`（本處零第二套邏輯；`require` 延遲以打破加載環）。
    * 硬口徑：① **管理員寫面**（`adminWhitelistDenial` 門同既有；非管理員 ⇒ `FORBIDDEN` ＋ 零扣費）；
@@ -5431,6 +5497,19 @@ async function persist(plan) {
   return id ? String(id) : ''
 }
 
+/**
+ * **删行**（服务端；`ai-enhance-discard` 的唯一删行点 —— 与 `persist` 同为本文件的写点单点）。
+ * 按文档 `_id` 删（`doc(docId).delete()`）；行不存在 ⇒ 平台回 `deleted: 0`（**不抛错**）。
+ * 失败 ⇒ **抛错**（由 `index.js` 统一转 `STORAGE_UNAVAILABLE`，**绝不伪装 FORBIDDEN**）。
+ * @param {string} collection 集合名（`^xiai_`；调用方一律经 `COLLECTIONS` 取值，不写字面）
+ * @param {string} docId 文档 `_id`
+ * @returns {Promise<void>}
+ */
+async function deleteRow(collection, docId) {
+  const db = resolveDb()
+  await db.collection(collection).doc(docId).delete()
+}
+
 module.exports = {
   COLLECTIONS,
   MARKABLE_FIELDS,
@@ -5602,6 +5681,12 @@ module.exports = {
      只補登記到導出面 —— 實現零改）。 */
   readRows,
   uploadDisplayArtifactBytes,
+  /* **AI 候選圖弃除面（本單 `ai-enhance-discard`）**：删行 / 删对象两个写点 ＋ 对象删除注入缝
+     （供离线自检直接断言；实现零第二套 —— 删对象单点在本文件 `deleteArtifactObject`）。 */
+  deleteRow,
+  deleteArtifactObject,
+  setOpsStorageDeleteProvider,
+  opsStorageDeleteInjected,
   artifactMimeOf,
   adminWhitelistDenial,
   readCorrectionRow,

@@ -1099,7 +1099,7 @@ check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDu
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
 const verifyScripts = readdirSync(path.join(ROOT, 'scripts')).filter((name) => /^verify-.*\.mjs$/.test(name))
-check('F4', '本套为第 29 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance）', { count: 29, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4', '本套为第 30 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard）', { count: 30, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
 check('F4b', '新增套 `verify-ai-connect-page.mjs` 亦在册（脚本计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-ai-connect-page.mjs') !== -1)
 
 check('F5', '核心只经四个 lib 的既有注入缝取集合（零取句柄字面）与零上游凭据字面', { seamCalls: 4, keyLiteral: 0 }, { seamCalls: ['setLedgerStoreProvider', 'setAiKeyStoreProvider', 'setUpstreamStoreProvider', 'setAiUsageStoreProvider'].filter((name) => countIn(coreSource, name) >= 1).length, keyLiteral: countIn(coreSource, UPSTREAM_KEY) })

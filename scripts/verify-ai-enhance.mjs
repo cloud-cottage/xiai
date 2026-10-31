@@ -9,7 +9,7 @@
  *
  * 断言面（本套 **26** 条，覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
- *      A0 `ADMIN_OPS` 注册面（恰 17 项、`ai-enhance-face` 在册且为函数）；
+ *      A0 `ADMIN_OPS` 注册面（恰 18 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 8 键**；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
  *         ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号；
  *      A2 `preview.sha256` **逐字 ＝ 上传字节的 sha256**（且上传字节与上游回图字节**逐字节相等**、
@@ -323,7 +323,7 @@ section('A', '注册面与成功路：恰 8 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 17 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 17, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 18 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 18, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
