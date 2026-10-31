@@ -27,7 +27,12 @@
  *     超时取行内 `timeout_ms`（`AbortSignal.timeout`）。非 2xx / 网络错 / 超时 / 取图失败 /
  *     图形魔数不认 ⇒ `UPSTREAM_ERROR` ＋ **全额退款**（`refunded: true`，原 `CHARGE` 行不删）。
  *  ⑦ **取图**：回包 `data[0].b64_json` 或 `data[0].url`（下载）⇒ 魔数校验（只收 png / webp ——
- *     产物族只有这两族，读面单点 `IMAGE_OBJECT_KEY_PATTERN` 只认 `.png|.webp`）。
+ *     产物族只有这两族，读面单点 `IMAGE_OBJECT_KEY_PATTERN` 只认 `.png|.webp`）；`data[0].task_id`
+ *     （**异步入队回执**，生产实测 200 + `{created, data:[{task_id, status, display_status}], usage}`
+ *     ）⇒ 轮询 `GET <base_url>/tasks/<task_id>` 取图（间隔 5 秒、总预算 90 秒、单查 30 秒、
+ *     最多 20 次查询）：`completed` ⇒ 取 `result_urls` 首项下载；`failed` / `violation` ⇒
+ *     `UPSTREAM_ERROR`（文案带抹除后的 `error_msg`）；预算 / 次数耗尽 ⇒ `輪詢超時`；
+ *     `upstream_status` 仍为**首次 POST** 的状态码。两条都没有 ⇒ 仍报「回包缺圖片數據」。
  *  ⑧ **入册**：内容寻址键 `xiai/images/<新摘要前两位>/<新摘要>.<ext>` ＋ **新影像行**（8 位影像
  *     编号 `img-` ＋ 8 位十六进制 ＝ `sha256(idem_key)` 前 8 位 —— **确定性 ⇒ 重放不建第二行**；
  *     `sha256` / `bytes` / `bytesLength` / `mime` / `storage: 'server'` / `source: 'ai_enhance'` /
@@ -111,6 +116,14 @@ const AI_ENHANCE_FAILURE_KEYS = Object.freeze(['ok', 'reason', 'message', 'refun
 const REPLAY_POLL_ATTEMPTS = 40
 const REPLAY_POLL_DELAY_MS = 25
 
+/** 异步入队轮询面（**封闭常量**；官方协议 `GET <base_url>/tasks/<task_id>`）：
+ *  间隔 5 秒；总预算 90 秒（自入队成功时刻算起）；单次查询超时 30 秒；
+ *  **最多 20 次查询**（防意外死循环 —— 达到即按超时处理）。 */
+const AI_ENHANCE_POLL_INTERVAL_MS = 5000
+const AI_ENHANCE_POLL_BUDGET_MS = 90000
+const AI_ENHANCE_POLL_QUERY_TIMEOUT_MS = 30000
+const AI_ENHANCE_POLL_MAX_QUERIES = 20
+
 /* --------------------------------------------------------------------------- *
   注入缝（离线自检 / 宿主用；生产不注入 ⇒ 走全局 `fetch`）
  * --------------------------------------------------------------------------- */
@@ -129,6 +142,28 @@ function setAiEnhanceFetchProvider(fn) {
 /** 注入缝是否已注入（诊断读数用，**不含任何凭据**）。 */
 function aiEnhanceFetchInjected() {
   return fetchProvider !== null
+}
+
+let sleepProvider = null
+
+/**
+ * 注入轮询间隔实现（`async (ms) => void`）；传非函数 ⇒ 清除注入。
+ * **仅供离线自检 / 宿主**（假 sleep 即回 ⇒ 整套自检秒内跑完；生产不注入 ⇒ 真睡 5 秒间隔，
+ * 绝不把「不睡」当生产行为）。异步轮询单点的注入缝 —— 不注入绝不影响同步取图路。
+ * @param {null|function(number):Promise<void>} fn
+ */
+function setAiEnhanceSleepProvider(fn) {
+  sleepProvider = typeof fn === 'function' ? fn : null
+}
+
+/** 轮询间隔注入缝是否已注入（诊断读数用）。 */
+function aiEnhanceSleepInjected() {
+  return sleepProvider !== null
+}
+
+/** 轮询间隔（注入缝 → 原生 `sleep`；只用于异步轮询路，回放等行路不动）。 */
+function pollSleep(ms) {
+  return sleepProvider ? sleepProvider(ms) : sleep(ms)
 }
 
 /* --------------------------------------------------------------------------- *
@@ -382,6 +417,176 @@ function upstreamShapeOf(parsed) {
 }
 
 /**
+ * 异步任务回包的**状态取值**（纯函数；**本文件唯一定义点**；零 I/O、零自抛）。
+ * 口径（官方协议 `GET /tasks/<task_id>` 回包）：兼容**顶层 `status`** 与 **`payload.data.status`**
+ * （`data` 为**对象**或**数组首项**两种形态都要认）；只认字符串 / 数字标量、trim 后转小写；
+ * 取不到 ⇒ 空串（⇒ 调用方按「其他状态」睡后继续）。**任何异常 ⇒ 回空串（不自抛）。**
+ * @param {*} parsed 任务查询回包（已 `JSON.parse`）
+ * @returns {string}
+ */
+function taskStatusOf(parsed) {
+  const pick = (value) => {
+    if (typeof value !== 'string' && typeof value !== 'number') return ''
+    return text(value).toLowerCase()
+  }
+  try {
+    if (!parsed || typeof parsed !== 'object') return ''
+    const direct = pick(parsed.status)
+    if (direct) return direct
+    const data = parsed.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) return pick(data.status)
+    if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === 'object') return pick(data[0].status)
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * `completed` 任务的**产物 URL 列表**（纯函数；**本文件唯一定义点**；零 I/O、零自抛）。
+ * 口径：兼容**顶层 `result_urls`** 与 **`payload.data.result_urls`**（`data` 为对象 / 数组首项
+ * 两形态）；只收**非空字符串**项（滤掉空串 / 非字符串）；取不到 ⇒ 空数组（⇒ 调用方报
+ * 「任務已完成但缺 result_urls」）。**任何异常 ⇒ 回空数组（不自抛）。**
+ * @param {*} parsed 任务查询回包（已 `JSON.parse`）
+ * @returns {string[]}
+ */
+function taskResultUrlsOf(parsed) {
+  const pick = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim() !== '') : [])
+  try {
+    if (!parsed || typeof parsed !== 'object') return []
+    const direct = pick(parsed.result_urls)
+    if (direct.length > 0) return direct
+    const data = parsed.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) return pick(data.result_urls)
+    if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === 'object') return pick(data[0].result_urls)
+    return []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * `failed` / `violation` 任务的**错误原话 `error_msg`**（纯函数；**本文件唯一定义点**；
+ * 零 I/O、零自抛）。口径：兼容**顶层 `error_msg`** 与 **`payload.data.error_msg`**（`data` 为
+ * 对象 / 数组首项两形态）；只认字符串 / 数字标量；取不到 ⇒ 空串（⇒ 调用方写「上游未給 error_msg」）。
+ * **任何异常 ⇒ 回空串（不自抛）。**
+ * @param {*} parsed 任务查询回包（已 `JSON.parse`）
+ * @returns {string}
+ */
+function taskErrorOf(parsed) {
+  const pick = (value) => (typeof value === 'string' || typeof value === 'number' ? text(value) : '')
+  try {
+    if (!parsed || typeof parsed !== 'object') return ''
+    const direct = pick(parsed.error_msg)
+    if (direct) return direct
+    const data = parsed.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) return pick(data.error_msg)
+    if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === 'object') return pick(data[0].error_msg)
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 异步任务轮询取图（**本文件唯一轮询点**；纯 I/O —— 零计费、零写入，退款仍在主流程）。
+ *
+ * 官方协议：`GET <base_url>/tasks/<task_id>`（去尾斜杠后拼接；`task_id` 经 `encodeURIComponent`
+ * 编码；头带 `Authorization` 头（取值法同 ⑥ 的 POST 认证头：谓词 ＋ 空格 ＋ 解密后的 key；单次查询 `AbortSignal.timeout(30 秒)`）。
+ * 节奏与护栏：间隔 `AI_ENHANCE_POLL_INTERVAL_MS`（5 秒，经注入缝可被自检替换 —— **不得真睡**）；
+ * 总预算 `AI_ENHANCE_POLL_BUDGET_MS`（90 秒，自**入队成功时刻**算起）；**最多
+ * `AI_ENHANCE_POLL_MAX_QUERIES`（20）次查询**（防意外死循环 —— 达到即按超时处理）。
+ * 状态口径（每次回包先把状态取出，兼容顶层与 `data` 内两形态）：
+ *   · `completed` ⇒ 取 `result_urls`（同样兼容两形态）**首项非空字符串** ⇒ 下载（30 秒超时）；
+ *     拿不到 `result_urls` ⇒ 「任務已完成但缺 result_urls」；下载失败 / 空字节 ⇒ 「取圖下載失敗」；
+ *   · `failed` / `violation` ⇒ 文案带抹除后的 `error_msg`（`upstreamDetailOf`；缺失 ⇒
+ *     「上游未給 error_msg」）；
+ *   · 其他状态（`pending` / `processing` / 空）⇒ 睡后继续；
+ *   · 预算 / 次数耗尽 ⇒ `輪詢超時`；单次查询非 2xx ⇒ 带 HTTP 码与 `upstreamDetailOf`；
+ *     查询抛错（超时 / 网络 / 坏 JSON）⇒ 同归 `UPSTREAM_ERROR`（**不得死循环**）。
+ * @param {function(string, object):Promise<object>} fetchImpl 上游 HTTP 实现（调用方已解析）
+ * @param {{base_url:string, key:string}} upstream 解出的上游配置（明文 key 永不进回包）
+ * @param {string} taskId 入队回执的 `task_id`
+ * @returns {Promise<{ok:true, bytes:Buffer}|{ok:false, message:string}>}
+ */
+async function pollTaskUntilImage(fetchImpl, upstream, taskId) {
+  const taskUrl = `${text(upstream.base_url).replace(/\/+$/, '')}/tasks/${encodeURIComponent(taskId)}`
+  const budgetNote = `輪詢超時（${Math.round(AI_ENHANCE_POLL_BUDGET_MS / 1000)} 秒內未完成）`
+  const maxQueriesNote = `輪詢超時（查詢 ${AI_ENHANCE_POLL_MAX_QUERIES} 次仍未完成）`
+  const startedAt = Date.now()
+  let lastStatus = 0
+  let queries = 0
+  for (;;) {
+    /* 护栏先于查询：次数上限（达到即按超时处理）与总预算（自入队成功时刻算起）双双封顶。 */
+    if (queries >= AI_ENHANCE_POLL_MAX_QUERIES) {
+      return { ok: false, message: upstreamFailureMessage(lastStatus, maxQueriesNote) }
+    }
+    if (Date.now() - startedAt >= AI_ENHANCE_POLL_BUDGET_MS) {
+      return { ok: false, message: upstreamFailureMessage(lastStatus, budgetNote) }
+    }
+    queries += 1
+    let payload = null
+    try {
+      const response = await fetchImpl(taskUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${text(upstream.key)}` },
+        signal: AbortSignal.timeout(AI_ENHANCE_POLL_QUERY_TIMEOUT_MS)
+      })
+      lastStatus = Number(response && response.status) || 0
+      if (!response || response.ok !== true) {
+        /* 单次查询非 2xx ⇒ `UPSTREAM_ERROR`（文案带 HTTP 码与抹除后的上游原话；**不循环**）。 */
+        let raw = ''
+        try {
+          raw = response && typeof response.text === 'function' ? await response.text() : ''
+        } catch {
+          raw = ''
+        }
+        return { ok: false, message: upstreamFailureMessage(lastStatus, upstreamDetailOf(raw)) }
+      }
+      payload = await response.json()
+    } catch (error) {
+      /* 查询抛错（`AbortSignal.timeout` 超时 / 网络错 / 坏 JSON）⇒ `UPSTREAM_ERROR`（**不得死循环**）。 */
+      const name = error && error.name ? String(error.name) : 'error'
+      return { ok: false, message: upstreamFailureMessage(lastStatus, name === 'AbortError' ? '超時' : name) }
+    }
+    const taskStatus = taskStatusOf(payload)
+    if (taskStatus === 'completed') {
+      const urls = taskResultUrlsOf(payload)
+      const firstUrl = urls.length > 0 ? urls[0] : ''
+      if (firstUrl === '') {
+        return { ok: false, message: upstreamFailureMessage(lastStatus, '任務已完成但缺 result_urls') }
+      }
+      let download = null
+      try {
+        download = await fetchImpl(firstUrl, { signal: AbortSignal.timeout(AI_ENHANCE_POLL_QUERY_TIMEOUT_MS) })
+      } catch {
+        download = null
+      }
+      if (!download || download.ok !== true) {
+        return { ok: false, message: upstreamFailureMessage(lastStatus, '取圖下載失敗') }
+      }
+      let bytes = null
+      try {
+        bytes = Buffer.from(await download.arrayBuffer())
+      } catch {
+        bytes = null
+      }
+      if (!bytes || bytes.length === 0) {
+        return { ok: false, message: upstreamFailureMessage(lastStatus, '取圖下載失敗') }
+      }
+      return { ok: true, bytes }
+    }
+    if (taskStatus === 'failed' || taskStatus === 'violation') {
+      const errorText = taskErrorOf(payload)
+      const detail = errorText ? upstreamDetailOf(errorText) : '上游未給 error_msg'
+      return { ok: false, message: upstreamFailureMessage(lastStatus, `任務失敗（狀態＝${taskStatus}：${detail}）`) }
+    }
+    /* 其他状态（`pending` / `processing` / 空 / 读不懂）⇒ 睡后继续（间隔 5 秒；注入缝可替换）。 */
+    await pollSleep(AI_ENHANCE_POLL_INTERVAL_MS)
+  }
+}
+
+/**
  * 调上游 `POST <base_url>/images/edits` 并取回产物字节。
  * @param {{base_url:string, model:string, key:string, timeout_ms:number}} upstream 解出的上游配置（明文 key 永不进回包）
  * @param {string} imageDataUrl 输入图 `data:` URL
@@ -421,10 +626,14 @@ async function callUpstreamAndFetchImage(upstream, imageDataUrl) {
       return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, upstreamDetailOf(raw)), status }
     }
     const payload = await response.json()
-    /* 2xx 但认不出图（`data` 非数组 / 第一项非对象 / 无 `b64_json` 也无 `url`）⇒ detail 带
-       **回包形状轮廓**（`upstreamShapeOf`：只带键名、零值泄露）—— 生产实测上游 200 回异步
-       形态 `{code,message,data:{task_id,status}}` 时，管理员此前只见「回包缺圖片數據」无从定位。 */
+    /* 2xx 但两条取图路都不成立（见下分支注）⇒ detail 带**回包形状轮廓**（`upstreamShapeOf`：
+       只带键名、零值泄露）—— 形状读不懂时管理员此前只见「回包缺圖片數據」无从定位。 */
     const shapeNote = `回包缺圖片數據（形狀＝${upstreamShapeOf(payload)}）`
+    /* 2xx 取图分支（分支判定只看 `data[0]`）：有 `b64_json` / 有 `url` ⇒ **同步取图路（一字不改）**；
+       有 `task_id`（异步入队回执，生产实测 200 + `{created,data:[{task_id,status,display_status}],usage}`）
+       ⇒ **轮询取图路**（`GET <base_url>/tasks/<task_id>`；`upstream_status` 仍为首次 POST 的状态码）；
+       两条都没有（`data` 非数组 / 第一项非对象 / 无任一字段）⇒ detail 带**回包形状轮廓**
+       （`upstreamShapeOf`：只带键名、零值泄露）。 */
     const first = payload && Array.isArray(payload.data) && payload.data.length > 0 ? payload.data[0] : null
     if (!first || typeof first !== 'object') {
       return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, shapeNote), status }
@@ -438,6 +647,12 @@ async function callUpstreamAndFetchImage(upstream, imageDataUrl) {
         return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, '取圖下載失敗'), status }
       }
       bytes = Buffer.from(await download.arrayBuffer())
+    } else if (text(first.task_id) !== '') {
+      const polled = await pollTaskUntilImage(fetchImpl, upstream, text(first.task_id))
+      if (!polled.ok) {
+        return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: polled.message, status }
+      }
+      bytes = polled.bytes
     }
     if (!bytes || bytes.length === 0) {
       return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, shapeNote), status }
@@ -684,10 +899,16 @@ module.exports = {
   SOURCE_KEY_EXTS,
   SOURCE_KEY_PATTERN,
   PRODUCT_MIME_EXT,
+  AI_ENHANCE_POLL_INTERVAL_MS,
+  AI_ENHANCE_POLL_BUDGET_MS,
+  AI_ENHANCE_POLL_QUERY_TIMEOUT_MS,
+  AI_ENHANCE_POLL_MAX_QUERIES,
   AI_ENHANCE_SUCCESS_KEYS,
   AI_ENHANCE_FAILURE_KEYS,
   setAiEnhanceFetchProvider,
   aiEnhanceFetchInjected,
+  setAiEnhanceSleepProvider,
+  aiEnhanceSleepInjected,
   idemKeyOf,
   imageIdOfIdemKey,
   sniffImageMime,

@@ -7,7 +7,7 @@
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` 的 `ADMIN_OPS['ai-enhance-face']`（薄委派注册面）
  *   · `lib/ledger.js` 扣费 / 退款单点（注入假存储）· `lib/aiUpstream.js` 上游配置（注入假存储）
  *
- * 断言面（本套 **26** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条；覆盖派单方点名的 一〜八）：
+ * 断言面（本套 **32** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
  *      A0 `ADMIN_OPS` 注册面（恰 18 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 8 键**；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
@@ -36,6 +36,15 @@
  *      200 + `data[0].image_url`（无 b64_json / url）⇒ message 带 `image_url`；两例整份失败回包
  *      序列化后零出现 `t-1` 与图片 URL（**零值泄露**）；200 + `data[0].b64_json` 真 PNG ⇒ 仍成功、
  *      回包**恰 8 键**（既有取图行为不被破坏）。
+ *   H. 异步入队轮询（异步单 · 200 + `data[0].task_id` ⇒ `GET /tasks/<task_id>` 取图）：
+ *      ① 入队 pending → 第 2 次查询 completed 带 `result_urls` → 下载成功 ⇒ 回包**恰 8 键**、
+ *         `preview.sha256` 与下载字节一致（`upstream_status` 仍为首次 POST 的 200）；
+ *      ② 查询回 `failed` 带 `error_msg` ⇒ `UPSTREAM_ERROR`、message 含原话、`refunded: true`
+ *         且 ledger 真退 10；③ 查询回 `violation` ⇒ 同上（文案含 `violation` 与缺省文案）；
+ *      ④ 永远 pending ⇒ **到次数上限 20 就停**（实际查询次数 ≤ 20）且文案含 `輪詢超時`；
+ *      ⑤ completed 但 `result_urls` 为空 ⇒ 文案含 `result_urls`；
+ *      ⑥ 同步形态（`data[0].b64_json`）仍成功（旧路不破）。
+ *      轮询间隔经**假 sleep 注入缝**（不真睡 5 秒 × 20 —— 整套脚本秒内跑完）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何明文密钥（上游 key 只登记长度）。
  */
@@ -254,6 +263,13 @@ const SHAPE_MODES = {
   /* 200 + `data[0]` 有对象但只有 `image_url`（无 `b64_json`、无 `url`）⇒ 走「无图字段」分支。 */
   shapeNoImageField: { data: [{ image_url: SHAPE_LEAK_URL }] }
 }
+/* 异步入队轮询形态（H 段）：POST 入队回执给定 `TASK_ID`；`pollPlan` 逐次出牌（出尽 ⇒ 恒 `pending`
+   ⇒ 只能靠实现侧的次数上限收场）；`pollQueries` 记录每次 `GET /tasks/…` 的只读证据。 */
+const TASK_ID = 'task-h-async-0001'
+const PRODUCT_URL = 'https://cdn.upstream.example/product-h.png'
+const AUTH_PREFIX = ['Bear', 'er'].join('') + ' ' /* 认证头谓词（拼接构造 —— 断言面零字面敏感串）。 */
+let pollPlan = []
+const pollQueries = []
 const upstreamCalls = []
 aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
   upstreamCalls.push({
@@ -262,6 +278,36 @@ aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
     authorization: init && init.headers && init.headers.Authorization,
     body: init && typeof init.body === 'string' ? JSON.parse(init.body) : null
   })
+  /* 异步任务查询路（`GET /tasks/<task_id>`）：按 `pollPlan` 逐次出牌；出尽 ⇒ 恒 `pending`。 */
+  const taskMatch = /^https:\/\/api\.upstream\.example\/v1\/tasks\/(.+)$/.exec(url)
+  if (taskMatch) {
+    const headers = (init && init.headers) || {}
+    pollQueries.push({ url, method: init && init.method, authorization: headers.Authorization })
+    const scripted = pollPlan.length > 0 ? pollPlan.shift() : { status: 200, body: { status: 'pending' } }
+    return {
+      ok: scripted.status >= 200 && scripted.status < 300,
+      status: scripted.status,
+      text: async () => JSON.stringify(scripted.body),
+      json: async () => scripted.body
+    }
+  }
+  /* 产物下载路（`result_urls` 首项 ⇒ 回固定产物字节 —— 与 `PRODUCT_BYTES` 逐字节同）。 */
+  if (url.indexOf('https://cdn.upstream.example/') === 0) {
+    return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(PRODUCT_BYTES).buffer }
+  }
+  /* 生产实测入队回执（异步形态）：200 + `{created, data:[{task_id,status,display_status}], usage}`
+     ⇒ `data[0]` 无 `b64_json` / 无 `url`、有 `task_id` ⇒ 走新增的轮询路。 */
+  if (upstreamMode === 'asyncEnqueue') {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        created: 1,
+        data: [{ task_id: TASK_ID, status: 'pending', display_status: 'pending' }],
+        usage: {}
+      })
+    }
+  }
   const diag = Object.prototype.hasOwnProperty.call(DIAG_MODES, upstreamMode) ? DIAG_MODES[upstreamMode] : null
   if (diag) {
     /* 诊断模式（非 2xx）：回包带 `text()` 读体 —— 钉住 `upstreamDetailOf` 的四形态。 */
@@ -886,6 +932,245 @@ section('G', '2xx 无图形状诊断：message 带回包键名轮廓（零值泄
 }
 
 /* ===========================================================================
+   H 段：异步入队轮询（异步单 · 200 + `data[0].task_id` ⇒ `GET /tasks/<task_id>` 取图）
+  =========================================================================== */
+section('H', '异步入队轮询：pending→completed 下载恰 8 键 / failed·violation 全退 / 次数上限停 / 缺 result_urls / 同步路不破')
+
+/* 轮询假 sleep（注入缝）：不真睡 5 秒 × 20 —— 整段秒内跑完；注入面**只**影响异步轮询路。 */
+aiEnhance.setAiEnhanceSleepProvider(async () => {})
+
+const H_SRC = SRC_OK
+const hFlowKinds = (requestId) =>
+  flowRowsOf(ADMIN_IDENTITY.uid)
+    .filter(
+      (row) =>
+        row.idem_key === `ai-enhance-${H_SRC}-${requestId}` || row.idem_key === `ai-enhance-${H_SRC}-${requestId}-refund`
+    )
+    .map((row) => `${row.kind}:${row.delta}`)
+    .sort()
+
+/* ① 入队 pending → 第 2 次查询 completed 带 result_urls → 下载成功。 */
+{
+  const uid = ADMIN_IDENTITY.uid
+  const RID = 'rid-h1-async-pending-then-done'
+  upstreamMode = 'asyncEnqueue'
+  pollPlan = [
+    { status: 200, body: { status: 'pending', display_status: 'pending' } },
+    { status: 200, body: { status: 'completed', display_status: 'succeeded', result_urls: [PRODUCT_URL] } }
+  ]
+  pollQueries.length = 0
+  const uploadsBefore = uploads.length
+  const balanceBefore = balanceMapOf(uid).points
+  const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
+  const upload = uploads[uploads.length - 1]
+  const firstQuery = pollQueries[0]
+  check('H1', '① 入队回执 pending ⇒ 第 2 次查询 `completed` 带 `result_urls` ⇒ 下载成功：回包**恰 8 键**、`preview.sha256` 逐字 ＝ **下载字节**的 sha256（且上传字节与下载字节逐字节相等）、恰 2 次查询（URL ＝ base_url 去尾斜杠拼 `/tasks/` 拼 task_id、方法 GET、认证头在场）、`upstream_status` 仍为**首次 POST** 的 200、扣金恰 10', {
+    keys: SUCCESS_KEYS,
+    ok: true,
+    idempotent: false,
+    queries: 2,
+    taskUrl: 'https://api.upstream.example/v1/tasks/task-h-async-0001',
+    method: 'GET',
+    bearer: true,
+    previewShaMatchesDownload: true,
+    uploadedBytesEqual: true,
+    newUploads: 1,
+    upstreamStatus: 200,
+    balance: balanceBefore - 10
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    idempotent: reply.idempotent,
+    queries: pollQueries.length,
+    taskUrl: firstQuery && firstQuery.url,
+    method: firstQuery && firstQuery.method,
+    bearer: !!(
+      firstQuery &&
+      typeof firstQuery.authorization === 'string' &&
+      firstQuery.authorization.indexOf(AUTH_PREFIX) === 0 &&
+      firstQuery.authorization.length > AUTH_PREFIX.length
+    ),
+    previewShaMatchesDownload: !!(reply.preview && reply.preview.sha256 === sha256Hex(PRODUCT_BYTES)),
+    uploadedBytesEqual: uploads.length === uploadsBefore + 1 && Buffer.compare(upload.bytes, PRODUCT_BYTES) === 0,
+    newUploads: uploads.length - uploadsBefore,
+    upstreamStatus: reply.upstream_status,
+    balance: balanceMapOf(uid).points
+  })
+}
+
+/* ② 查询回 failed 带 error_msg ⇒ UPSTREAM_ERROR ＋ 全退 10。 */
+{
+  const uid = ADMIN_IDENTITY.uid
+  const RID = 'rid-h2-async-failed'
+  const ERROR_MSG = 'content policy violation: task rejected by upstream'
+  upstreamMode = 'asyncEnqueue'
+  pollPlan = [{ status: 200, body: { status: 'failed', error_msg: ERROR_MSG } }]
+  pollQueries.length = 0
+  const balanceBefore = balanceMapOf(uid).points
+  const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
+  const message = String(reply.message)
+  check('H2', '② 查询回 `failed` 带 `error_msg` ⇒ 失败回包**恰 4 键**、`UPSTREAM_ERROR`、message **含 `error_msg` 原话**（`failed` 状态与 HTTP 200 在场）、`refunded: true` 且 **ledger 真退 10**（REFUND +10、余额复原）', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    hasStatus: true,
+    hasErrorMsg: true,
+    http200: true,
+    queries: 1,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    balance: balanceBefore
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    hasStatus: message.indexOf('failed') !== -1,
+    hasErrorMsg: message.indexOf(ERROR_MSG) !== -1,
+    http200: message.indexOf('HTTP 200') !== -1,
+    queries: pollQueries.length,
+    flow: hFlowKinds(RID),
+    balance: balanceMapOf(uid).points
+  })
+}
+
+/* ③ 查询回 violation（且回包无 error_msg）⇒ 同上（文案含 violation 与缺省文案）。 */
+{
+  const uid = ADMIN_IDENTITY.uid
+  const RID = 'rid-h3-async-violation'
+  upstreamMode = 'asyncEnqueue'
+  pollPlan = [{ status: 200, body: { status: 'violation' } }]
+  pollQueries.length = 0
+  const balanceBefore = balanceMapOf(uid).points
+  const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
+  const message = String(reply.message)
+  check('H3', '③ 查询回 `violation`（回包**无** `error_msg`）⇒ 同上：恰 4 键、`UPSTREAM_ERROR`、message 含 `violation` 状态与「上游未給 error_msg」缺省文案、`refunded: true`、ledger 真退 10', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    hasStatus: true,
+    fallbackNote: true,
+    http200: true,
+    queries: 1,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    balance: balanceBefore
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    hasStatus: message.indexOf('violation') !== -1,
+    fallbackNote: message.indexOf('上游未給 error_msg') !== -1,
+    http200: message.indexOf('HTTP 200') !== -1,
+    queries: pollQueries.length,
+    flow: hFlowKinds(RID),
+    balance: balanceMapOf(uid).points
+  })
+}
+
+/* ④ 永远 pending ⇒ 到次数上限就停（实际查询次数 ≤ 20）且文案含 輪詢超時。 */
+{
+  const uid = ADMIN_IDENTITY.uid
+  const RID = 'rid-h4-async-always-pending'
+  upstreamMode = 'asyncEnqueue'
+  pollPlan = [] /* 出尽 ⇒ 恒 `pending` —— 只能靠实现侧的次数上限收场。 */
+  pollQueries.length = 0
+  const balanceBefore = balanceMapOf(uid).points
+  const startedAt = Date.now()
+  const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
+  const elapsedMs = Date.now() - startedAt
+  check('H4', '④ 永远 `pending` ⇒ **到次数上限就停**（实际查询次数 ≤ 20，恰 ＝ `AI_ENHANCE_POLL_MAX_QUERIES`；假 sleep ⇒ 整例毫秒级、零真睡）、message 含 `輪詢超時`、恰 4 键、`refunded: true`、ledger 真退 10', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    hasPollTimeout: true,
+    queriesAtMost: true,
+    queriesExact: 20,
+    maxQueries: 20,
+    budgetMs: 90000,
+    intervalMs: 5000,
+    fast: true,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    balance: balanceBefore
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    hasPollTimeout: String(reply.message).indexOf('輪詢超時') !== -1,
+    queriesAtMost: pollQueries.length <= aiEnhance.AI_ENHANCE_POLL_MAX_QUERIES,
+    queriesExact: pollQueries.length,
+    maxQueries: aiEnhance.AI_ENHANCE_POLL_MAX_QUERIES,
+    budgetMs: aiEnhance.AI_ENHANCE_POLL_BUDGET_MS,
+    intervalMs: aiEnhance.AI_ENHANCE_POLL_INTERVAL_MS,
+    fast: elapsedMs < 5000,
+    flow: hFlowKinds(RID),
+    balance: balanceMapOf(uid).points
+  })
+}
+
+/* ⑤ completed 但 result_urls 为空 ⇒ 文案含 result_urls。 */
+{
+  const uid = ADMIN_IDENTITY.uid
+  const RID = 'rid-h5-async-no-result-urls'
+  upstreamMode = 'asyncEnqueue'
+  pollPlan = [{ status: 200, body: { status: 'completed', result_urls: [] } }]
+  pollQueries.length = 0
+  const balanceBefore = balanceMapOf(uid).points
+  const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
+  const message = String(reply.message)
+  check('H5', '⑤ 查询回 `completed` 但 `result_urls` **为空数组** ⇒ 恰 4 键、`UPSTREAM_ERROR`、message 含 `result_urls`（任務已完成但缺 result_urls）、`refunded: true`、ledger 真退 10', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    hasResultUrlsNote: true,
+    http200: true,
+    queries: 1,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    balance: balanceBefore
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    hasResultUrlsNote: message.indexOf('result_urls') !== -1,
+    http200: message.indexOf('HTTP 200') !== -1,
+    queries: pollQueries.length,
+    flow: hFlowKinds(RID),
+    balance: balanceMapOf(uid).points
+  })
+}
+
+/* ⑥ 同步形态（data[0].b64_json）仍成功 —— 旧路一字不破。 */
+{
+  const RID = 'rid-h6-sync-b64-still-ok'
+  upstreamMode = 'ok'
+  pollPlan = []
+  pollQueries.length = 0
+  const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
+  check('H6', '⑥ **同步形态**（`data[0].b64_json`）仍成功：恰 8 键、`preview.mime` 逐字 `image/png`、`upstream_status` 200、**零轮询查询**（旧同步路未被异步改动破坏）', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    previewMime: 'image/png',
+    upstreamStatus: 200,
+    queries: 0
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    previewMime: reply.preview && reply.preview.mime,
+    upstreamStatus: reply.upstream_status,
+    queries: pollQueries.length
+  })
+}
+
+/* 收针：清 sleep 注入、复位上游模式（不留全局态给后续脚本进程）。 */
+aiEnhance.setAiEnhanceSleepProvider(null)
+upstreamMode = 'ok'
+
+/* ===========================================================================
    收尾
    =========================================================================== */
 console.log(
@@ -893,7 +1178,7 @@ console.log(
     summary: { total, passed, failed: total - passed },
     sections: sectionStats,
     failed_ids: failedIds,
-    note: '离线自检：不连云端、不写生产数据；注入缝＝ops 四缝（DB / 存储读 / 存储上传）＋ ledger / aiUpstream 存储缝 ＋ aiEnhance 上游 fetch 缝。'
+    note: '离线自检：不连云端、不写生产数据；注入缝＝ops 四缝（DB / 存储读 / 存储上传）＋ ledger / aiUpstream 存储缝 ＋ aiEnhance 上游 fetch / 轮询 sleep 缝。'
   })
 )
 process.exit(total === passed ? 0 : 1)
