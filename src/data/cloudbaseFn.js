@@ -82,10 +82,42 @@ const TRANSPORT_MESSAGES = Object.freeze({
   BAD_REPLY: '雲端校驗回傳形狀不可辨識，本次未寫入。'
 })
 
+/** 从任意抛出物里取「平台原始原因」的可读单行文本（脱敏、截 120 字；取不到 ⇒ 空串）。 */
+function platformReasonText(detail) {
+  try {
+    if (detail === undefined || detail === null) return ''
+    let text = ''
+    if (typeof detail === 'string') {
+      text = detail
+    } else if (typeof detail === 'object' && typeof detail.message === 'string' && detail.message !== '') {
+      text = detail.message
+    } else if (typeof detail === 'object' && typeof detail.code === 'string' && detail.code !== '') {
+      text = detail.code
+    } else {
+      try {
+        text = JSON.stringify(detail)
+      } catch {
+        text = String(detail)
+      }
+    }
+    return redactDiagnostic(text).slice(0, 120)
+  } catch {
+    return ''
+  }
+}
+
 function transportDenial(kind, detail) {
   /* **形状恒为恰 3 键**（`ok` / `reason` / `message`）；平台原始原因只进诊断通道（见 `diagnose()`）。 */
   diagnose(kind, detail)
-  return { ok: false, reason: CLOUD_FUNCTION_UNAVAILABLE, message: TRANSPORT_MESSAGES[kind] || TRANSPORT_MESSAGES.CALL_FAILED }
+  const base = TRANSPORT_MESSAGES[kind] || TRANSPORT_MESSAGES.CALL_FAILED
+  let message = base
+  try {
+    const reasonText = platformReasonText(detail)
+    if (reasonText !== '') message = `${base}（平台原因：${reasonText}）`
+  } catch {
+    /* 拼接失败不得影响判定结果 */
+  }
+  return { ok: false, reason: CLOUD_FUNCTION_UNAVAILABLE, message }
 }
 
 /* ---------------------------------------------------------------------------
@@ -241,8 +273,8 @@ export async function callCloudFunction(name, data, options = {}) {
       const unpacked = unpackFunctionReply(reply)
       if (!unpacked.ok) return transportDenial('BAD_REPLY')
       return unpacked
-    } catch {
-      return transportDenial('CALL_FAILED')
+    } catch (error) {
+      return transportDenial('CALL_FAILED', error)
     }
   }
   const resolved = await withTimeout(appOrNull(), timeoutMs)

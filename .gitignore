@@ -21,7 +21,10 @@ qa-recheck/
 *.log
 .vercel
 # data/ 内含真库 yinpu.db（唯一真源）与 originals/、backups/，public 仓绝不能收录。
-data/
+# （2026-10-31）**锚定根目录**：无锚点的 `data/` 会匹配任意层级同名目录 ——
+# 实例：`src/data/**`（云函数调用缝 / CloudBase 读面 / 资产元数据）一度被这条规则吞掉，
+# 新增文件会被**静默忽略**、永不入库。与上方 `feicui/` 同类事故，一并锚定。
+/data/
 # 运行时产物与 Python 虚拟环境 / 缓存（server/ 是入库的内容 API，但其 .venv 不入库）。
 .runtime/
 server/.venv/
