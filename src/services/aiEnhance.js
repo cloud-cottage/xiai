@@ -49,6 +49,16 @@ export const AI_ENHANCE_DISCARD_OP = 'ai-enhance-discard'
 /** **單張修復成本（金）**：調用前在彈窗內明示；**實際扣費以回包 `charge.amount` 爲準**（服務端是判據）。 */
 export const AI_ENHANCE_COST = 10
 
+/**
+ * **`ai-enhance-face` 的雲端調用超時預算（毫秒）**（本單「超時預算」新增）。
+ *
+ * 為什麼是 120000：上游出圖需 20〜60 秒（`timeout_ms` 服務端默認 60000），加雲函數冷啟動、
+ * 下載原圖與落庫 —— 以「上游默認 2 倍」留餘量，避免全局 15000 ms 預算必然誤殺慢出圖。
+ * 只作用於 `ai-enhance-face`；`ai-enhance-discard` **仍走全局默認**（它很快，零退款面不等慢上游）。
+ * 全局默認 `CLOUD_FUNCTION_TIMEOUT_MS`（15000 ms）**逐字不變**（見 `data/cloudbaseFn.js`）。
+ */
+export const AI_ENHANCE_TIMEOUT_MS = 120000
+
 /** 前置攔截的 reason（**本層判定，零網路；不是服務端的授權面**；與 `feicui.js` / `aiAccess.js` 同族）。 */
 export const LOGIN_REQUIRED = 'LOGIN_REQUIRED'
 export const NOT_ADMIN = 'NOT_ADMIN'
@@ -143,6 +153,24 @@ function numberOrNaN(value) {
 }
 
 /**
+ * **雲端逾時文案的柔性補筆**（本單「超時預算」新增）。
+ *
+ * 判據（兩條同時成立才補）：`reason === 'STORAGE_UNAVAILABLE'` **且**服務端 / 傳輸層 message 含
+ * 「逾時」（既有 `TRANSPORT_MESSAGES.TIMEOUT` 文案即含此二字）。補筆只加在 **message 末尾**、
+ * **reason 與原 message 一字不改寫**（既有「失敗原樣透傳」硬口徑不變）——
+ * 目的是**不讓用戶誤以為一定失敗**：預算放寬後雲端可能仍在跑，刷新可確認候選圖是否已生成。
+ * 其他任何失敗（`FORBIDDEN` / `INVALID_VALUE` / 非逾時傳輸失敗 …）**零補筆、逐字透傳**。
+ * @param {string} reason 上屏 reason（原樣回傳，不改寫）
+ * @param {string} message 上屏原文
+ * @returns {{reason:string, message:string}}
+ */
+function timeoutSoftNote(reason, message) {
+  const text = String(message === undefined || message === null ? '' : message)
+  if (reason !== 'STORAGE_UNAVAILABLE' || !text.includes('逾時')) return { reason, message: text }
+  return { reason, message: `${text}（雲端可能仍在處理：稍後重新整理該印面可確認是否已生成候選圖；若未生成則未扣金。）` }
+}
+
+/**
  * 發起一次印面人工智能修復（**會計費**：單張 10 金；服務端裁決）。
  *
  * 前置（零網路）：未登錄 ⇒ `LOGIN_REQUIRED`；非管理員 ⇒ `NOT_ADMIN`；三鍵缺任一 ⇒ `INVALID_INPUT`。
@@ -172,17 +200,25 @@ export async function enhanceFaceImage(input) {
     )
   }
 
+  /* **超時預算（本單）**：只有 `ai-enhance-face` 把 `AI_ENHANCE_TIMEOUT_MS`（120000）經
+     `options.timeoutMs` 透傳下去（`readoutKeys` 同一對象、不丟）；`ai-enhance-discard` 仍走全局
+     默認 15000 ms（它很快）。全局默認逐字不變。 */
   const gate = await userWriteGate(
     AI_ENHANCE_OP,
     { image_id: imageId, seal_id: sealId, face_id: faceId },
-    { readoutKeys: READOUT_KEYS }
+    { readoutKeys: READOUT_KEYS, timeoutMs: AI_ENHANCE_TIMEOUT_MS }
   )
-  /* 传输层 / 補簽 / 服務端結構化拒絕 ⇒ **原樣透傳**（`refunded` 有鍵才帶，不補寫）。 */
+  /* 传输层 / 補簽 / 服務端結構化拒絕 ⇒ **原樣透傳**（`refunded` 有鍵才帶，不補寫）；
+     唯一例外＝「逾時」柔性補筆（`timeoutSoftNote`；reason 與原 message 一字不改寫）。 */
   if (!gate || gate.ok !== true) {
+    const noted = timeoutSoftNote(
+      (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      (gate && gate.message) || '人工智能修復服務暫時不可用，請稍後再試。'
+    )
     return {
       ok: false,
-      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
-      message: (gate && gate.message) || '人工智能修復服務暫時不可用，請稍後再試。',
+      reason: noted.reason,
+      message: noted.message,
       refunded: Boolean(gate && gate.refunded === true)
     }
   }

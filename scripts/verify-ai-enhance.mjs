@@ -7,7 +7,7 @@
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` 的 `ADMIN_OPS['ai-enhance-face']`（薄委派注册面）
  *   · `lib/ledger.js` 扣费 / 退款单点（注入假存储）· `lib/aiUpstream.js` 上游配置（注入假存储）
  *
- * 断言面（本套 **26** 条，覆盖派单方点名的 一〜八）：
+ * 断言面（本套 **22** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
  *      A0 `ADMIN_OPS` 注册面（恰 18 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 8 键**；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
@@ -27,6 +27,10 @@
  *      同请求号重放 ⇒ 不重复扣金、不重复建行、`idempotent: true`；并发两发同 `image_id` ⇒
  *      恰一路真跑（`idempotent: false`）、另一路等行回放（`idempotent: true`），扣金恰一次、
  *      行恰一条、上游恰一调；`idemKeyOf` / `imageIdOfIdemKey` 对三个样本确定、稳定、互不碰撞。
+ *   F. 非 2xx 上游诊断（诊断补丁单 ①〜⑥；`upstreamDetailOf` 经真流程钉住）：
+ *      402 带 FastAPI 风格 `detail` ⇒ message 带上游原话（`spend limit exceeded` / `remaining`）；
+ *      402 空体 ⇒ `body=empty`；500 纯文本 ⇒ 原文前 80 字；`detail` 带 48 位长串 ⇒ `<redacted>`
+ *      （回包内零出现）；失败回包键面仍**恰 4 键**且 `refunded: true`；超时分支 message **逐字不变**。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何明文密钥（上游 key 只登记长度）。
  */
@@ -228,6 +232,14 @@ const SOURCE_BYTES = Buffer.concat([PNG_MAGIC, Buffer.from('offline-source-image
 const PRODUCT_BYTES = Buffer.concat([PNG_MAGIC, Buffer.from('offline-product-image-fixture-unique', 'utf8')])
 
 let upstreamMode = 'ok'
+/* 非 2xx 诊断形态（`upstreamDetailOf` 四样本；body 文本逐字冻结）。 */
+const LEAK_48 = 'a'.repeat(48)
+const DIAG_MODES = {
+  diag402detail: { status: 402, body: JSON.stringify({ detail: 'API key spend limit exceeded; remaining $0.0050' }) },
+  diag402empty: { status: 402, body: '' },
+  diag500text: { status: 500, body: 'Internal error' },
+  diag402leak: { status: 402, body: JSON.stringify({ detail: `leak ${LEAK_48}` }) }
+}
 const upstreamCalls = []
 aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
   upstreamCalls.push({
@@ -236,6 +248,11 @@ aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
     authorization: init && init.headers && init.headers.Authorization,
     body: init && typeof init.body === 'string' ? JSON.parse(init.body) : null
   })
+  const diag = Object.prototype.hasOwnProperty.call(DIAG_MODES, upstreamMode) ? DIAG_MODES[upstreamMode] : null
+  if (diag) {
+    /* 诊断模式（非 2xx）：回包带 `text()` 读体 —— 钉住 `upstreamDetailOf` 的四形态。 */
+    return { ok: false, status: diag.status, text: async () => diag.body, json: async () => ({}) }
+  }
   if (upstreamMode === 'ok') {
     return {
       ok: true,
@@ -679,6 +696,98 @@ section('E', '静态门：委派恰一处 require / 实现点零集合句柄字�
     docCalls: countIn(implSource, '.doc('),
     reasonsSize: Object.keys(userConfig.REASONS).length,
     upstreamErrorRegistered: userConfig.REASONS.UPSTREAM_ERROR === 'UPSTREAM_ERROR'
+  })
+}
+
+/* ===========================================================================
+   F 段：非 2xx 上游诊断（诊断补丁单 · `upstreamDetailOf` 经真流程钉住：
+   ① 402 带 detail ⇒ message 带上游原话 ② 402 空体 ⇒ body=empty ③ 500 纯文本 ⇒ 原文前 80 字
+   ④ detail 带 48 位长串 ⇒ <redacted>（回包内零出现）⑤ 键面仍恰 4 键且 refunded true
+   ⑥ 超时分支 message 逐字不变）
+   =========================================================================== */
+section('F', '非 2xx 上游诊断：message 带上游原话（抹除截长）；失败键面仍 4 键 + refunded true；超时文案逐字不变')
+
+async function runDiag(mode, requestId) {
+  upstreamMode = mode
+  const reply = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, requestId)
+  upstreamMode = 'ok'
+  return reply
+}
+
+{
+  const diagReplies = {
+    detail: await runDiag('diag402detail', 'rid-f1-402-detail'),
+    empty: await runDiag('diag402empty', 'rid-f2-402-empty'),
+    text500: await runDiag('diag500text', 'rid-f3-500-text'),
+    leak: await runDiag('diag402leak', 'rid-f4-402-leak')
+  }
+
+  /* ① 402 + FastAPI 风格 detail ⇒ message 带上游原话。 */
+  const detailMessage = String(diagReplies.detail.message)
+  check('F1', '① 假上游 402 + {"detail":"API key spend limit exceeded; remaining $0.0050"} ⇒ 失败 message **带上游原话**（含 spend limit exceeded 与 remaining；HTTP 402 在场）', {
+    http402: true,
+    spendLimitExceeded: true,
+    remaining: true,
+    reason: 'UPSTREAM_ERROR'
+  }, {
+    http402: detailMessage.indexOf('HTTP 402：') !== -1,
+    spendLimitExceeded: detailMessage.indexOf('spend limit exceeded') !== -1,
+    remaining: detailMessage.indexOf('remaining') !== -1,
+    reason: diagReplies.detail.reason
+  })
+
+  /* ② 402 + 空体 ⇒ body=empty。 */
+  const emptyMessage = String(diagReplies.empty.message)
+  check('F2', '② 假上游 402 + **空体** ⇒ message 含 body=empty（「空体」与「有体读不懂」可区分）', {
+    http402: true,
+    bodyEmpty: true
+  }, {
+    http402: emptyMessage.indexOf('HTTP 402：') !== -1,
+    bodyEmpty: emptyMessage.indexOf('body=empty') !== -1
+  })
+
+  /* ③ 500 + 纯文本（非 JSON）⇒ 原文前 80 字。 */
+  const textMessage = String(diagReplies.text500.message)
+  check('F3', '③ 假上游 500 + **纯文本** Internal error（非 JSON）⇒ message 含原文 Internal error', {
+    http500: true,
+    internalError: true
+  }, {
+    http500: textMessage.indexOf('HTTP 500：') !== -1,
+    internalError: textMessage.indexOf('Internal error') !== -1
+  })
+
+  /* ④ 402 + detail 带 48 位长串 ⇒ 抹除（回包内零出现）。 */
+  const leakSerialized = JSON.stringify(diagReplies.leak)
+  check('F4', '④ 假上游 402 + {"detail":"leak " + 48 位 a} ⇒ **回包内不得出现那 48 位串**（必须被 <redacted> 抹除）', {
+    leakAbsent: true,
+    redacted: true
+  }, {
+    leakAbsent: leakSerialized.indexOf(LEAK_48) === -1,
+    redacted: String(diagReplies.leak.message).indexOf('<redacted>') !== -1
+  })
+
+  /* ⑤ 诊断改动不动回包键面：恰 4 键、refunded 恒 true。 */
+  const diagNames = ['detail', 'empty', 'text500', 'leak']
+  check('F5', '⑤ 诊断改动**不动回包键面**：四例失败回包均恰 4 键（message,ok,reason,refunded）且 refunded: true（退金判据未因诊断改动而漂）', {
+    shapes: ['message,ok,reason,refunded', 'message,ok,reason,refunded', 'message,ok,reason,refunded', 'message,ok,reason,refunded'],
+    refundedAll: true
+  }, {
+    shapes: diagNames.map((name) => shapeOf(diagReplies[name])),
+    refundedAll: diagNames.every((name) => diagReplies[name].refunded === true)
+  })
+
+  /* ⑥ 超时分支 message 逐字不变（不得被新诊断污染）。 */
+  const timeoutReply = await runDiag('hang', 'rid-f6-timeout-verbatim')
+  check('F6', '⑥ **超时分支 message 逐字仍为原样**（網絡 / 超時：超時；不得被新诊断污染）', {
+    message: 'AI 修復上游調用失敗（網絡 / 超時：超時）⇒ 已全額退回 10 金；本次未建影像行、未改印面指向。',
+    keys: 'message,ok,reason,refunded',
+    reason: 'UPSTREAM_ERROR',
+    refunded: true
+  }, {
+    message: timeoutReply.message,
+    keys: shapeOf(timeoutReply),
+    reason: timeoutReply.reason,
+    refunded: timeoutReply.refunded
   })
 }
 

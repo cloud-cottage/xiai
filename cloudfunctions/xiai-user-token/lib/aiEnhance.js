@@ -279,10 +279,60 @@ function resolveFetch() {
   throw new Error('AI_ENHANCE_FETCH_UNAVAILABLE')
 }
 
-/** 上游失败摘要（**零敏感**：只报状态与错误名，不透传上游错误体 / key）。 */
+/**
+ * 上游失败摘要（**零敏感**：状态码 ＋（经抹除截长的）上游错误体可读摘要 / 错误名；
+ * 明文 key 永不进回包）。
+ */
 function upstreamFailureMessage(status, detail) {
   const statusText = Number.isInteger(status) && status > 0 ? `HTTP ${status}` : '網絡 / 超時'
   return `AI 修復上游調用失敗（${statusText}${detail ? `：${detail}` : ''}）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；本次未建影像行、未改印面指向。`
+}
+
+/**
+ * 上游**非 2xx 错误体**的可读摘要（纯函数；**本文件唯一定义点**；零 I/O、零自抛）。
+ *
+ * 生产实测上游（maizitech / FastAPI）402 只回 `{"detail":"API key spend limit exceeded; …"}`，
+ * 此前非 2xx 分支 detail 恒空串 ⇒ 管理员只看到「HTTP 402」、无从定位。口径与
+ * `api/_lib/aiRelay.js::upstreamErrorDigestOf` 同族，此处取**最小版**：
+ *   · 入参先 `trim`；空 ⇒ 回 `body=empty`（让「空体」与「有体读不懂」可区分）；
+ *   · 尝试 `JSON.parse`：成功则**按序**取 `error.message` / `message` / `msg` / `detail` /
+ *     （`error` 为**字符串**时的）`error` —— 取到就回**该值的抹除版**；
+ *   · JSON 解析失败或取不到可读字段 ⇒ 回**原文前 80 字**（抹除版）；
+ *   · 抹除规则：`/[A-Za-z0-9+/=]{40,}/g` → `<redacted>`（base64 / 长随机串一律抹掉），
+ *     再截 120 字；**任何异常 ⇒ 回 `unknown`（不自抛）** —— 诊断面绝不影响主判定。
+ * @param {string} rawText 上游响应体文本
+ * @returns {string}
+ */
+function upstreamDetailOf(rawText) {
+  const LIMIT = 120
+  const REDACT = /[A-Za-z0-9+/=]{40,}/g
+  const cut = (value) => {
+    const safe = String(value === undefined || value === null ? '' : value).replace(REDACT, '<redacted>')
+    return safe.length > LIMIT ? safe.slice(0, LIMIT) : safe
+  }
+  try {
+    const raw = String(rawText === undefined || rawText === null ? '' : rawText).trim()
+    if (!raw) return 'body=empty'
+    let parsed = null
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = null
+    }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const errorObj = parsed.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error) ? parsed.error : null
+      /* 按序取值；只认标量（对象 / 数组形态的字段不采信 ⇒ 落原文回退）。 */
+      const candidates = [errorObj ? errorObj.message : undefined, parsed.message, parsed.msg, parsed.detail, errorObj ? undefined : parsed.error]
+      for (const candidate of candidates) {
+        if (typeof candidate !== 'string' && typeof candidate !== 'number' && typeof candidate !== 'boolean') continue
+        const out = cut(candidate)
+        if (out) return out
+      }
+    }
+    return cut(raw).slice(0, 80)
+  } catch {
+    return 'unknown'
+  }
 }
 
 /**
@@ -314,7 +364,15 @@ async function callUpstreamAndFetchImage(upstream, imageDataUrl) {
     })
     status = Number(response && response.status) || 0
     if (!response || response.ok !== true) {
-      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, ''), status }
+      /* 非 2xx：先读响应体（**读失败当空串**），把抹除后的可读摘要作为第二参传给
+         `upstreamFailureMessage`（签名不变）⇒ 文案带上游原话（`upstreamDetailOf`）。 */
+      let raw = ''
+      try {
+        raw = response && typeof response.text === 'function' ? await response.text() : ''
+      } catch {
+        raw = ''
+      }
+      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, upstreamDetailOf(raw)), status }
     }
     const payload = await response.json()
     const first = payload && Array.isArray(payload.data) && payload.data.length > 0 ? payload.data[0] : null

@@ -225,12 +225,16 @@ export function createTokenChannel(profile) {
    * 写操作的服务端门：**云端形态下必须由云函数回 `ok:true` 才算过门**。
    * @param {string} op 写操作名（须在云函数的 `OPS` 注册面内）
    * @param {object} payload 载荷（**身份类键由服务端拒**）
-   * @param {{readoutKeys?:Array<string>}} [options] **additive 透传声明（本單「我的 API」新增）**：
+   * @param {{readoutKeys?:Array<string>, timeoutMs?:number}} [options] **additive 透传声明（本單「我的 API」新增）**：
    *   `readoutKeys` ＝ 调用方**逐字声明**的回包读数键面（如 AI 金鑰 / 用量 / 上游配置面的
    *   `key` / `rows` / `points` / `today` / `minute` / `key_mask` …）。本函数**只按声明的键名**
    *   把「云函数回包（`result`）**确有**的键」逐字叠进出参；未声明 ⇒ 行为逐字不变，
    *   **其余任何 op 一律不出现这些键**（与 `pullImportRows` / review 两段收窄透传同族口径）。
    *   **本文件不含任何 op 名字面值**（鍵面真源 ＝ `src/services/aiAccess.js`）。
+   *   `timeoutMs` ＝ **按 op 放宽超时的唯一通道**（本單「超時預算」）：调用方逐字声明本次云函数
+   *   调用的总预算（毫秒）；**未声明 ⇒ 传 `undefined` ⇒ `callCloudFunction` 内部回落全局默认
+   *   `CLOUD_FUNCTION_TIMEOUT_MS`（15000 ms，本單逐字不改）** —— 全局默认不变，只有显式
+   *   声明的 op（如 `ai-enhance-face`）才拿到更长预算；本文件不硬编码任何 op 的超时数字。
    */
   async function gate(op, payload, options) {
     if (writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV) {
@@ -239,13 +243,16 @@ export function createTokenChannel(profile) {
          且本形态**明确标注为非正式写入路径**（见 `writeFaceModeLabel()`）。 */
       return { ok: true, mode: TOKEN_MODES.LOCAL_DEV, dev: true, message: 'dev / 離線形態：未經雲端驗簽。' }
     }
-    /* 云端形态：**不预判、不短路** —— 一律把请求交给云函数（前端不产出授权结论）。 */
+    /* 云端形态：**不预判、不短路** —— 一律把请求交给云函数（前端不产出授权结论）。
+       **超时透传（本單「超時預算」）**：`options.timeoutMs` 逐字下传 —— 这是「按 op 放宽超时」
+       的**唯一通道**；未传 ⇒ `undefined` ⇒ `callCloudFunction` 内部回落全局默认 15000 ms
+       （既有行为逐字不变；全局默认 `CLOUD_FUNCTION_TIMEOUT_MS` 本單不改）。 */
     const reply = await callCloudFunction(functionName, {
       action: TOKEN_ACTIONS.VERIFY,
       token: state.token,
       op: trimmed(op),
       payload: payload === undefined ? null : payload
-    })
+    }, { timeoutMs: options && options.timeoutMs })
     if (!reply.ok) {
       /* 传输层失败 ⇒ `STORAGE_UNAVAILABLE`（**绝不伪装 `FORBIDDEN`**）；令牌**不清**（「未知」≠「无效」）。 */
       state.lastReason = reply.reason
