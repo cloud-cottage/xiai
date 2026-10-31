@@ -17,7 +17,7 @@
  *       登录引导目标含 `/login` ＋ `redirect`
  *       （**静态判据，非 DOM 判据**；口径见 S5b 描述：字面 `/login` 或路由名 `login`，
  *        并交叉核对路由表 `login → /login`）。
- *   S6  `AC-506` 全 `src/**` 的 `[data-admin-action]` 去重取值集合 ⇒ **恰 11 值 / 归并 10 类**（v1.73：＋edit-ai-upstream）。
+ *   S6  `AC-506` 全 `src/**` 的 `[data-admin-action]` 去重取值集合 ⇒ **恰 12 值 / 归并 11 类**（v1.77：＋ai-enhance-face）。
  *       扫描函数**照抄**既有套件 `scripts/verify-endorsement.mjs` 的 D1 段口径
  *       （`walkFiles` ＋ `readFileSync` ＋ `/data-admin-action="([^"]+)"/g` ＋ `correction-*` 归并），
  *       **不自创第二套**。
@@ -421,10 +421,10 @@ check(
 check('S5c', '登录引导经**真实导航调用**（`router.push` / `router.replace`，非静默失败）', true, hasPush)
 
 /* ===========================================================================
-   S6（AC-506）钩子族不变：全 src/** 的 `[data-admin-action]` ⇒ 恰 11 值 / 归并 10 类
+   S6（AC-506）钩子族不变：全 src/** 的 `[data-admin-action]` ⇒ 恰 12 值 / 归并 11 类
    —— 扫描函数**照抄** scripts/verify-endorsement.mjs D1 段口径
    =========================================================================== */
-console.log(JSON.stringify({ section: 'S6', title: 'AC-506 data-admin-action 去重集合（11 值 / 10 类）' }))
+console.log(JSON.stringify({ section: 'S6', title: 'AC-506 data-admin-action 去重集合（12 值 / 11 类）' }))
 
 function walkFiles(dir, out = []) {
   readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
@@ -446,7 +446,8 @@ const ADMIN_ACTION_EXPECTED = [
   'export-seal-data',
   'person-proposal-review',
   'person-import-review',
-  'edit-ai-upstream'
+  'edit-ai-upstream',
+  'ai-enhance-face'
 ]
 const mergeClass = (v) => (v.startsWith('correction-') ? 'correction-accept|reject' : v)
 
@@ -457,13 +458,13 @@ const mergeClass = (v) => (v.startsWith('correction-') ? 'correction-accept|reje
     const matches = body.match(/data-admin-action="([^"]+)"/g) || []
     matches.forEach((m) => found.add(m.replace(/^data-admin-action="/, '').replace(/"$/, '')))
   })
-  check('S6a', '`[data-admin-action]` 去重取值集合逐字 ＝ 规范现值（**11 值**，v1.73：＋edit-ai-upstream）', sorted(ADMIN_ACTION_EXPECTED), sorted([...found]))
-  check('S6b', '按归并表归并后 ＝ **10 类**（`correction-accept|reject` 合一，其余各自成类）', 10, new Set([...found].map(mergeClass)).size)
+  check('S6a', '`[data-admin-action]` 去重取值集合逐字 ＝ 规范现值（**12 值**（v1.77：＋ai-enhance-face），v1.73：＋edit-ai-upstream）', sorted(ADMIN_ACTION_EXPECTED), sorted([...found]))
+  check('S6b', '按归并表归并后 ＝ **11 类**（`correction-accept|reject` 合一，其余各自成类）', 11, new Set([...found].map(mergeClass)).size)
 
   const withCanary = new Set([...found, 'qa-canary-10th'])
-  check('N6a', '正对照：注入 canary `qa-canary-10th` ⇒ 取值集合变 12（证明扫描器非硬编码）', 12, withCanary.size)
-  check('N6b', '正对照：canary 使归并类数变 11', 11, new Set([...withCanary].map(mergeClass)).size)
-  check('N6c', '负对照：移除 canary 后回基线 11 值 / 10 类（集合非恒等）', { values: 11, classes: 10 }, { values: found.size, classes: new Set([...found].map(mergeClass)).size })
+  check('N6a', '正对照：注入 canary `qa-canary-10th` ⇒ 取值集合变 13（证明扫描器非硬编码）', 13, withCanary.size)
+  check('N6b', '正对照：canary 使归并类数变 12', 12, new Set([...withCanary].map(mergeClass)).size)
+  check('N6c', '负对照：移除 canary 后回基线 12 值 / 11 类（集合非恒等）', { values: 12, classes: 11 }, { values: found.size, classes: new Set([...found].map(mergeClass)).size })
 }
 
 /* ===========================================================================

@@ -109,7 +109,8 @@ const FROZEN_REASONS = [
   'KEY_INVALID',
   'CONFIG_MISSING',
   'LIMIT_DAY',
-  'LIMIT_MINUTE'
+  'LIMIT_MINUTE',
+  'UPSTREAM_ERROR'
 ]
 /* **uid 派生单点**：客户端 `src/data/uid.js::uidOf`（`u-` ＋ sha256(手机号) 前 16 位，不可反推手机号）。
    自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */
@@ -748,7 +749,7 @@ check(
   ]
   check(
     'D7',
-    '配置面 REASONS 取值 ⊆ 既有冻结表（**新增 reason 字面值 0**）',
+    '配置面 REASONS 取值 ⊆ 既有冻结表（v1.77：新增恰 1 个 —— UPSTREAM_ERROR，§3.68 登记；旧值一个未动）',
     [],
     fromReasonTable.filter((item) => FROZEN_REASONS.indexOf(item) === -1)
   )

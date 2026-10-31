@@ -1078,9 +1078,9 @@ section('E', '静态门：模块零取句柄字面 / 三集合不进云读面 / 
 {
   const expected = ['KEY_INVALID', 'CONFIG_MISSING', 'LIMIT_DAY', 'LIMIT_MINUTE']
   const table = Object.values(userConfig.REASONS)
-  check('E3', 'reason 逐字登记：四个新字面值逐字在配置面冻结表内（12 键）；`LIMIT_EXCEEDED` **不在表**（按派单方指示不自行新增 ⇒ 回落 INVALID_VALUE 并登记）', {
+  check('E3', 'reason 逐字登记：四个新字面值逐字在配置面冻结表内（13 键，v1.77 增 UPSTREAM_ERROR）；`LIMIT_EXCEEDED` **不在表**（按派单方指示不自行新增 ⇒ 回落 INVALID_VALUE 并登记）', {
     present: expected,
-    tableSize: 12,
+    tableSize: 13,
     limitExceededAbsent: true
   }, {
     present: expected.filter((item) => table.indexOf(item) !== -1),

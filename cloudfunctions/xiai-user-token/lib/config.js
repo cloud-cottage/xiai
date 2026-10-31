@@ -66,7 +66,16 @@ const REASONS = Object.freeze({
   KEY_INVALID: 'KEY_INVALID',
   CONFIG_MISSING: 'CONFIG_MISSING',
   LIMIT_DAY: 'LIMIT_DAY',
-  LIMIT_MINUTE: 'LIMIT_MINUTE'
+  LIMIT_MINUTE: 'LIMIT_MINUTE',
+  /**
+   * **上游調用失敗**（2026-10-31「管理員人工智能修復」返工單新增；**派單方 Zang 終審裁定**的
+   * 唯一新字面值 —— 表由 **12 值 → 13 值**）：只由 `lib/aiEnhance.js` 的上游失敗路徑產出
+   * （非 2xx / 超時 / 網絡錯 / 取圖失敗 / 圖形墨數不入册族），且**恆伴全額退款**
+   * （`refunded: true`；已預扣才退、未預扣不上本表）。
+   * 它是**端點面既有詞彙的登記**（`api/_lib::aiRelay.js` / `api/feicui/v1` 的
+   * `UPSTREAM_ERROR` 逐字同值、同語義），**不是新造詞**；改名只改本表 ＋引用處。
+   */
+  UPSTREAM_ERROR: 'UPSTREAM_ERROR'
 })
 
 /** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。

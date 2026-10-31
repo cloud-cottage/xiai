@@ -133,6 +133,7 @@ const countIn = (text, needle) => (needle === '' ? -1 : String(text).split(needl
    4. `[data-admin-action]` 去重集合（预期现值 11 值；**现抽现印**）
    --------------------------------------------------------------------------- */
 const EXPECTED_ADMIN_ACTIONS = [
+  'ai-enhance-face',
   'correction-accept',
   'correction-reject',
   'edit-ai-upstream',
@@ -231,7 +232,7 @@ console.log(JSON.stringify({ section: 'B', title: '② op 名唯一通道 ＋ �
   /* ④ 集合现抽并印出。 */
   const scanned = collectAdminActions(SRC_FILES)
   console.log(JSON.stringify({ readout: 'data-admin-action 去重取值集合（现抽）', count: scanned.length, values: scanned }))
-  check('B4', '④ `[data-admin-action]` 去重取值集合逐字 ＝ 预期 11 值（**集合为主体判据，不是个数**）', EXPECTED_ADMIN_ACTIONS, scanned)
+  check('B4', '④ `[data-admin-action]` 去重取值集合逐字 ＝ 预期 12 值（v1.77：＋ai-enhance-face）（**集合为主体判据，不是个数**）', EXPECTED_ADMIN_ACTIONS, scanned)
 }
 
 /* ===========================================================================

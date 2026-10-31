@@ -246,6 +246,7 @@ console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 
    `createSealWithFaceDirect`（直写正式行，S1/S2 双 env 收紧）＋ `querySealByFingerprint`（只读三态）。
    加严：同判据补两条**负对照**（期望抽掉一项 / 多一个不存在的 op ⇒ 必红），防判据退化成「恒绿」。 */
 const ADMIN_OPS_EXPECTED = [
+  'ai-enhance-face',
   'createSealWithFaceDirect',
   'getAiUpstream',
   'issueFeicuiToken',
@@ -267,7 +268,7 @@ const adminOpsActual = sorted(Object.keys(ops.ADMIN_OPS))
 const adminOpsEqual = (expected) => canonical(sorted(expected)) === canonical(adminOpsActual)
 /* A1（2026-10-28 AI 金鑰單 合法过期 ⇒ 期望 14 → 16）：新增 **AI 上游配置面**两 op
    （`getAiUpstream` 只读公共面零密文 ＋ `setAiUpstream` 写配置先判主密钥 env）。 */
-check('A1', '`ADMIN_OPS` 恰含 16 项 {createSealWithFaceDirect, getAiUpstream, issueFeicuiToken, migrateCodeNumbers, migrateDynastyValues, migrateSealValueDomains, pullImportRows, querySealByFingerprint, repairImportAcceptance, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setAiUpstream, setInviteReward}（2026-10-12 階段乙增 pullImportRows；本单增 issueFeicuiToken：仅管理员签发斐萃令牌、零落盘；2026-10-27 §4 增 migrateCodeNumbers 一次性发号重编；2026-10-28 增无审核直写两 op；2026-10-28 AI 金鑰單增上游配置两 op）', ADMIN_OPS_EXPECTED, adminOpsActual)
+check('A1', '`ADMIN_OPS` 恰含 17 项 {ai-enhance-face, createSealWithFaceDirect, getAiUpstream, issueFeicuiToken, migrateCodeNumbers, migrateDynastyValues, migrateSealValueDomains, pullImportRows, querySealByFingerprint, repairImportAcceptance, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setAiUpstream, setInviteReward}（2026-10-12 階段乙增 pullImportRows；本单增 issueFeicuiToken：仅管理员签发斐萃令牌、零落盘；2026-10-27 §4 增 migrateCodeNumbers 一次性发号重编；2026-10-28 增无审核直写两 op；2026-10-28 AI 金鑰單增上游配置两 op；2026-10-31 §3.68 增 ai-enhance-face（管理员人工智能修復））', ADMIN_OPS_EXPECTED, adminOpsActual)
 check('A1n1', '负对照①（必红）：期望数组抽掉 `migrateCodeNumbers` ⇒ 与现实值不等', false, adminOpsEqual(ADMIN_OPS_EXPECTED.filter((op) => op !== 'migrateCodeNumbers')))
 check('A1n2', '负对照②（必红）：期望数组多一个不存在的 op ⇒ 与现实值不等', false, adminOpsEqual([...ADMIN_OPS_EXPECTED, 'noSuchOp'].sort()))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
@@ -436,9 +437,10 @@ const FROZEN_ADMIN_ACTIONS = [
   'person-import-review',
   'replace-face-image',
   'upload-seal',
-  'edit-ai-upstream'
+  'edit-ai-upstream',
+  'ai-enhance-face'
 ]
-const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal', 'edit-ai-upstream']
+const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invite-reward', 'edit-seal-attributes', 'export-seal-data', 'person-proposal-review', 'person-import-review', 'replace-face-image', 'upload-seal', 'edit-ai-upstream', 'ai-enhance-face']
 {
   const found = new Set()
   walkFiles(path.join(ROOT, 'src')).forEach((file) => {
@@ -447,13 +449,13 @@ const MERGED_CLASSES = ['correction-accept', 'edit-fixed-attributes', 'edit-invi
     matches.forEach((m) => found.add(m.replace(/data-admin-action="/, '').replace(/"$/, '')))
   })
   const scanned = [...found].sort()
-  check('G1', '去重取值集合逐字 ＝ 冻结 11 值（v1.73：＋edit-ai-upstream）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
+  check('G1', '去重取值集合逐字 ＝ 冻结 12 值（v1.77：＋ai-enhance-face）', FROZEN_ADMIN_ACTIONS.slice().sort(), scanned)
   const merged = scanned.map((v) => (v === 'correction-reject' ? 'correction-accept' : v))
-  check('G2', '按归并表归并 ⇒ 恰 10 类（v1.73：edit-ai-upstream 自成一类）', MERGED_CLASSES.slice().sort(), [...new Set(merged)].sort())
+  check('G2', '按归并表归并 ⇒ 恰 11 类（v1.77：ai-enhance-face 自成一类）', MERGED_CLASSES.slice().sort(), [...new Set(merged)].sort())
   const canary = 'qa-canary-9th'
   const withCanary = [...new Set([...scanned, canary])]
-  check('G1c', '正对照：注入 canary 取值 ⇒ 集合变 12（非恒等；v1.73 基线 11）', 12, withCanary.length)
-  check('G1c2', '负对照：移除 canary 后回基线 11', 11, withCanary.filter((v) => v !== canary).length)
+  check('G1c', '正对照：注入 canary 取值 ⇒ 集合变 13（非恒等；v1.77 基线 12）', 13, withCanary.length)
+  check('G1c2', '负对照：移除 canary 后回基线 12', 12, withCanary.filter((v) => v !== canary).length)
 }
 
 /* ===========================================================================

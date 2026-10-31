@@ -3410,6 +3410,27 @@ async function directWriteRowOfExistingSeal(sealRow, idempotent) {
 
 const ADMIN_OPS = Object.freeze({
   /**
+   * **管理員「人工智能修復」（`ai-enhance-face`｜規範 §3.68）** —— 薄委派：業務邏輯單點在
+   * `lib/aiEnhance.js::enhanceFace`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **管理員寫面**（`adminWhitelistDenial` 門同既有；非管理員 ⇒ `FORBIDDEN` ＋ 零扣費）；
+   * ② **扣管理員自己的金 10 金/張**（§3.67.2 唯一寫值處）—— **預扣**（`CHARGE` ＋
+   * `idem_key = ai-enhance-<image_id>-<rid>` 三段封閉），上游 / 存儲 / 入册任何失敗 ⇒ **全額退款**
+   * （原 `CHARGE` 行不删、回包 `refunded: true`）；③ 成功回包**恰 8 鍵**（`ok, image_id,
+   * source_image_id, preview, charge, upstream_status, elapsed_ms, idempotent`）、失敗回包
+   * **恰 4 鍵**（`ok, reason, message, refunded`）；④ `reason` 唯一新增字面值 `UPSTREAM_ERROR`
+   * （`lib/config.js::REASONS` 第 13 值，逐字同端點面 `api/_lib/aiRelay.js` 詞彙）；⑤ 冪等：
+   * 同請求號重放零重扣、零重建行（`idempotent: true`）；不掛印面（零 `face_image_id` 寫入）。
+   * @param {object} payload 載荷（封閉三鍵 `image_id` / `seal_id` / `face_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number, requestId?:string}} [context]
+   */
+  'ai-enhance-face': async function aiEnhanceFaceDelegate(payload, identity, context) {
+    /* 延遲 require：與 `lib/aiUpstream.js` 同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { enhanceFace } = require('./aiEnhance.js')
+    return enhanceFace(payload, identity, context)
+  },
+
+  /**
    * **一次性幂等编号迁移（R-3 ＋ R-5｜V3 全量重编）** —— 管理员写面（白名单门同 `migrateDynastyValues`）。
    *
    * 契约（口径件 §4 / §8，逐条）：
@@ -5577,6 +5598,9 @@ module.exports = {
   identitySourceOf,
   identityUsable,
   readArtifactBytes,
+  /* **AI 修復（§3.68）離線自檢**：`lib/aiEnhance.js` 經此讀點取影像行（本文件既有函數，
+     只補登記到導出面 —— 實現零改）。 */
+  readRows,
   uploadDisplayArtifactBytes,
   artifactMimeOf,
   adminWhitelistDenial,

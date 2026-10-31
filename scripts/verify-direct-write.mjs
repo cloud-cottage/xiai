@@ -451,7 +451,8 @@ console.log(JSON.stringify({ section: 'E', title: '号域：seal_no 推到 5,153
    F 段：注册面 ＋ 回包纪律 ＋ env 只登记名字
    =========================================================================== */
 console.log(JSON.stringify({ section: 'F', title: '注册面 / 回包纪律 / reason 零新增' }))
-check('F1', '`ADMIN_OPS` 恰含 16 项（原 12 ＋ 直写两 op ＋ AI 上游两 op）', sorted([
+check('F1', '`ADMIN_OPS` 恰含 17 项（原 12 ＋ 直写两 op ＋ AI 上游两 op ＋ §3.68 ai-enhance-face）', sorted([
+  'ai-enhance-face',
   'createSealWithFaceDirect',
   'getAiUpstream',
   'issueFeicuiToken',

@@ -107,7 +107,9 @@ const FROZEN_REASONS = [
   'KEY_INVALID',
   'CONFIG_MISSING',
   'LIMIT_DAY',
-  'LIMIT_MINUTE'
+  'LIMIT_MINUTE',
+  /* §3.68（2026-10-31 管理员人工智能修復單）新增的唯一 reason 字面值 ⇒ 冻结表取并集。 */
+  'UPSTREAM_ERROR'
 ]
 
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
@@ -527,7 +529,7 @@ const TOUCHED = [
   'cloudfunctions/xiai-user-token/lib/ops.js'
 ]
 const fromReasonTable = Object.values(require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/config.js')).REASONS)
-check('C1', '配置面 REASONS 取值 ⊆ 既有冻结表（**新增 reason 字面值 0**）', [], fromReasonTable.filter((item) => FROZEN_REASONS.indexOf(item) === -1))
+check('C1', '配置面 REASONS 取值 ⊆ 既有冻结表（v1.77：新增恰 1 个 —— UPSTREAM_ERROR，§3.68 登记）', [], fromReasonTable.filter((item) => FROZEN_REASONS.indexOf(item) === -1))
 
 /* **与 HEAD 逐文件对照**：本单改动的文件**不得新增任何 `reason` 字面值**（读 `git show`，只读）。
    对照基准走**仓内 `git show HEAD:<file>`，`cwd` 固定到仓根 `ROOT`（＋ `-C ROOT` 双保险）**；
