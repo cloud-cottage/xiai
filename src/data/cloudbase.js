@@ -181,8 +181,20 @@ export const CLOUD_STORAGE_BUCKET_DEFAULT = '6c69-liwu-d8gek6jjdab1d087c-1463728
  *  `jpg` / `jpeg` 为 §3.68 AI 产物引入（AI 修復产物族扩 jpeg；浏览器原生解码，不经服务端转码）。 */
 export const IMAGE_OBJECT_KEY_PATTERN = /^xiai\/images\/([0-9a-f]{2})\/([0-9a-f]{64})\.(png|webp|jpg|jpeg)$/
 
-/** 展示件容器 ↔ 扩展名（校验 storage_key 与行内 mime 是否自洽；**不改写**，只判）。 */
-export const IMAGE_EXT_MIME = Object.freeze({ png: 'image/png', webp: 'image/webp' })
+/** 展示件容器 ↔ 扩展名（校验 storage_key 与行内 mime 是否自洽；**不改写**，只判）。
+ *  `jpg` / `jpeg` 为 §3.68 AI 产物引入（AI 修復产物族扩 jpeg；浏览器原生解码，不经服务端转码）。
+ *  ★ 本表与 `IMAGE_OBJECT_KEY_PATTERN` 的末位扩展名分支是**一对**：改一处必改另一处 ——
+ *  `cloudBaseObjectKeyOf` 的一致性校验（`IMAGE_EXT_MIME[ext] !== declared ⇒ ''`）只认这张表，
+ *  单边扩展会让**完全合法的行**回空串 ⇒ 读面拿不到对象键 ⇒ 页面「影像暫時無法顯示」
+ *  （§3.68 实测事故形态：PATTERN 已扩 jpeg、本表漏扩 ⇒ 数据行正确而影像不显示）。
+ *  三处一致性守卫（PATTERN 命中 ＋ 本表有值 ＋ `cloudBaseObjectKeyOf` 拿回原键 ＋ 负对照
+ *  ＋ 两集合相等静态门）见 `scripts/verify-object-key-pattern.mjs` C 段。 */
+export const IMAGE_EXT_MIME = Object.freeze({
+  png: 'image/png',
+  webp: 'image/webp',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg'
+})
 
 /** 对象字节内存缓存条数上限（同一枚印章的卡片 + 详情页会各取一次 ⇒ 免重复下载）。 */
 export const CLOUD_OBJECT_CACHE_LIMIT = 64
