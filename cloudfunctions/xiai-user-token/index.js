@@ -82,6 +82,45 @@ const DENIAL_REASONS = Object.freeze({
   TTL_UNAVAILABLE: REASONS.STORAGE_UNAVAILABLE
 })
 
+/* ---------------------------------------------------------------------------
+ * **§3.68 修復讀數面（additive 透传白名单）**：AI 修復 / 弃除两 op 的成功回包读数键
+ * （恰 8 项）。**键名真源在 `lib/aiEnhance.js` / `lib/aiEnhanceDiscard.js`**（那里逐字
+ * 产出这些键）；本文件只负责**穿透**（把 `opResult` 里真有的键逐字叠进成功回包），
+ * 不定义、不改名、不派生任何键。**存在性驱动**（`hasOwnProperty`）：`opResult` 没有
+ * 的键一律不叠（缺键 ⇒ 序列化后不出现该键，而非填 `undefined` 假装在场）。
+ * --------------------------------------------------------------------------- */
+const AI_ENHANCE_READOUT_KEYS = Object.freeze([
+  'image_id',
+  'source_image_id',
+  'preview',
+  'charge',
+  'upstream_status',
+  'elapsed_ms',
+  'idempotent',
+  'deleted_objects'
+])
+
+/**
+ * **§3.68 讀數面挑拣（纯函数，供 `scripts/verify-ai-enhance-wire.mjs` 离线断言）**：
+ * 仅当 `op` 是修復 / 弃除两 op 之一时，按 `AI_ENHANCE_READOUT_KEYS` 白名单逐键挑出
+ * `opResult` **真有**的读数（`hasOwnProperty`）；**其余任何 op 一律回 `null`**
+ * （调用方零叠键 ⇒ 既有回包逐字不变，即使 `opResult` 意外带同名键也不外泄）。
+ * 键名真源在 `lib/aiEnhance.js` / `lib/aiEnhanceDiscard.js`，本函数只负责穿透。
+ * 零 SDK 依赖（`index.js` 保持零 SDK 字面）。
+ * @param {string} op 已通过值域门的 op 名
+ * @param {object|null} opResult op 的成功结果对象
+ * @returns {object|null} 要叠进回包的键值对象；非本面 op ⇒ `null`
+ */
+function pickAiEnhanceReadouts(op, opResult) {
+  if (op !== 'ai-enhance-face' && op !== 'ai-enhance-discard') return null
+  const picked = {}
+  if (!opResult || typeof opResult !== 'object') return picked
+  for (const key of AI_ENHANCE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) picked[key] = opResult[key]
+  }
+  return picked
+}
+
 /** 结构化审计日志（**不含令牌原文 / 不含密钥 / 不含手机号原文**）。 */
 function audit(record) {
   try {
@@ -532,6 +571,16 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
+  /* **AI 修復讀數面（additive 透傳｜**按 `op` 收窄**｜§3.68）**：挑拣逻辑在纯函数
+     `pickAiEnhanceReadouts`（白名单常量 `AI_ENHANCE_READOUT_KEYS`，见文件头常量区）——
+     **仅当 op 属修復 / 弃除两 op 且 `opResult` 真有该键**（`hasOwnProperty`）时逐字叠进
+     回包；**其余任何 op 一律零叠键**（纯函数回 `null` ⇒ 既有回包逐字不变，序列化后亦
+     不新增键）。键名真源在 `lib/aiEnhance.js` / `lib/aiEnhanceDiscard.js`，本处只负责穿透。
+     既有字段一律不刪、不改。 */
+  const aiEnhanceReadouts = pickAiEnhanceReadouts(op, opResult)
+  if (aiEnhanceReadouts) {
+    for (const key of Object.keys(aiEnhanceReadouts)) response[key] = aiEnhanceReadouts[key]
+  }
   return response
 }
 
@@ -568,3 +617,6 @@ exports.OPS = OPS
 exports.DENIAL_MESSAGES = DENIAL_MESSAGES
 exports.DENIAL_REASONS = DENIAL_REASONS
 exports.ENV_NAMES = ENV_NAMES
+/* **§3.68 讀數面挑拣（纯函数）**：供 `scripts/verify-ai-enhance-wire.mjs` 离线直接断言。 */
+exports.pickAiEnhanceReadouts = pickAiEnhanceReadouts
+exports.AI_ENHANCE_READOUT_KEYS = AI_ENHANCE_READOUT_KEYS
