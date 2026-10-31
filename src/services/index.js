@@ -35,8 +35,11 @@ import * as feicui from './feicui.js'
 /* **「我的 AI」门面（本單新增）**：7 個 op（AI 金鑰 / 用量 / 上游配置）的唯一業務入口
    （`aiAccess.js`；鍵面真源、op 名字面值全倉唯一處）。页面与组件仍**只**经本门面访问数据。 */
 import * as aiAccess from './aiAccess.js'
+/* **「人工智能修復」门面（本單新增）**：印面影像 AI 修復的唯一業務入口（`aiEnhance.js`；
+   op 名 / 讀數鍵面真源）。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
+import * as aiEnhance from './aiEnhance.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance }
 export default services

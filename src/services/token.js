@@ -326,7 +326,13 @@ export function createTokenChannel(profile) {
       /* **服务端结构化拒绝原样透传**（`reason` / `message` 一个都不改写）。 */
       state.lastReason = result.reason
       if (result.reason === 'FORBIDDEN') clear()
-      return { ok: false, reason: result.reason, message: result.message }
+      const denial = { ok: false, reason: result.reason, message: result.message }
+      /* **`refunded` additive 透传（本单「人工智能修復」）**：失败回包**确有该键**（布尔）才逐字
+         叠出 —— 退费与否只由服务端说了算（如 `ai-enhance-face` 的失败回包带 `refunded`）。
+         服务端未回该键 ⇒ 本键缺席（调用方读到 `undefined`），**既有任何 op 的失败回包逐字不变**
+         （与 `rows` / `count`、`readoutKeys` 的 additive 口径同族；本文件仍零 op 名字面值）。 */
+      if (typeof result.refunded === 'boolean') denial.refunded = result.refunded
+      return denial
     }
     return shapeDenial()
   }

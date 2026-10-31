@@ -9,7 +9,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
-import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport } from '../services/index.js'
+import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport, aiEnhance } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
@@ -1253,8 +1253,192 @@ async function submitReplaceFaceImage() {
   }
 }
 
+/* ============================================================================
+   管理员：**人工智能修復**（印面影像；本单新增）
+   ----------------------------------------------------------------------------
+   - 入口：印面块管理员动作区按钮（`data-admin-action="ai-enhance-face"`，仅管理员渲染；
+     仅**印面（FACE）且已有影像编号**可修 —— 无源图无从修）。
+   - 通道：`services/aiEnhance.js`（op `ai-enhance-face`；载荷封闭三键 image_id / seal_id /
+     face_id）—— 与勘误 / 采纳同一用户令牌通道（含补签自愈）。**服务端是唯一判据**。
+   - 弹窗：左格「原圖」＝当前影像、右格「修復圖」＝回包候选影像（两者都走
+     `seals.imageDisplaySourceOf`，不自写第二套取图路径）。
+   - 计费明示：**每张 10 金**（`aiEnhance.AI_ENHANCE_COST`；调用前弹窗内一行小字；
+     实际扣费以回包 `charge.amount` 爲准）。
+   - 取消：只停止等待，**不撤回服务端请求**（前端无该能力）⇒ 在途回包仍由 `runAiEnhance`
+     收取（序号不符 ⇒ 只落 `aiEnhanceLateReply` 机械读数），**不在前端丢下未收的回包**。
+   - 【取】：**复用现有换图写面** `seals.updateSealFixedAttributes(null, faceId,
+     { face_image_id })`（与「編輯固定屬性」同一入口 ⇒ 与 replace-face-image 同语义：
+     只改印面指向、**旧行不删**）；**不新增写面 op、不新增影像行**。
+   ============================================================================ */
+
+/** 弹窗宿主印面（按 id 挂到 faces 上；空串 ⇒ 不渲染弹窗）。 */
+const aiEnhanceFaceId = ref('')
+const aiEnhanceFace = computed(() => faces.value.find((item) => item.id === aiEnhanceFaceId.value) || null)
+/** 弹窗状态（右格四态）：`idle`（未发起）/ `running` / `done` / `failed`；`cancelled` ＝ 调用中被取消。 */
+const aiEnhanceStatus = ref('idle')
+/** 回包成功读数（`aiEnhance.enhanceFaceImage` 的成功形状）。 */
+const aiEnhanceResult = ref(null)
+/** 失败可读文案（**含服务端 message 原文**）。 */
+const aiEnhanceError = ref('')
+/** 失败回包的 `refunded`（true ⇒ 明示「本次未消耗金」；只由服务端说了算）。 */
+const aiEnhanceRefunded = ref(false)
+/** 顶部 + 弹窗内的可读反馈（【取】成功 ⇒「影像編號 旧 → 新」；写面失败同样走这里）。 */
+const aiEnhanceFeedback = ref('')
+/** 【取】写面中（防重复点击）。 */
+const aiEnhanceAccepting = ref(false)
+/** 左格（原圖）/ 右格（修復圖）的取图读数：`{state, id, dataUrl, row, message}`。 */
+const aiSourcePane = ref(null)
+const aiCandidatePane = ref(null)
+/** 在途请求序号：关窗 / 取消 ⇒ +1 ⇒ 在途回包不再改写界面（但**仍被收取**，见 `aiEnhanceLateReply`）。 */
+let aiEnhanceRequestSeq = 0
+/** 取消 / 关窗后仍在后台收到的回包（**机械读数**：证明回包未被前端丢下）。 */
+const aiEnhanceLateReply = ref(null)
+
+/** 成本小字（调用前明示；实际扣费以回包 charge 爲准）。 */
+const aiEnhanceCost = aiEnhance.AI_ENHANCE_COST
+
+/** 管理员门：与「編輯固定屬性」同一服务层判定（`role === 'admin'`；非管理员 / 游客 ⇒ 不渲染）。 */
+const canAiEnhanceFace = computed(() => seals.canEditFixedAttributes())
+
+/** 【取】可用性：**仅回包成功**（`done` 且有修復影像编号）才可点。 */
+const aiEnhanceAcceptable = computed(
+  () => aiEnhanceStatus.value === 'done' && Boolean(aiEnhanceResult.value && aiEnhanceResult.value.imageId)
+)
+
+/** 扣费读数（**不编造数字**：回包未附 charge ⇒ 如实写「未記載」）。 */
+const aiEnhanceChargeText = computed(() => {
+  const result = aiEnhanceResult.value
+  if (!result || !result.charge) return '回包未附扣費記載（charge）；本次實際扣費以服務端記載爲準。'
+  const amount = Number.isFinite(result.charge.amount) ? `${result.charge.amount} 金` : '（未記載）'
+  const balance = Number.isFinite(result.charge.balance) ? `${result.charge.balance} 金` : '（未記載）'
+  return `本次扣費 ${amount} · 扣後餘額 ${balance}`
+})
+
+/** 取消后仍在后台收到的回包（**可见落点**：如实写「已收取」＋成败；证明未丢回包、未改指向）。 */
+const aiEnhanceLateReplyTag = computed(() => {
+  const reply = aiEnhanceLateReply.value
+  if (!reply) return ''
+  return reply.ok
+    ? `回包已收取：修復成功（影像編號 ${reply.imageId}），本次未採用、印面指向未變。`
+    : `回包已收取：修復失敗（${reply.reason || '未知原因'}），本次未採用、印面指向未變。`
+})
+
+/** 影像编号 → 弹窗格读数（**走 `seals.imageDisplaySourceOf`**；不自写第二套取图路径）。 */
+async function aiPaneOf(imageId) {
+  const id = String(imageId || '')
+  if (!id) return { state: 'empty', id: '', dataUrl: '', row: null, message: '本印面沒有影像編號，無從修復。' }
+  const out = await seals.imageDisplaySourceOf(id)
+  const source = seals.imageSourceOf(id) || { row: null }
+  if (!out.ok) {
+    return { state: 'error', id, dataUrl: '', row: source.row || null, message: out.message || '影像暫時無法顯示。' }
+  }
+  /* digest 行（二进制在服务端权威库）无 dataURL ⇒ 交给 SliceImage 按 digest 取块面；
+     其余（含云端展示件整件）有 dataURL ⇒ 直接 `<img>` 呈现。 */
+  return {
+    state: out.via === 'digest' ? 'digest' : 'ready',
+    id,
+    dataUrl: out.dataUrl || '',
+    row: source.row || null,
+    message: ''
+  }
+}
+
+/** 发起一次修復调用（**开窗即调用**；弹窗内只有【取】/【關閉】两个底部动作）。 */
+async function runAiEnhance(face) {
+  const seq = (aiEnhanceRequestSeq += 1)
+  aiEnhanceStatus.value = 'running'
+  aiEnhanceResult.value = null
+  aiEnhanceError.value = ''
+  aiEnhanceRefunded.value = false
+  aiEnhanceLateReply.value = null
+  const sealId = seal.value ? seal.value.stamp_id : face.sealId || face.stamp_id || ''
+  const reply = await aiEnhance.enhanceFaceImage({
+    image_id: face.face_image_id,
+    seal_id: sealId,
+    face_id: face.id
+  })
+  /* 回包**一定被收取**（本 await 即收取动作，promise 终点有明确去处）——序号不符
+     （已取消 / 已关窗）⇒ 只落机械读数，不改界面、不写任何状态。 */
+  if (seq !== aiEnhanceRequestSeq) {
+    aiEnhanceLateReply.value = reply
+    return
+  }
+  if (!reply.ok) {
+    aiEnhanceStatus.value = 'failed'
+    aiEnhanceError.value = reply.message
+    aiEnhanceRefunded.value = reply.refunded === true
+    return
+  }
+  aiEnhanceResult.value = reply
+  aiEnhanceStatus.value = 'done'
+  /* 右格按**新影像编号**取回展示源（同样走 `imageDisplaySourceOf`）。 */
+  aiCandidatePane.value = { state: 'loading', id: reply.imageId, dataUrl: '', row: null, message: '' }
+  aiCandidatePane.value = await aiPaneOf(reply.imageId)
+}
+
+function openAiEnhance(face) {
+  aiEnhanceFeedback.value = ''
+  aiEnhanceResult.value = null
+  aiEnhanceError.value = ''
+  aiEnhanceRefunded.value = false
+  aiEnhanceLateReply.value = null
+  aiEnhanceFaceId.value = face.id
+  /* 左格：当前影像（原圖）；右格：开窗即发起修復请求（骨架 + 可取消）。 */
+  aiSourcePane.value = { state: 'loading', id: String(face.face_image_id || ''), dataUrl: '', row: null, message: '' }
+  aiCandidatePane.value = { state: 'loading', id: '', dataUrl: '', row: null, message: '' }
+  void aiPaneOf(face.face_image_id).then((pane) => {
+    if (aiEnhanceFaceId.value === face.id) aiSourcePane.value = pane
+  })
+  void runAiEnhance(face)
+}
+
+/** 取消：只停止等待（**服务端请求不撤回**）；在途回包仍被收取 ⇒ 不丢未收的回包。 */
+function cancelAiEnhanceRun() {
+  aiEnhanceRequestSeq += 1
+  aiEnhanceStatus.value = 'cancelled'
+}
+
+function closeAiEnhance() {
+  /* 关窗同样只作废界面态：在途回包仍由 `runAiEnhance` 收取（序号不符 ⇒ 落机械读数）。 */
+  aiEnhanceRequestSeq += 1
+  aiEnhanceFaceId.value = ''
+  aiSourcePane.value = null
+  aiCandidatePane.value = null
+}
+
+/**
+ * 【取】：把本印面 `face_image_id` 指向修復影像 —— **复用现有换图写面**
+ * `seals.updateSealFixedAttributes(null, faceId, patch)`（与「編輯固定屬性」同一入口；
+ * 与 replace-face-image 同语义：只改指向、**旧行不删**；**不新增写面 op**）。
+ * 成功 ⇒ 顶部反馈「影像編號 旧 → 新」＋ `dataVersion + 1`（派生读数立即重算）。
+ */
+async function acceptAiEnhance() {
+  const face = aiEnhanceFace.value
+  const result = aiEnhanceResult.value
+  if (!face || !result || !aiEnhanceAcceptable.value || aiEnhanceAccepting.value) return
+  const previousId = face.face_image_id ? String(face.face_image_id) : ''
+  const nextId = String(result.imageId)
+  aiEnhanceAccepting.value = true
+  try {
+    const written = seals.updateSealFixedAttributes(null, face.id, { face_image_id: nextId })
+    if (!written || written.ok !== true) {
+      aiEnhanceFeedback.value = `取用修復圖未生效：${(written && written.message) || '未知原因'}（印面指向未變）`
+      return
+    }
+    aiEnhanceFeedback.value =
+      `影像編號 ${previousId || '（原無）'} → ${nextId}；舊影像行與二進制保留未刪。`
+    /* 派生读数立即刷新（本页影像按新编号重取；无需刷新页面）。 */
+    dataVersion.value += 1
+    closeAiEnhance()
+  } finally {
+    aiEnhanceAccepting.value = false
+  }
+}
+
 onBeforeUnmount(() => {
   releaseReplaceSource()
+  /* 在途的 AI 修復请求：作废界面态（回包仍被收取，见 `runAiEnhance`）。 */
+  aiEnhanceRequestSeq += 1
 })
 </script>
 
@@ -1324,6 +1508,11 @@ onBeforeUnmount(() => {
     <!-- 替换印面图的可读反馈（含「影像编号 旧 → 新」；成功 / 失败都走这里）。 -->
     <p v-if="replaceFeedback" class="notice detail__notice" data-admin-feedback="replace-face-image">
       {{ replaceFeedback }}
+    </p>
+
+    <!-- 人工智能修復的可读反馈（【取】成功 ⇒「影像編號 旧 → 新」；写面失败同样走这里）。 -->
+    <p v-if="aiEnhanceFeedback" class="notice detail__notice" data-admin-feedback="ai-enhance-accept">
+      {{ aiEnhanceFeedback }}
     </p>
 
     <!-- 印面图上传端的**可读降级提示**（R-93：本常量必须真渲染，不得只定义不用）。
@@ -1413,6 +1602,19 @@ onBeforeUnmount(() => {
             @click="openFaceImageReplace(face)"
           >
             重新上傳印面圖
+          </button>
+          <!-- 管理员专属（普通用户 / 游客 ⇒ 不渲染，DOM 零命中）：**人工智能修復**本印面的印面图。
+               仅**印面（FACE）且已有影像编号**可修（无源图无从修 ⇒ 边款 / 无图印面不呈现此按钮）；
+               管理员门沿用既有服务层判定（`canEditFixedAttributes`，role === 'admin'）。 -->
+          <button
+            v-if="canAiEnhanceFace && !face.isEdge && face.face_image_id"
+            class="btn btn--ghost"
+            type="button"
+            data-admin-action="ai-enhance-face"
+            :data-face-id="face.id"
+            @click="openAiEnhance(face)"
+          >
+            人工智能修復
           </button>
         </div>
       </div>
@@ -1944,6 +2146,140 @@ onBeforeUnmount(() => {
             @click="submitReplaceFaceImage"
           >
             {{ replaceBusy ? '正在替換…' : '確認替換' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 管理员专属弹窗：**人工智能修復**（左格「原圖」／右格「修復圖」并列对比）。
+         弹窗内按钮**只用 `data-action`**（**不得**复用 `data-admin-action`，否则取值集合被撑破）。
+         底部只有【取】（仅回包成功可用）与【關閉】；**没有【弃】** —— 调用中的取消入口在右格内。 -->
+    <div
+      v-if="aiEnhanceFace"
+      class="ai-face-mask"
+      role="dialog"
+      aria-modal="true"
+      aria-label="人工智能修復"
+      data-admin-dialog="ai-enhance-face"
+    >
+      <div class="ai-face-box">
+        <h3 class="ai-face-box__title">人工智能修復 · {{ faceLabel(aiEnhanceFace) }}</h3>
+        <p class="ai-face-box__lede">
+          印面編號 {{ aiEnhanceFace.id }} · 當前影像編號 {{ aiEnhanceFace.face_image_id || '（暫無）' }}。
+          修復在服務端進行，產出**新影像**；按【取】才把本印面指向新影像，**舊影像與二進制保留**（不刪除、可回溯）。
+        </p>
+        <!-- 成本明示（**调用前**一行小字）：每张 10 金；实际扣费以回包 charge 爲准。 -->
+        <p class="ai-face-box__cost" data-ai-enhance-cost>
+          本次修復每張消耗 {{ aiEnhanceCost }} 金（調用前明示；實際扣費以服務端回包記載爲準）。
+        </p>
+
+        <div class="ai-face-compare">
+          <!-- 左格：原圖（当前影像，走 `seals.imageDisplaySourceOf`）。 -->
+          <section class="ai-face-pane" data-ai-enhance-pane="source">
+            <h4 class="ai-face-pane__title">原圖</h4>
+            <img
+              v-if="aiSourcePane && aiSourcePane.dataUrl"
+              class="ai-face-pane__img"
+              :src="aiSourcePane.dataUrl"
+              :alt="`原圖 ${aiSourcePane.id}`"
+              data-ai-enhance-image="source"
+            />
+            <SliceImage
+              v-else-if="aiSourcePane && aiSourcePane.row"
+              class="ai-face-pane__img"
+              :row="aiSourcePane.row"
+              :alt="`原圖 ${aiSourcePane.id}`"
+            />
+            <p v-else-if="aiSourcePane && aiSourcePane.state === 'loading'" class="ai-face-pane__state">
+              正在讀取原圖…
+            </p>
+            <p v-else-if="aiSourcePane && aiSourcePane.message" class="ai-face-pane__state ai-face-pane__state--error">
+              {{ aiSourcePane.message }}
+            </p>
+            <p v-else class="ai-face-pane__state">原圖暫不可讀。</p>
+            <p class="ai-face-pane__id" data-ai-enhance-image-id="source">
+              影像編號 {{ aiSourcePane && aiSourcePane.id ? aiSourcePane.id : '（暫無）' }}
+            </p>
+          </section>
+
+          <!-- 右格：修復圖（四态：调用中骨架 / 成功候选影像 / 失败可读文案 / 取消）。 -->
+          <section class="ai-face-pane" data-ai-enhance-pane="candidate">
+            <h4 class="ai-face-pane__title">修復圖</h4>
+            <!-- 调用中：骨架 ＋ 可取消入口（取消只停止等待，**不撤回服务端请求**；回包仍被收取）。 -->
+            <div v-if="aiEnhanceStatus === 'running'" class="ai-face-pane__skeleton" data-ai-enhance-state="running">
+              <p class="ai-face-pane__state">正在修復，約需 20–60 秒…</p>
+              <button class="btn btn--ghost" type="button" data-action="ai-enhance-cancel" @click="cancelAiEnhanceRun">
+                取消
+              </button>
+            </div>
+            <p v-else-if="aiEnhanceStatus === 'cancelled'" class="ai-face-pane__state" data-ai-enhance-state="cancelled">
+              已取消等待：服務端請求未撤回，回包到達後仍會被收取（本次不採用、印面指向不變）。
+              <span v-if="aiEnhanceLateReplyTag" class="ai-face-pane__meta" data-ai-enhance-late-reply>
+                {{ aiEnhanceLateReplyTag }}
+              </span>
+            </p>
+            <!-- 失败：可读繁体文案（**含服务端 message 原文**）；refunded === true ⇒ 明示未消耗金。 -->
+            <p
+              v-else-if="aiEnhanceStatus === 'failed'"
+              class="ai-face-pane__state ai-face-pane__state--error"
+              data-ai-enhance-state="failed"
+            >
+              修復失敗：{{ aiEnhanceError }}
+              <span v-if="aiEnhanceRefunded" data-ai-enhance-refunded>（本次未消耗金）</span>
+            </p>
+            <template v-else-if="aiEnhanceStatus === 'done'">
+              <img
+                v-if="aiCandidatePane && aiCandidatePane.dataUrl"
+                class="ai-face-pane__img"
+                :src="aiCandidatePane.dataUrl"
+                :alt="`修復圖 ${aiCandidatePane.id}`"
+                data-ai-enhance-image="candidate"
+              />
+              <SliceImage
+                v-else-if="aiCandidatePane && aiCandidatePane.row"
+                class="ai-face-pane__img"
+                :row="aiCandidatePane.row"
+                alt="修復圖"
+              />
+              <p
+                v-else-if="aiCandidatePane && aiCandidatePane.state === 'loading'"
+                class="ai-face-pane__state"
+              >
+                正在讀取修復圖…
+              </p>
+              <p
+                v-else-if="aiCandidatePane && aiCandidatePane.message"
+                class="ai-face-pane__state ai-face-pane__state--error"
+              >
+                {{ aiCandidatePane.message }}
+              </p>
+              <p v-else class="ai-face-pane__state">修復圖暫不可讀。</p>
+              <p class="ai-face-pane__id" data-ai-enhance-image-id="candidate">
+                影像編號 {{ aiEnhanceResult ? aiEnhanceResult.imageId : '' }}
+              </p>
+              <p class="ai-face-pane__meta" data-ai-enhance-charge>{{ aiEnhanceChargeText }}</p>
+            </template>
+            <p v-else class="ai-face-pane__state" data-ai-enhance-state="idle">尚未發起修復請求。</p>
+          </section>
+        </div>
+
+        <p v-if="aiEnhanceFeedback" class="ai-face-box__feedback" data-admin-feedback="ai-enhance-dialog">
+          {{ aiEnhanceFeedback }}
+        </p>
+
+        <div class="ai-face-box__foot">
+          <button class="btn btn--ghost" type="button" data-action="ai-enhance-close" @click="closeAiEnhance()">
+            關閉
+          </button>
+          <!-- 【取】：**仅回包成功可用**（复用现有换图写面改写 face_image_id；旧行不删）。 -->
+          <button
+            class="btn btn--primary"
+            type="button"
+            data-action="ai-enhance-accept"
+            :disabled="!aiEnhanceAcceptable || aiEnhanceAccepting"
+            @click="acceptAiEnhance"
+          >
+            {{ aiEnhanceAccepting ? '正在取用…' : '取' }}
           </button>
         </div>
       </div>
@@ -2723,6 +3059,134 @@ onBeforeUnmount(() => {
 }
 
 .seal-attr-box__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+
+/* ------------------ 人工智能修復：弹窗与并列对比格（本单新增） ------------------ */
+
+.ai-face-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--s-5);
+  background: var(--c-overlay);
+  overflow: auto;
+}
+
+.ai-face-box {
+  width: 100%;
+  max-width: 680px;
+  max-height: 88vh;
+  overflow: auto;
+  padding: var(--s-5);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+}
+
+.ai-face-box__title {
+  margin-bottom: var(--s-2);
+  font-size: var(--t-lg);
+  color: var(--c-text);
+}
+
+.ai-face-box__lede {
+  margin-bottom: var(--s-2);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+}
+
+/* 成本小字（调用前明示）。 */
+.ai-face-box__cost {
+  margin-bottom: var(--s-3);
+  color: var(--c-text-muted);
+  font-size: var(--t-xs, var(--t-sm));
+}
+
+.ai-face-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+}
+
+@media (max-width: 640px) {
+  .ai-face-compare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ai-face-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-sunken);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+}
+
+.ai-face-pane__title {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--c-text);
+}
+
+.ai-face-pane__img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-sm);
+  -webkit-user-drag: none;
+}
+
+.ai-face-pane__skeleton {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 160px;
+  justify-content: center;
+  border: 1px dashed var(--c-line-strong);
+  border-radius: var(--r-sm);
+}
+
+.ai-face-pane__state {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+  text-align: center;
+}
+
+.ai-face-pane__state--error {
+  color: var(--c-danger);
+}
+
+.ai-face-pane__id,
+.ai-face-pane__meta {
+  margin: 0;
+  color: var(--c-text);
+  font-size: var(--t-xs, var(--t-sm));
+}
+
+.ai-face-box__feedback {
+  margin-top: var(--s-3);
+  margin-bottom: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-sunken);
+  border-radius: var(--r-md);
+  color: var(--c-text);
+  font-size: var(--t-sm);
+}
+
+.ai-face-box__foot {
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
