@@ -109,6 +109,31 @@ export const CLOUD_ORDER_DIRECTION = 'asc'
 export const CLOUD_HYDRATE_TIMEOUT_MS = 20000
 
 /**
+ * **CloudBase SDK app 級超時**（傳給本文件 `sdk.init({ timeout })`）。
+ *
+ * 為什麼要顯式設：官方 FAQ 明言「使用 SDK 時，**SDK 默認超時是 15 秒**，與函數超時取較短者生效」。
+ * 也就是說即使我們自己的外層預算放到 120 秒，SDK 內建那道 15 秒仍會先把請求掐掉
+ * ⇒ 想讓長跑的呼叫活下來，**只能在 `init` 配置裡覆蓋**（`callFunction(t, e, n)` 不收 per-call
+ * timeout，請求層的 `timeout` 全部來自 app 級配置下傳 ⇒ init 是唯一入口）。
+ *
+ * **對本文件既有行為零變化**（這是本常量的硬約束，不是副作用）：本文件的 `sdk.init` 只服務
+ * **讀面水合**（匿名登錄 ＋ 逐集合分頁查詢），每一段 `await` 都被 `withBudget` 釘住——
+ * 總預算 `CLOUD_HYDRATE_TIMEOUT_MS`（20 秒）＋ 分階段預算 `CLOUD_STAGE_BUDGET_MS`
+ * （`sdk-load` 12 s / `anonymous-login` 8 s / 單頁 `query` 8 s，各自再 min 上本輪剩餘）。
+ * 外層到點就抛 `CloudTimeoutError` ⇒ SDK 那層根本沒機會跑到 120 秒。抬高它只是**摘掉一道
+ * 會在 15 秒先於外層預算動手的硬上限**，讓「外層還沒判死、SDK 先掐斷」這種錯配不再可能。
+ *
+ * 注意：**不得**與水合預算 `CLOUD_HYDRATE_TIMEOUT_MS`（20 秒，見其頭注）混為一談——
+ * 後者是我們自己的牆鐘預算，前者只是把 SDK 內建的硬上限抬高到「不會先於外層預算掐斷」。
+ *
+ * ⚠️ **長跑路線不在此文件**：`ai-enhance-face`（要跑 20–60 秒，外層預算 120000 由
+ * `services/aiEnhance.js::AI_ENHANCE_TIMEOUT_MS` 透傳）走的是 `data/cloudbaseFn.js` 的
+ * `callCloudFunction` → **那份檔案自己的 `sdk.init`（另起一個 app 實例）**。那條路要真正跑完，
+ * 需要在 `cloudbaseFn.js` 的 `init` 裡做同樣的覆蓋；**本單按約束只改本文件**，故那一處仍待處理。
+ */
+export const CLOUD_SDK_TIMEOUT_MS = 120000
+
+/**
  * **按階段預算（v3 T1）** —— 讓「SDK 塊下載 / 匿名登錄 / 單頁查詢」**各自不被誤判為整體超時**。
  *
  * 形態：`每階段的實際等待上限 ＝ min(該階段預算, 本輪總預算剩餘)`。
@@ -1380,7 +1405,12 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
   }
   let app = null
   try {
-    app = sdk.init({ env: config.envId, ...(config.region ? { region: config.region } : {}) })
+    app = sdk.init({
+      env: config.envId,
+      /* SDK 默認 15 秒（與函數超時取較短者）—— 見 CLOUD_SDK_TIMEOUT_MS 的頭注。 */
+      timeout: CLOUD_SDK_TIMEOUT_MS,
+      ...(config.region ? { region: config.region } : {}),
+    })
   } catch {
     return fail(gen, 'SDK_UNAVAILABLE', 'CloudBase 初始化失敗，已回落到本機示範資料')
   }

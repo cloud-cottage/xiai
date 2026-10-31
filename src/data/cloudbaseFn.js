@@ -27,6 +27,31 @@ import { cloudBaseConfig, cloudBaseConfigured, ensureAnonymousLogin, CLOUD_HYDRA
 export const CLOUD_FUNCTION_TIMEOUT_MS = 15000
 
 /**
+ * **写面 CloudBase SDK app 级超時**（傳給本文件 `resolveApp()` 的 `sdk.init({ timeout })`）。
+ *
+ * 為什麼要顯式設：官方 FAQ 明言「使用 SDK 時，**SDK 默認超時是 15 秒**，與函數超時取較短者生效」。
+ * 也就是說即使我們自己的外層預算更長，SDK 內建那道 15 秒仍會先把請求掐掉 ⇒ 想讓長跑的呼叫
+ * 活下來，**只能在 `init` 配置裡覆蓋**（`callFunction(t, e, n)` 不收 per-call timeout，請求層的
+ * `timeout` 全部來自 app 級配置下傳 ⇒ init 是唯一入口）。
+ *
+ * **本 app 實例專門服務寫面**（`resolveApp()` 惰性建立、並發去重；只服務 `callCloudFunction` ＋
+ * 影像寫面的 `cloudBaseApp()`），而寫面裡**只有 `ai-enhance-face` 需要跑久**（20–90 秒，
+ * 外層預算由 `services/aiEnhance.js::AI_ENHANCE_TIMEOUT_MS` 透傳）⇒ 只有它會真正逼近 120 秒。
+ *
+ * **對其他 op 行為零變化**（這是本常量的硬約束，不是副作用）：其餘 op 一律仍受
+ * `callCloudFunction` 的 `withTimeout` 約束（默認 `CLOUD_FUNCTION_TIMEOUT_MS`＝15000，可經
+ * `options.timeoutMs` 覆蓋）——外層到點即回結構化 `TIMEOUT` 拒絕，SDK 那層根本沒機會跑到
+ * 120 秒。抬高它只是**摘掉一道會在 15 秒先於外層預算動手的硬上限**，讓「外層還沒判死、
+ * SDK 先掐斷」這種錯配不再可能（`ai-enhance` 的長調用此前正被這道默認 15 秒提前掐掉）。
+ *
+ * 注意：**不得**與 `CLOUD_FUNCTION_TIMEOUT_MS`（15 秒，寫面單次往返預算）混為一談——
+ * 後者是我們自己的牆鐘預算，前者只是把 SDK 內建的硬上限抬高到「不會先於外層預算掐斷」；
+ * 也**不得**與讀面的 `CLOUD_SDK_TIMEOUT_MS`（同為 120000，見 `data/cloudbase.js`）混為一處——
+ * 讀面 / 寫面是**兩個獨立 app 實例**（各自一份 `sdk.init`），故這裡另立一份常量。
+ */
+export const CLOUD_FN_SDK_TIMEOUT_MS = 120000
+
+/**
  * 诊断通道标签（**只用于 console.warn 读数**；不是判据、也不进返回结构）。
  * 纪律：失败形状恒为**恰 3 键** `{ok:false, reason, message}`（冻结表不变、**不新增 reason 字面值**）；
  * 平台 / SDK 的**原始原因**（如 `[PERMISSION_DENIED]`）只经本通道上抛供排障，绝不改写判定。
@@ -162,7 +187,13 @@ async function resolveApp() {
   if (!sdk || typeof sdk.init !== 'function') return { ok: false, kind: 'SDK_UNAVAILABLE' }
   let app = null
   try {
-    app = sdk.init({ env: config.envId, ...(config.region ? { region: config.region } : {}) })
+    app = sdk.init({
+      env: config.envId,
+      /* SDK 默認 15 秒（與函數超時取較短者）⇒ 寫面的長調用（ai-enhance 20–90 s）必被提前掐掉；
+         只在 init 覆蓋（callFunction 不收 per-call timeout）。見 CLOUD_FN_SDK_TIMEOUT_MS 的頭注。 */
+      timeout: CLOUD_FN_SDK_TIMEOUT_MS,
+      ...(config.region ? { region: config.region } : {})
+    })
   } catch {
     return { ok: false, kind: 'INIT_FAILED' }
   }
