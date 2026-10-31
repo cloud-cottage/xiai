@@ -579,7 +579,7 @@ check('C3', '新 op 本体（切片）不含任何落盘计划（`plan:` 命中 
 
 const dbSource = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
 check('C4', '行 `storage_key` 由权威方回包决定（A 路空串不变 / B 路 ＝ 对象键）', true, /storage_key: authority \? String\(authority\.storageKey \|\| ''\) : assetBlobKey\(assetId\)/.test(dbSource))
-check('C5', '读面**只**走既有机制：`IMAGE_OBJECT_KEY_PATTERN` / `cloudBaseObjectKeyOf` 未被本单改动', true, /IMAGE_OBJECT_KEY_PATTERN = \/\^xiai\\\/images\\\/\(\[0-9a-f\]\{2\}\)\\\/\(\[0-9a-f\]\{64\}\)\\\.\(png\|webp\)\$\//.test(readFileSync(path.join(ROOT, 'src/data/cloudbase.js'), 'utf8')))
+check('C5', '读面**只**走既有机制：`IMAGE_OBJECT_KEY_PATTERN` 扩展名族逐字 ＝ §3.68 裁定基线（png|webp|jpg|jpeg；jpeg 为本仓 AI 产物族扩面单特例许可）／`cloudBaseObjectKeyOf` 未被改动', true, /IMAGE_OBJECT_KEY_PATTERN = \/\^xiai\\\/images\\\/\(\[0-9a-f\]\{2\}\)\\\/\(\[0-9a-f\]\{64\}\)\\\.\(png\|webp\|jpg\|jpeg\)\$\//.test(readFileSync(path.join(ROOT, 'src/data/cloudbase.js'), 'utf8')))
 const readFaceChanged = ['src/data/cloudbase.js'].filter((rel) => {
   const text = readFileSync(path.join(ROOT, rel), 'utf8')
   return /tiff/i.test(text.split('IMAGE_OBJECT_KEY_PATTERN')[1] ? text.split('IMAGE_OBJECT_KEY_PATTERN')[1].split('\n')[0] : '')

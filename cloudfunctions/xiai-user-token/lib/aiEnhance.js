@@ -94,8 +94,11 @@ const SOURCE_KEY_PATTERN = /^xiai\/images\/([0-9a-f]{2})\/([0-9a-f]{64})\.(png|w
 /** 摘要形态（64 位小写十六进制）。 */
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
 
-/** 产物族（**只收 png / webp** —— 读面单点 `IMAGE_OBJECT_KEY_PATTERN` 只认这两族）。 */
-const PRODUCT_MIME_EXT = Object.freeze({ 'image/png': 'png', 'image/webp': 'webp' })
+/** 产物族（png / webp / **jpeg** —— 读面单点 `IMAGE_OBJECT_KEY_PATTERN` 同认这三族；
+ *  之所以允许 jpeg：**上游 nano-banana 类模型原生输出常为 JPEG**（生产实测回图 FF D8 FF），
+ *  `sniffImageMime` 本就认得 image/jpeg，此前缺此映射 ⇒ 下载成功的 JPEG 产物被误判
+ *  「不是本面入册的產物族」而全额退回；jpeg 产物的对象键后缀取 `jpg`。 */
+const PRODUCT_MIME_EXT = Object.freeze({ 'image/png': 'png', 'image/webp': 'webp', 'image/jpeg': 'jpg' })
 
 /** 成功回包键面（恰 8 键；`preview` / `charge` 是嵌套对象 —— 顶层键面即此 8 个）。 */
 const AI_ENHANCE_SUCCESS_KEYS = Object.freeze([

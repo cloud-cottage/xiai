@@ -44,7 +44,7 @@
  *      ⑬ 400 / 401 / 429 三类错误回包键集**恰 3**；⑭ 上游请求体的 `image` 是**签名链**
  *      （非 `data:` 前缀、非本函数下载的字节）。
  *   F. 交付面静态门：`@cloudbase/node-sdk` 落 dependencies、`vercel.json`
- *      `functions.maxDuration=60` 且既有段一字未动、路由默认导出是函数、本套为第 28 个脚本（基线 26 ＋ 本套 ai-relay ＋ ai-connect-page）、
+ *      `functions.maxDuration=60` 且既有段一字未动、路由默认导出是函数、本套为第 32 个脚本（基线 26 ＋ ai-relay / ai-connect-page / ai-enhance / ai-enhance-discard / cloudfn-transport / object-key-pattern）、
  *      核心源码零 `data:image` 字面 / 零字节下载面。
  *   G. **data_url 转存面（v1.74 AC-601〜603）**：① `data_url` 成功（上傳恰 1 次、
  *      上游拿到的 `image` 是簽名鏈、回包恰 6 鍵、上傳字節＝解碼字節、鍵＝內容尋址族）；
@@ -1099,7 +1099,7 @@ check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDu
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
 const verifyScripts = readdirSync(path.join(ROOT, 'scripts')).filter((name) => /^verify-.*\.mjs$/.test(name))
-check('F4', '本套为第 31 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport）', { count: 31, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4', '本套为第 32 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern）', { count: 32, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
 check('F4b', '新增套 `verify-ai-connect-page.mjs` 亦在册（脚本计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-ai-connect-page.mjs') !== -1)
 
 check('F5', '核心只经四个 lib 的既有注入缝取集合（零取句柄字面）与零上游凭据字面', { seamCalls: 4, keyLiteral: 0 }, { seamCalls: ['setLedgerStoreProvider', 'setAiKeyStoreProvider', 'setUpstreamStoreProvider', 'setAiUsageStoreProvider'].filter((name) => countIn(coreSource, name) >= 1).length, keyLiteral: countIn(coreSource, UPSTREAM_KEY) })

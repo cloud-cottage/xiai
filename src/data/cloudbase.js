@@ -177,8 +177,9 @@ export const CLOUD_RETRYABLE_TIMEOUT_STAGES = Object.freeze(['sdk-load'])
    默認值 ＝ 下面這個**唯一一處**字面量（全倉只此一處，散落多處即判負）。 */
 export const CLOUD_STORAGE_BUCKET_DEFAULT = '6c69-liwu-d8gek6jjdab1d087c-1463728495'
 
-/** 影像展示件对象键形态（mapping.md §3：`xiai/images/` 加 sha 前两位 加 `/` 加 sha 加 点加扩展名）。 */
-export const IMAGE_OBJECT_KEY_PATTERN = /^xiai\/images\/([0-9a-f]{2})\/([0-9a-f]{64})\.(png|webp)$/
+/** 影像展示件对象键形态（mapping.md §3：`xiai/images/` 加 sha 前两位 加 `/` 加 sha 加 点加扩展名）。
+ *  `jpg` / `jpeg` 为 §3.68 AI 产物引入（AI 修復产物族扩 jpeg；浏览器原生解码，不经服务端转码）。 */
+export const IMAGE_OBJECT_KEY_PATTERN = /^xiai\/images\/([0-9a-f]{2})\/([0-9a-f]{64})\.(png|webp|jpg|jpeg)$/
 
 /** 展示件容器 ↔ 扩展名（校验 storage_key 与行内 mime 是否自洽；**不改写**，只判）。 */
 export const IMAGE_EXT_MIME = Object.freeze({ png: 'image/png', webp: 'image/webp' })

@@ -7,7 +7,8 @@
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` 的 `ADMIN_OPS['ai-enhance-face']`（薄委派注册面）
  *   · `lib/ledger.js` 扣费 / 退款单点（注入假存储）· `lib/aiUpstream.js` 上游配置（注入假存储）
  *
- * 断言面（本套 **32** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条；覆盖派单方点名的 一〜八）：
+ * 断言面（本套 **38** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
+ * ＋ 产物族 jpeg 扩面 6 条（I 段）；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
  *      A0 `ADMIN_OPS` 注册面（恰 18 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 8 键**；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
@@ -45,6 +46,13 @@
  *      ⑤ completed 但 `result_urls` 为空 ⇒ 文案含 `result_urls`；
  *      ⑥ 同步形态（`data[0].b64_json`）仍成功（旧路不破）。
  *      轮询间隔经**假 sleep 注入缝**（不真睡 5 秒 × 20 —— 整套脚本秒内跑完）。
+ *   I. 产物族 jpeg 扩面（§3.68 AI 产物容器族；`PRODUCT_MIME_EXT` 增 `'image/jpeg' → 'jpg'`）：
+ *      ① 假上游给 **JPEG**（FF D8 FF 魔数）⇒ **仍成功**：回包恰 8 键、`preview.mime` 逐字
+ *         `image/jpeg`、上传键以 `.jpg` 结尾（内容寻址 `xiai/images/<前两位>/<sha>.jpg`）、
+ *         新影像行入册自洽（`mime` / `storage_key` / `sha256` 三面对齐）；
+ *      ② png 仍成功且键以 `.png`；③ webp 仍成功（键以 `.webp`）；
+ *      ④ GIF / GZIP **非白名单**字节 ⇒ 仍报产物族拒绝（message 含「產物族」）且**全额退款**
+ *         （`refunded: true`、REFUND +10、余额复原）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何明文密钥（上游 key 只登记长度）。
  */
@@ -244,6 +252,29 @@ ops.setOpsStorageUploadProvider(async ({ cloudPath, bytes }) => {
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const SOURCE_BYTES = Buffer.concat([PNG_MAGIC, Buffer.from('offline-source-image-fixture', 'utf8')])
 const PRODUCT_BYTES = Buffer.concat([PNG_MAGIC, Buffer.from('offline-product-image-fixture-unique', 'utf8')])
+/* I 段产物族样本：JPEG / WebP **合成**字节（魔数可认）；GIF / GZIP 为**非白名单**对照。 */
+const JPEG_PRODUCT_BYTES = Buffer.concat([
+  Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]),
+  Buffer.from('offline-product-jpeg-fixture', 'utf8')
+])
+const WEBP_PRODUCT_BYTES = Buffer.concat([
+  Buffer.from('RIFF', 'ascii'),
+  Buffer.from([0x2a, 0x00, 0x00, 0x00]),
+  Buffer.from('WEBP', 'ascii'),
+  Buffer.from('offline-product-webp-fixture', 'utf8')
+])
+const GIF_PRODUCT_BYTES = Buffer.from('GIF89a-offline-product-gif-fixture', 'utf8')
+const GZIP_PRODUCT_BYTES = Buffer.concat([
+  Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00]),
+  Buffer.from('offline-gzip-fixture', 'utf8')
+])
+/* I 段模式 → 产物字节（2xx + `data[0].b64_json` 直给该容器字节）。 */
+const PRODUCT_MODE_BYTES = Object.freeze({
+  okJpeg: JPEG_PRODUCT_BYTES,
+  okWebp: WEBP_PRODUCT_BYTES,
+  rejectGif: GIF_PRODUCT_BYTES,
+  rejectGzip: GZIP_PRODUCT_BYTES
+})
 
 let upstreamMode = 'ok'
 /* 非 2xx 诊断形态（`upstreamDetailOf` 四样本；body 文本逐字冻结）。 */
@@ -316,6 +347,14 @@ aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
   if (Object.prototype.hasOwnProperty.call(SHAPE_MODES, upstreamMode)) {
     /* 形状模式（2xx 但认不出图）：钉住 `upstreamShapeOf` 的键名轮廓（零值泄露）。 */
     return { ok: true, status: 200, json: async () => SHAPE_MODES[upstreamMode] }
+  }
+  if (Object.prototype.hasOwnProperty.call(PRODUCT_MODE_BYTES, upstreamMode)) {
+    /* I 段产物族样本：2xx + `data[0].b64_json` 给指定容器字节（JPEG / WebP 成功入册；GIF / GZIP 被产物族门拒）。 */
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ b64_json: PRODUCT_MODE_BYTES[upstreamMode].toString('base64') }] })
+    }
   }
   if (upstreamMode === 'ok') {
     return {
@@ -1163,6 +1202,150 @@ const hFlowKinds = (requestId) =>
     previewMime: reply.preview && reply.preview.mime,
     upstreamStatus: reply.upstream_status,
     queries: pollQueries.length
+  })
+}
+
+/* ===========================================================================
+   I 段：产物族 jpeg 扩面（§3.68 AI 产物容器族；`PRODUCT_MIME_EXT` 增 'image/jpeg' → 'jpg'）
+   =========================================================================== */
+section('I', '产物族扩 jpeg：JPEG 产物入册（键 .jpg / preview.mime image/jpeg）；png·webp 不破；GIF·GZIP 仍拒且全退')
+
+/* 专用管理员身份（同白名单手机号、不同 uid ＋ 预置 100 金 —— 不动 ADMIN 的余额与用量轨迹）。 */
+const I_IDENTITY = { uid: 'u-admin-ai-enhance-family', phone: ADMIN_PHONE }
+const iBalance = () => balanceMapOf(I_IDENTITY.uid)
+const iFlowKinds = (requestId) =>
+  flowRowsOf(I_IDENTITY.uid)
+    .filter(
+      (row) =>
+        row.idem_key === `ai-enhance-${SRC_OK}-${requestId}` || row.idem_key === `ai-enhance-${SRC_OK}-${requestId}-refund`
+    )
+    .map((row) => `${row.kind}:${row.delta}`)
+    .sort()
+fakeDb.bucketOf('xiai_balances').set(`bl-${I_IDENTITY.uid}`, { _id: `bl-${I_IDENTITY.uid}`, uid: I_IDENTITY.uid, points: 100, updated_at: 'seed' })
+const iEnhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payload, I_IDENTITY, CONTEXT(requestId))
+
+/* ① 假上游给 JPEG（FF D8 FF 魔数）⇒ 成功入册：恰 8 键、preview.mime image/jpeg、键以 .jpg 结尾。 */
+{
+  const RID = 'rid-i1-product-jpeg'
+  const uploadsBefore = uploads.length
+  const balanceBefore = iBalance().points
+  upstreamMode = 'okJpeg'
+  const reply = await iEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  upstreamMode = 'ok'
+  const upload = uploads[uploads.length - 1]
+  const jpegSha = sha256Hex(JPEG_PRODUCT_BYTES)
+  check('I1', '① 假上游给 **JPEG**（FF D8 FF 魔数）⇒ **成功**：回包**恰 8 键**、`preview.mime` 逐字 `image/jpeg`、上传键以 `.jpg` 结尾（内容寻址 `xiai/images/<前两位>/<sha>.jpg`）、上传字节与上游回图**逐字节相等**、扣金恰 10', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    previewMime: 'image/jpeg',
+    keyEndsWithJpg: true,
+    keyContentAddressed: true,
+    bytesEqual: true,
+    newUploads: 1,
+    upstreamStatus: 200,
+    balance: balanceBefore - 10
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    previewMime: reply.preview && reply.preview.mime,
+    keyEndsWithJpg: !!(upload && upload.cloudPath.slice(-4) === '.jpg'),
+    keyContentAddressed: !!(upload && upload.cloudPath === `xiai/images/${jpegSha.slice(0, 2)}/${jpegSha}.jpg`),
+    bytesEqual: !!(upload && Buffer.compare(upload.bytes, JPEG_PRODUCT_BYTES) === 0),
+    newUploads: uploads.length - uploadsBefore,
+    upstreamStatus: reply.upstream_status,
+    balance: iBalance().points
+  })
+  /* I1b：新影像行入册自洽（读面按行内 sha / storage_key / mime 取图 ⇒ 三面必须对齐）。 */
+  const row = fakeDb.bucketOf('xiai_images').get(reply.image_id)
+  check('I1b', '① 新影像行入册自洽：`mime` 逐字 `image/jpeg`、`storage_key` 以 `.jpg` 结尾且**逐字 ＝ 上传键**、`sha256` ＝ 上传字节摘要', {
+    mime: 'image/jpeg',
+    keyEndsWithJpg: true,
+    keyMatchesUpload: true,
+    shaMatches: true
+  }, {
+    mime: row && row.mime,
+    keyEndsWithJpg: !!(row && row.storage_key && row.storage_key.slice(-4) === '.jpg'),
+    keyMatchesUpload: !!(row && upload && row.storage_key === upload.cloudPath),
+    shaMatches: !!(row && row.sha256 === jpegSha && row.sha256 === sha256Hex(upload.bytes))
+  })
+}
+
+/* ② png 仍成功、键以 .png（既有族不破）。 */
+{
+  const RID = 'rid-i2-product-png-still-ok'
+  const uploadsBefore = uploads.length
+  const balanceBefore = iBalance().points
+  const reply = await iEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  const upload = uploads[uploads.length - 1]
+  check('I2', '② **png 仍成功**：恰 8 键、`preview.mime` 逐字 `image/png`、上传键以 `.png` 结尾（既有族不破）', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    previewMime: 'image/png',
+    keyEndsWithPng: true,
+    newUploads: 1,
+    balance: balanceBefore - 10
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    previewMime: reply.preview && reply.preview.mime,
+    keyEndsWithPng: !!(upload && upload.cloudPath.slice(-4) === '.png'),
+    newUploads: uploads.length - uploadsBefore,
+    balance: iBalance().points
+  })
+}
+
+/* ③ webp 仍成功、键以 .webp。 */
+{
+  const RID = 'rid-i3-product-webp-still-ok'
+  const uploadsBefore = uploads.length
+  const balanceBefore = iBalance().points
+  upstreamMode = 'okWebp'
+  const reply = await iEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  upstreamMode = 'ok'
+  const upload = uploads[uploads.length - 1]
+  check('I3', '③ **webp 仍成功**：恰 8 键、`preview.mime` 逐字 `image/webp`、上传键以 `.webp` 结尾', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    previewMime: 'image/webp',
+    keyEndsWithWebp: true,
+    newUploads: 1,
+    balance: balanceBefore - 10
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    previewMime: reply.preview && reply.preview.mime,
+    keyEndsWithWebp: !!(upload && upload.cloudPath.slice(-5) === '.webp'),
+    newUploads: uploads.length - uploadsBefore,
+    balance: iBalance().points
+  })
+}
+
+/* ④ GIF / GZIP（非白名单字节）⇒ 仍报产物族拒绝且全额退款（两发；模式即复位）。 */
+for (const [label, mode, rid, note] of [
+  ['I4a', 'rejectGif', 'rid-i4a-product-gif-reject', 'GIF89a'],
+  ['I4b', 'rejectGzip', 'rid-i4b-product-gzip-reject', 'GZIP（1f 8b）']
+]) {
+  upstreamMode = mode
+  const balanceBefore = iBalance().points
+  const reply = await iEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, rid)
+  upstreamMode = 'ok'
+  const message = String(reply.message)
+  check(label, `④ 假上游给非白名单字节（${note}）⇒ **仍报产物族拒绝**：恰 4 键、\`reason\` 逐字 \`UPSTREAM_ERROR\`、message 含「產物族」、\`refunded: true\` 且 **ledger 真退 10**（REFUND +10、余额复原；原 CHARGE 行不删）`, {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    hasFamilyNote: true,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    balance: balanceBefore
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    hasFamilyNote: message.indexOf('產物族') !== -1,
+    flow: iFlowKinds(rid),
+    balance: iBalance().points
   })
 }
 
