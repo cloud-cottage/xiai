@@ -453,7 +453,18 @@ const opBody = opStart >= 0 ? opsSource.slice(opStart, opEndCandidates.length ? 
 check('E2', 'op 本体：无落盘计划（`plan:` 0）＆ 走 readArtifactBytes ＋ tiffToPng ＋ uploadDisplayArtifactBytes', [false, true, true, true], [opBody.includes('plan:'), opBody.includes('readArtifactBytes'), opBody.includes('tiffToPng'), opBody.includes('uploadDisplayArtifactBytes')])
 
 const cbSource = readFileSync(path.join(ROOT, 'src/data/cloudbase.js'), 'utf8')
-check('E3', '读面：既有 IMAGE_OBJECT_KEY_PATTERN（png|webp）未被改动 ＋ 新增源件 pattern 在场', true, /IMAGE_OBJECT_KEY_PATTERN = \/\^xiai\\\/images\\\/\(\[0-9a-f\]\{2\}\)\\\/\(\[0-9a-f\]\{64\}\)\\\.\(png\|webp\)\$\//.test(cbSource) && cbSource.includes('IMAGE_SOURCE_TIFF_KEY_PATTERN'))
+check('E3', '读面：既有 IMAGE_OBJECT_KEY_PATTERN（png|webp|jpg|jpeg）未被改动 ＋ 新增源件 pattern 在场（v1.81：+jpg|jpeg，§3.68 AI 产物）', true, /IMAGE_OBJECT_KEY_PATTERN = \/\^xiai\\\/images\\\/\(\[0-9a-f\]\{2\}\)\\\/\(\[0-9a-f\]\{64\}\)\\\.\(png\|webp\|jpg\|jpeg\)\$\//.test(cbSource) && cbSource.includes('IMAGE_SOURCE_TIFF_KEY_PATTERN'))
+/* E3a / E3b **派生式断言**（不手写字面）：从 `src/data/cloudbase.js` 源码抽出
+   `IMAGE_OBJECT_KEY_PATTERN` 的末位扩展名分支集合，与 `IMAGE_EXT_MIME` 键集合**相等** ——
+   复用 `scripts/verify-object-key-pattern.mjs` C3a〜C3d 的静态守卫口径，任一侧单边扩展
+   （§3.68 实测事故形态）即判负；免得下次再手写一份陈旧字面。 */
+const patternDeclLine = (/(?:export )?const IMAGE_OBJECT_KEY_PATTERN = [^\n]*/.exec(cbSource) || [''])[0]
+const branchMatched = /\\\.\(([^)]+)\)\$\//.exec(patternDeclLine)
+const BRANCH_EXTS = branchMatched ? branchMatched[1].split('|') : []
+const mimeDeclBody = (/export const IMAGE_EXT_MIME = Object\.freeze\(\{([\s\S]*?)\}\)/.exec(cbSource) || ['', ''])[1]
+const MIME_EXTS = [...mimeDeclBody.matchAll(/^\s*([a-z][a-z0-9]*)\s*:/gm)].map((item) => item[1])
+check('E3a', '源码抽出 `IMAGE_OBJECT_KEY_PATTERN` 末位扩展名分支（形如 `\\.(a|b|…)$`）', true, Boolean(branchMatched))
+check('E3b', '`IMAGE_EXT_MIME` 键集合 ＝ PATTERN 扩展名分支集合（排序后逐字；防任一侧单边扩展）', [...MIME_EXTS].sort(), [...BRANCH_EXTS].sort())
 
 const iaSource = readFileSync(path.join(ROOT, 'src/services/imageAuthority.js'), 'utf8')
 const ixSource = readFileSync(path.join(ROOT, 'cloudfunctions/xiai-user-token/index.js'), 'utf8')
