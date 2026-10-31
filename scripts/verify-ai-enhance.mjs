@@ -7,7 +7,7 @@
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` 的 `ADMIN_OPS['ai-enhance-face']`（薄委派注册面）
  *   · `lib/ledger.js` 扣费 / 退款单点（注入假存储）· `lib/aiUpstream.js` 上游配置（注入假存储）
  *
- * 断言面（本套 **22** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条；覆盖派单方点名的 一〜八）：
+ * 断言面（本套 **26** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
  *      A0 `ADMIN_OPS` 注册面（恰 18 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 8 键**；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
@@ -31,6 +31,11 @@
  *      402 带 FastAPI 风格 `detail` ⇒ message 带上游原话（`spend limit exceeded` / `remaining`）；
  *      402 空体 ⇒ `body=empty`；500 纯文本 ⇒ 原文前 80 字；`detail` 带 48 位长串 ⇒ `<redacted>`
  *      （回包内零出现）；失败回包键面仍**恰 4 键**且 `refunded: true`；超时分支 message **逐字不变**。
+ *   G. 2xx 形状诊断（`upstreamShapeOf` 经真流程钉住）：
+ *      200 + 异步对象 `data:{task_id,status}` ⇒ message 带 `data` / `task_id` / `status` 键名；
+ *      200 + `data[0].image_url`（无 b64_json / url）⇒ message 带 `image_url`；两例整份失败回包
+ *      序列化后零出现 `t-1` 与图片 URL（**零值泄露**）；200 + `data[0].b64_json` 真 PNG ⇒ 仍成功、
+ *      回包**恰 8 键**（既有取图行为不被破坏）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何明文密钥（上游 key 只登记长度）。
  */
@@ -240,6 +245,15 @@ const DIAG_MODES = {
   diag500text: { status: 500, body: 'Internal error' },
   diag402leak: { status: 402, body: JSON.stringify({ detail: `leak ${LEAK_48}` }) }
 }
+/* 2xx 形状诊断形态（`upstreamShapeOf` 三样本；值里埋哨兵 `t-1` / `https://x/y.png` —— 回包内零出现）。 */
+const SHAPE_LEAK_TASK = 't-1'
+const SHAPE_LEAK_URL = 'https://x/y.png'
+const SHAPE_MODES = {
+  /* 生产实测形态：200 + 异步回包（`data` 是对象、不是数组）⇒ 走「data 非数组」分支。 */
+  shapeAsyncObject: { code: 0, message: 'ok', data: { task_id: SHAPE_LEAK_TASK, status: 'pending' } },
+  /* 200 + `data[0]` 有对象但只有 `image_url`（无 `b64_json`、无 `url`）⇒ 走「无图字段」分支。 */
+  shapeNoImageField: { data: [{ image_url: SHAPE_LEAK_URL }] }
+}
 const upstreamCalls = []
 aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
   upstreamCalls.push({
@@ -252,6 +266,10 @@ aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
   if (diag) {
     /* 诊断模式（非 2xx）：回包带 `text()` 读体 —— 钉住 `upstreamDetailOf` 的四形态。 */
     return { ok: false, status: diag.status, text: async () => diag.body, json: async () => ({}) }
+  }
+  if (Object.prototype.hasOwnProperty.call(SHAPE_MODES, upstreamMode)) {
+    /* 形状模式（2xx 但认不出图）：钉住 `upstreamShapeOf` 的键名轮廓（零值泄露）。 */
+    return { ok: true, status: 200, json: async () => SHAPE_MODES[upstreamMode] }
   }
   if (upstreamMode === 'ok') {
     return {
@@ -788,6 +806,82 @@ async function runDiag(mode, requestId) {
     keys: shapeOf(timeoutReply),
     reason: timeoutReply.reason,
     refunded: timeoutReply.refunded
+  })
+}
+
+/* ===========================================================================
+   G 段：2xx 无图的**形状诊断**（诊断单 · `upstreamShapeOf` 经真流程钉住：
+  ① 200 + 异步对象 data ⇒ message 带 data / task_id / status 键名
+  ② 200 + data[0] 只有 image_url ⇒ message 带 image_url 键名
+  ③ 两例整份失败回包（含 message）序列化零出现 t-1 与图片 URL（零值泄露）
+  ④ 200 + data[0].b64_json 真 PNG ⇒ 仍成功、回包恰 8 键（既有行为不被破坏））
+   =========================================================================== */
+section('G', '2xx 无图形状诊断：message 带回包键名轮廓（零值泄露）；b64_json 真图仍成功恰 8 键')
+
+{
+  const shapeAsyncReply = await runDiag('shapeAsyncObject', 'rid-g1-shape-async-object')
+  const shapeNoImageReply = await runDiag('shapeNoImageField', 'rid-g2-shape-no-image-field')
+
+  /* ① 200 + {code,message,data:{task_id,status}}（`data` 为对象）⇒ message 带 data / task_id / status。 */
+  const shapeAsyncMessage = String(shapeAsyncReply.message)
+  check('G1', '① 假上游 200 + {"code":0,"message":"ok","data":{"task_id":"t-1","status":"pending"}}（`data` 为**对象**、非数组）⇒ 失败 message **带形状轮廓**（含顶层 `data` 键名与 `data 键=（task_id,status）`；HTTP 200 在场；仍 `UPSTREAM_ERROR` ＋ `refunded: true`）', {
+    hasData: true,
+    hasTaskId: true,
+    hasStatus: true,
+    http200: true,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    keys: 'message,ok,reason,refunded'
+  }, {
+    hasData: shapeAsyncMessage.indexOf('data') !== -1,
+    hasTaskId: shapeAsyncMessage.indexOf('task_id') !== -1,
+    hasStatus: shapeAsyncMessage.indexOf('status') !== -1,
+    http200: shapeAsyncMessage.indexOf('HTTP 200') !== -1,
+    reason: shapeAsyncReply.reason,
+    refunded: shapeAsyncReply.refunded,
+    keys: shapeOf(shapeAsyncReply)
+  })
+
+  /* ② 200 + data[0].image_url（无 b64_json、无 url）⇒ message 带 image_url。 */
+  const shapeNoImageMessage = String(shapeNoImageReply.message)
+  check('G2', '② 假上游 200 + {"data":[{"image_url":"https://x/y.png"}]}（`data[0]` 有对象但无 `b64_json`、无 `url`）⇒ 失败 message **带形状轮廓**（含 `data[0] 键=（image_url）`；仍 `UPSTREAM_ERROR` ＋ `refunded: true`）', {
+    hasImageUrl: true,
+    hasData0: true,
+    reason: 'UPSTREAM_ERROR',
+    refunded: true,
+    keys: 'message,ok,reason,refunded'
+  }, {
+    hasImageUrl: shapeNoImageMessage.indexOf('image_url') !== -1,
+    hasData0: shapeNoImageMessage.indexOf('data[0]') !== -1,
+    reason: shapeNoImageReply.reason,
+    refunded: shapeNoImageReply.refunded,
+    keys: shapeOf(shapeNoImageReply)
+  })
+
+  /* ③ 零值泄露：两例整份失败回包（含 message）序列化后不得出现哨兵值。 */
+  const shapeSerialized = JSON.stringify(shapeAsyncReply) + JSON.stringify(shapeNoImageReply)
+  check('G3', '③ **零值泄露**：上述两例整份失败回包（含 `message`；恰 4 键、零额外字段）序列化后**不得出现** `t-1` 与 `https://x/y.png`（形状只带键名、不带值）', {
+    taskAbsent: true,
+    urlAbsent: true,
+    shapes: ['message,ok,reason,refunded', 'message,ok,reason,refunded']
+  }, {
+    taskAbsent: shapeSerialized.indexOf(SHAPE_LEAK_TASK) === -1,
+    urlAbsent: shapeSerialized.indexOf(SHAPE_LEAK_URL) === -1,
+    shapes: [shapeOf(shapeAsyncReply), shapeOf(shapeNoImageReply)]
+  })
+
+  /* ④ 200 + data[0].b64_json 真 PNG ⇒ 仍成功、回包恰 8 键（既有取图行为不被形状诊断破坏）。 */
+  const shapeOkReply = await runDiag('ok', 'rid-g4-shape-b64-ok')
+  check('G4', '④ 假上游 200 + {"data":[{"b64_json":"<真 PNG base64>"}]} ⇒ **仍成功**：`ok: true`、回包**恰 8 键**（既有 b64_json 取图行为不被形状诊断破坏）', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    previewMime: 'image/png',
+    upstreamStatus: 200
+  }, {
+    ok: shapeOkReply.ok,
+    keys: shapeOf(shapeOkReply),
+    previewMime: shapeOkReply.preview && shapeOkReply.preview.mime,
+    upstreamStatus: shapeOkReply.upstream_status
   })
 }
 

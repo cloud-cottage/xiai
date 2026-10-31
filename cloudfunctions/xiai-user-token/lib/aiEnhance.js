@@ -336,6 +336,52 @@ function upstreamDetailOf(rawText) {
 }
 
 /**
+ * 上游**2xx 回包的形状轮廓**（纯函数；**本文件唯一定义点**；零 I/O、零自抛）。
+ *
+ * 生产实测：上游 200 但回包里没有本面认得出的图（如异步形态 `{code,message,data:{task_id,status}}`）
+ * 时，此前 detail 恒「回包缺圖片數據」、管理员无从判断上游到底回了什么。口径向
+ * `api/_lib/aiRelay.js::shapeOutlineOf` 对齐，此处取**同尺版**：
+ *   · 顶层键名逗号拼接（最多 8 个、每个截 24 字）；
+ *   · `parsed.data` 是数组 ⇒ 追加 `; data[0] 键=（…）`（空数组则 `; data[]`）；是对象 ⇒
+ *     追加 `; data 键=（…）`；
+ *   · `output` / `result` / `images` 存在时同样追加一层键名（数组同 `data` 形态）；
+ *   · **只取 `Object.keys`、绝不序列化任何值**（键名本身不含上游数据值 ⇒ 零值泄露）；
+ *     总长截 240 字；**任何异常 ⇒ 回 `unknown`（不自抛）** —— 诊断面绝不影响主判定。
+ * @param {*} parsed 上游 2xx 回包（已 `JSON.parse`）
+ * @returns {string}
+ */
+function upstreamShapeOf(parsed) {
+  const LIMIT = 240
+  const keysOf = (value) => {
+    if (!value || typeof value !== 'object') return null
+    return Object.keys(value)
+      .filter((key) => typeof key === 'string')
+      .slice(0, 8)
+      .map((key) => (key.length > 24 ? key.slice(0, 24) : key))
+      .join(',')
+  }
+  const layerOf = (name, value) => {
+    if (Array.isArray(value)) {
+      if (value.length === 0) return `; ${name}[]`
+      return `; ${name}[0] 键=（${keysOf(value[0]) || ''}）`
+    }
+    if (value && typeof value === 'object') return `; ${name} 键=（${keysOf(value) || ''}）`
+    return ''
+  }
+  try {
+    if (!parsed || typeof parsed !== 'object') return 'unknown'
+    let out = keysOf(parsed)
+    if (out === null) return 'unknown'
+    for (const name of ['data', 'output', 'result', 'images']) {
+      if (Object.prototype.hasOwnProperty.call(parsed, name)) out += layerOf(name, parsed[name])
+    }
+    return out.length > LIMIT ? out.slice(0, LIMIT) : out
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
  * 调上游 `POST <base_url>/images/edits` 并取回产物字节。
  * @param {{base_url:string, model:string, key:string, timeout_ms:number}} upstream 解出的上游配置（明文 key 永不进回包）
  * @param {string} imageDataUrl 输入图 `data:` URL
@@ -375,9 +421,13 @@ async function callUpstreamAndFetchImage(upstream, imageDataUrl) {
       return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, upstreamDetailOf(raw)), status }
     }
     const payload = await response.json()
+    /* 2xx 但认不出图（`data` 非数组 / 第一项非对象 / 无 `b64_json` 也无 `url`）⇒ detail 带
+       **回包形状轮廓**（`upstreamShapeOf`：只带键名、零值泄露）—— 生产实测上游 200 回异步
+       形态 `{code,message,data:{task_id,status}}` 时，管理员此前只见「回包缺圖片數據」无从定位。 */
+    const shapeNote = `回包缺圖片數據（形狀＝${upstreamShapeOf(payload)}）`
     const first = payload && Array.isArray(payload.data) && payload.data.length > 0 ? payload.data[0] : null
     if (!first || typeof first !== 'object') {
-      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, '回包缺圖片數據'), status }
+      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, shapeNote), status }
     }
     let bytes = null
     if (typeof first.b64_json === 'string' && first.b64_json !== '') {
@@ -390,7 +440,7 @@ async function callUpstreamAndFetchImage(upstream, imageDataUrl) {
       bytes = Buffer.from(await download.arrayBuffer())
     }
     if (!bytes || bytes.length === 0) {
-      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, '回包缺圖片數據'), status }
+      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, shapeNote), status }
     }
     return { ok: true, bytes, status, elapsedMs: Date.now() - startedAt }
   } catch (error) {
