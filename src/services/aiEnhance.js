@@ -12,7 +12,8 @@
  *
  * 契約（**服務端單並行實現，以此為準**；本文件只做形狀校驗、**不補編任何鍵**）：
  *   · `ai-enhance-face` 載荷**封閉三鍵**：`image_id`（原圖）/ `seal_id` / `face_id`；
- *     成功回包：`{ok:true, image_id, source_image_id, preview:{mime, sha256}, charge:{amount, balance}}`；
+ *     成功回包：`{ok:true, image_id, source_image_id, preview:{mime, sha256}, charge:{amount, balance},
+ *     row}`（`row` ＝ 服務端**已落庫的那一行本身**）；
  *     失敗回包：`{ok:false, reason, message, refunded}`（`refunded === true` ⇒ 本次未消耗金）。
  *   · `ai-enhance-discard` 載荷**封閉一鍵**：`image_id`（候選影像編號）；
  *     成功回包**恰 3 鍵**：`{ok:true, image_id, deleted_objects}`；
@@ -29,10 +30,14 @@
  *     `preview` / `charge` 缺位 ⇒ 對應讀數為 `null`（**不編造 mime / 摘要 / 扣費數字**）。
  *  ④ 組件 / 視圖**只經本文件**；op 名字面值與讀數鍵面**全倉只在此處**。
  *  ⑤ **dev / 離線形態**：過門但未經雲端 ⇒ 如實結構化拒絕（非正式路徑；**零扣費、零影像**）。
+ *  ⑥ **候選行本地鏡像（本單）**：`ai-enhance-face` 成功回包的 `row` ⇒ 追加進本地影像行鏡像
+ *     （先讀現有行再 append、**冪等**）；鏡像讀 / 寫失敗或 `row` 缺席 ⇒ **只降級**成
+ *     `mirror: false`（仍 `ok: true`、仍回 `image_id`，UI 可據此提示刷新），**絕不改判成功**。
  * ============================================================================
  */
 
 import { isAdmin, isLoggedIn } from '../data/session.js'
+import { listImageRows, saveImageRows } from '../data/db.js'
 import { userWriteGate } from './userWrite.js'
 
 /** 雲函數 op 名（與 `lib/ops.js` 注册面逐字一致；全倉唯一出現處）。 */
@@ -75,6 +80,75 @@ const READOUT_KEYS = Object.freeze(['image_id', 'source_image_id', 'preview', 'c
  * —— 經 `gate()` 的 `readoutKeys` **additive 透傳**声明取得。
  */
 const DISCARD_READOUT_KEYS = Object.freeze(['image_id', 'deleted_objects'])
+
+/* ============================================================================
+   候選行**本地鏡像**（服務端成功回包帶 `row` ⇒ 客戶端把它追加進本地影像行鏡像）
+   ----------------------------------------------------------------------------
+   為什麼要這一步：`seals.js::loadImageDataUrl` 走雲端分支的前提是 `listImageRows()`
+   找得到該行；服務端已落庫、本機鏡像卻沒有 ⇒ `meta = null` ⇒ 回落本地 blobstore ⇒
+   右格報「影像二進制不在本地存儲中」。本段把服務端權威行**鏡像回本機**，讓右格立即出圖。
+
+   硬口徑（逐條）：
+   ① 只在**成功**回包上做；`reply.row` 非對象 ⇒ **不追加、不崩**（照常返回 `image_id`）。
+   ② **冪等**：該 id 已在鏡像裡 ⇒ **不重複追加**（行數不變）。
+   ③ 鏡像讀 / 寫**任何失敗只降級**：仍返回 `ok: true` 與 `image_id`，並給可讀提示位
+      `mirror: false`（UI 據此提示刷新）；**絕不把成功改判成失敗**。
+   ④ `mirror` 只是「本機鏡像此刻是否已有該行」的如實讀數，不是服務端判定；
+      `reply.row` 缺席（舊服務端 / 未透傳）同樣回 `mirror: false`。
+   ⑤ 讀寫一律走 `db` 的 `listImageRows` / `saveImageRows` 同族入口（**先讀現有行再 append**，
+      與 `db.js::insertImageRow` 的落盤範式逐字同構），本文件零 localStorage 字面值。
+
+   注入縫：`setAiEnhanceMirrorStore`（離線自檢注入假鏡像存儲；生產不注入 ⇒ 走 db 真入口）。
+   ============================================================================ */
+
+let mirrorStore = null
+
+/**
+ * 注入鏡像存儲（`{list(): Array, save(rows): any}`）；傳非對象 ⇒ 清除注入。
+ * **僅供離線自檢 / 宿主**（生產不注入 ⇒ 走 `db` 的 `listImageRows` / `saveImageRows`）。
+ * @param {null|object} store
+ */
+export function setAiEnhanceMirrorStore(store) {
+  mirrorStore = store && typeof store === 'object' ? store : null
+}
+
+/** 讀現有影像行（注入縫 → `db.listImageRows`）。 */
+function mirrorListRows() {
+  if (mirrorStore && typeof mirrorStore.list === 'function') return mirrorStore.list()
+  return listImageRows()
+}
+
+/** 寫整份影像行（注入縫 → `db.saveImageRows`；回 `false` 視為寫入未成立）。 */
+function mirrorSaveRows(rows) {
+  if (mirrorStore && typeof mirrorStore.save === 'function') return mirrorStore.save(rows)
+  return saveImageRows(rows)
+}
+
+/**
+ * 把候選行追加進本地影像行鏡像（**冪等**）。
+ * @param {*} row 服務端回包的 `row`（已落庫的那一行）
+ * @returns {boolean} 本機鏡像此刻是否已有該行（任何失敗一律 `false`，**不拋**）
+ */
+function mirrorCandidateRow(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false
+  const id =
+    typeof row.id === 'string' && row.id !== ''
+      ? row.id
+      : typeof row._id === 'string' && row._id !== ''
+        ? row._id
+        : ''
+  if (id === '') return false
+  try {
+    const current = mirrorListRows()
+    const rows = Array.isArray(current) ? current : []
+    const already = rows.some((item) => item && (item.id === id || item._id === id))
+    if (already) return true
+    return mirrorSaveRows(rows.concat([row])) !== false
+  } catch {
+    /* 鏡像讀 / 寫失敗 ⇒ 只降級（`mirror: false`），**不改判成功**。 */
+    return false
+  }
+}
 
 /* ---------------------------------------------------------------------------
    【棄】棄置候選修復圖（op `ai-enhance-discard`；服務端單並行實現，以此為準）
@@ -179,8 +253,11 @@ function timeoutSoftNote(reason, message) {
  * @param {{image_id:string, seal_id:string, face_id:string}} input 載荷（封閉三鍵）
  * @returns {Promise<{ok:true, imageId:string, sourceImageId:string,
  *          preview:{mime:string, sha256:string}|null,
- *          charge:{amount:number, balance:number}|null}
+ *          charge:{amount:number, balance:number}|null,
+ *          mirror:boolean}
  *          |{ok:false, reason:string, message:string, refunded:boolean}>}
+ *          成功必帶 `mirror`：`true` ＝ 本機影像行鏡像已含服務端回的候選行；
+ *          `false` ＝ 未鏡像成功（`row` 缺席 / 鏡像讀寫失敗）⇒ 仍 `ok: true`，UI 可據此提示刷新。
  */
 export async function enhanceFaceImage(input) {
   const options = input || {}
@@ -247,12 +324,16 @@ export async function enhanceFaceImage(input) {
   const charge = gate.charge && typeof gate.charge === 'object'
     ? { amount: numberOrNaN(gate.charge.amount), balance: numberOrNaN(gate.charge.balance) }
     : null
+  /* **候選行本地鏡像**（本單）：服務端回 `row` ⇒ 追加進本地影像行鏡像，右格立即出圖。
+     讀 / 寫失敗或 `row` 缺席 ⇒ 只降級成 `mirror: false`（提示刷新），**不改判成功**。 */
+  const mirror = mirrorCandidateRow(gate.row)
   return {
     ok: true,
     imageId: newImageId,
     sourceImageId: typeof gate.source_image_id === 'string' ? gate.source_image_id.trim() : '',
     preview,
     charge,
-    message: ''
+    message: '',
+    mirror
   }
 }

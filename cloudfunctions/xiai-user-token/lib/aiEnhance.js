@@ -37,8 +37,12 @@
  *     编号 `img-` ＋ 8 位十六进制 ＝ `sha256(idem_key)` 前 8 位 —— **确定性 ⇒ 重放不建第二行**；
  *     `sha256` / `bytes` / `bytesLength` / `mime` / `storage: 'server'` / `source: 'ai_enhance'` /
  *     `displayOnly: true` / `created_at`）；**不挂印面**（不写任何 `face_image_id`、不写面行）。
- *  ⑨ **成功回包恰 8 键**：`ok, image_id, source_image_id, preview{mime,sha256},
- *     charge{amount,balance}, upstream_status, elapsed_ms, idempotent`。
+ *  ⑨ **成功回包恰 9 键**：`ok, image_id, source_image_id, preview{mime,sha256},
+ *     charge{amount,balance}, upstream_status, elapsed_ms, idempotent, row` —— `row` ＝ **已落库的
+ *     那一行本身**（与入册对象逐字段一致：`_id`/`id`、`stamp_id`、`sealId`、`kind`、`storage`、
+ *     `storage_key`、`sha256`、`bytes`/`bytesLength`、`mime`、`source=ai_enhance`、`displayOnly`、
+ *     `source_image_id`、`charge_balance_after`、`upstream_status`、`elapsed_ms`、`created_at`），
+ *     供客户端把候選行**镜像进本地影像行**（客户端侧镜像写失败只降级、不改判成功）。
  *  ⑩ **失败回包恰 4 键**：`ok, reason, message, refunded` —— 任何失败路径**先确保退款**
  *     （已预扣 ⇒ 退、退成功 ⇒ `refunded: true`；未预扣 ⇒ `refunded: false`）。
  *  ⑪ **幂等**：同请求号重放 ⇒ 不重复扣金、不重复调上游、不重复建行，回首次结果
@@ -100,7 +104,8 @@ const DIGEST_PATTERN = /^[0-9a-f]{64}$/
  *  「不是本面入册的產物族」而全额退回；jpeg 产物的对象键后缀取 `jpg`。 */
 const PRODUCT_MIME_EXT = Object.freeze({ 'image/png': 'png', 'image/webp': 'webp', 'image/jpeg': 'jpg' })
 
-/** 成功回包键面（恰 8 键；`preview` / `charge` 是嵌套对象 —— 顶层键面即此 8 个）。 */
+/** 成功回包键面（恰 9 键；`preview` / `charge` / `row` 是嵌套对象 —— 顶层键面即此 9 个；
+ *  `row` ＝ **已落库的那一行本身**（与入册对象逐字段一致），供客户端镜像回本地影像行。 */
 const AI_ENHANCE_SUCCESS_KEYS = Object.freeze([
   'ok',
   'image_id',
@@ -109,7 +114,8 @@ const AI_ENHANCE_SUCCESS_KEYS = Object.freeze([
   'charge',
   'upstream_status',
   'elapsed_ms',
-  'idempotent'
+  'idempotent',
+  'row'
 ])
 
 /** 失败回包键面（恰 4 键；`refunded` 恒为布尔）。 */
@@ -259,6 +265,18 @@ async function uploadProductBytes(objectKey, bytes) {
 async function persistEnhanceRow(imageId, doc) {
   const ops = opsModule()
   await ops.persist({ writes: [{ kind: 'set', collection: ops.COLLECTIONS.images, id: imageId, doc }] })
+}
+
+/** 已落库的那一行（**读回为先**：权威行逐字；读不回 ⇒ 与入册对象逐字段一致的重建行 ——
+ *  成功回包**恒不缺 `row`**，读回抖动**不得**把成功降级成失败）。 */
+async function storedRowOf(imageId, doc) {
+  try {
+    const row = await readEnhanceRow(imageId)
+    if (row && typeof row === 'object') return row
+  } catch {
+    /* 读回失败（读面抖动）⇒ 走重建行；本步只影响 `row` 的取法，不改判成功。 */
+  }
+  return Object.assign({ _id: imageId }, doc)
 }
 
 /* --------------------------------------------------------------------------- *
@@ -678,7 +696,7 @@ async function callUpstreamAndFetchImage(upstream, imageDataUrl) {
   主流程
  * --------------------------------------------------------------------------- */
 
-/** 已存行 ⇒ 回放成功回包（`idempotent: true`；零扣费、零上游、零建行）。 */
+/** 已存行 ⇒ 回放成功回包（`idempotent: true`；零扣费、零上游、零建行；`row` ＝ 库内那一行本体）。 */
 function replayReply(row, sourceImageId) {
   return {
     ok: true,
@@ -688,7 +706,8 @@ function replayReply(row, sourceImageId) {
     charge: { amount: AI_ENHANCE_COST, balance: Number(row.charge_balance_after) || 0 },
     upstream_status: Number(row.upstream_status) || 0,
     elapsed_ms: Number.isInteger(row.elapsed_ms) ? row.elapsed_ms : 0,
-    idempotent: true
+    idempotent: true,
+    row
   }
 }
 
@@ -696,12 +715,12 @@ function replayReply(row, sourceImageId) {
  * **一次印面人工智能修復**（管理员面；会計費：单张 10 金；服务端裁决）。
  * 顺序（**判定全部在扣费 / 调上游之前**）：① 载荷封闭三键 → ② 管理员门 → ③ 幂等回放预查
  * → ④ 读影像行 / 拼对象键 / 下载字节（拒绝面：零扣费）→ ⑤ 上游配置（缺 ⇒ 零扣费）
- * → ⑥ 预扣 10 金 → ⑦ 调上游 + 取图 → ⑧ 内容寻址存储 → ⑨ 新影像行入册 → ⑩ 成功回包恰 8 键。
+ * → ⑥ 预扣 10 金 → ⑦ 调上游 + 取图 → ⑧ 内容寻址存储 → ⑨ 新影像行入册 → ⑩ 成功回包恰 9 键。
  * 任何失败路径：**先退款（已预扣才退）**，回失败回包恰 4 键（`refunded` 恒布尔）。
  * @param {object} payload 载荷（封闭三键 `image_id` / `seal_id` / `face_id`）
  * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
  * @param {{adminPhone?:string, nowSeconds?:number, requestId?:string}} [context]
- * @returns {Promise<object>} 成功恰 8 键 / 失败恰 4 键
+ * @returns {Promise<object>} 成功恰 9 键（含 `row` ＝ 已落库那一行）/ 失败恰 4 键
  */
 async function enhanceFace(payload, identity, context) {
   const uid = text(identity && identity.uid)
@@ -877,7 +896,9 @@ async function enhanceFace(payload, identity, context) {
     )
   }
 
-  /* ⑩ 成功回包（**恰 8 键**；`preview` / `charge` 嵌套、顶层键面即 8 个）。 */
+  /* ⑩ 成功回包（**恰 9 键**；`preview` / `charge` / `row` 嵌套、顶层键面即 9 个）：
+     `row` ＝ **已落库的那一行本身**（`storedRowOf`：先读回权威行，读不回才重建同值行）——
+     客户端据此把候選行镜像进本地影像行（右格才能立即出图）。 */
   return {
     ok: true,
     image_id: newImageId,
@@ -886,7 +907,8 @@ async function enhanceFace(payload, identity, context) {
     charge: { amount: AI_ENHANCE_COST, balance: charged.balance },
     upstream_status: upstreamCall.status,
     elapsed_ms: Number.isInteger(upstreamCall.elapsedMs) ? upstreamCall.elapsedMs : 0,
-    idempotent: charged.idempotent
+    idempotent: charged.idempotent,
+    row: await storedRowOf(newImageId, doc)
   }
 }
 

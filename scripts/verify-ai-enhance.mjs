@@ -7,17 +7,20 @@
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` 的 `ADMIN_OPS['ai-enhance-face']`（薄委派注册面）
  *   · `lib/ledger.js` 扣费 / 退款单点（注入假存储）· `lib/aiUpstream.js` 上游配置（注入假存储）
  *
- * 断言面（本套 **38** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
- * ＋ 产物族 jpeg 扩面 6 条（I 段）；覆盖派单方点名的 一〜八）：
+ * 断言面（本套 **39** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
+ * ＋ 产物族 jpeg 扩面 6 条（I 段）＋ 候選行 `row` 1 条（A5）；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
  *      A0 `ADMIN_OPS` 注册面（恰 18 项、`ai-enhance-face` 在册且为函数）；
- *      A1 回包**恰 8 键**；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
+ *      A1 回包**恰 9 键**（原 8 键仍逐字在场 ＋ 新增 `row`）；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
  *         ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号；
  *      A2 `preview.sha256` **逐字 ＝ 上传字节的 sha256**（且上传字节与上游回图字节**逐字节相等**、
  *         对象键为内容寻址 `xiai/images/<前两位>/<sha>.png`）；`charge.amount === 10`；
  *      A3 上游请求体恰五键（`model/prompt/size/resolution/image`）、`size` 逐字 `1:1`、
  *         `resolution` 逐字 `1K`、`prompt` 逐字 ＝ `lib/aiEnhancePrompt.js`、`image` 为 `data:` URL；
  *      A4 新影像行入册键面（不挂印面：零 `face_image_id`）；扣金恰 10（CHARGE 行 delta -10）。
+ *      A5 **新键 `row`**（本单）：`row` ＝ 已落库的那一行本身（整行深比较 ＝ 库内行）；
+ *         `row._id` 逐字 ＝ `image_id`（`row.id` 同）、`row.storage` 逐字 `server`、
+ *         `row.mime` 逐字 ＝ `preview.mime`、`row.storage_key` 以对应产物后缀（`.png`）结尾。
  *   B. 上游失败路（② 4xx ／ ③ 超时）
  *      失败回包**恰 4 键**、`reason` 逐字 `UPSTREAM_ERROR`、`refunded: true`；
  *      **ledger 真的退了 10**（余额复原、REFUND 行 +10、原 CHARGE 行不删）。
@@ -36,9 +39,9 @@
  *      200 + 异步对象 `data:{task_id,status}` ⇒ message 带 `data` / `task_id` / `status` 键名；
  *      200 + `data[0].image_url`（无 b64_json / url）⇒ message 带 `image_url`；两例整份失败回包
  *      序列化后零出现 `t-1` 与图片 URL（**零值泄露**）；200 + `data[0].b64_json` 真 PNG ⇒ 仍成功、
- *      回包**恰 8 键**（既有取图行为不被破坏）。
+ *      回包**恰 9 键**（既有取图行为不被破坏）。
  *   H. 异步入队轮询（异步单 · 200 + `data[0].task_id` ⇒ `GET /tasks/<task_id>` 取图）：
- *      ① 入队 pending → 第 2 次查询 completed 带 `result_urls` → 下载成功 ⇒ 回包**恰 8 键**、
+ *      ① 入队 pending → 第 2 次查询 completed 带 `result_urls` → 下载成功 ⇒ 回包**恰 9 键**、
  *         `preview.sha256` 与下载字节一致（`upstream_status` 仍为首次 POST 的 200）；
  *      ② 查询回 `failed` 带 `error_msg` ⇒ `UPSTREAM_ERROR`、message 含原话、`refunded: true`
  *         且 ledger 真退 10；③ 查询回 `violation` ⇒ 同上（文案含 `violation` 与缺省文案）；
@@ -47,7 +50,7 @@
  *      ⑥ 同步形态（`data[0].b64_json`）仍成功（旧路不破）。
  *      轮询间隔经**假 sleep 注入缝**（不真睡 5 秒 × 20 —— 整套脚本秒内跑完）。
  *   I. 产物族 jpeg 扩面（§3.68 AI 产物容器族；`PRODUCT_MIME_EXT` 增 `'image/jpeg' → 'jpg'`）：
- *      ① 假上游给 **JPEG**（FF D8 FF 魔数）⇒ **仍成功**：回包恰 8 键、`preview.mime` 逐字
+ *      ① 假上游给 **JPEG**（FF D8 FF 魔数）⇒ **仍成功**：回包恰 9 键、`preview.mime` 逐字
  *         `image/jpeg`、上传键以 `.jpg` 结尾（内容寻址 `xiai/images/<前两位>/<sha>.jpg`）、
  *         新影像行入册自洽（`mime` / `storage_key` / `sha256` 三面对齐）；
  *      ② png 仍成功且键以 `.png`；③ webp 仍成功（键以 `.webp`）；
@@ -112,8 +115,10 @@ function check(id, title, expected, actual) {
 
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
 const sha256Hex = (bytes) => createHash('sha256').update(bytes).digest('hex')
-/** 成功回包恰 8 键的**排序后**键面（`shapeOf` 排序口径）。 */
-const SUCCESS_KEYS = ['ok', 'image_id', 'source_image_id', 'preview', 'charge', 'upstream_status', 'elapsed_ms', 'idempotent'].sort().join(',')
+/** 成功回包恰 9 键的**排序后**键面（`shapeOf` 排序口径；`row` ＝ 新增的已落库影像行）。 */
+const SUCCESS_KEYS = ['ok', 'image_id', 'source_image_id', 'preview', 'charge', 'upstream_status', 'elapsed_ms', 'idempotent', 'row'].sort().join(',')
+/** 改动**前**的 8 个成功键（排序后）—— 断言「原 8 键仍逐字在场」用（不得因新增 `row` 而丢键）。 */
+const LEGACY_SUCCESS_KEYS = ['ok', 'image_id', 'source_image_id', 'preview', 'charge', 'upstream_status', 'elapsed_ms', 'idempotent'].sort().join(',')
 
 /* ---------------------------------------------------------------------------
    内存假 DB（形状对齐真实 SDK 使用面；`where(...).update(...)` 在**执行时**按过滤条件匹配；
@@ -439,7 +444,7 @@ const enhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payload
 /* ===========================================================================
    A 段：注册面与成功路（①）
    =========================================================================== */
-section('A', '注册面与成功路：恰 8 键 / 新编号 / sha256 逐字一致 / 上游体五键 / 扣金恰 10')
+section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一致 / 上游体五键 / 扣金恰 10')
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
@@ -451,8 +456,9 @@ const expectedNewId = aiEnhance.imageIdOfIdemKey(aiEnhance.idemKeyOf(SRC_OK, RID
 const uploadsBeforeOk = uploads.length
 const okReply = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID_OK)
 {
-  check('A1', '① 成功回包**恰 8 键**；`image_id` 为新编号（`img-`＋8 位十六进制、≠ 原编号、逐字 ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号', {
+  check('A1', '① 成功回包**恰 9 键**（＝ 原 8 键逐字在场 ＋ 新增 `row`）；`image_id` 为新编号（`img-`＋8 位十六进制、≠ 原编号、逐字 ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号', {
     keys: SUCCESS_KEYS,
+    legacyKeys: LEGACY_SUCCESS_KEYS,
     newIdShape: true,
     newIdDiffers: true,
     newIdDeterministic: expectedNewId,
@@ -462,6 +468,7 @@ const okReply = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1'
     upstreamStatus: 200
   }, {
     keys: shapeOf(okReply),
+    legacyKeys: LEGACY_SUCCESS_KEYS.split(',').filter((key) => Object.prototype.hasOwnProperty.call(okReply, key)).join(','),
     newIdShape: /^img-[0-9a-f]{8}$/.test(String(okReply.image_id)),
     newIdDiffers: okReply.image_id !== SRC_OK,
     newIdDeterministic: okReply.image_id,
@@ -531,6 +538,29 @@ const okReply = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1'
     refType: chargeRows[0] && chargeRows[0].ref_type,
     idemKey: chargeRows[0] && chargeRows[0].idem_key,
     balance: balanceMapOf(ADMIN_IDENTITY.uid) && balanceMapOf(ADMIN_IDENTITY.uid).points
+  })
+
+  /* A5（本单新增）：新键 `row` ＝ **已落库的那一行本身**（与库内行深比较逐字一致）。 */
+  const okRow = okReply.row
+  const expectedExt = aiEnhance.PRODUCT_MIME_EXT[okReply.preview && okReply.preview.mime]
+  check('A5', '⑨ 新键 `row` ＝ **已落库的那一行本身**：整行深比较逐字 ＝ 库内该行；`row._id` 逐字 ＝ `image_id`（`row.id` 同）、`row.storage` 逐字 `server`、`row.mime` 逐字 ＝ `preview.mime`、`row.storage_key` 以对应产物后缀（`.png`）结尾', {
+    isObject: true,
+    sameAsStored: true,
+    idMatches: true,
+    storage: 'server',
+    mimeMatches: true,
+    keyExt: 'png',
+    keyExtMatchesMime: true,
+    source: 'ai_enhance'
+  }, {
+    isObject: !!(okRow && typeof okRow === 'object' && !Array.isArray(okRow)),
+    sameAsStored: !!okRow && JSON.stringify(okRow) === JSON.stringify(newRow),
+    idMatches: !!(okRow && okRow._id === okReply.image_id && okRow.id === okReply.image_id),
+    storage: okRow && okRow.storage,
+    mimeMatches: !!(okRow && okRow.mime === (okReply.preview && okReply.preview.mime)),
+    keyExt: String((okRow && okRow.storage_key) || '').split('.').pop(),
+    keyExtMatchesMime: !!(okRow && typeof okRow.storage_key === 'string' && expectedExt && okRow.storage_key.slice(-(`.${expectedExt}`).length) === `.${expectedExt}`),
+    source: okRow && okRow.source
   })
 }
 
@@ -676,7 +706,7 @@ section('D', '幂等与互逆：同请求号重放零重扣零重建行 / 并发
     balance: balanceMapOf(uid).points
   }
   const replay = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID_OK)
-  check('D1', '⑥ **同请求号重放** ⇒ `idempotent: true`、恰 8 键、同 `image_id`；不重复扣金（chargePoints 零新调、CHARGE 行仍 1）、不重复建行（影像行数不变）、不再调上游、余额不变', {
+  check('D1', '⑥ **同请求号重放** ⇒ `idempotent: true`、恰 9 键、同 `image_id`；不重复扣金（chargePoints 零新调、CHARGE 行仍 1）、不重复建行（影像行数不变）、不再调上游、余额不变', {
     keys: SUCCESS_KEYS,
     ok: true,
     idempotent: true,
@@ -714,7 +744,7 @@ section('D', '幂等与互逆：同请求号重放零重扣零重建行 / 并发
   ])
   const chargeRows = flowRowsOf(uid).filter((row) => row.idem_key === `ai-enhance-${SRC_CONC}-${RID_CONC}` && row.kind === 'CHARGE')
   const concRows = imageRowsAll().filter((row) => row.source_image_id === SRC_CONC)
-  check('D2', '⑦ **并发两发同 image_id**（同请求号）⇒ 两发皆回成功 8 键、恰一路真跑（`idempotent: false`）、另一路**等行回放**（`idempotent: true`）；真扣恰一次（CHARGE 恰 1 行、余额只减 10；两路都经 `chargePoints` ⇒ 调用增量 2、账本幂等收敛）、行恰一条、上游恰一调、上传恰一次', {
+  check('D2', '⑦ **并发两发同 image_id**（同请求号）⇒ 两发皆回成功 9 键、恰一路真跑（`idempotent: false`）、另一路**等行回放**（`idempotent: true`）；真扣恰一次（CHARGE 恰 1 行、余额只减 10；两路都经 `chargePoints` ⇒ 调用增量 2、账本幂等收敛）、行恰一条、上游恰一调、上传恰一次', {
     bothOk: true,
     shapes: `${SUCCESS_KEYS},${SUCCESS_KEYS}`,
     realRuns: 1,
@@ -899,9 +929,9 @@ async function runDiag(mode, requestId) {
   ① 200 + 异步对象 data ⇒ message 带 data / task_id / status 键名
   ② 200 + data[0] 只有 image_url ⇒ message 带 image_url 键名
   ③ 两例整份失败回包（含 message）序列化零出现 t-1 与图片 URL（零值泄露）
-  ④ 200 + data[0].b64_json 真 PNG ⇒ 仍成功、回包恰 8 键（既有行为不被破坏））
+  ④ 200 + data[0].b64_json 真 PNG ⇒ 仍成功、回包恰 9 键（既有行为不被破坏））
    =========================================================================== */
-section('G', '2xx 无图形状诊断：message 带回包键名轮廓（零值泄露）；b64_json 真图仍成功恰 8 键')
+section('G', '2xx 无图形状诊断：message 带回包键名轮廓（零值泄露）；b64_json 真图仍成功恰 9 键')
 
 {
   const shapeAsyncReply = await runDiag('shapeAsyncObject', 'rid-g1-shape-async-object')
@@ -955,9 +985,9 @@ section('G', '2xx 无图形状诊断：message 带回包键名轮廓（零值泄
     shapes: [shapeOf(shapeAsyncReply), shapeOf(shapeNoImageReply)]
   })
 
-  /* ④ 200 + data[0].b64_json 真 PNG ⇒ 仍成功、回包恰 8 键（既有取图行为不被形状诊断破坏）。 */
+  /* ④ 200 + data[0].b64_json 真 PNG ⇒ 仍成功、回包恰 9 键（既有取图行为不被形状诊断破坏）。 */
   const shapeOkReply = await runDiag('ok', 'rid-g4-shape-b64-ok')
-  check('G4', '④ 假上游 200 + {"data":[{"b64_json":"<真 PNG base64>"}]} ⇒ **仍成功**：`ok: true`、回包**恰 8 键**（既有 b64_json 取图行为不被形状诊断破坏）', {
+  check('G4', '④ 假上游 200 + {"data":[{"b64_json":"<真 PNG base64>"}]} ⇒ **仍成功**：`ok: true`、回包**恰 9 键**（既有 b64_json 取图行为不被形状诊断破坏）', {
     ok: true,
     keys: SUCCESS_KEYS,
     previewMime: 'image/png',
@@ -973,7 +1003,7 @@ section('G', '2xx 无图形状诊断：message 带回包键名轮廓（零值泄
 /* ===========================================================================
    H 段：异步入队轮询（异步单 · 200 + `data[0].task_id` ⇒ `GET /tasks/<task_id>` 取图）
   =========================================================================== */
-section('H', '异步入队轮询：pending→completed 下载恰 8 键 / failed·violation 全退 / 次数上限停 / 缺 result_urls / 同步路不破')
+section('H', '异步入队轮询：pending→completed 下载恰 9 键 / failed·violation 全退 / 次数上限停 / 缺 result_urls / 同步路不破')
 
 /* 轮询假 sleep（注入缝）：不真睡 5 秒 × 20 —— 整段秒内跑完；注入面**只**影响异步轮询路。 */
 aiEnhance.setAiEnhanceSleepProvider(async () => {})
@@ -1003,7 +1033,7 @@ const hFlowKinds = (requestId) =>
   const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
   const upload = uploads[uploads.length - 1]
   const firstQuery = pollQueries[0]
-  check('H1', '① 入队回执 pending ⇒ 第 2 次查询 `completed` 带 `result_urls` ⇒ 下载成功：回包**恰 8 键**、`preview.sha256` 逐字 ＝ **下载字节**的 sha256（且上传字节与下载字节逐字节相等）、恰 2 次查询（URL ＝ base_url 去尾斜杠拼 `/tasks/` 拼 task_id、方法 GET、认证头在场）、`upstream_status` 仍为**首次 POST** 的 200、扣金恰 10', {
+  check('H1', '① 入队回执 pending ⇒ 第 2 次查询 `completed` 带 `result_urls` ⇒ 下载成功：回包**恰 9 键**、`preview.sha256` 逐字 ＝ **下载字节**的 sha256（且上传字节与下载字节逐字节相等）、恰 2 次查询（URL ＝ base_url 去尾斜杠拼 `/tasks/` 拼 task_id、方法 GET、认证头在场）、`upstream_status` 仍为**首次 POST** 的 200、扣金恰 10', {
     keys: SUCCESS_KEYS,
     ok: true,
     idempotent: false,
@@ -1190,7 +1220,7 @@ const hFlowKinds = (requestId) =>
   pollPlan = []
   pollQueries.length = 0
   const reply = await enhance({ image_id: H_SRC, seal_id: 's-1', face_id: 'f-1' }, RID)
-  check('H6', '⑥ **同步形态**（`data[0].b64_json`）仍成功：恰 8 键、`preview.mime` 逐字 `image/png`、`upstream_status` 200、**零轮询查询**（旧同步路未被异步改动破坏）', {
+  check('H6', '⑥ **同步形态**（`data[0].b64_json`）仍成功：恰 9 键、`preview.mime` 逐字 `image/png`、`upstream_status` 200、**零轮询查询**（旧同步路未被异步改动破坏）', {
     ok: true,
     keys: SUCCESS_KEYS,
     previewMime: 'image/png',
@@ -1224,7 +1254,7 @@ const iFlowKinds = (requestId) =>
 fakeDb.bucketOf('xiai_balances').set(`bl-${I_IDENTITY.uid}`, { _id: `bl-${I_IDENTITY.uid}`, uid: I_IDENTITY.uid, points: 100, updated_at: 'seed' })
 const iEnhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payload, I_IDENTITY, CONTEXT(requestId))
 
-/* ① 假上游给 JPEG（FF D8 FF 魔数）⇒ 成功入册：恰 8 键、preview.mime image/jpeg、键以 .jpg 结尾。 */
+/* ① 假上游给 JPEG（FF D8 FF 魔数）⇒ 成功入册：恰 9 键、preview.mime image/jpeg、键以 .jpg 结尾。 */
 {
   const RID = 'rid-i1-product-jpeg'
   const uploadsBefore = uploads.length
@@ -1234,7 +1264,7 @@ const iEnhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payloa
   upstreamMode = 'ok'
   const upload = uploads[uploads.length - 1]
   const jpegSha = sha256Hex(JPEG_PRODUCT_BYTES)
-  check('I1', '① 假上游给 **JPEG**（FF D8 FF 魔数）⇒ **成功**：回包**恰 8 键**、`preview.mime` 逐字 `image/jpeg`、上传键以 `.jpg` 结尾（内容寻址 `xiai/images/<前两位>/<sha>.jpg`）、上传字节与上游回图**逐字节相等**、扣金恰 10', {
+  check('I1', '① 假上游给 **JPEG**（FF D8 FF 魔数）⇒ **成功**：回包**恰 9 键**、`preview.mime` 逐字 `image/jpeg`、上传键以 `.jpg` 结尾（内容寻址 `xiai/images/<前两位>/<sha>.jpg`）、上传字节与上游回图**逐字节相等**、扣金恰 10', {
     ok: true,
     keys: SUCCESS_KEYS,
     previewMime: 'image/jpeg',
@@ -1277,7 +1307,7 @@ const iEnhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payloa
   const balanceBefore = iBalance().points
   const reply = await iEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
   const upload = uploads[uploads.length - 1]
-  check('I2', '② **png 仍成功**：恰 8 键、`preview.mime` 逐字 `image/png`、上传键以 `.png` 结尾（既有族不破）', {
+  check('I2', '② **png 仍成功**：恰 9 键、`preview.mime` 逐字 `image/png`、上传键以 `.png` 结尾（既有族不破）', {
     ok: true,
     keys: SUCCESS_KEYS,
     previewMime: 'image/png',
@@ -1303,7 +1333,7 @@ const iEnhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payloa
   const reply = await iEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
   upstreamMode = 'ok'
   const upload = uploads[uploads.length - 1]
-  check('I3', '③ **webp 仍成功**：恰 8 键、`preview.mime` 逐字 `image/webp`、上传键以 `.webp` 结尾', {
+  check('I3', '③ **webp 仍成功**：恰 9 键、`preview.mime` 逐字 `image/webp`、上传键以 `.webp` 结尾', {
     ok: true,
     keys: SUCCESS_KEYS,
     previewMime: 'image/webp',
