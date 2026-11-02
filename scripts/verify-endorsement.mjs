@@ -18,7 +18,7 @@
  *   C. **前端渲染逻辑**：纯函数 `endorsementDecision` ＋ 集成读数 `endorsementEntriesOf`：
  *      他人提交出按钮 / 自己的提交不出 / 已 ACCEPTED 不出 / 游客按钮渲染但点击走登录引导。
  *      （用服务层真源执行，**不以「读代码推断」充当证据**。）
- *   D. **机械扫描**：`[data-admin-action]` 去重集合现实值（11 值 / 归并 10 类，v1.73 钩子族扩充：＋edit-ai-upstream）；上屏文案繁體
+ *   D. **机械扫描**：`[data-admin-action]` 去重集合现实值（12 值 / 归并 11 类，v1.76 钩子族扩充：＋ai-enhance-face；v1.73 为 11 值 / 10 类 ＋edit-ai-upstream）；上屏文案繁體
  *      （正 / 负对照）；既有 `STORAGE_KEYS` 逐字未动。
  *
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
@@ -547,9 +547,9 @@ resetLocalCorrections()
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'D', title: '机械扫描：admin 钩子 / 繁體 / 存储键' }))
 
-/* D1：`[data-admin-action]` 去重集合现实值（9 值 / 归并 8 类）。
-   规范 v1.53：钩子族由 8 值 / 7 类扩为 9 值 / 8 类，新增 `person-proposal-review`
-   （印人提案审核；归并表中**自成一类**，不与 `correction-*` 同族）。 */
+/* D1：`[data-admin-action]` 去重集合现实值（**12 值 / 归并 11 类** —— 规范现值 ＝ §3.12.1 表下注 v1.76）。
+   钩子族沿革（只增不删）：v1.53 8 值 / 7 类 → 9 值 / 8 类（＋`person-proposal-review`）→
+   v1.73 11 值 / 10 类（＋`edit-ai-upstream`）→ **v1.76 12 值 / 11 类（＋`ai-enhance-face`）**。 */
 function walkFiles(dir, out = []) {
   readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
     const full = path.join(dir, entry.name)
@@ -569,7 +569,8 @@ const ADMIN_ACTION_EXPECTED = [
   'export-seal-data',
   'person-proposal-review',
   'person-import-review',
-  'edit-ai-upstream'
+  'edit-ai-upstream',
+  'ai-enhance-face'
 ]
 {
   const found = new Set()
@@ -578,18 +579,18 @@ const ADMIN_ACTION_EXPECTED = [
     const matches = body.match(/data-admin-action="([^"]+)"/g) || []
     matches.forEach((m) => found.add(m.replace(/^data-admin-action="/, '').replace(/"$/, '')))
   })
-  check('D1', '`[data-admin-action]` 去重取值集合逐字 ＝ 规范现值（11 值，v1.73：＋edit-ai-upstream）', sorted(ADMIN_ACTION_EXPECTED), sorted([...found]))
-  /* 归并 10 类：`correction-*` 合一（correction-accept|reject），其余 `person-proposal-review`
-     / `person-import-review` / `edit-ai-upstream` 等各自成类 ⇒ 11 值归并 10 类。 */
+  check('D1', '`[data-admin-action]` 去重取值集合逐字 ＝ 规范现值（12 值，v1.76：＋ai-enhance-face）', sorted(ADMIN_ACTION_EXPECTED), sorted([...found]))
+  /* 归并 11 类：`correction-*` 合一（correction-accept|reject），其余 `person-proposal-review`
+     / `person-import-review` / `edit-ai-upstream` / `ai-enhance-face` 等各自成类 ⇒ 12 值归并 11 类。 */
   const classes = [...found].map((v) => (v.startsWith('correction-') ? 'correction-accept|reject' : v))
-  check('D1b', '按归并表归并后 ＝ 10 类（v1.73：新增 edit-ai-upstream 自成一类）', 10, new Set(classes).size)
-  /* **正 / 负对照（本单新增 ⑸）**：注入 canary 取值 ⇒ 去重集合必须变 12 值 / 11 类
-     （证明探针能看见「多出来的值」，不是恒等或硬编码）；移除后回基线 11 / 10。 */
+  check('D1b', '按归并表归并后 ＝ 11 类（v1.76：新增 ai-enhance-face 自成一类）', 11, new Set(classes).size)
+  /* **正 / 负对照（本单新增 ⑸）**：注入 canary 取值 ⇒ 去重集合必须变 13 值 / 12 类
+     （证明探针能看见「多出来的值」，不是恒等或硬编码）；移除后回基线 12 / 11。 */
   const withCanary = new Set([...found, 'qa-canary-9th'])
-  check('D1c', '正对照：注入 canary `qa-canary-9th` ⇒ 去重集合变 12（v1.73 基线 11）', 12, withCanary.size)
+  check('D1c', '正对照：注入 canary `qa-canary-9th` ⇒ 去重集合变 13（v1.76 基线 12）', 13, withCanary.size)
   const classesWithCanary = [...withCanary].map((v) => (v.startsWith('correction-') ? 'correction-accept|reject' : v))
-  check('D1c2', '正对照：canary 使归并类数变 11（v1.73 基线 10）', 11, new Set(classesWithCanary).size)
-  check('D1c3', '负对照：移除 canary 后回基线 11（集合非恒等）', 11, found.size)
+  check('D1c2', '正对照：canary 使归并类数变 12（v1.76 基线 11）', 12, new Set(classesWithCanary).size)
+  check('D1c3', '负对照：移除 canary 后回基线 12（集合非恒等）', 12, found.size)
   /* 本单新增的采信钮一律用 `data-action`，**不得**带 `data-admin-action`（去注释后再判）。 */
   const endorseBlock = stripComments(readFileSync(path.join(ROOT, 'src/views/SealDetailView.vue'), 'utf8'))
   check('D1d', '采信钮用 `data-action="endorse"`（未新增 admin 钩子取值）', true, /data-action="endorse"/.test(endorseBlock))
