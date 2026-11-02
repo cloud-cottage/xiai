@@ -11,7 +11,7 @@
  * 数据层对越权写另有独立拒绝，不因界面变化而放宽。
  */
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { corrections, persons, points, seals, items } from '../services/index.js'
@@ -102,6 +102,8 @@ async function refreshLocalImportRows() {
 /* 刷新即重取（R-8：僅內存 ⇒ 不持久化、不緩存）。 */
 onMounted(() => {
   void refreshLocalImportRows()
+  /* **勘误只读面（本单｜W-54）**：挂载时异步取一次「我的提交 ＋ 待审队列」（云行 ∪ 本机镜像）。 */
+  void refreshCorrectionReads()
 })
 
 /* ============================================================================
@@ -595,40 +597,106 @@ async function confirmItemImport() {
   }
 }
 
-/** 我的提交（所有登录用户都能看到自己的记录）。 */
-const rows = computed(() => {
-  void dataVersion.value
-  return corrections.listMyCorrections()
-})
+/* ============================================================================
+   **勘误只读面（本单｜W-54）：由 `computed` 同步读本机镜像 ⇒ `ref` ＋ 异步云读**
+   ----------------------------------------------------------------------------
+   · 改前两处都是 `computed` 同步读**本机 localStorage 镜像** ⇒ 云端形态下别人提交的行、
+     本人换设备后的行都读不到（在册缺口 W-54）；
+   · 现在**挂载时异步取一次**（云行 ∪ 本机镜像），**审核后重取**（`dataVersion` 自增 ⇒ watcher）；
+   · **加载中如实上屏**、**云读失败上屏可读降级文案** —— 两者都**不得显示「0 條 / 暫無」**；
+   · 「可能還有更多」＝ 服务层按 `count === limit` 派生的 `maybeMore` ⇒ 上屏
+     「已取 N 條（可能還有更多）」；**不新增任何 `data-admin-action` 取值**。
+   ============================================================================ */
+
+/** 我的提交（所有登录用户都能看到自己的记录；初始为空、挂载后覆盖）。 */
+const rows = ref([])
+/** 「我的提交」汇总（**仍是同一服务层函数** `summarizeCorrections`）。 */
 const summary = computed(() => corrections.summarizeCorrections(rows.value))
+/** 我的读数加载中（如实上屏；初值 `true` ⇒ 首屏不显示「暫無」空态）。 */
+const myLoading = ref(true)
+/** 我的读数降级文案（正常路径为空串；有值 ⇒ 模板上屏、**不渲染空态占位**）。 */
+const myNotice = ref('')
+/** 我的读数「可能還有更多」（服务层按 `count === limit` 派生）。 */
+const myMaybeMore = ref(false)
 
 /** 管理员：全部用户的待审勘误。服务层返回**结构化结果**（`{ok:true,rows}` /
  *  `{ok:false,reason,message}`）—— 这里按 `result.ok ? result.rows : []` 取数，
  *  并把 `message` 作为可读空态文案渲染（见模板 `data-correction-queue-notice`），**不静默**。 */
-const pendingResult = computed(() => {
-  void dataVersion.value
-  return corrections.listPendingForAdmin(actor.value)
-})
+const pendingResult = ref({ ok: true, rows: [], count: 0, maybeMore: false })
 /** 队列读数：拒绝时为空集（**不把「拒绝」渲染成「就是没有数据」**）。 */
 const queue = computed(() => (pendingResult.value.ok ? pendingResult.value.rows : []))
 /** 队列拒绝理由（正常路径为空串）；模板里作为可读文案展示，不做静默吞掉。 */
 const queueNotice = computed(() => (pendingResult.value.ok ? '' : pendingResult.value.message))
+/** 队列「可能還有更多」（服务层按 `count === limit` 派生）。 */
+const queueMaybeMore = computed(() => pendingResult.value.ok && pendingResult.value.maybeMore === true)
+/** 队列读数加载中（初值 `true` ⇒ 首屏不显示「當前沒有待審覈的勘誤」空态）。 */
+const queueLoading = ref(true)
 
-/* --------------------------------------------------------------------------
+/* ----------------------------------------------------------------------------
    按提交单（batch）分组 + 组级批量审核（R-B3 / R-B4 / R-B7）
-   --------------------------------------------------------------------------
+   ----------------------------------------------------------------------------
    分组口径**只在服务层**（`listPendingBatchesForAdmin`）；视图层不另写第二套。
    组级按钮 `data-admin-action` **复用** `correction-accept` / `correction-reject`
    ⇒ `[data-admin-action]` 取值集合不变；另加 `data-action` / `data-correction-batch` 区分。
    -------------------------------------------------------------------------- */
-const batchResult = computed(() => {
-  void dataVersion.value
-  return corrections.listPendingBatchesForAdmin(actor.value)
-})
+const batchResult = ref({ ok: true, batches: [] })
 /** 待审提交单（拒绝 ⇒ 空集，**不把「拒绝」渲染成「就是没有数据」**）。 */
 const batches = computed(() => (batchResult.value.ok ? batchResult.value.batches : []))
 /** 待审条数合计（用于标题读数）。 */
 const batchRowCount = computed(() => batches.value.reduce((sum, batch) => sum + batch.count, 0))
+
+/**
+ * **重新取「我的提交 ＋ 待审队列 ＋ 待审批次」**（异步云读 ∪ 本机镜像）。
+ * 三者并行；任一失败**如实上屏**（结构化失败 ＋ 可读文案，**不静默、不以空集冒充**）。
+ * 批次分组**复用同一次待审读数**（服务层第 2 参）⇒ 管理员面只发一次云读。
+ */
+async function refreshCorrectionReads() {
+  myLoading.value = true
+  queueLoading.value = true
+  try {
+    const [mine, pending] = await Promise.all([
+      corrections
+        .listMyCorrections()
+        .catch((error) => ({
+          ok: false,
+          reason: 'STORAGE_UNAVAILABLE',
+          message: `讀取我的勘誤記錄失敗：${(error && error.message) || '未知錯誤'}`,
+          rows: rows.value
+        })),
+      corrections
+        .listPendingForAdmin(actor.value)
+        .catch((error) => ({ ok: false, reason: 'STORAGE_UNAVAILABLE', message: `讀取待審勘誤失敗：${(error && error.message) || '未知錯誤'}` }))
+    ])
+    /* 我的提交：成功 ⇒ 服务层已合并「云行 ∪ 本机镜像」；失败 ⇒ 服务层随行回本机镜像 ＋ 降级文案。 */
+    rows.value = Array.isArray(mine && mine.rows) ? mine.rows : []
+    myMaybeMore.value = !!(mine && mine.ok && mine.maybeMore === true)
+    myNotice.value = mine && mine.ok ? '' : (mine && mine.message) || '讀取我的勘誤記錄失敗。'
+    pendingResult.value =
+      pending && typeof pending === 'object'
+        ? pending
+        : { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取待審勘誤回傳形狀不可辨識。' }
+    /* 分组口径**只在服务层**：复用同一次待审读数（不另开第二条读路径）。 */
+    batchResult.value = await corrections
+      .listPendingBatchesForAdmin(actor.value, pendingResult.value)
+      .catch(() => ({ ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取待審勘誤分組失敗。' }))
+  } catch (error) {
+    /* 兜底（**不外抛、不静默**）：任何未预期异常都要有可读文案。 */
+    if (!myNotice.value) myNotice.value = `讀取勘誤記錄失敗：${(error && error.message) || '未知錯誤'}`
+    if (pendingResult.value.ok) {
+      pendingResult.value = { ok: false, reason: 'STORAGE_UNAVAILABLE', message: `讀取待審勘誤失敗：${(error && error.message) || '未知錯誤'}` }
+      batchResult.value = pendingResult.value
+    }
+  } finally {
+    myLoading.value = false
+    queueLoading.value = false
+  }
+}
+
+/* **审核后重取**：任何一次审核 / 提交把 `dataVersion` 自增 ⇒ 重读云端 ＋ 本机镜像
+   （与改前 `computed` 依赖 `dataVersion` 的语义对齐，只是从同步读改成异步取）。 */
+watch(dataVersion, () => {
+  void refreshCorrectionReads()
+})
 
 /** 批量审核的二次确认状态（`null` ＝ 未打开）。 */
 const batchDialog = ref(null)
@@ -771,9 +839,16 @@ async function decide(row, decision) {
     <section v-if="canReview" class="panel">
       <div class="panel__head">
         <h2>待審覈勘誤（全部用戶）</h2>
-        <span class="muted-hint">共 {{ queue.length }} 條 · {{ batches.length }} 批</span>
+        <!-- 计数行**如实三态**：加载中 / 认证读数不可用 / 正常读数（**不以「共 0 條」冒充读数不可用**）。 -->
+        <span v-if="queueLoading" class="muted-hint" data-correction-queue-loading>正在讀取…</span>
+        <span v-else-if="!pendingResult.ok" class="muted-hint" data-correction-queue-unavailable>待審讀數不可用</span>
+        <span v-else class="muted-hint">共 {{ queue.length }} 條 · {{ batches.length }} 批</span>
       </div>
       <div class="panel__body">
+        <!-- **本单（W-54）**：服务层按 `count === limit` 派生「可能還有更多」⇒ 如实上屏，不报成全部。 -->
+        <p v-if="queueMaybeMore" class="notice review__notice" data-correction-queue-more>
+          已取 {{ queue.length }} 條（可能還有更多）
+        </p>
         <!-- 按提交单（batch）分组：组级「全部採納 / 全部駁回」＋ 批内逐条按钮（保留）。
              组级按钮 `data-admin-action` **复用** correction-accept / correction-reject
              ⇒ `[data-admin-action]` 取值集合不变；另加 `data-action` ＋ `data-correction-batch` 区分。 -->
@@ -870,6 +945,9 @@ async function decide(row, decision) {
             </table>
           </article>
         </div>
+        <p v-else-if="queueLoading" class="muted-hint" data-correction-queue-loading-body>
+          正在讀取待審勘誤…
+        </p>
         <p v-else-if="queueNotice" class="notice review__notice" data-correction-queue-notice>
           {{ queueNotice }}
         </p>
@@ -1365,6 +1443,14 @@ async function decide(row, decision) {
       </div>
     </ConfirmDialog>
 
+    <!-- **本单（W-54）**：加载中 / 云读失败都**如实上屏**；两者都不得落到「暫無勘誤記錄」空态
+         （失败时服务层随行回本机镜像 ⇒ 表格照常渲染，文案写明「以下為本機鏡像」）。 -->
+    <p v-if="myNotice" class="notice review__notice" data-correction-my-notice>{{ myNotice }}</p>
+    <p v-else-if="myLoading" class="notice review__notice" data-correction-my-loading>正在讀取我的勘誤記錄…</p>
+    <p v-if="myMaybeMore" class="notice review__notice" data-correction-my-more>
+      已取 {{ rows.length }} 條（可能還有更多）
+    </p>
+
     <section v-if="rows.length" class="panel">
       <div class="panel__head">
         <h2>我的提交</h2>
@@ -1425,8 +1511,9 @@ async function decide(row, decision) {
       </div>
     </section>
 
+    <!-- 空态占位**只在真·空**时渲染（加载中 / 云读失败 ⇒ 由上方文案承接，**不显示「暫無」冒充**）。 -->
     <PlaceholderPanel
-      v-else
+      v-else-if="!myLoading && !myNotice"
       glyph="勘"
       title="暫無勘誤記錄"
       desc="在印章詳情頁對可標記屬性提交勘誤後，會在此處顯示審覈進度。"

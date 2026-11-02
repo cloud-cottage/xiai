@@ -480,10 +480,11 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
-  /* **只讀取行面（additive 透傳｜**按 `op` 收窄**｜本單 E-3）**：`rows` / `count` **僅當
-     `op === 'pullImportRows'` 且 `opResult` 確有該鍵時**才逐字疊進回包；**其餘任何 op 一律
+  /* **只读行面（additive 透传｜**按 `op` 收窄**）**：`rows` / `count` **僅當
+     `op` ∈ 三只读取行 op（`pullImportRows` ＋ 本單新增的勘誤只讀面 `listMyCorrections` /
+     `listPendingCorrectionsForAdmin`）且 `opResult` 確有該鍵時**才逐字疊進回包；**其餘任何 op 一律
      不透傳這 2 個鍵**。既有字段一律不刪、不改。 */
-  if (op === 'pullImportRows') {
+  if (op === 'pullImportRows' || op === 'listMyCorrections' || op === 'listPendingCorrectionsForAdmin') {
     const PULL_READOUT_KEYS = ['rows', 'count']
     for (const key of PULL_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]

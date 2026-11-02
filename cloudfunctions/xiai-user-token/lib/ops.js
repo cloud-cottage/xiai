@@ -1182,19 +1182,39 @@ function rowsOfReply(reply) {
  * （终态行不再进入读集 ⇒ **天然自愈分页**、可反复调用直至清空）；`.limit` 只是单次体量护栏。
  * @param {string} collection 集合名（`^xiai_`）
  * @param {object} match 等值条件
- * @param {{limit?:number}} [options] 单次读取上限（平台护栏；缺省 / ≤0 ⇒ 不显式限量）
+ * @param {{limit?:number, orderByDesc?:string}} [options] 单次读取上限（平台护栏；缺省 / ≤0 ⇒ 不显式限量）
+ *   ＋ **可选排序**（`orderByDesc` ＝ 字段名，倒序）。
+ *   排序**只增不改**：未给 `orderByDesc` 的既有调用者行为**逐字不变**（同一条 `where → limit → get` 链）。
+ *   给了则**优先交给 DB**（`chain.orderBy(field, 'desc')`，仅当该链真有 `orderBy` 方法时才调）；
+ *   **SDK 不支持 / 调用报错 ⇒ 退路**为退回不排序的同一条链取回（调用方在服务端自行排序）——
+ *   判据：本读点的链只有 `where → limit → get`，注入式内存假体（离线自检）没有 `orderBy` 方法。
  * @returns {Promise<Array<object>>}
  */
 async function readRows(collection, match, options) {
   const db = resolveDb()
   const query = db.collection(collection)
   if (!query || typeof query.where !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
-  let chain = query.where(match)
-  const limit = Number(options && options.limit)
-  if (Number.isFinite(limit) && limit > 0 && chain && typeof chain.limit === 'function') {
-    chain = chain.limit(Math.floor(limit))
+  const orderField = options && typeof options.orderByDesc === 'string' ? options.orderByDesc : ''
+  const build = (withOrder) => {
+    let chain = query.where(match)
+    const limit = Number(options && options.limit)
+    if (Number.isFinite(limit) && limit > 0 && chain && typeof chain.limit === 'function') {
+      chain = chain.limit(Math.floor(limit))
+    }
+    if (withOrder && orderField && chain && typeof chain.orderBy === 'function') {
+      chain = chain.orderBy(orderField, 'desc')
+    }
+    return chain
   }
-  return rowsOfReply(await chain.get())
+  if (orderField) {
+    try {
+      return rowsOfReply(await build(true).get())
+    } catch (error) {
+      /* 退路（**不吞真故障**）：真存储故障会在下面这次重读里再次抛出，仍由 `index.js` 转 `STORAGE_UNAVAILABLE`。 */
+      return rowsOfReply(await build(false).get())
+    }
+  }
+  return rowsOfReply(await build(false).get())
 }
 
 /**
@@ -1906,6 +1926,87 @@ function pointsPayloadDenial(payload, allowedKeys) {
     return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
   }
   return null
+}
+
+/* ---------------------------------------------------------------------------
+   **勘誤只讀面（本單新增兩 op｜`listMyCorrections` ＋ `listPendingCorrectionsForAdmin`｜零寫入）**
+   ---------------------------------------------------------------------------
+   · op① `listMyCorrections` 落 `OPS`：只回 `user_id` ＝ **服务端派生 uid** 的行；身份只取自
+     已验签令牌 ⇒ 载荷带身份类键一律 `INVALID_FIELD`（`pointsPayloadDenial` 同族键面门）。
+   · op② `listPendingCorrectionsForAdmin` 落 `ADMIN_OPS`（需 `context.adminPhone`）：**管理员门
+     复用现有 `adminWhitelistDenial`**（`XIAI_ADMIN_PHONE` 白名单；缺 env ⇒ 结构化拒绝 ＋ **零读取**）；
+     跨用户读 `xiai_corrections`，`status` **缺省 `PENDING`**。
+   · 载荷封闭键面两 op 同形（`{status?, limit?}`）：`status` ∈ `PENDING` / `ACCEPTED` / `REJECTED`、
+     `limit` ∈ 1〜200 整数（缺省 200）；`reason` 只用既有冻结值（**新增字面值 0**）。
+   · 行面：**逐行剥除一切键名含 `phone` 的键**（旧行的 `user_phone` 一并剥；不透明 uid 原样保留）
+     —— 复用现成 `stripImportIdentityFields`；**不改写、不新增、不删库内行**。
+   · 排序：`created_at` 倒序（DB `orderBy` 优先，见 `readRows`；SDK 不支持 / 報錯 ⇒ 退路为取回后
+     在服务端排序）；单次上限 200 行；「可能還有更多」由**客户端**按 `count === limit` 派生
+     ⇒ **回包不新增任何键**。
+   · 成功回包恰 4 键 `{ok:true, op, rows, count}`（`rows` / `count` 由 `index.js` 按 op 收窄透传）；
+     失败恒为恰 3 键。
+   --------------------------------------------------------------------------- */
+
+/** 勘误行状态三态（与状态机冻结字面值 / `CORRECTION_PENDING` 同值）。 */
+const CORRECTION_ROWS_STATUS_VALUES = Object.freeze(['PENDING', 'ACCEPTED', 'REJECTED'])
+
+/** `listMyCorrections` 载荷封闭键面（**零身份类键**；身份一律服务端从令牌派生）。 */
+const MY_CORRECTION_ROWS_ALLOWED_KEYS = Object.freeze(['status', 'limit'])
+
+/** `listPendingCorrectionsForAdmin` 载荷封闭键面（与 op① 同形）。 */
+const PENDING_CORRECTION_ROWS_ALLOWED_KEYS = Object.freeze(['status', 'limit'])
+
+/** 单次取行缺省上限（＝硬上限：`limit` ∈ 1〜200，缺省 200）。 */
+const CORRECTION_ROWS_DEFAULT_LIMIT = 200
+
+/** 单次取行硬上限（防无界；与缺省同值 ⇒ 单次最多 200 行）。 */
+const CORRECTION_ROWS_MAX_LIMIT = 200
+
+/** 勘误行排序字段（倒序）。 */
+const CORRECTION_ROWS_ORDER_FIELD = 'created_at'
+
+/**
+ * 勘误只读 op 的**载荷判定**（全部判定在任何读之前）：封闭键面 → `status` 三态值域 →
+ * `limit` 1〜200 整数（缺省 200）。通过 ⇒ `{ok:true, status, limit}`；失败 ⇒ 恰 3 键结构化拒绝。
+ * @param {object} payload 载荷
+ * @param {readonly string[]} allowedKeys 该 op 的封闭键面
+ * @returns {{ok:true, status:string, limit:number}|{ok:false, reason:string, message:string}}
+ */
+function correctionRowsReadArgs(payload, allowedKeys) {
+  const keyDenial = pointsPayloadDenial(payload, allowedKeys)
+  if (keyDenial) return keyDenial
+  let status = ''
+  if (payload.status !== undefined && payload.status !== null) {
+    status = text(payload.status)
+    if (CORRECTION_ROWS_STATUS_VALUES.indexOf(status) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `勘誤狀態（status）值域外：${status || '（空）'}（僅允許 PENDING / ACCEPTED / REJECTED）；本次零寫入。`
+      )
+    }
+  }
+  let limit = CORRECTION_ROWS_DEFAULT_LIMIT
+  if (payload.limit !== undefined && payload.limit !== null) {
+    const requested = payload.limit
+    if (typeof requested !== 'number' || !Number.isInteger(requested) || requested <= 0 || requested > CORRECTION_ROWS_MAX_LIMIT) {
+      return deny(REASONS.INVALID_VALUE, `單次取行上限（limit）必須是 1 〜 ${CORRECTION_ROWS_MAX_LIMIT} 之間的整數；本次零寫入。`)
+    }
+    limit = requested
+  }
+  return { ok: true, status, limit }
+}
+
+/**
+ * **只读读勘误行**（两 op 共用的唯一读点）：等值 `match` ＋ 显式 `limit` ＋ `created_at` 倒序。
+ * 排序优先交给 DB（`readRows` 的 `orderByDesc`）；SDK 无 `orderBy` 或调用报错 ⇒ 退路为取回后
+ * 在本函数内排序 ⇒ 回包顺序**不因 SDK 能力而变**。
+ * @param {object} match 等值条件
+ * @param {number} limit 单次上限（1〜200）
+ * @returns {Promise<Array<object>>} 已按 `created_at` 倒序、**尚未剥字段**的行
+ */
+async function readCorrectionRowsSorted(match, limit) {
+  const rows = await readRows(COLLECTIONS.corrections, match, { limit, orderByDesc: CORRECTION_ROWS_ORDER_FIELD })
+  return rows.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
 }
 
 /* ---------------------------------------------------------------------------
@@ -2865,6 +2966,38 @@ const OPS = Object.freeze({
     const balance = await ledger.readBalance(identity.uid)
     if (!balance.ok) return balance
     return { ok: true, points: balance.points, today: usage.day, minute: usage.minute }
+  },
+
+  /**
+   * **本人勘誤行（本單新增只讀 op｜`listMyCorrections`）**：回本人（`user_id` ＝ 服务端派生
+   * uid）的勘误行 `{ok:true, op, rows, count}` —— **零写入**（不产出 `plan` ⇒ `index.js`
+   * 落盘分支不触发）。
+   * 顺序（**全部判定在任何读之前**）：① 载荷形态 ＋ 封闭键面 `MY_CORRECTION_ROWS_ALLOWED_KEYS`
+   * （`{status?, limit?}`；身份类键 ⇒ `INVALID_FIELD` ＋ 零读取）→ ② 身份取自已验签令牌
+   * （缺 ⇒ `FORBIDDEN`；**载荷自称一律无效**）→ ③ `status` 三态值域、`limit` 1〜200（缺省 200）
+   * （越界 ⇒ `INVALID_VALUE`，不静默夹取）→ ④ 只读读行（`user_id` 等值 ＋ 显式 `limit` ＋
+   * `created_at` 倒序；失败 ⇒ 由 `index.js` 转 `STORAGE_UNAVAILABLE`）→ ⑤ 逐行剥除一切含
+   * `phone` 的键。**回包不新增任何键**（`rows` / `count` 由 `index.js` 按 op 收窄透传）。
+   * @param {object} payload 载荷（允许键 `status` / `limit`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   * @returns {Promise<{ok:true, op:string, rows:Array<object>, count:number}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async listMyCorrections(payload, identity) {
+    /* ① 载荷形态 ＋ 封闭键面（身份类键 ⇒ `INVALID_FIELD` ＋ 零读取）。 */
+    const args = correctionRowsReadArgs(payload, MY_CORRECTION_ROWS_ALLOWED_KEYS)
+    if (!args.ok) return args
+    /* ② 身份只取自已验签令牌（服务端派生 uid）。 */
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    /* ③ 只回本人行（等值 `user_id`；给了 `status` 才按状态过滤）。 */
+    const match = { user_id: identity.uid }
+    if (args.status) match.status = args.status
+    const rows = await readCorrectionRowsSorted(match, args.limit)
+    /* ④ 行面剥除身份 / 手机号类键（`user_phone` 一类零出现；不透明 uid 原样保留）。 */
+    const safeRows = rows.map((row) => stripImportIdentityFields(row))
+    return { ok: true, op: 'listMyCorrections', rows: safeRows, count: safeRows.length }
   }
 })
 
@@ -5081,6 +5214,39 @@ const ADMIN_OPS = Object.freeze({
     /* ⑥ 逐行剝除身份 / 手機號類鍵（`user_phone` 一類零出現；不透明 uid 原樣）。 */
     const safeRows = rows.map((row) => stripImportIdentityFields(row))
     return { ok: true, op: 'pullImportRows', rows: safeRows, count: safeRows.length }
+  },
+
+  /**
+   * **待審勘誤行（全部用戶｜本單新增只讀 op｜`listPendingCorrectionsForAdmin`）**：回**跨用户**
+   * 的勘误行 `{ok:true, op, rows, count}` —— **零写入**（不产出 `plan` ⇒ `index.js` 落盘分支
+   * 不触发；不改写、不新增、不删任何库内行）。
+   * 顺序（**全部判定在任何读之前**）：① **管理员白名单门复用现有 `adminWhitelistDenial`**
+   * （`XIAI_ADMIN_PHONE`；缺 / 空 env ⇒ 结构化拒绝 ＋ **零读取**；非白名单 ⇒ `FORBIDDEN`）
+   * → ② 载荷形态 ＋ 封闭键面 `PENDING_CORRECTION_ROWS_ALLOWED_KEYS`（与 op① 同形
+   * `{status?, limit?}`；身份类键 ⇒ `INVALID_FIELD` ＋ 零读取）→ ③ `status` 值域三态、
+   * **缺省 `PENDING`**（待审面）、`limit` 1〜200（缺省 200；越界 ⇒ `INVALID_VALUE`，不静默夹取）
+   * → ④ 只读读行（显式 `limit` ＋ `created_at` 倒序；失败 ⇒ 由 `index.js` 转
+   * `STORAGE_UNAVAILABLE`）→ ⑤ 逐行剥除一切含 `phone` 的键（旧行 `user_phone` 一并剥；
+   * 不透明 uid 原样保留）。**回包不新增任何键**（`rows` / `count` 由 `index.js` 按 op 收窄透传）。
+   * @param {object} payload 载荷（允许键 `status` / `limit`）
+   * @param {{uid:string, phone:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, op:string, rows:Array<object>, count:number}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async listPendingCorrectionsForAdmin(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，任何读之前**；缺 env ⇒ 结构化拒绝 ＋ 零读取）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷形态 ＋ 封闭键面（身份类键 ⇒ `INVALID_FIELD` ＋ 零读取）。 */
+    const args = correctionRowsReadArgs(payload, PENDING_CORRECTION_ROWS_ALLOWED_KEYS)
+    if (!args.ok) return args
+    /* ③ `status` 缺省 `PENDING`（待审面）；给了则按三态值域过滤。 */
+    const match = { status: args.status || CORRECTION_PENDING }
+    const rows = await readCorrectionRowsSorted(match, args.limit)
+    /* ④ 行面剥除身份 / 手机号类键（`user_phone` 一类零出现；不透明 uid 原样保留）。 */
+    const safeRows = rows.map((row) => stripImportIdentityFields(row))
+    return { ok: true, op: 'listPendingCorrectionsForAdmin', rows: safeRows, count: safeRows.length }
   },
 
   /**

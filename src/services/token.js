@@ -297,11 +297,12 @@ export function createTokenChannel(profile) {
         renewals: state.renewals,
         message: ''
       }
-      /* **只读行面（additive 透传｜**按 `op` 收窄**｜E-3）**：`rows` / `count` **仅当
-         `op === 'pullImportRows'` 且云函数回包（`result`）确有该键时**才逐字叠进出参；
+      /* **只读行面（additive 透传｜**按 `op` 收窄**｜E-3 ＋ 勘误只读面）**：`rows` / `count` **仅当
+         `op` ∈ 三只读取行 op（`pullImportRows` ／ `listMyCorrections` ／ `listPendingCorrectionsForAdmin`）
+         且云函数回包（`result`）确有该键时**才逐字叠进出参；
          服务端未回 ⇒ 本键**缺席**（调用方读到 `undefined`），**不得默认成 `[]` / `0`**。
          其余任何 op 一律不出现这 2 个键（既有回包逐字不变）。 */
-      if (trimmed(op) === 'pullImportRows') {
+      if (trimmed(op) === 'pullImportRows' || trimmed(op) === 'listMyCorrections' || trimmed(op) === 'listPendingCorrectionsForAdmin') {
         const PULL_READOUT_KEYS = ['rows', 'count']
         for (const key of PULL_READOUT_KEYS) {
           if (Object.prototype.hasOwnProperty.call(result, key)) envelope[key] = result[key]

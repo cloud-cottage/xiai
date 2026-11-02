@@ -203,12 +203,112 @@ export const MARKABLE_FIELDS = [
   { key: 'transcription', label: '印文釋義' }
 ]
 
-export function listMyCorrections() {
+/* ============================================================================
+   **勘误只读面（本单｜W-54 收口）：本机镜像 ∪ 云端权威行**
+   ----------------------------------------------------------------------------
+   背景（既有缺口 W-54）：`xiai_corrections` 是 PRIVATE ACL、不进任何客户端读面 ⇒ 本机
+   `localStorage` 镜像只看得到**本浏览器**提交的行（他人提交的行、本人换设备后的行都读不到）。
+   本单新增两个**只读**云 op（云函数 `xiai-user-token` 的 `action:'verify'` 内派发、零写入）：
+     · `listMyCorrections` —— 只回 `user_id` ＝ **服务端从令牌派生的 uid** 的行；
+     · `listPendingCorrectionsForAdmin` —— 管理员白名单门后**跨用户**回待审行。
+   读口径（逐条）：
+     · **云端形态 ⇒ 云行 ∪ 本机镜像**（按行 id 去重、**本机行优先**）；
+     · **local-dev / 离线 / 未登录 ⇒ 仅本机镜像**（行为与改前逐字一致）；
+     · **云读失败 ⇒ 结构化失败 ＋ 可读降级文案**（**不静默、不以空集冒充**）；
+     · 「可能還有更多」＝ 客户端按服务端 `count === limit`（单次上限 200）派生 ⇒ 回包零新键。
+   ============================================================================ */
+
+/** 只读 op 名（**须与云函数 `cloudfunctions/xiai-user-token/lib/ops.js` 的注册面逐字一致**）。 */
+export const LIST_MY_CORRECTIONS_OP = 'listMyCorrections'
+
+/** 同上（管理员待审面；落云函数 `ADMIN_OPS`）。 */
+export const LIST_PENDING_CORRECTIONS_OP = 'listPendingCorrectionsForAdmin'
+
+/** 单次云读上限（与云函数侧 `CORRECTION_ROWS_MAX_LIMIT` 同值；缺省亦为 200）。 */
+export const CORRECTION_ROWS_LIMIT = 200
+
+/** 行 id（云行 / 本机行同源：`id`，兜底 `_id`）。 */
+function correctionRowKey(row) {
+  return String((row && (row.id || row._id)) || '')
+}
+
+/** 按 `created_at` 倒序（与云函数侧同一口径）。 */
+function sortCorrectionRows(list) {
+  return list.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+}
+
+/**
+ * **云行 ∪ 本机镜像**：按行 id 去重、**本机行优先**（本机行是提交时落的镜像，带 `batchId`
+ * 等前端专有键）；无 id 的行原样保留（**不静默丢行**）。
+ * @param {Array<object>} cloudRows 云端权威行
+ * @param {Array<object>} localRows 本机镜像行
+ * @returns {Array<object>} 已按 `created_at` 倒序的合并结果
+ */
+function mergeCorrectionRows(cloudRows, localRows) {
+  const byKey = new Map()
+  const withoutKey = []
+  const put = (row, overwrite) => {
+    const key = correctionRowKey(row)
+    if (!key) {
+      withoutKey.push(row)
+      return
+    }
+    if (!overwrite && byKey.has(key)) return
+    byKey.set(key, row)
+  }
+  ;(Array.isArray(cloudRows) ? cloudRows : []).forEach((row) => put(row, false))
+  ;(Array.isArray(localRows) ? localRows : []).forEach((row) => put(row, true))
+  return sortCorrectionRows([...byKey.values(), ...withoutKey])
+}
+
+/**
+ * 云读门回包的结构化判读（**只认 `ok` / `rows`**；不改写真因、不编造假读数）。
+ * @returns {null|{ok:false, reason:string, message:string}} `null` ＝ 放行
+ */
+function correctionRowsDenial(gate) {
+  if (!gate || typeof gate !== 'object') {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳形狀不可辨識；本次零讀取。' }
+  }
+  if (gate.ok !== true) {
+    return { ok: false, reason: gate.reason || 'STORAGE_UNAVAILABLE', message: gate.message || '雲端讀取被拒；本次零讀取。' }
+  }
+  if (!Array.isArray(gate.rows)) {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳未帶勘誤行（rows）；雲端讀數不可用。' }
+  }
+  return null
+}
+
+/** 由云读回包派生「可能還有更多」（`count === limit`；**不新增回包键**）。 */
+function correctionRowsMaybeMore(gate, rows) {
+  const raw = gate && gate.count !== undefined && gate.count !== null ? Number(gate.count) : NaN
+  const cloudCount = Number.isFinite(raw) ? raw : rows.length
+  return cloudCount === CORRECTION_ROWS_LIMIT
+}
+
+export async function listMyCorrections() {
   const user = currentUser()
-  if (!user) return []
-  return listCorrectionRows()
-    .filter((row) => row.user_id === user.id)
-    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+  /* 未登录 ⇒ 与改前逐字一致：空集（零云端、零本机行）。 */
+  if (!user) return { ok: true, rows: [], count: 0, maybeMore: false }
+  const local = sortCorrectionRows(listCorrectionRows().filter((row) => row.user_id === user.id))
+  /* 经登录令牌只读门（无令牌且有会话 ⇒ 先静默补签；与 `submitCorrection` 同一通道）。 */
+  const gate = await userWriteGate(LIST_MY_CORRECTIONS_OP, { limit: CORRECTION_ROWS_LIMIT })
+  /* local-dev / 离线形态：门不发请求 ⇒ **仅本机镜像**（行为与改前逐字一致）。 */
+  if (gate && gate.mode === 'local-dev') {
+    return { ok: true, rows: local, count: local.length, maybeMore: false }
+  }
+  const denial = correctionRowsDenial(gate)
+  if (denial) {
+    /* 云读失败 ⇒ 结构化失败 ＋ 可读降级文案（**不静默**）；本机镜像随行返回供上屏，
+       并在文案里写明「以下為本機鏡像」⇒ 不冒充云端读数。 */
+    return {
+      ok: false,
+      reason: denial.reason,
+      message: `雲端讀取我的勘誤記錄失敗：${denial.message}以下為本機鏡像，可能不完整。`,
+      rows: local
+    }
+  }
+  const merged = mergeCorrectionRows(gate.rows, local)
+  return { ok: true, rows: merged, count: merged.length, maybeMore: correctionRowsMaybeMore(gate, gate.rows) }
 }
 
 export function summarizeCorrections(rows) {
@@ -741,19 +841,26 @@ export function canReviewCorrections(actor) {
  * （§3.12.10(c) 字面值与数据层同源；**不以空集冒充拒绝**，形状与写入口 `review()` 一致）；
  * 管理员 ⇒ `{ok:true, rows}`。两条路径均**不抛未捕获异常**。
  *
+ * **本单（W-54）改为 `async` 云端读**：云端形态 ⇒ 云行 ∪ 本机镜像（按行 id 去重、本机行优先）；
+ * local-dev / 离线 ⇒ 仅本机镜像（行为与改前逐字一致）；云读失败 ⇒ **恰 3 键结构化拒绝**
+ * （**不以本机镜像冒充待审读数**，由调用方上屏「讀數不可用」）。成功回包**增补**两个加性键
+ * `count`（＝ `rows.length`）与 `maybeMore`（服务端 `count === limit` 派生；既有调用方不受影响）。
+ *
  * 适配登记（2026-09-20 收口）：服务层读入口由「裸数组」改为「结构化结果」，**调用点同步适配**
  * —— 唯一产品侧调用点是 `src/views/MyCorrectionsView.vue`（队列读数读 `result.ok ? result.rows : []`，
  * 并把 `result.message` 作为可读文案渲染，**不静默**）。
  * @param {object|null} actor 操作者（须为管理员；缺省回落到当前登录态）
- * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:string, message:string}}
+ * @returns {Promise<{ok:true, rows:Array<object>, count:number, maybeMore:boolean}
+ *   |{ok:false, reason:string, message:string}>}
  *   `rows` 为 `PENDING` 勘误行（按提交时间倒序）
  */
-export function listPendingForAdmin(actor) {
+export async function listPendingForAdmin(actor) {
   const who = actor || currentUser()
   /* 与写入口 `review` 同判定：非管理员**结构化拒绝**（不是空集）。 */
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
   }
+  /* ① 本机镜像（与改前同一段逻辑；数据层拒绝 ⇒ **原样透传、不再发起云读**）。 */
   let res
   try {
     res = listPendingCorrectionRowsForAdmin(who)
@@ -764,14 +871,35 @@ export function listPendingForAdmin(actor) {
     }
     return { ok: false, reason: 'INTERNAL_ERROR', message: `讀取待審勘誤失敗：${(err && err.message) || '未知錯誤'}` }
   }
-  if (Array.isArray(res)) return { ok: true, rows: res } // 兼容：万一数据层回退成裸数组
-  if (res && res.ok) return { ok: true, rows: res.rows || [] }
-  /* 数据层结构化拒绝 ⇒ 原样透传（reason / message 同字面值），不吞成空集。 */
-  return {
-    ok: false,
-    reason: (res && res.reason) || 'FORBIDDEN',
-    message: (res && res.message) || '僅管理員可以查看全部用戶的待審勘誤'
+  let local = null
+  if (Array.isArray(res)) {
+    local = res // 兼容：万一数据层回退成裸数组
+  } else if (res && res.ok) {
+    local = Array.isArray(res.rows) ? res.rows : []
+  } else {
+    /* 数据层结构化拒绝 ⇒ 原样透传（reason / message 同字面值），不吞成空集。 */
+    return {
+      ok: false,
+      reason: (res && res.reason) || 'FORBIDDEN',
+      message: (res && res.message) || '僅管理員可以查看全部用戶的待審勘誤'
+    }
   }
+  /* ② 云端只读（管理员白名单门在**服务端**判；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝 ＋ 零读取）。 */
+  const gate = await userWriteGate(LIST_PENDING_CORRECTIONS_OP, {
+    status: CORRECTION_STATUS.PENDING,
+    limit: CORRECTION_ROWS_LIMIT
+  })
+  /* local-dev / 离线形态：门不发请求 ⇒ **仅本机镜像**（行为与改前逐字一致）。 */
+  if (gate && gate.mode === 'local-dev') {
+    return { ok: true, rows: local, count: local.length, maybeMore: false }
+  }
+  const denial = correctionRowsDenial(gate)
+  if (denial) {
+    /* 云读失败 ⇒ **恰 3 键结构化拒绝**（与写入口同形）；**不以本机镜像冒充待审读数**。 */
+    return { ok: false, reason: denial.reason, message: `雲端讀取待審勘誤失敗：${denial.message}待審讀數不可用。` }
+  }
+  const merged = mergeCorrectionRows(gate.rows, local)
+  return { ok: true, rows: merged, count: merged.length, maybeMore: correctionRowsMaybeMore(gate, gate.rows) }
 }
 
 function isPermissionError(err) {
@@ -1228,17 +1356,23 @@ function buildPendingBatches(rows) {
  * 非管理员 ⇒ 与 `listPendingForAdmin` **同字面值**的结构化拒绝（`FORBIDDEN`、零读取面）；
  * 管理员 ⇒ `{ok:true, batches}`（批按时间倒序、批内按字段稳定排序）。
  * 落位：**复用** `listPendingForAdmin`（读面与逐条审核完全同源，不另开读路径）。
+ *
+ * **本单（W-54）随 `listPendingForAdmin` 改为 `async`**；第 2 参 `pending`（**可选**）用于
+ * 「调用方已取过一次待审读数」时**复用同一次云读**（省一次云往返）——**不传则行为与传前逐字一致**
+ * （内部自行 `await listPendingForAdmin`）。`pending` 形状须是该函数的结构化回包。
  * @param {object|null} actor 操作者（须为管理员；缺省回落到当前登录态）
- * @returns {{ok:true, batches:Array<object>}|{ok:false, reason:string, message:string}}
+ * @param {{ok:boolean, rows?:Array<object>, reason?:string, message?:string}} [pending]
+ *   已取到的待审读数（可选；`undefined` ⇒ 自取）
+ * @returns {Promise<{ok:true, batches:Array<object>}|{ok:false, reason:string, message:string}>}
  */
-export function listPendingBatchesForAdmin(actor) {
+export async function listPendingBatchesForAdmin(actor, pending) {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
   }
-  const pending = listPendingForAdmin(who)
-  if (!pending.ok) return pending
-  return { ok: true, batches: buildPendingBatches(pending.rows) }
+  const source = pending !== undefined && pending !== null ? pending : await listPendingForAdmin(who)
+  if (!source.ok) return source
+  return { ok: true, batches: buildPendingBatches(source.rows || []) }
 }
 
 /**
