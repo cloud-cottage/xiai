@@ -459,6 +459,19 @@ function faceMarkableValue(face, key, raw) {
   return display || raw || ''
 }
 
+/* 视图层「跳过」上屏文案（冻结口径 2026-11-02；一律繁體，须过 `s2t(文案) === 文案` 自检）。
+   服务层 / 云函数的拒绝形状与回包键面**一字不变**（仍是 `ok:false` + `DUPLICATE_VALUE` + 原 message +
+   零写入），跳过语义只在本视图层实现。 */
+const CORRECTION_SKIP_ALL_MESSAGE =
+  '所選項目已有相同提交，本次未新增勘誤。若你贊同該值，請改用【採信】為它佐證。'
+
+/** 成功句（含金奖励句尾）在前；有跳过时把**部分跳过句**接在其后。 */
+function correctionFeedbackOf(accepted, skipped, reward) {
+  const success = `已提交 ${accepted} 條勘誤，平臺審覈採納後每條獎勵 ${reward} 金。`
+  if (!skipped) return success
+  return `${success}另有 ${skipped} 條已有相同提交（無需重複提交），本次未新增。`
+}
+
 /**
  * 提交本印面的【印面内容】/【印面风格】勘误（只提交**有选择**的项）。
  * 成功后 `dataVersion + 1` ⇒ 「待审核」计数与本块读数**不刷新即反映**。
@@ -480,21 +493,28 @@ async function submitFaceEntry(face) {
   /* 一次表单提交 ＝ 一个提交单号（R-B2）：本批 N 条共享同一 `batchId`。 */
   const batchId = corrections.newBatchId()
   let accepted = 0
+  /* 冻结口径（2026-11-02）：重复字段按**跳过**处理（不新增行、不报错），不计入失败。 */
+  let skipped = 0
   let firstError = ''
   /* OBS-1：`submitCorrection` 已改 `async`（经云函数验签后落盘）⇒ 本处由逐项并发
      改为**串行 `await`**（逐条独立成败，与改前语义一致：一条失败不影响其余）。 */
   for (const { field, label, value } of pairs) {
     const result = await corrections.submitCorrection({ faceId: face.id, sealId, field, value, batchId })
     if (result.ok) accepted += 1
+    else if (result.reason === 'DUPLICATE_VALUE') skipped += 1
     else if (!firstError) firstError = result.message || `「${label}」提交失敗`
   }
-  if (accepted === 0) {
+  /* 口径 4：有真实失败 ⇒ 仍上屏**首个真实失败**文案（跳过不得覆盖失败）。 */
+  if (accepted === 0 && firstError) {
     faceEntryFeedback[face.id] = firstError
     return
   }
   faceEntryFeedback[face.id] =
-    `已提交 ${accepted} 條勘誤，平臺審覈採納後每條獎勵 ${points.CORRECTION_REWARD} 金。`
-  if (accepted === pairs.length) {
+    accepted === 0
+      ? CORRECTION_SKIP_ALL_MESSAGE
+      : correctionFeedbackOf(accepted, skipped, points.CORRECTION_REWARD)
+  /* 口径 5：接受数 ＋ 跳过数 === 本次填写项数 ⇒ 整单完成（清空草稿）。 */
+  if (accepted + skipped === pairs.length) {
     draft.content = ''
     draft.style = ''
   }
@@ -818,6 +838,8 @@ async function submitCorrection() {
     return
   }
   let accepted = 0
+  /* 冻结口径（2026-11-02）：重复字段按**跳过**处理（不新增行、不报错），不计入失败。 */
+  let skipped = 0
   let firstError = ''
   /* 一次表单提交 ＝ 一个提交单号（R-B2）：本批 N 条共享同一 `batchId`。 */
   const batchId = corrections.newBatchId()
@@ -833,14 +855,20 @@ async function submitCorrection() {
       batchId
     })
     if (result.ok) accepted += 1
+    else if (result.reason === 'DUPLICATE_VALUE') skipped += 1
     else if (!firstError) firstError = result.message
   }
-  if (accepted === 0) {
+  /* 口径 4：有真实失败 ⇒ 仍上屏**首个真实失败**文案（跳过不得覆盖失败）。 */
+  if (accepted === 0 && firstError) {
     formFeedback.value = firstError || '提交失敗，請稍後重試'
     return
   }
-  formFeedback.value = `已提交 ${accepted} 條勘誤，平臺審覈採納後每條獎勵 ${points.CORRECTION_REWARD} 金。`
-  if (accepted === filled.length) formOpen.value = false
+  formFeedback.value =
+    accepted === 0
+      ? CORRECTION_SKIP_ALL_MESSAGE
+      : correctionFeedbackOf(accepted, skipped, points.CORRECTION_REWARD)
+  /* 口径 5：接受数 ＋ 跳过数 === 本次填写项数 ⇒ 整单完成（关闭弹窗）。 */
+  if (accepted + skipped === filled.length) formOpen.value = false
 }
 
 /** 选图 / 粘贴**共用处理体**：把一个 File 走完「登录门 → 解码 → 上限校验 → 上传管线 → 入库」。 */

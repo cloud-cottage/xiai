@@ -1965,8 +1965,11 @@ const OPS = Object.freeze({
       return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
     }
     /* **提交侧防重（本单追加）**：同 `(faceId, field, value)` 已有行（含云端：以服务端为准）
-       ⇒ 同一段文字只允许一人提交；第二人应改用【採信】。**判定在任何写入之前**（只读）。 */
-    const duplicate = await readRows(COLLECTIONS.corrections, { faceId, field, value })
+       ⇒ 同一段文字只允许一人提交；第二人应改用【採信】。**判定在任何写入之前**（只读）。
+       **防重只认未驳回行（冻结口径 2026-11-02）**：`status` 为 `REJECTED` 的行先滤掉再判空
+       （被驳回的值允许再次提交）；`reason` / `message` / 载荷键面 / 回包形状**一字不变**。 */
+    const duplicateAll = await readRows(COLLECTIONS.corrections, { faceId, field, value })
+    const duplicate = duplicateAll.filter((row) => text(row && row.status) !== CORRECTION_STATUS.REJECTED)
     if (duplicate.length > 0) {
       return deny(
         REASONS.DUPLICATE_VALUE,
@@ -2002,7 +2005,9 @@ const OPS = Object.freeze({
       sealId: row.sealId,
       field,
       value,
-      submissions: [...duplicate, row],
+      /* 摘要重算仍吃**全部**命中行（含 `REJECTED`；`buildCorrectionSummaryRow` 内部自行
+         跳过驳回行的提交人计数）—— 滤掉 `REJECTED` 只作用于上面的防重判空。 */
+      submissions: [...duplicateAll, row],
       endorsements: [],
       at
     })

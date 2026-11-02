@@ -517,9 +517,12 @@ export async function submitCorrection({
 
   /* **提交侧防重（本单）**：同 `(faceId, field, value)` 已有提交行（本机前置门）⇒ `DUPLICATE_VALUE`
      ＋ 零写入。严格判据：值**逐字相同**即重复（含异体 / 标点差异 ⇒ 按**精确字符串比较**，不做归一）；
-     同一段文字只允许一人提交 —— 第二人应改用【採信】。云端形态下另有服务端权威门（以服务端为准）。 */
+     同一段文字只允许一人提交 —— 第二人应改用【採信】。云端形态下另有服务端权威门（以服务端为准）。
+     **防重只认未驳回行（冻结口径 2026-11-02）**：`status` 归一后为 `REJECTED` 的行**不参与防重**
+     （被驳回的值允许再次提交 —— 与印人提案面「已有未驳回提案才判重复」同形）。 */
   const duplicate = rowsOfFace(face).some(
     (row) =>
+      normalizeCorrectionStatus(row && row.status) !== CORRECTION_STATUS.REJECTED &&
       String((row && row.field) || '') === String(field) &&
       String((row && row.value) === null || (row && row.value) === undefined ? '' : row.value).trim() === text
   )
