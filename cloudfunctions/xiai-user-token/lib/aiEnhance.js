@@ -196,6 +196,67 @@ function failure(reason, message, refunded) {
   return { ok: false, reason, message, refunded: refunded === true }
 }
 
+/**
+ * **面向管理员的诊断指纹**（与 `index.js::errorFingerprint` 同形：`name / code / message 前 60 字`
+ * 三段；**非临时补丁，上线后保留**）—— 但本版**向下展开 `error.cause`（最多两层）**：
+ * 平台真因（如 `ops.persist` 包装错 `WRITE_STEP_FAILED` 的 `cause`）只挂在 cause 上，
+ * 不展开就只会回显我们自己的包装文案，诊断面等于没有。分层间以 ` ⇒ ` 连接（外因 ⇒ 内因）。
+ * 硬口径（与 `index.js` 逐条同尺）：
+ *  · **零密钥 / 零令牌 / 零用户隐私**：≥40 位连续字母数字长串（base64 / hex 形态的
+ *    密钥、令牌、密文）一律抹成 `<redacted>`；message 只取前 60 字。
+ *  · **纯函数、绝不自抛**：异常对象取不到值（null / 非对象 / 无 name / 无 message）⇒
+ *    对应段回 `'unknown'`；本函数任何分支都不得抛错（诊断面不得反噬主路）。
+ *  · 只进 `message`（仍是 `{ok,reason,message}` 恰 3 键），**不新增 reason 字面值**。
+ * @param {*} error 抛出的异常（任意形态；可带 `cause` 链）
+ * @returns {string} 形如 `Error / code=WRITE_STEP_FAILED:1/1 / … ⇒ TcbError / code=404 / …`
+ */
+function errorFingerprint(error) {
+  try {
+    const segmentOf = (value) => {
+      const source =
+        value !== null && typeof value === 'object'
+          ? value
+          : typeof value === 'string' || typeof value === 'number'
+            ? { message: String(value) }
+            : {}
+      const name = typeof source.name === 'string' && source.name !== '' ? source.name : 'unknown'
+      const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
+      const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
+      const rawMessage = typeof source.message === 'string' ? source.message : ''
+      const scrubbed = rawMessage.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 60)
+      return `${name} / code=${code} / ${scrubbed === '' ? 'unknown' : scrubbed}`
+    }
+    const segments = [segmentOf(error)]
+    let current = error
+    for (let depth = 0; depth < 2; depth += 1) {
+      const source = current !== null && typeof current === 'object' ? current : null
+      const cause = source ? source.cause : undefined
+      if (cause === undefined || cause === null) break
+      segments.push(segmentOf(cause))
+      current = cause
+    }
+    return segments.join(' ⇒ ')
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** 入册前 doc 清洗（**缺键 ≠ 非法值**）：剔除值为 `undefined` / `NaN` 的键
+ *  （如 `charge_balance_after` / `upstream_status` / `elapsed_ms` 一类取不到时的情形）——
+ *  其余字段与取值一律不变。纯函数；任何异常 ⇒ 原样返回（清洗不得反噬主路）。 */
+function sanitizeEnhanceDoc(doc) {
+  try {
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return doc
+    for (const key of Object.keys(doc)) {
+      const value = doc[key]
+      if (value === undefined || (typeof value === 'number' && Number.isNaN(value))) delete doc[key]
+    }
+    return doc
+  } catch {
+    return doc
+  }
+}
+
 /** 按字节魔数判容器（认不出 ⇒ 空串 —— **不采信自称值**）。 */
 function sniffImageMime(bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 12) return ''
@@ -852,11 +913,11 @@ async function enhanceFace(payload, identity, context) {
   const productKey = `xiai/images/${productSha.slice(0, 2)}/${productSha}.${productExt}`
   try {
     await uploadProductBytes(productKey, upstreamCall.bytes)
-  } catch {
+  } catch (error) {
     const refunded = await refundTen(uid, idemKey, newImageId)
     return failure(
       REASONS.STORAGE_UNAVAILABLE,
-      `修復產物上傳失敗（雲端存儲不可用）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；本次未建影像行、未改印面指向。`,
+      `修復產物上傳失敗（雲端存儲不可用）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；本次未建影像行、未改印面指向。（診斷：${errorFingerprint(error)}）`,
       refunded
     )
   }
@@ -885,13 +946,25 @@ async function enhanceFace(payload, identity, context) {
     elapsed_ms: Number.isInteger(upstreamCall.elapsedMs) ? upstreamCall.elapsedMs : 0,
     created_at: now
   }
-  try {
-    await persistEnhanceRow(newImageId, doc)
-  } catch {
+  /* 入册前 doc 清洗：`undefined` / `NaN` 一律不落（缺键 ≠ 非法值）；其余字段与取值不变。 */
+  sanitizeEnhanceDoc(doc)
+  /* ⑨ 首次 `doc(id).set` 失败 ⇒ 用清洗后的同一 doc **重试一次**（`set` 幂等 upsert，
+     不新建第二行）；**仍失败才退款判失败**。重试与首试共用同一 `doc` ⇒ 零第二份入册对象。 */
+  let persistError = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await persistEnhanceRow(newImageId, doc)
+      persistError = null
+      break
+    } catch (error) {
+      persistError = error
+    }
+  }
+  if (persistError) {
     const refunded = await refundTen(uid, idemKey, newImageId)
     return failure(
       REASONS.STORAGE_UNAVAILABLE,
-      `修復產物影像行入册失敗（權威存儲不可用）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；不留半成品行、未改印面指向。`,
+      `修復產物影像行入册失敗（權威存儲不可用）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；不留半成品行、未改印面指向。（診斷：${errorFingerprint(persistError)}）`,
       refunded
     )
   }
