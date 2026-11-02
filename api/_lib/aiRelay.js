@@ -56,7 +56,12 @@
  *      body 恆帶 `prompt` / `model` / `n:1`，**有给就逐字透传** `size` / `resolution`
  *      （2026-10-30 单：不转换、不因上游可能不认就丢掉；`edits` 另带 `image` 签名链））
  *      失败 / 超时 / 非 2xx / 非 JSON / 缺图片字段 ⇒ **退款**（`refundPoints` 同 `ref_id`、
- *      kind=`REFUND`）＋ 502 `UPSTREAM_ERROR`（带上游状态码；网络错与超时为 `0`）
+ *      kind=`REFUND`）＋ 502 `UPSTREAM_ERROR`（带上游状态码；网络错与超时为 `0`）；
+ *      **2026-11-02 異步任務路**：2xx 但 `imageOf` 認不出圖且 `data[0].task_id` 非空 ⇒ 改走
+ *      `GET <base_url>/tasks/<task_id>` 輪詢取圖（間隔 4 秒 / 總預算 45 秒〔自首次 POST 發出
+ *      時刻〕/ 單查 20 秒 / 最多 12 次；`completed` 取 `result_urls` 首項下載、`failed`・
+ *      `violation` 帶抹除後 `error_msg`）；**無 `task_id` 才維持「上游 200 但無圖」**；輪詢任一
+ *      失敗仍走本步的**退款 ＋ 502 `UPSTREAM_ERROR`**（`reason` 零新增、成功回包鍵面不變）
  *   ⑪ 成功 ⇒ `commitUsage` ＋ 200；回包**恰 6 键**
  *      `{ok, image, charge, usage, idempotent, upstream_request}`（上游回 url 就回 url、回 b64 就回 b64，
  *      **不再自己编码一次**；`upstream_request.sent_keys` ＝ 本次实际上游体的**键名清单**，
@@ -576,6 +581,238 @@ export function upstreamErrorDigestOf(parsed) {
   }
 }
 
+/* --------------------------------------------------------------------------- 上游异步任务（轮询取图路；v1.80 协议）
+   --------------------------------------------------------------------------- */
+
+/** 异步任务轮询面（**封闭常量**；官方协议 `GET <base_url>/tasks/<task_id>`；**本文件唯一定义点**）。
+ *  Vercel 侧 `vercel.json` 的 `functions.maxDuration ＝ 60 秒` **已定、本单不得改** ⇒ 护栏必须给
+ *  退款 / `commitUsage` 的写入留余量：总预算 **45 秒**（自**首次 POST 发出时刻**算起）、
+ *  轮询间隔 **4 秒**、单次查询超时 **20 秒**、最多 **12 次**查询。
+ *  （与云函数 `lib/aiEnhance.js` 的 5000 / 90000 / 30000 / 20 是**两套常量**：那边 SCF 时限宽、
+ *  这边卡在 60 秒函数上限内；两文件互不 require、各持一份纯函数与轮询实现。） */
+export const TASK_POLL_INTERVAL_MS = 4000
+export const TASK_POLL_BUDGET_MS = 45000
+export const TASK_POLL_QUERY_TIMEOUT_MS = 20000
+export const TASK_POLL_MAX_QUERIES = 12
+
+/** 轮询间隔的缺省睡（**注入缝优先**：自检注入假睡即回 ⇒ 不真睡；生产不注入 ⇒ 真睡）。 */
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 异步任务回包的**状态取值**（纯函数；**本文件唯一定义点**；零 I/O、零自抛）。
+ * 口径（官方协议 `GET /tasks/<task_id>` 回包）：兼容**顶层 `status`** 与 **`data.status`**
+ * （`data` 为**对象**或**数组首项**两形态都要认）；只认字符串 / 数字标量、trim 后转小写；
+ * 取不到 ⇒ 空串（⇒ 调用方按「其他状态」睡后继续）。**任何异常 ⇒ 回空串。**
+ * @param {*} parsed 任务查询回包（已 `JSON.parse`）
+ * @returns {string}
+ */
+export function taskStatusOf(parsed) {
+  const pick = (value) => {
+    if (typeof value !== 'string' && typeof value !== 'number') return ''
+    return text(value).toLowerCase()
+  }
+  try {
+    if (!parsed || typeof parsed !== 'object') return ''
+    const direct = pick(parsed.status)
+    if (direct) return direct
+    const data = parsed.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) return pick(data.status)
+    if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === 'object') return pick(data[0].status)
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * `completed` 任务的**产物 URL 列表**（纯函数；**本文件唯一定义点**；零 I/O、零自抛）。
+ * 口径：兼容**顶层 `result_urls`** 与 **`data.result_urls`**（`data` 为对象 / 数组首项两形态）；
+ * 只收**非空字符串**项（滤掉空串 / 非字符串）；取不到 ⇒ 空数组（⇒ 调用方报
+ * 「任務已完成但缺 result_urls」）。**任何异常 ⇒ 回空数组。**
+ * @param {*} parsed 任务查询回包（已 `JSON.parse`）
+ * @returns {string[]}
+ */
+export function taskResultUrlsOf(parsed) {
+  const pick = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim() !== '') : [])
+  try {
+    if (!parsed || typeof parsed !== 'object') return []
+    const direct = pick(parsed.result_urls)
+    if (direct.length > 0) return direct
+    const data = parsed.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) return pick(data.result_urls)
+    if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === 'object') return pick(data[0].result_urls)
+    return []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * `failed` / `violation` 任务的**错误原话 `error_msg`**（纯函数；**本文件唯一定义点**；
+ * 零 I/O、零自抛）。口径：兼容**顶层 `error_msg`** 与 **`data.error_msg`**（`data` 为对象 /
+ * 数组首项两形态）；只认字符串 / 数字标量；取不到 ⇒ 空串（⇒ 调用方写「上游未給 error_msg」）。
+ * **任何异常 ⇒ 回空串。**
+ * @param {*} parsed 任务查询回包（已 `JSON.parse`）
+ * @returns {string}
+ */
+export function taskErrorOf(parsed) {
+  const pick = (value) => (typeof value === 'string' || typeof value === 'number' ? text(value) : '')
+  try {
+    if (!parsed || typeof parsed !== 'object') return ''
+    const direct = pick(parsed.error_msg)
+    if (direct) return direct
+    const data = parsed.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) return pick(data.error_msg)
+    if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === 'object') return pick(data[0].error_msg)
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 异步任务轮询取图（**本文件唯一轮询点**；纯 I/O —— 零扣费、零写入，退款仍在主流程 `failUpstream`）。
+ *
+ * 官方协议：`GET <base_url>/tasks/<task_id>`（`base_url` 去尾斜杠后拼接；`task_id` 经
+ * `encodeURIComponent` 编码；头带 `Authorization`，**取值与首次 POST 完全一致** —— 明文 key
+ * 永不进回包 / 日志 / 上屏）。**不直接抓全局 fetch**：一律用注入缝传进来的 `fetchImpl`
+ * （`createAiRelay({fetch})` 既有缝；`scripts/verify-ai-relay.mjs` 同缝驱动）。
+ * 护栏（自**首次 POST 发出时刻** `startedAt` 算起）：总预算 `TASK_POLL_BUDGET_MS`（45 秒）、
+ * 间隔 `TASK_POLL_INTERVAL_MS`（4 秒，**睡可注入** ⇒ 自检不真睡）、单次查询与下载超时
+ * `TASK_POLL_QUERY_TIMEOUT_MS`（20 秒，**并以剩余预算封顶** ⇒ 整条路恒在 45 秒内收口）、
+ * 最多 `TASK_POLL_MAX_QUERIES`（12）次查询；**接进任何一次查询之前先判预算** ⇒ 超预算
+ * 文案写「上游任務未在 45 秒內完成」（**绝不**退化成「上游 200 但無圖」——两种成因可区分）。
+ * 状态口径（每次回包先取状态，兼容顶层与 `data` 两形态）：
+ *   · `completed` ⇒ 取 `result_urls`（同样两形态）**首项非空字符串** ⇒ 下载（超时以剩余预算封顶）；
+ *     拿不到 ⇒ 「任務已完成但缺 result_urls」；下载失败 / 空字节 ⇒ 「取圖下載失敗」；
+ *   · `failed` / `violation` ⇒ 文案带**抹除后**的 `error_msg`（长随机串 / base64 一律
+ *     `<redacted>`、截 120 字；缺失 ⇒ 「上游未給 error_msg」）；
+ *   · 其他状态（`pending` / `processing` / 空）⇒ 睡后继续；
+ *   · 单次查询非 2xx ⇒ 带 HTTP 码与错误体摘要（沿 `upstreamErrorDigestOf`，**不循环**）；
+ *     查询抛错（超时 / 网络 / 坏 JSON）⇒ 同归失败（**不得死循环**）。
+ * @param {{baseUrl:string, auth:string, taskId:string, fetchImpl:Function, sleep?:Function,
+ *          now?:Function, startedAt?:number, intervalMs?:number, budgetMs?:number,
+ *          queryTimeoutMs?:number, maxQueries?:number}} deps
+ * @returns {Promise<{ok:true, url:string}|{ok:false, message:string}>}
+ */
+export async function pollTaskUntilImage(deps = {}) {
+  const baseUrl = text(deps.baseUrl).replace(/\/+$/, '')
+  const auth = text(deps.auth)
+  const taskId = text(deps.taskId)
+  const fetchImpl = typeof deps.fetchImpl === 'function' ? deps.fetchImpl : null
+  const sleep = typeof deps.sleep === 'function' ? deps.sleep : defaultSleep
+  const clock = typeof deps.now === 'function' ? deps.now : () => Date.now()
+  const intervalMs = Number(deps.intervalMs) > 0 ? Number(deps.intervalMs) : TASK_POLL_INTERVAL_MS
+  const budgetMs = Number(deps.budgetMs) > 0 ? Number(deps.budgetMs) : TASK_POLL_BUDGET_MS
+  const queryTimeoutMs = Number(deps.queryTimeoutMs) > 0 ? Number(deps.queryTimeoutMs) : TASK_POLL_QUERY_TIMEOUT_MS
+  const maxQueries = Number(deps.maxQueries) > 0 ? Number(deps.maxQueries) : TASK_POLL_MAX_QUERIES
+  const seconds = Math.round(budgetMs / 1000)
+  const startedAt = Number.isFinite(Number(deps.startedAt)) ? Number(deps.startedAt) : Number(clock())
+  const taskUrl = `${baseUrl}/tasks/${encodeURIComponent(taskId)}`
+  const spentMs = () => {
+    const at = Number(clock())
+    return Number.isFinite(at) && Number.isFinite(startedAt) ? at - startedAt : 0
+  }
+  let lastState = '未知'
+  let queries = 0
+  const fail = (detail) => ({ ok: false, message: detail })
+  const timeoutNote = (extra) => `上游任務未在 ${seconds} 秒內完成（${extra ? `${extra}；` : ''}最後狀態＝${lastState}）`
+  if (typeof fetchImpl !== 'function') return fail('任務查詢失敗（fetch 不可用）')
+  for (;;) {
+    /* 护栏先于查询：**总预算**（自首次 POST 发出时刻算起）与次数上限双双封顶。 */
+    const spent = spentMs()
+    if (spent >= budgetMs) return fail(timeoutNote(''))
+    if (queries >= maxQueries) return fail(timeoutNote(`已達查詢次數上限 ${maxQueries}`))
+    /* 单次查询超时**以剩余预算封顶** ⇒ 任一网络操作都不越过预算（60 秒 maxDuration 内必收口）。 */
+    const timeoutMs = Math.max(1, Math.min(queryTimeoutMs, budgetMs - spent))
+    queries += 1
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+    let response = null
+    let thrown = null
+    try {
+      response = await fetchImpl(taskUrl, {
+        method: 'GET',
+        headers: { Authorization: auth },
+        signal: controller ? controller.signal : undefined
+      })
+    } catch (error) {
+      thrown = error
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (thrown) {
+      const name = thrown && thrown.name ? String(thrown.name) : 'Error'
+      return fail(`任務查詢失敗（${name === 'AbortError' || name === 'TimeoutError' ? '超時' : name}）`)
+    }
+    const status = Number(response && response.status) || 0
+    if (!response || status < 200 || status >= 300) {
+      lastState = `HTTP ${status}`
+      let raw = ''
+      try {
+        raw = response && typeof response.text === 'function' ? await response.text() : ''
+      } catch {
+        raw = ''
+      }
+      let digest = ''
+      try {
+        digest = upstreamErrorDigestOf(JSON.parse(raw))
+      } catch {
+        digest = ''
+      }
+      const bodyText = typeof raw === 'string' ? raw : String(raw)
+      const note = digest || (bodyText.trim() === '' ? 'body=empty' : bodyText.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 80))
+      return fail(`任務查詢失敗（HTTP ${status}${note ? `；${note}` : ''}）`)
+    }
+    let payload = null
+    try {
+      payload = JSON.parse(await response.text())
+    } catch {
+      return fail('任務查詢失敗（回包非 JSON）')
+    }
+    const state = taskStatusOf(payload)
+    if (state) lastState = state
+    if (state === 'completed') {
+      const urls = taskResultUrlsOf(payload)
+      const firstUrl = urls.length > 0 ? urls[0] : ''
+      if (firstUrl === '') return fail('任務已完成但缺 result_urls')
+      /* 下载：超时同样以剩余预算封顶（预算已尽 ⇒ 1 毫秒即中止 ⇒ 按「取圖下載失敗」收口）。 */
+      const downloadTimeoutMs = Math.max(1, Math.min(queryTimeoutMs, budgetMs - spentMs()))
+      const downloadController = typeof AbortController === 'function' ? new AbortController() : null
+      const downloadTimer = downloadController ? setTimeout(() => downloadController.abort(), downloadTimeoutMs) : null
+      let download = null
+      let downloadThrew = false
+      try {
+        download = await fetchImpl(firstUrl, { signal: downloadController ? downloadController.signal : undefined })
+      } catch {
+        downloadThrew = true
+      } finally {
+        if (downloadTimer) clearTimeout(downloadTimer)
+      }
+      const downloadStatus = Number(download && download.status) || 0
+      if (downloadThrew || !download || downloadStatus < 200 || downloadStatus >= 300) return fail('取圖下載失敗')
+      let byteLength = 0
+      try {
+        const bytes = await download.arrayBuffer()
+        byteLength = bytes && typeof bytes.byteLength === 'number' ? bytes.byteLength : 0
+      } catch {
+        byteLength = 0
+      }
+      if (byteLength < 1) return fail('取圖下載失敗')
+      return { ok: true, url: firstUrl }
+    }
+    if (state === 'failed' || state === 'violation') {
+      const errorText = taskErrorOf(payload)
+      const detail = errorText ? errorText.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 120) : '上游未給 error_msg'
+      return fail(`任務失敗（狀態＝${state}：${detail}）`)
+    }
+    /* 其他状态（`pending` / `processing` / 空 / 读不懂）⇒ 睡后继续（睡亦以剩余预算封顶）。 */
+    await sleep(Math.max(0, Math.min(intervalMs, budgetMs - spentMs())))
+  }
+}
+
 /* --------------------------------------------------------------------------- CloudBase 凭据对（唯一解析点 → `lib/config.js`）
    --------------------------------------------------------------------------- */
 
@@ -723,13 +960,14 @@ export async function defaultUploadImage(bytes, ext, env) {
    --------------------------------------------------------------------------- */
 
 /**
- * @param {{env?:object, fetch?:function, now?:function, resolveImageUrl?:function,
+ * @param {{env?:object, fetch?:function, now?:function, sleep?:function, resolveImageUrl?:function,
  *          uploadImage?:function, logger?:object, stores?:{balances?:object, flow?:object,
  *          keys?:object, upstream?:object, usage?:object}}} [options]
  *   · `stores` 给了 ⇒ 经四个 lib 的**既有注入缝**接上（同一只读 / 单文档更新面）；
  *     不给 ⇒ 生产路径走 `lib/ops.js::resolveAiStore` / `resolveLedgerStore` 的真句柄。
- *   · `fetch` / `now` / `resolveImageUrl` / `uploadImage` / `env` 缺省取全局实现
- *     （`uploadImage` ＝ `data_url` 转存 CloudBase 的默认实现，离线自检注入假体）。
+ *   · `fetch` / `now` / `sleep` / `resolveImageUrl` / `uploadImage` / `env` 缺省取全局实现
+ *     （`uploadImage` ＝ `data_url` 转存 CloudBase 的默认实现，离线自检注入假体；
+ *     `sleep` 只服务**异步任务轮询路** —— 自检注入假睡 ⇒ 不真睡，同步取图路不受影响）。
  * @returns {(request:{method?:string, path?:string, url?:string, headers?:object,
  *          body?:string|Buffer|object})=>Promise<{status:number, body:object, headers:object}>}
  */
@@ -738,6 +976,9 @@ export function createAiRelay(options = {}) {
   const fetchImpl =
     typeof options.fetch === 'function' ? options.fetch : typeof fetch === 'function' ? fetch : null
   const now = typeof options.now === 'function' ? options.now : () => Date.now()
+  /* 轮询间隔的睡（**既有注入缝的同形新增**：自检注入假睡 ⇒ 整套秒内跑完、绝不真睡；
+     生产不注入 ⇒ 真睡。只服务异步轮询路，同步取图路一字不动）。 */
+  const sleep = typeof options.sleep === 'function' ? options.sleep : defaultSleep
   const resolveImageUrl = typeof options.resolveImageUrl === 'function' ? options.resolveImageUrl : defaultResolveImageUrl
   const uploadImage = typeof options.uploadImage === 'function' ? options.uploadImage : defaultUploadImage
   const logger = options.logger || (typeof console !== 'undefined' ? console : null)
@@ -970,6 +1211,8 @@ export function createAiRelay(options = {}) {
 
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+    /* 轮询总预算的起点：**首次 POST 发出时刻**（45 秒护栏自此处算起 —— 非自回包、非自轮询开始）。 */
+    const upstreamSentAt = Number(now())
     let response = null
     try {
       response = await fetchImpl(upstreamUrl, {
@@ -1034,14 +1277,34 @@ export function createAiRelay(options = {}) {
     } catch {
       return failUpstream('non-json', upstreamStatus)
     }
-    const image = imageOf(upstreamJson)
+    let image = imageOf(upstreamJson)
     if (!image) {
-      /* 2xx 但无图：message 末尾附**键名轮廓**诊断（`shapeOutlineOf` 零值泄露；键集不变）。 */
-      return failUpstream(
-        'no-image',
-        upstreamStatus,
-        `${MSG.UPSTREAM}（診斷：上游 200 但無圖；形狀＝${shapeOutlineOf(upstreamJson)}）`
-      )
+      /* 2xx 但同步取图路认不出图 ⇒ **先判异步入队回执**（`data[0].task_id` 非空）才进轮询取图路；
+         确实没有 `task_id` 才保持既有「上游 200 但無圖」诊断 —— 两种成因可区分、旧文案一字不改。 */
+      const queued = upstreamJson && Array.isArray(upstreamJson.data) && upstreamJson.data.length > 0 ? upstreamJson.data[0] : null
+      const queuedTaskId = queued && typeof queued === 'object' && !Array.isArray(queued) ? queued.task_id : null
+      const taskId = typeof queuedTaskId === 'string' || typeof queuedTaskId === 'number' ? text(queuedTaskId) : ''
+      if (taskId) {
+        /* 轮询（纯 I/O；`fetchImpl` / `sleep` / `now` 全走既有注入缝，key 只进请求头）。 */
+        const polled = await pollTaskUntilImage({
+          baseUrl: resolved.base_url,
+          auth: upstreamAuth,
+          taskId,
+          fetchImpl,
+          sleep,
+          now,
+          startedAt: upstreamSentAt
+        })
+        if (!polled.ok) return failUpstream('task-poll', upstreamStatus, `${MSG.UPSTREAM}（診斷：${polled.message}）`)
+        image = { url: polled.url }
+      } else {
+        /* 2xx 但无图：message 末尾附**键名轮廓**诊断（`shapeOutlineOf` 零值泄露；键集不变）。 */
+        return failUpstream(
+          'no-image',
+          upstreamStatus,
+          `${MSG.UPSTREAM}（診斷：上游 200 但無圖；形狀＝${shapeOutlineOf(upstreamJson)}）`
+        )
+      }
     }
 
     /* ⑪ 成功：`commitUsage`（日 / 分鐘各 +1）→ 200。commitUsage 失败 ⇒ 退款 ＋ 503（已知项 B/G）。 */
