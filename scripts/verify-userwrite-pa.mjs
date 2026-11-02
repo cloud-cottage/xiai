@@ -561,7 +561,7 @@ check('B2b', '权威来源 ＝ SERVER', 'SERVER', submitted.authority)
 check('B2c', '云端恰 2 处（勘误私有行 ＋ 值级公开摘要行）', 2, bucket.adds.length - beforeB2)
 check('B2d', '行内 userId ＝ 服务端派生 uid（**非前端自称**）', uidOfPhone(PHONE), bucket.adds[beforeB2].doc.user_id)
 check('B2e', '本机镜像行 ＝ 服务端权威行（逐字，非前端自建）', true, submitted.row.id === bucket.adds[beforeB2].doc.id)
-check('B2f', '本机镜像已落（读回可见）', true, corrections.listMyCorrections().some((row) => row.id === submitted.row.id))
+check('B2f', '本机镜像已落（读回可见；`listMyCorrections` 已改 async ⇒ 必须 await）', true, (await corrections.listMyCorrections()).some((row) => row.id === submitted.row.id))
 console.log(
   JSON.stringify({
     B2_readout: { docId: submitted.docId, authority: submitted.authority, row_user_id: submitted.row.user_id, row_field: submitted.row.field }

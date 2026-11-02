@@ -11,7 +11,7 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **76** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 断言面（本套 **85** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
  * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
  * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕
  * ＋ 形狀診斷面 4〔T1〜T4：上游 2xx 無圖 ⇒ message 只帶**鍵名輪廓**（`shapeOutlineOf` 零值泄露、
@@ -292,6 +292,9 @@ function listen(server) {
 let upstreamMode = 'url'
 const upstreamHits = []
 const hangingResponses = []
+/* 異步任務輪詢面（`aa9b461`）：`GET /tasks/<id>` 按**腳本逐步**回（每次 shift 一步；
+   只剩一步時重複回它 ⇒ 「始終 pending」可用）；取圖下載回真字節（不連外網）。 */
+let taskSteps = []
 
 const upstreamServer = createServer(async (req, res) => {
   const chunks = []
@@ -313,6 +316,16 @@ const upstreamServer = createServer(async (req, res) => {
   const json = (status, payload) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(payload))
+  }
+  /* 異步任務：`GET <base_url>/tasks/<id>` 按腳本逐步回；`/fake-task-image*` 回下載字節。
+     （兩支都在 `upstreamMode` 分派**之前** ⇒ 與既有 POST 模式互不干擾；仍記進 `upstreamHits`。） */
+  if (req.method === 'GET' && String(req.url).indexOf('/tasks/') !== -1) {
+    const step = taskSteps.length > 1 ? taskSteps.shift() : taskSteps[0]
+    return json(200, step || { status: 'pending' })
+  }
+  if (req.method === 'GET' && String(req.url).indexOf('/fake-task-image') !== -1) {
+    res.writeHead(200, { 'Content-Type': 'image/png' })
+    return res.end('offline-task-image-bytes')
   }
   if (upstreamMode === 'hang') {
     hangingResponses.push(res) /* 永不回 ⇒ 由 `timeout_ms` 触发中止 */
@@ -345,6 +358,9 @@ const upstreamServer = createServer(async (req, res) => {
   if (upstreamMode === 'b64') return json(200, { data: [{ b64_json: UPSTREAM_B64, mime: 'image/png', sha256: sha256('offline') }] })
   /* T 段（形狀診斷面）：两份 2xx 無圖回包 ＋ 一份正常回包（鍵名診斷 / 零值泄露 / 既有行為不破）。 */
   if (upstreamMode === 'shape-task') return json(200, { code: 0, message: 'ok', data: { task_id: 't-1', status: 'pending' } })
+  /* 異步入隊回執（`data[0].task_id` 非空 ⇒ 輪詢路）／「確實無 `task_id`」對照（維持舊診斷）。 */
+  if (upstreamMode === 'task-enqueue') return json(200, { code: 0, message: 'ok', data: [{ task_id: 't-relay-0001', status: 'pending' }] })
+  if (upstreamMode === 'no-task') return json(200, { code: 0, message: 'ok', data: [{ status: 'queued' }] })
   if (upstreamMode === 'shape-item') return json(200, { data: [{ image_url: 'https://x/y.png' }] })
   if (upstreamMode === 'shape-ok') return json(200, { data: [{ url: 'https://x/y.png' }] })
   return json(200, { data: [{ url: IMG_URL }] })
@@ -1086,6 +1102,94 @@ const M5 = await call({ requestId: 'rid-M05-0001', handler: brokenFlowHandler })
 check('M5', '⑤ 嘗試序號讀不出（流水面故障）⇒ **fail-closed 503** CONFIG_MISSING ＋ 零扣費（寫計數與流水行數均不變）；不新增第九個 reason', { status: 503, reason: 'CONFIG_MISSING', writes: 0, flow: 0, keys: 'message,ok,reason' }, { status: M5.status, reason: M5.reason, writes: writeSnapshot() - m5Writes, flow: flowSnapshot() - m5Flow, keys: shapeOf(M5.body) })
 
 /* ===========================================================================
+  R 段：上游**異步任務輪詢**（`aa9b461`：`data[0].task_id` ⇒ `GET <base_url>/tasks/<id>`；
+  間隔 4s ／ 總預算 45s〔自首次 POST 發出〕／ 單查 20s ／ 最多 12 次；
+  **零真睡**（`sleep` 注入假睡並推進時鐘 ⇒ 預算判據可被機械走完）、**零真網絡**（全走假上游回環））
+  =========================================================================== */
+section('R', '異步任務輪詢：task_id ⇒ completed 一次 / pending→processing→completed 三次 / failed 帶原話 / 始終 pending 超預算 / 無 task_id 仍「上游 200 但無圖」')
+
+/* 專屬 uid ＋ 預置 50 金（不動其餘段的餘額 / 用量基線）。 */
+issued.task = await aiKeys.issueAiKey({ uid: 'u-task', label: '自检-异步任务', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-task', { _id: 'bl-u-task', uid: 'u-task', points: 50, updated_at: 'seed' })
+
+const TASK_IMG_URL = `https://127.0.0.1:${upstreamPort}/fake-task-image.png`
+const resetTask = (steps) => {
+  taskSteps = steps.slice()
+}
+const taskQueryHits = () => upstreamHits.filter((hit) => hit.method === 'GET' && String(hit.url).indexOf('/tasks/') !== -1).length
+const flowOfRid = (rid, kind) => flowRows().filter((row) => row.kind === kind && String(row.ref_id).includes(rid))
+
+/* 專屬 handler：**假睡推進時鐘** ⇒ 「總預算 45 秒」這條護欄在零真睡下也能真實走到。 */
+let taskClockMs = 1_800_000_000_000
+const taskHandler = routeModule.createHandler(
+  Object.assign({}, deps, {
+    now: () => taskClockMs,
+    sleep: async (ms) => {
+      taskClockMs += Math.max(0, Number(ms) || 0)
+    }
+  })
+)
+
+/* R0：**同步取图路基线**（同 body、同 handler）⇒ 用来证明异步路的 `sent_keys` 一字未改。 */
+upstreamMode = 'url'
+const R0 = await call({ key: issued.task.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R00-0001', handler: taskHandler })
+const r0SentKeys = R0.body && R0.body.upstream_request && R0.body.upstream_request.sent_keys
+const r0LastPost = upstreamHits.slice().reverse().find((hit) => hit.method === 'POST')
+check('R0', '基线：**同步取图路**（同 `EDITS_BODY`、同 handler）⇒ 200 ＋ `sent_keys` 逐字等于实际上游体键集', { status: 200, matchesUpstreamBody: true, sentKeys: ['prompt', 'model', 'n', 'image'] }, { status: R0.status, matchesUpstreamBody: JSON.stringify(r0SentKeys) === JSON.stringify(Object.keys((r0LastPost && r0LastPost.body) || {})), sentKeys: r0SentKeys })
+
+/* R1：`task_id` ⇒ `completed` —— 一次查询即取图成功。 */
+resetTask([{ status: 'completed', result_urls: [TASK_IMG_URL] }])
+upstreamMode = 'task-enqueue'
+const r1QueriesBefore = taskQueryHits()
+const R1 = await call({ key: issued.task.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R01-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r1SentKeys = R1.body && R1.body.upstream_request && R1.body.upstream_request.sent_keys
+check('R1', '① 上游回 `data[0].task_id` ⇒ 走轮询路：`completed` **一次查询**即取图成功（200 ＋ 回包恰 6 鍵 ＋ `sent_keys` 逐字同同步路 ＋ 任务查询恰 1 次）', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', taskQueries: 1, sentKeysSame: true, url: TASK_IMG_URL }, { status: R1.status, keys: shapeOf(R1.body), taskQueries: taskQueryHits() - r1QueriesBefore, sentKeysSame: JSON.stringify(r1SentKeys) === JSON.stringify(r0SentKeys), url: R1.body && R1.body.image && R1.body.image.url })
+
+/* R2：`pending` → `processing` → `completed` —— 三次查询（中间各假睡一次、零真睡）。 */
+resetTask([{ status: 'pending' }, { status: 'processing' }, { status: 'completed', result_urls: [TASK_IMG_URL] }])
+upstreamMode = 'task-enqueue'
+const r2QueriesBefore = taskQueryHits()
+const R2 = await call({ key: issued.task.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R02-0001', handler: taskHandler })
+upstreamMode = 'url'
+check('R2', '② `pending` → `processing` → `completed` **三次查询**（非终态睡后续查、零真睡）⇒ 200 ＋ 任务查询恰 3 次 ＋ 回包恰 6 鍵', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', taskQueries: 3 }, { status: R2.status, keys: shapeOf(R2.body), taskQueries: taskQueryHits() - r2QueriesBefore })
+
+/* R3：`failed` ⇒ 502 ＋ 文案带 **`error_msg` 原话** ＋ 退款恰 1 次。 */
+const TASK_FAIL_MSG = '違反內容政策_測試原話'
+resetTask([{ status: 'failed', error_msg: TASK_FAIL_MSG }])
+upstreamMode = 'task-enqueue'
+const r3QueriesBefore = taskQueryHits()
+const R3 = await call({ key: issued.task.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R03-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r3Refund = flowOfRid('rid-R03-0001', 'REFUND')
+check('R3', '③ `failed` ⇒ 502 `UPSTREAM_ERROR` ＋ message 含 **`error_msg` 原话**（抹除规则不误伤）＋ 任务查询恰 1 次 ＋ **退款恰 1 次**', { status: 502, reason: 'UPSTREAM_ERROR', keys: 'message,ok,reason,status', taskQueries: 1, refundRows: 1, hasOriginal: true }, { status: R3.status, reason: R3.reason, keys: shapeOf(R3.body), taskQueries: taskQueryHits() - r3QueriesBefore, refundRows: r3Refund.length, hasOriginal: countIn(R3.body && R3.body.message, TASK_FAIL_MSG) >= 1 })
+
+/* R4：始终 `pending` ⇒ **超预算**（假睡推进时钟 ⇒ 45 秒护栏真实走到）。 */
+resetTask([{ status: 'pending' }])
+upstreamMode = 'task-enqueue'
+const r4QueriesBefore = taskQueryHits()
+const R4 = await call({ key: issued.task.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R04-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r4Refund = flowOfRid('rid-R04-0001', 'REFUND')
+const r4Message = (R4.body && R4.body.message) || ''
+check('R4', '④ 始终 `pending` ⇒ **超预算**：message 含「未在 45 秒內完成」（且带最后状态）**且不含**「上游 200 但無圖」＋ 任务查询恰 12 次上限 ＋ 退款恰 1 次 ＋ reason 仍 `UPSTREAM_ERROR`', { status: 502, reason: 'UPSTREAM_ERROR', hasBudgetText: true, hasNoImageText: false, hasLastState: true, taskQueries: 12, refundRows: 1 }, { status: R4.status, reason: R4.reason, hasBudgetText: countIn(r4Message, '未在 45 秒內完成') >= 1, hasNoImageText: countIn(r4Message, '上游 200 但無圖') >= 1, hasLastState: countIn(r4Message, '最後狀態＝') >= 1, taskQueries: taskQueryHits() - r4QueriesBefore, refundRows: r4Refund.length })
+
+/* R5：確實**無 `task_id`**（`data[0]` 無該鍵）⇒ 維持既有「上游 200 但無圖」診斷、零任務查詢。 */
+upstreamMode = 'no-task'
+const r5QueriesBefore = taskQueryHits()
+const R5 = await call({ key: issued.task.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R05-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r5Refund = flowOfRid('rid-R05-0001', 'REFUND')
+const r5Message = (R5.body && R5.body.message) || ''
+check('R5', '⑤ 確實無 `task_id` ⇒ 仍報「上游 200 但無圖；形狀＝…」（舊文案一字不改）＋ **零任務查詢** ＋ 退款恰 1 次 ＋ reason 仍 `UPSTREAM_ERROR`', { status: 502, reason: 'UPSTREAM_ERROR', hasNoImage: true, hasShape: true, taskQueries: 0, refundRows: 1 }, { status: R5.status, reason: R5.reason, hasNoImage: countIn(r5Message, '上游 200 但無圖；形狀＝') >= 1, hasShape: countIn(r5Message, '形狀＝') >= 1, taskQueries: taskQueryHits() - r5QueriesBefore, refundRows: r5Refund.length })
+
+/* R6：异步成功回包键集与 `sent_keys` 与同步路**逐字一致**（诊断面零侵扰）。 */
+check('R6', '⑥ 异步成功回包键集**仍恰 6 鍵**、且 `upstream_request.sent_keys` **逐字等于**同步路（R0 基线）的值（R1 / R2 两发均同）', { keys: 'charge,idempotent,image,ok,upstream_request,usage', r1Same: true, r2Same: true }, { keys: shapeOf(R2.body), r1Same: JSON.stringify(r1SentKeys) === JSON.stringify(r0SentKeys), r2Same: JSON.stringify(R2.body && R2.body.upstream_request && R2.body.upstream_request.sent_keys) === JSON.stringify(r0SentKeys) })
+
+/* R7：本段三发失败**各退款恰 1 次**、reason 零新增；末余额可由三发净额机械反推。 */
+check('R7', '⑦ 三发失败（failed ／ 超预算 ／ 无 task_id）**各退款恰 1 次**、reason 仍 `UPSTREAM_ERROR`（reason 零新增）；段末余额 ＝ 50 − 3 次成功扣费 ＝ 20', { refunds: [1, 1, 1], reasons: ['UPSTREAM_ERROR', 'UPSTREAM_ERROR', 'UPSTREAM_ERROR'], balance: 20 }, { refunds: [r3Refund.length, r4Refund.length, r5Refund.length], reasons: [R3.reason, R4.reason, R5.reason], balance: balanceOf('u-task') })
+
+/* ===========================================================================
    F 段：交付面静态门
    =========================================================================== */
 section('F', '交付面：依赖落 dependencies / vercel.json functions / 路由导出 / 28 脚本')
@@ -1099,8 +1203,9 @@ check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDu
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
 const verifyScripts = readdirSync(path.join(ROOT, 'scripts')).filter((name) => /^verify-.*\.mjs$/.test(name))
-check('F4', '本套为第 35 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕）', { count: 35, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4', '本套为第 36 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕）', { count: 36, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
 check('F4b', '新增套 `verify-ai-connect-page.mjs` 亦在册（脚本计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-ai-connect-page.mjs') !== -1)
+check('F4c', '新增套 `verify-correction-readonly.mjs` 亦在册（v1.84 勘误只读面；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-correction-readonly.mjs') !== -1)
 
 check('F5', '核心只经四个 lib 的既有注入缝取集合（零取句柄字面）与零上游凭据字面', { seamCalls: 4, keyLiteral: 0 }, { seamCalls: ['setLedgerStoreProvider', 'setAiKeyStoreProvider', 'setUpstreamStoreProvider', 'setAiUsageStoreProvider'].filter((name) => countIn(coreSource, name) >= 1).length, keyLiteral: countIn(coreSource, UPSTREAM_KEY) })
 
