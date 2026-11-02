@@ -7,8 +7,8 @@
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` 的 `ADMIN_OPS['ai-enhance-face']`（薄委派注册面）
  *   · `lib/ledger.js` 扣费 / 退款单点（注入假存储）· `lib/aiUpstream.js` 上游配置（注入假存储）
  *
- * 断言面（本套 **39** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
- * ＋ 产物族 jpeg 扩面 6 条（I 段）＋ 候選行 `row` 1 条（A5）；覆盖派单方点名的 一〜八）：
+ * 断言面（本套 **45** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
+ * ＋ 产物族 jpeg 扩面 6 条（I 段）＋ 候選行 `row` 1 条（A5）＋ ⑨ 重复键兜底专项 6 条（J 段 · 736b340）；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
  *      A0 `ADMIN_OPS` 注册面（恰 19 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 9 键**（原 8 键仍逐字在场 ＋ 新增 `row`）；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
@@ -56,6 +56,15 @@
  *      ② png 仍成功且键以 `.png`；③ webp 仍成功（键以 `.webp`）；
  *      ④ GIF / GZIP **非白名单**字节 ⇒ 仍报产物族拒绝（message 含「產物族」）且**全额退款**
  *         （`refunded: true`、REFUND +10、余额复原）。
+ *   J. ⑨ 入册撞唯一索引（E11000）兜底 ＋ 诊断指纹 ＋ doc 清洗（736b340 专项 · 真函数体经注入式假 DB）：
+ *      J1 抛重复键错 ＋ 按 `_id` 读回命中 ⇒ 回包 ok、**恰 9 键**、`image_id` ＝ 读回行 id、`row` ＝ 库内行、
+ *         **退款 0 次**、`set` 恰 1 次、库内不新增第二行；
+ *      J2 同抛重复键但 `_id` / `sha256` 两路均读不回 ⇒ **二次 `set` 后失败**、退款恰 1 次、
+ *         `reason` 逐字 `STORAGE_UNAVAILABLE`、文案前缀与改动前逐字一致；
+ *      J3 非重复键错（`ETIMEDOUT`）⇒ 走原「重试一次」、**零读回**（sha 读计数 0）；
+ *      J4 指纹面：E11000 失败文案同时含 `E11000` / `keyPattern` / `keyValue`、≥40 位长串抹为 `<redacted>`；
+ *      J5 无锚错误回退：不抛错、指纹 message 段 ≤120 字（不回旧 60 字上限）；
+ *      J6 doc 清洗：`charge_balance_after` 为 `undefined` ⇒ 落盘 doc 无该键，且零 `undefined` / `NaN` 值键。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何明文密钥（上游 key 只登记长度）。
  */
@@ -129,6 +138,11 @@ const rowMatches = (row, match) => Object.keys(match).every((key) => row[key] ==
 
 function createFakeDb() {
   const buckets = new Map()
+  /* J 段（⑨ 重复键兜底 · 736b340 专项）读写探针 —— 只记不改，缺省零行为差：
+     · `setCalls`：每次 `doc(id).set` **尝试**先记后写（抛错也算一次尝试 ⇒ 可数「set 恰几次」）；
+     · `queries`：每次 `where(match)` 记 `{collection, match}`（可数「按 sha256 读回」是否被触发）；
+     · `setInterceptor`：用例临时挂上（模拟平台唯一索引冲突：先种并发行 / 直接抛错），用完置 null。 */
+  const hooks = { setCalls: [], queries: [], setInterceptor: null }
   const bucketOf = (name) => {
     if (!buckets.has(name)) buckets.set(name, new Map())
     return buckets.get(name)
@@ -201,6 +215,10 @@ function createFakeDb() {
                 error.code = 'INVALID_PARAM'
                 throw error
               }
+              hooks.setCalls.push({ collection: name, id })
+              /* J 段注入缝：用例可在此**先种并发行再抛错**（模拟平台唯一索引冲突）—— 抛错即中断、
+                 不落本 doc（与真 SDK「set 抛错 ⇒ 未写入」同尺）。 */
+              if (hooks.setInterceptor) hooks.setInterceptor({ collection: name, id, doc, bucket: map })
               map.set(id, Object.assign({ _id: id }, doc))
               return { updated: 1 }
             }
@@ -214,11 +232,13 @@ function createFakeDb() {
           return { _id: id }
         },
         where(match) {
+          hooks.queries.push({ collection: name, match })
           return makeQuery(map, { match })
         }
       }
     }
   }
+  db.hooks = hooks
   return db
 }
 
@@ -282,6 +302,9 @@ const PRODUCT_MODE_BYTES = Object.freeze({
 })
 
 let upstreamMode = 'ok'
+/* J 段（⑨ 重复键兜底）唯一产物字节：`upstreamMode='okUnique'` 时按此回图 ⇒ 每例一个**全库唯一
+   sha256**（不与早前用例行的同 sha 行撞车 ⇒ 「按 sha256 读回」的命中 / 落空由用例自己说了算）。 */
+let uniqueProductBytes = null
 /* 非 2xx 诊断形态（`upstreamDetailOf` 四样本；body 文本逐字冻结）。 */
 const LEAK_48 = 'a'.repeat(48)
 const DIAG_MODES = {
@@ -359,6 +382,14 @@ aiEnhance.setAiEnhanceFetchProvider(async (url, init) => {
       ok: true,
       status: 200,
       json: async () => ({ data: [{ b64_json: PRODUCT_MODE_BYTES[upstreamMode].toString('base64') }] })
+    }
+  }
+  if (upstreamMode === 'okUnique') {
+    /* J 段（⑨ 重复键兜底）：按 `uniqueProductBytes` 回 PNG（魔数在场、字节全库唯一）。 */
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ b64_json: Buffer.from(uniqueProductBytes).toString('base64') }] })
     }
   }
   if (upstreamMode === 'ok') {
@@ -1379,9 +1410,326 @@ for (const [label, mode, rid, note] of [
   })
 }
 
+/* ===========================================================================
+   J 段（本单新增 · 736b340 专项）：⑨ 入册撞唯一索引（E11000）兜底 ＋ 诊断指纹 ＋ doc 清洗
+   跑**真函数体**（`enhanceFace` → `ops.persist` → 注入式假 DB 的 `doc(id).set`）：
+   `fakeDb.hooks.setInterceptor` 在 `set` 时抛平台错（可先种并发行），`hooks.setCalls` /
+   `hooks.queries` 给出「set 几次」「按 sha256 读回几次」的机械读数。
+   =========================================================================== */
+section('J', '⑨ 重复键兜底：E11000 ⇒ 读回既有行视为成功（不退款不建第二行）／读不回 ⇒ 二次 set 后退款；非重复键走原重试；指纹带 E11000·keyPattern·keyValue；doc 清洗 undefined·NaN')
+
+/* 专用管理员身份（同白名单手机号、不同 uid ＋ 预置 100 金 —— 不动既有余额与用量轨迹）。 */
+const J_IDENTITY = { uid: 'u-admin-ai-enhance-dupkey', phone: ADMIN_PHONE }
+fakeDb.bucketOf('xiai_balances').set(`bl-${J_IDENTITY.uid}`, { _id: `bl-${J_IDENTITY.uid}`, uid: J_IDENTITY.uid, points: 100, updated_at: 'seed' })
+const jEnhance = (payload, requestId) => ops.ADMIN_OPS['ai-enhance-face'](payload, J_IDENTITY, CONTEXT(requestId))
+const jFlowKinds = (requestId) =>
+  flowRowsOf(J_IDENTITY.uid)
+    .filter(
+      (row) =>
+        row.idem_key === `ai-enhance-${SRC_OK}-${requestId}` || row.idem_key === `ai-enhance-${SRC_OK}-${requestId}-refund`
+    )
+    .map((row) => `${row.kind}:${row.delta}`)
+    .sort()
+const jNewIdOf = (requestId) => aiEnhance.imageIdOfIdemKey(aiEnhance.idemKeyOf(SRC_OK, requestId))
+const jHooks = fakeDb.hooks
+const jSetCallsOf = (imageId) => jHooks.setCalls.filter((call) => call.collection === ops.COLLECTIONS.images && call.id === imageId)
+const jShaReadsFrom = (mark) =>
+  jHooks.queries.slice(mark).filter((q) => q.collection === ops.COLLECTIONS.images && Object.prototype.hasOwnProperty.call(q.match, 'sha256'))
+/* 每例一份**全库唯一**的产物字节（新 sha256 ⇒ 「按 sha256 读回」的命中 / 落空由用例自己说了算）。 */
+const jUniqueBytes = (tag) => Buffer.concat([PNG_MAGIC, Buffer.from(`offline-dupkey-product-${tag}`, 'utf8')])
+/* 平台 bulk write 多写错原文（带 ≥40 位长串 —— 抹除面同尺断言）；`code` 取 `E11000` 同真源。 */
+const J_DUP_MESSAGE = `[FailedOperation] multiple write errors: [{write errors: [{E11000 duplicate key error index: sha256_1 dup key: { sha256: "${LEAK_48}" } keyPattern: { sha256: 1 } keyValue: { sha256: "${LEAK_48}" } }]}]`
+/* ⑨ 失败文案前缀（与改动前 `b403e9e` **逐字同** —— 本次只在其后拼诊断段）。 */
+const J_FAIL_PREFIX = '修復產物影像行入册失敗（權威存儲不可用）⇒ 已全額退回 10 金；不留半成品行、未改印面指向。（診斷：'
+const jFingerprintOf = (message) => (/（診斷：([\s\S]*)）$/.exec(String(message)) || [, ''])[1]
+/* 指纹里**最后一层**的 message 段（`<name> / <code> / <message>` 三段取末段）。 */
+const jFpMessageSegOf = (fingerprint) => {
+  const parts = String(fingerprint).split(' ⇒ ')
+  return parts[parts.length - 1].split(' / ').slice(2).join(' / ')
+}
+const jThrower = (targetId, makeError) => ({ collection, id, bucket }) => {
+  if (collection !== ops.COLLECTIONS.images || id !== targetId) return
+  makeError(bucket)
+}
+
+/* ---------------- J1（判据 A）：重复键 ＋ 按 `_id` 读回命中 ⇒ 视为成功、不退款、不建第二行 ---------------- */
+{
+  const RID = 'rid-j1-dupkey-readback-hit'
+  const newId = jNewIdOf(RID)
+  const bytes = jUniqueBytes('j1')
+  const productSha = sha256Hex(bytes)
+  /* 「并发写方」已抢先落的那一行（挂在同一行号下 ⇒ 第一路读回命中）。 */
+  const existingRow = {
+    _id: newId,
+    id: newId,
+    stamp_id: 's-1',
+    sealId: 's-1',
+    kind: 'FACE',
+    storage: 'server',
+    storage_key: `xiai/images/${productSha.slice(0, 2)}/${productSha}.png`,
+    sha256: productSha,
+    bytes: bytes.length,
+    bytesLength: bytes.length,
+    mime: 'image/png',
+    width: null,
+    height: null,
+    source: 'ai_enhance',
+    displayOnly: true,
+    source_image_id: SRC_OK,
+    charge_balance_after: 90,
+    upstream_status: 200,
+    elapsed_ms: 7,
+    created_at: '2026-11-02T12:00:00.000Z'
+  }
+  uniqueProductBytes = bytes
+  upstreamMode = 'okUnique'
+  const rowsBefore = imageRowsAll().length
+  const refundBefore = refundSpy.calls
+  jHooks.setInterceptor = jThrower(newId, (bucket) => {
+    bucket.set(newId, Object.assign({}, existingRow))
+    const error = new Error(J_DUP_MESSAGE)
+    error.code = 'E11000'
+    throw error
+  })
+  const reply = await jEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  jHooks.setInterceptor = null
+  upstreamMode = 'ok'
+  const stored = fakeDb.bucketOf('xiai_images').get(newId)
+  const setCalls = jSetCallsOf(newId)
+  const rowsForId = imageRowsAll().filter((row) => row.id === newId)
+  check('J1', '⑨ 抛重复键错（`E11000 duplicate key` ＋ `keyPattern` ＋ `keyValue`）且按 `_id` 读回命中 ⇒ **视为成功**：回包 `ok: true`、**恰 9 键**、`image_id` 逐字 ＝ 读回行 id、`row` ＝ 库内行（深比较）、`preview.sha256` ＝ 读回行摘要；**退款 0 次**、`set` 恰 1 次（不重试）、库内不新增第二行（该行号恰 1 行、影像行总数只多「并发写方」那 1 行）；扣金恰 10', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    idempotent: false,
+    imageIdIsReadBackRow: true,
+    rowIsStoredRow: true,
+    previewShaMatchesRow: true,
+    refundCalls: 0,
+    setCalls: 1,
+    rowsForId: 1,
+    imageRowsDelta: 1,
+    flow: ['CHARGE:-10'],
+    balanceAfterCharge: 90
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    idempotent: reply.idempotent,
+    imageIdIsReadBackRow: reply.image_id === existingRow.id && reply.image_id === newId,
+    rowIsStoredRow: !!reply.row && JSON.stringify(reply.row) === JSON.stringify(stored),
+    previewShaMatchesRow: !!(reply.preview && reply.row && reply.preview.sha256 === productSha && reply.row.sha256 === productSha),
+    refundCalls: refundSpy.calls - refundBefore,
+    setCalls: setCalls.length,
+    rowsForId: rowsForId.length,
+    imageRowsDelta: imageRowsAll().length - rowsBefore,
+    flow: jFlowKinds(RID),
+    balanceAfterCharge: balanceMapOf(J_IDENTITY.uid).points
+  })
+}
+
+/* ---------------- J2（判据 B ＋ D 前半）：两路均读不回 ⇒ 二次 set 后失败、退款恰 1 次 ---------------- */
+let jDupReply = null
+{
+  const RID = 'rid-j2-dupkey-readback-miss'
+  const newId = jNewIdOf(RID)
+  uniqueProductBytes = jUniqueBytes('j2')
+  upstreamMode = 'okUnique'
+  const rowsBefore = imageRowsAll().length
+  const refundBefore = refundSpy.calls
+  const balanceBefore = balanceMapOf(J_IDENTITY.uid).points
+  /* 不种任何并发行 ⇒ 按 `_id` 与按 `sha256` 两路都读不回（每例产物 sha 全库唯一，故 sha 路必空）。 */
+  jHooks.setInterceptor = jThrower(newId, () => {
+    const error = new Error(J_DUP_MESSAGE)
+    error.code = 'E11000'
+    throw error
+  })
+  const reply = await jEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  jHooks.setInterceptor = null
+  upstreamMode = 'ok'
+  jDupReply = reply
+  const setCalls = jSetCallsOf(newId)
+  check('J2', '⑨ 抛重复键错但按 `_id` 与 `sha256` **两路均读不回** ⇒ 同一 doc **再 `set` 一次**、仍失败才判失败：回包**恰 4 键**、`reason` 逐字 `STORAGE_UNAVAILABLE`、`refunded: true` 且 **ledger 恰退款 1 次**（REFUND +10、余额复原到扣前值）、`set` 恰 2 次、零建行；文案前缀与改动前**逐字一致**', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'STORAGE_UNAVAILABLE',
+    refunded: true,
+    refundCalls: 1,
+    setCalls: 2,
+    imageRowsDelta: 0,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    prefixVerbatim: true,
+    balanceRestored: balanceBefore
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    refundCalls: refundSpy.calls - refundBefore,
+    setCalls: setCalls.length,
+    imageRowsDelta: imageRowsAll().length - rowsBefore,
+    flow: jFlowKinds(RID),
+    prefixVerbatim: String(reply.message).indexOf(J_FAIL_PREFIX) === 0,
+    balanceRestored: balanceMapOf(J_IDENTITY.uid).points
+  })
+}
+
+/* ---------------- J3（判据 C）：非重复键错 ⇒ 走原「重试一次」、零读回 ---------------- */
+{
+  const RID = 'rid-j3-nondup-retry'
+  const newId = jNewIdOf(RID)
+  uniqueProductBytes = jUniqueBytes('j3')
+  upstreamMode = 'okUnique'
+  const rowsBefore = imageRowsAll().length
+  const refundBefore = refundSpy.calls
+  const queriesMark = jHooks.queries.length
+  jHooks.setInterceptor = jThrower(newId, () => {
+    const error = new Error('connect ETIMEDOUT 10.0.0.1:443')
+    error.code = 'ETIMEDOUT'
+    throw error
+  })
+  const reply = await jEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  jHooks.setInterceptor = null
+  upstreamMode = 'ok'
+  const setCalls = jSetCallsOf(newId)
+  const shaReads = jShaReadsFrom(queriesMark)
+  check('J3', '⑨ 抛**非重复键错**（`ETIMEDOUT`）⇒ 走原「重试一次」路：`set` 恰 2 次、**零读回**（按 `sha256` 的读计数 0）、退款恰 1 次、`reason` 逐字 `STORAGE_UNAVAILABLE`、文案前缀逐字一致、零建行', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'STORAGE_UNAVAILABLE',
+    refunded: true,
+    refundCalls: 1,
+    setCalls: 2,
+    shaReads: 0,
+    imageRowsDelta: 0,
+    flow: ['CHARGE:-10', 'REFUND:10'],
+    prefixVerbatim: true
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    refundCalls: refundSpy.calls - refundBefore,
+    setCalls: setCalls.length,
+    shaReads: shaReads.length,
+    imageRowsDelta: imageRowsAll().length - rowsBefore,
+    flow: jFlowKinds(RID),
+    prefixVerbatim: String(reply.message).indexOf(J_FAIL_PREFIX) === 0
+  })
+}
+
+/* ---------------- J4（判据 D 前半）：E11000 失败文案的指纹面（锚段在场 ＋ 长串抹除） ---------------- */
+{
+  const message = String((jDupReply && jDupReply.message) || '')
+  const fingerprint = jFingerprintOf(message)
+  const fpMessageSeg = jFpMessageSegOf(fingerprint)
+  check('J4', 'D 指纹面：J2 的 E11000 失败文案**同时含** `E11000`、`keyPattern`、`keyValue`；≥40 位长串已抹为 `<redacted>`（整份回包零出现该长串）；指纹 message 段**不超 120 字**且非空', {
+    hasE11000: true,
+    hasKeyPattern: true,
+    hasKeyValue: true,
+    redacted: true,
+    leakAbsent: true,
+    fpSegNonEmpty: true,
+    fpSegWithin120: true
+  }, {
+    hasE11000: message.indexOf('E11000') !== -1,
+    hasKeyPattern: message.indexOf('keyPattern') !== -1,
+    hasKeyValue: message.indexOf('keyValue') !== -1,
+    redacted: message.indexOf('<redacted>') !== -1,
+    leakAbsent: message.indexOf(LEAK_48) === -1,
+    fpSegNonEmpty: fpMessageSeg.length > 0,
+    fpSegWithin120: fpMessageSeg.length <= 120
+  })
+}
+
+/* ---------------- J5（判据 D 后半）：无锚错误 ⇒ 回退取起始段（不抛错、不超长、非旧 60 字） ---------------- */
+{
+  const RID = 'rid-j5-fingerprint-no-anchor'
+  const newId = jNewIdOf(RID)
+  uniqueProductBytes = jUniqueBytes('j5')
+  upstreamMode = 'okUnique'
+  const refundBefore = refundSpy.calls
+  /* 无任一锚段（`E\d{5}` / duplicate key / keyPattern / keyValue / AlreadyExists / RESOURCE_ALREADY_EXISTS）的长文案。 */
+  jHooks.setInterceptor = jThrower(newId, () => {
+    throw new Error('boom '.repeat(60))
+  })
+  const reply = await jEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  jHooks.setInterceptor = null
+  upstreamMode = 'ok'
+  const fingerprint = jFingerprintOf(String(reply.message))
+  const fpMessageSeg = jFpMessageSegOf(fingerprint)
+  const boomRuns = fpMessageSeg.split('boom').length - 1
+  const setCalls = jSetCallsOf(newId)
+  check('J5', 'D 回退规则：**无锚**错误的指纹不抛错（回包仍恰 4 键、`STORAGE_UNAVAILABLE`、退款 1 次、`set` 2 次）、指纹 message 段 **≤120 字且 >60 字**（不回旧 60 字上限）、内容取自原文起始段（`boom` 在场、出现次数被上限封顶）', {
+    keys: 'message,ok,reason,refunded',
+    ok: false,
+    reason: 'STORAGE_UNAVAILABLE',
+    refunded: true,
+    refundCalls: 1,
+    setCalls: 2,
+    prefixVerbatim: true,
+    fpSegNonEmpty: true,
+    fpSegWithin120: true,
+    fpSegBeyondOld60: true,
+    fpHasBoom: true,
+    fpBoomRunsCapped: true
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    reason: reply.reason,
+    refunded: reply.refunded,
+    refundCalls: refundSpy.calls - refundBefore,
+    setCalls: setCalls.length,
+    prefixVerbatim: String(reply.message).indexOf(J_FAIL_PREFIX) === 0,
+    fpSegNonEmpty: fpMessageSeg.length > 0,
+    fpSegWithin120: fpMessageSeg.length <= 120,
+    fpSegBeyondOld60: fpMessageSeg.length > 60,
+    fpHasBoom: fpMessageSeg.indexOf('boom') !== -1,
+    fpBoomRunsCapped: boomRuns <= 24
+  })
+}
+
+/* ---------------- J6（判据 E）：入册前 doc 清洗（`undefined` / `NaN` 一律不落） ---------------- */
+{
+  const RID = 'rid-j6-doc-sanitize'
+  const newId = jNewIdOf(RID)
+  uniqueProductBytes = jUniqueBytes('j6')
+  upstreamMode = 'okUnique'
+  /* 模拟「服务端取不到结算后余额」：只改**回传值**（`balance_after` ⇒ `undefined`），不动账本行。 */
+  const chargeWrap = ledger.chargePoints
+  ledger.chargePoints = async (params) => {
+    const result = await chargeWrap(params)
+    return result && result.ok === true ? Object.assign({}, result, { balance_after: undefined }) : result
+  }
+  const reply = await jEnhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' }, RID)
+  ledger.chargePoints = chargeWrap
+  upstreamMode = 'ok'
+  const row = fakeDb.bucketOf('xiai_images').get(newId)
+  const badValueKeys = row
+    ? Object.keys(row).filter((key) => row[key] === undefined || (typeof row[key] === 'number' && Number.isNaN(row[key])))
+    : ['<no-row>']
+  const coreKeys = ['id', 'stamp_id', 'sealId', 'kind', 'storage', 'storage_key', 'sha256', 'bytes', 'bytesLength', 'mime', 'source', 'displayOnly', 'source_image_id', 'upstream_status', 'elapsed_ms', 'created_at']
+  check('J6', 'E doc 清洗：`charge_balance_after` 取到 `undefined` ⇒ **落盘 doc 无该键**；落盘行**零 `undefined` / `NaN` 值键**、其余核心键一个不少；回包仍恰 9 键且 `row` ＝ 库内行', {
+    ok: true,
+    keys: SUCCESS_KEYS,
+    rowFound: true,
+    hasChargeBalanceAfter: false,
+    badValueKeys: [],
+    coreKeysAllPresent: true,
+    replyRowMatchesStored: true
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    rowFound: !!row,
+    hasChargeBalanceAfter: !!(row && Object.prototype.hasOwnProperty.call(row, 'charge_balance_after')),
+    badValueKeys,
+    coreKeysAllPresent: !!row && coreKeys.every((key) => Object.prototype.hasOwnProperty.call(row, key)),
+    replyRowMatchesStored: !!row && !!reply.row && JSON.stringify(reply.row) === JSON.stringify(row)
+  })
+}
+
 /* 收针：清 sleep 注入、复位上游模式（不留全局态给后续脚本进程）。 */
 aiEnhance.setAiEnhanceSleepProvider(null)
 upstreamMode = 'ok'
+jHooks.setInterceptor = null
 
 /* ===========================================================================
    收尾
