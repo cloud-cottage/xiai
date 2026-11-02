@@ -133,6 +133,28 @@ const AI_ENHANCE_POLL_BUDGET_MS = 90000
 const AI_ENHANCE_POLL_QUERY_TIMEOUT_MS = 30000
 const AI_ENHANCE_POLL_MAX_QUERIES = 20
 
+/** 诊断指纹 `message` 段**总长上限**（字）。**60 → 120**（2026-11-02 真因处置）：平台 bulk write
+ *  多写错 `[FailedOperation] multiple write errors: [{write errors: [{E11000 … keyPattern …`
+ *  的真因恰好落在第 60 字之后，旧 60 字截断把 `E11000` 与冲突键整段吃掉（第二次同类故障的
+ *  诊断面盲区）。锚段片段与无命中回退段**共用**此上限。 */
+const FINGERPRINT_MESSAGE_LIMIT = 120
+
+/** 诊断指纹锚段命中后**前后各取字数**（`该片段连同前后 20 字纳入指纹`）。 */
+const FINGERPRINT_ANCHOR_CONTEXT = 20
+
+/** 重复键类锚段（**按序尝试**：`E11000` 族 → 文案 → 冲突键名 → 已存在类）。**一处定义、两处引用**：
+ *  ① `errorFingerprint` 的关键片段提取；② ⑨ 入册失败后「是否重复键类」的判定（共用同一判据
+ *  ⇒ 指纹看得见的错，兜底必然认得出）。正则皆非 `/g` ⇒ `test` / `exec` 无 `lastIndex` 状态、
+ *  可安全重复调用。 */
+const DUPLICATE_KEY_ANCHORS = Object.freeze([
+  /E\d{5}/,
+  /duplicate key/i,
+  /keyPattern/,
+  /keyValue/,
+  /AlreadyExists/,
+  /RESOURCE_ALREADY_EXISTS/
+])
+
 /* --------------------------------------------------------------------------- *
   注入缝（离线自检 / 宿主用；生产不注入 ⇒ 走全局 `fetch`）
  * --------------------------------------------------------------------------- */
@@ -197,13 +219,95 @@ function failure(reason, message, refunded) {
 }
 
 /**
- * **面向管理员的诊断指纹**（与 `index.js::errorFingerprint` 同形：`name / code / message 前 60 字`
- * 三段；**非临时补丁，上线后保留**）—— 但本版**向下展开 `error.cause`（最多两层）**：
- * 平台真因（如 `ops.persist` 包装错 `WRITE_STEP_FAILED` 的 `cause`）只挂在 cause 上，
- * 不展开就只会回显我们自己的包装文案，诊断面等于没有。分层间以 ` ⇒ ` 连接（外因 ⇒ 内因）。
+ * 诊断指纹的 `message` 段取值（纯函数；**零 I/O、零自抛**）。
+ * 口径（2026-11-02 真因处置）：**先提关键片段、再截长** ——
+ *  · 先抹长串（≥40 位连续字母数字 → `<redacted>`；**抹除先于提取** ⇒ 片段里也不带长串）；
+ *  · 按 `DUPLICATE_KEY_ANCHORS` **依次**找锚段：每个命中锚段取「位置前后各
+ *    `FINGERPRINT_ANCHOR_CONTEXT`（20）字」的窗口（**锚核心** ＝ 锚段本身），相邻 / 重叠
+ *    窗口合并（`E11000` 与 `duplicate key`、`keyPattern` 与 `keyValue` 天然相邻 ⇒ 合并成
+ *    一块）、按原文顺序拼接（块间以 ` … ` 连接；被边界截断处带 `…`）；
+ *  · **预算装配（总长恒 ≤ `FINGERPRINT_MESSAGE_LIMIT`（120 字））**：逐块放入，放不下时
+ *    **先收尾（末锚之后的上下文）、再收头（首锚之前的上下文）**，锚核心与块序永不裁 ——
+ *    多锚段长文案（`E11000` ＋ `keyPattern` ＋ `keyValue`）在 120 字内**一个锚都不丢**；
+ *    极端情形（连锚核心都放不下）才对当前块硬截，兜底总长不超限；
+ *  · 一个锚都没命中 ⇒ 取抹除后原文起始段（同 120 字上限 —— 与旧 60 字相比只多不少，
+ *    诊断面只增不减）。
+ * **任何异常 ⇒ 回空串**（由 `errorFingerprint` 转 `unknown`；诊断面不得反噬主路）。
+ * @param {*} rawMessage 任意形态的 message（非字符串 ⇒ 当空串）
+ * @returns {string}
+ */
+function fingerprintMessageOf(rawMessage) {
+  try {
+    const scrubbed = String(rawMessage === undefined || rawMessage === null ? '' : rawMessage).replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>')
+    const total = scrubbed.length
+    const windows = []
+    for (const anchor of DUPLICATE_KEY_ANCHORS) {
+      const hit = anchor.exec(scrubbed)
+      if (!hit) continue
+      const coreStart = hit.index
+      const coreEnd = hit.index + hit[0].length
+      windows.push({
+        start: Math.max(0, coreStart - FINGERPRINT_ANCHOR_CONTEXT),
+        end: Math.min(total, coreEnd + FINGERPRINT_ANCHOR_CONTEXT),
+        coreStart,
+        coreEnd
+      })
+    }
+    if (windows.length === 0) return scrubbed.slice(0, FINGERPRINT_MESSAGE_LIMIT)
+    windows.sort((left, right) => left.start - right.start)
+    const merged = []
+    for (const window of windows) {
+      const last = merged.length > 0 ? merged[merged.length - 1] : null
+      if (last && window.start <= last.end) {
+        last.start = Math.min(last.start, window.start)
+        last.end = Math.max(last.end, window.end)
+        last.coreStart = Math.min(last.coreStart, window.coreStart)
+        last.coreEnd = Math.max(last.coreEnd, window.coreEnd)
+      } else {
+        merged.push(Object.assign({}, window))
+      }
+    }
+    let out = ''
+    for (const window of merged) {
+      const sep = out === '' ? '' : ' … '
+      const budget = FINGERPRINT_MESSAGE_LIMIT - out.length - sep.length
+      if (budget <= 0) break
+      let { start, end, coreStart, coreEnd } = window
+      const markStart = () => (start > 0 ? '…' : '')
+      const markEnd = () => (end < total ? '…' : '')
+      let excess = markStart().length + (end - start) + markEnd().length - budget
+      if (excess > 0) {
+        const cutEnd = Math.min(end - coreEnd, excess)
+        end -= cutEnd
+        excess -= cutEnd
+        const cutStart = Math.min(coreStart - start, excess)
+        start += cutStart
+        excess -= cutStart
+      }
+      const piece = markStart() + scrubbed.slice(start, end) + markEnd()
+      out += sep + (excess > 0 ? piece.slice(0, Math.max(0, budget)) : piece)
+    }
+    return out.slice(0, FINGERPRINT_MESSAGE_LIMIT)
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * **面向管理员的诊断指纹**（与 `index.js::errorFingerprint` 同形：`name / code / message`
+ * 三段；**非临时补丁，上线后保留**）—— 本版有两处加强（2026-11-02 真因处置）：
+ *  ① **message 段先提关键片段再截长**（`fingerprintMessageOf`）：按 `DUPLICATE_KEY_ANCHORS`
+ *     依次尝试 `E\d{5}` / `duplicate key` / `keyPattern` / `keyValue` / `AlreadyExists` /
+ *     `RESOURCE_ALREADY_EXISTS`，命中 ⇒ 该锚段连同前后 20 字纳入、总长上限
+ *     `FINGERPRINT_MESSAGE_LIMIT`（**120 字**）—— 平台 bulk write 多写错的
+ *     `[FailedOperation] multiple write errors: [{write errors: [{E11000 … keyPattern …`
+ *     在旧 60 字截断下恰好把 `E11000` 与冲突键吃掉；
+ *  ② **向下展开 `error.cause`（最多两层）**：平台真因（如 `ops.persist` 包装错
+ *     `WRITE_STEP_FAILED` 的 `cause`）只挂在 cause 上，不展开就只会回显我们自己的包装文案，
+ *     诊断面等于没有。分层间以 ` ⇒ ` 连接（外因 ⇒ 内因）。
  * 硬口径（与 `index.js` 逐条同尺）：
  *  · **零密钥 / 零令牌 / 零用户隐私**：≥40 位连续字母数字长串（base64 / hex 形态的
- *    密钥、令牌、密文）一律抹成 `<redacted>`；message 只取前 60 字。
+ *    密钥、令牌、密文）一律抹成 `<redacted>`（抹除先于片段提取 —— 片段里也不带长串）。
  *  · **纯函数、绝不自抛**：异常对象取不到值（null / 非对象 / 无 name / 无 message）⇒
  *    对应段回 `'unknown'`；本函数任何分支都不得抛错（诊断面不得反噬主路）。
  *  · 只进 `message`（仍是 `{ok,reason,message}` 恰 3 键），**不新增 reason 字面值**。
@@ -223,8 +327,8 @@ function errorFingerprint(error) {
       const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
       const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
       const rawMessage = typeof source.message === 'string' ? source.message : ''
-      const scrubbed = rawMessage.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 60)
-      return `${name} / code=${code} / ${scrubbed === '' ? 'unknown' : scrubbed}`
+      const message = fingerprintMessageOf(rawMessage)
+      return `${name} / code=${code} / ${message === '' ? 'unknown' : message}`
     }
     const segments = [segmentOf(error)]
     let current = error
@@ -238,6 +342,35 @@ function errorFingerprint(error) {
     return segments.join(' ⇒ ')
   } catch {
     return 'unknown'
+  }
+}
+
+/**
+ * **重复键类判定**（⑨ 入册幂等兜底的门；纯函数、**零 I/O、零自抛**）：错误链 message
+ * （本层 + 向下两层 `cause`，与 `errorFingerprint` 展开同尺）任一层命中
+ * `DUPLICATE_KEY_ANCHORS` 任一锚段 ⇒ `true`。判据与指纹提取**共用同一常量** ⇒ 指纹里
+ * 看得见 `E11000` 的错，这里必然认得出。取不到 message / 任何异常 ⇒ `false`
+ * （判不出 ⇒ 按非重复键类走原策略 —— 兜底只在**认得准**时才介入）。
+ * @param {*} error `persistEnhanceRow` 抛出的异常（可带 `cause` 链）
+ * @returns {boolean}
+ */
+function isDuplicateKeyError(error) {
+  try {
+    let current = error
+    for (let depth = 0; depth < 3; depth += 1) {
+      if (current === null || current === undefined) break
+      const message =
+        typeof current === 'string'
+          ? current
+          : current !== null && typeof current === 'object' && typeof current.message === 'string'
+            ? current.message
+            : ''
+      if (message !== '' && DUPLICATE_KEY_ANCHORS.some((anchor) => anchor.test(message))) return true
+      current = current !== null && typeof current === 'object' ? current.cause : undefined
+    }
+    return false
+  } catch {
+    return false
   }
 }
 
@@ -326,6 +459,27 @@ async function uploadProductBytes(objectKey, bytes) {
 async function persistEnhanceRow(imageId, doc) {
   const ops = opsModule()
   await ops.persist({ writes: [{ kind: 'set', collection: ops.COLLECTIONS.images, id: imageId, doc }] })
+}
+
+/** 重复键类失败的**兜底读回**（⑨ 用；**只读** —— 不写、不删、不改任何既有行）：
+ *  先按新影像行号读（`readEnhanceRow`），读不到再按 `sha256` 读（内容寻址唯一索引撞键
+ *  ⇒ 既有行挂在**另一个 `_id`** 下 —— 只有按摘要才找得到）；两路皆空 / 读抛错 ⇒ `null`
+ *  （调用方按原策略「同一 doc 再 set 一次」）。不 `add`、不新建第二行。 */
+async function readBackExistingRow(imageId, sha256) {
+  try {
+    const row = await readEnhanceRow(imageId)
+    if (row && typeof row === 'object') return row
+  } catch {
+    /* 第一路读抛错（读面抖动）⇒ 继续第二路；两路都失败才放弃（不吞成「有行」）。 */
+  }
+  try {
+    const ops = opsModule()
+    const rows = await ops.readRows(ops.COLLECTIONS.images, { sha256: text(sha256) }, { limit: 1 })
+    if (rows.length > 0 && rows[0] && typeof rows[0] === 'object') return rows[0]
+  } catch {
+    /* 第二路也读不回 ⇒ null ⇒ 调用方按原策略重试。 */
+  }
+  return null
 }
 
 /** 已落库的那一行（**读回为先**：权威行逐字；读不回 ⇒ 与入册对象逐字段一致的重建行 ——
@@ -948,14 +1102,43 @@ async function enhanceFace(payload, identity, context) {
   }
   /* 入册前 doc 清洗：`undefined` / `NaN` 一律不落（缺键 ≠ 非法值）；其余字段与取值不变。 */
   sanitizeEnhanceDoc(doc)
-  /* ⑨ 首次 `doc(id).set` 失败 ⇒ 用清洗后的同一 doc **重试一次**（`set` 幂等 upsert，
-     不新建第二行）；**仍失败才退款判失败**。重试与首试共用同一 `doc` ⇒ 零第二份入册对象。 */
+  /* ⑨ 首次 `doc(id).set` 失败 ⇒ 先判**重复键类**（错误链 message 命中 `DUPLICATE_KEY_ANCHORS`
+     —— 平台 bulk write 多写错 `E11000`：`_id` 或 `sha256` 等唯一索引已有行 ⇒ 这一路 `set`
+     永远过不去，重试多少次都一样）：
+       · 是 ⇒ **读回既有行**（`readBackExistingRow`：先按行号、再按 `sha256`；**只读回 ——
+         不 `add`、不新建第二行、不删不改既有行**）：读回成功 ⇒ **视为成功** —— 回包 `row`
+         ＝ 读回行、`image_id` ＝ 读回行 `id`、**不退款**（上游确已出了一张图、库内也确已有
+         该行），键面仍恰 9 键、**零新增回包键**；读不回 ⇒ 走下面的原策略。
+       · 不是重复键类 / 读不回 ⇒ 原策略不变：用清洗后的同一 doc **重试一次**（`set` 幂等
+         upsert，不新建第二行），**仍失败才退款判失败**（文案与原断逐字一致）。 */
   let persistError = null
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  try {
+    await persistEnhanceRow(newImageId, doc)
+  } catch (error) {
+    persistError = error
+    if (isDuplicateKeyError(error)) {
+      const recoveredRow = await readBackExistingRow(newImageId, productSha)
+      if (recoveredRow) {
+        /* 重复键 + 读回既有行 ⇒ 成功面（**不退款**；不改写既有行 —— 只读回）。 */
+        return {
+          ok: true,
+          image_id: text(recoveredRow.id) || newImageId,
+          source_image_id: imageId,
+          preview: { mime: productMime, sha256: productSha },
+          charge: { amount: AI_ENHANCE_COST, balance: charged.balance },
+          upstream_status: upstreamCall.status,
+          elapsed_ms: Number.isInteger(upstreamCall.elapsedMs) ? upstreamCall.elapsedMs : 0,
+          idempotent: charged.idempotent,
+          row: recoveredRow
+        }
+      }
+    }
+  }
+  if (persistError) {
+    /* 重试与首试共用同一 `doc` ⇒ 零第二份入册对象（不新建第二行）。 */
     try {
       await persistEnhanceRow(newImageId, doc)
       persistError = null
-      break
     } catch (error) {
       persistError = error
     }
