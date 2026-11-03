@@ -5672,6 +5672,25 @@ function isDuplicateKeyError(error) {
 }
 
 /**
+ * **写前剔 `_id`（`set` 专用；纯函数、零 I/O、**绝不自抛**）**：CloudBase 的
+ * `doc(id).set(doc)` 不允许 doc 内再出现 `_id`（报 `INVALID_PARAM / 不能更新_id的值`）——
+ * 文档标识只由 `doc(step.id)` 这一路给。故对带 `_id` 的 doc 做**浅拷贝后剔除该键**；
+ * **不改写调用方传进来的对象**（浅拷贝 ⇒ 调用方原对象仍带 `_id`）。doc 本无 `_id`
+ * （含 `null` / 非对象）⇒ **原样返回**（引用都不换 ⇒ 与改前逐字相同、零额外开销）。
+ * 仅 `persist` 的 `kind === 'set'` 分支（含其建集自愈 `add` 重试）调用；`update` / `add`
+ * 分支不经过此函数（语义不动）。
+ * @param {any} doc 待写入的文档
+ * @returns {any} 无 `_id` 的文档（无 `_id` 时为原引用）
+ */
+function stripDocId(doc) {
+  if (!doc || typeof doc !== 'object') return doc
+  if (!Object.prototype.hasOwnProperty.call(doc, '_id')) return doc
+  const copy = Object.assign({}, doc)
+  delete copy._id
+  return copy
+}
+
+/**
  * 落盘（**唯一写点**）。
  *
  * 两种计划形态（互斥）：
@@ -5700,21 +5719,30 @@ async function persist(plan) {
       const step = plan.writes[index]
       try {
         if (step && step.kind === 'set') {
-          /* **建集自愈（本单真因修）**：CloudBase 的 `doc(id).set()` 对**从未被创建的集合**回
+          /* **建集自愈（上一轮真因修）**：CloudBase 的 `doc(id).set()` 对**从未被创建的集合**回
              `DATABASE_COLLECTION_NOT_EXIST`（`set` 不自动建集，只有 `add` 会）⇒ 生产
-             `xiai_correction_summaries` 从未被写过 ⇒ `submitCorrection` 的第 2/2 步、
-             `reviewCorrection` 的第 3/3 步**恒失败**（用户所见「提交勘误永远报写入中断」
-             「采纳 / 驳回第三步永远失败」，而前置步骤已真写入）。故**仅**对「集合不存在」
+             `xiai_correction_summaries` 从未被写过 ⇒ 上述各步**恒失败**。故**仅**对「集合不存在」
              改走 `add()` 重试一次（首写即建集，且带同一确定性 `_id` ⇒ 幂等）；`add` 报
              **重复键**（错误链含 `E11000` / `duplicate key`）⇒ 行已存在 ⇒ **幂等成功、不抛**；
              其余错误原样上抛 ⇒ 由外层 catch 按原样包 `WRITE_STEP_FAILED`（**回包键面 /
-             reason 一字不变**）。`update` / `add` 两分支与本分支的正常路**逐字未改**。 */
+             reason 一字不变**）。`update` / `add` 两分支与本分支的正常路**逐字未改**。
+             **写前剔 `_id`（本单真因修 2）**：CloudBase 的 `doc(id).set(doc)` **不允许 doc 内
+             再出现 `_id`** ⇒ 报 `INVALID_PARAM / 不能更新_id的值`（文档标识只由 `doc(step.id)`
+             这条路给；doc 内的 `_id` 是「重复身份」而非数据）。本文件的摘要行
+             （`buildCorrectionSummary` 恒带确定性 `_id`）与采信行（`row._id = endorsementId`）
+             都自带 `_id` ⇒ `submitCorrection` 第 2/2 步、`endorseCorrection` 第 1/2 与 2/2 步、
+             `reviewCorrection` 第 3/3 步**恒失败**（前置步骤已真写入 ⇒ 用户所见「提交了但报错」）。
+             故 **仅**对「doc 带 `_id`」这一类：**浅拷贝后剔除 `_id`** 再交给 `set` / 自愈 `add`
+             （`add` 的 `_id` 一律只用 `step.id`；`Object.assign({_id: step.id}, doc)` 里 doc 已无
+             `_id` ⇒ 不会覆盖）。**不改写调用方传进来的对象**（浅拷贝）；doc 本无 `_id` ⇒ 原样传，
+             与改前逐字相同。 */
+          const doc = stripDocId(step.doc)
           try {
-            await db.collection(step.collection).doc(step.id).set(step.doc)
+            await db.collection(step.collection).doc(step.id).set(doc)
           } catch (error) {
             if (!isCollectionNotExistError(error)) throw error
             try {
-              await db.collection(step.collection).add(Object.assign({ _id: step.id }, step.doc))
+              await db.collection(step.collection).add(Object.assign({ _id: step.id }, doc))
             } catch (addError) {
               if (!isDuplicateKeyError(addError)) throw addError
             }
