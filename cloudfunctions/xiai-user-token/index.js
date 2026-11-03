@@ -369,7 +369,9 @@ async function handleVerify(event, config, callContext) {
       if (completedSteps > 0) {
         return deny(
           REASONS.STORAGE_UNAVAILABLE,
-          `寫入中斷：第 ${failedStep} / ${totalSteps} 步落盤失敗 ⇒ 已停止後續步驟；**已發生 ${completedSteps} 步寫入（未回退）**，本次**非零寫入**。請重放本操作（正式行按冪等鍵去重）以自愈。`
+          /* **本单追加（不改原句一字）**：末尾补 `診斷：` 指纹 ＋ 三档进度读数，
+             让运维在客户端回包里一眼定位失败步（集合不存在 / 唯一索引 / 权限 …）。 */
+          `寫入中斷：第 ${failedStep} / ${totalSteps} 步落盤失敗 ⇒ 已停止後續步驟；**已發生 ${completedSteps} 步寫入（未回退）**，本次**非零寫入**。請重放本操作（正式行按冪等鍵去重）以自愈。（診斷：${errorFingerprint(error)}；failedStep=${failedStep} / totalSteps=${totalSteps} / completedSteps=${completedSteps}）`
         )
       }
       return deny(
@@ -380,7 +382,17 @@ async function handleVerify(event, config, callContext) {
     if (!docId) {
       audit({ action: 'verify', outcome: REASONS.STORAGE_UNAVAILABLE, op, uid: identity.uid, stage: 'persist-id', serverNow: now })
       /* **本单 I-1**：走到这里 ⇒ 写入**已送出**（只是平台未回文档标识）⇒ **不得声称零写入**。 */
-      return deny(REASONS.STORAGE_UNAVAILABLE, '權威存儲未回傳文檔標識，無法確認寫入結果（該步寫入已送出、未回退）；請重放本操作以核對。')
+      /* **本单追加（原句一字不改，仅在末尾补同口径 `診斷：` 指纹）**：该分支**没有抛出的异常**
+         （`persist` 正常 resolve 却回空 `docId`）⇒ 用条件本身的三段描述合成指纹，
+         格式与 `errorFingerprint(error)` 完全同形（`name / code / message`），便于同一套解析。 */
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `權威存儲未回傳文檔標識，無法確認寫入結果（該步寫入已送出、未回退）；請重放本操作以核對。（診斷：${errorFingerprint({
+          name: 'PersistNoDocId',
+          code: 'PERSIST_NO_DOC_ID',
+          message: 'persist resolved with empty docId'
+        })}）`
+      )
     }
   }
   /* ⑥ 滑动续期：**只续期、不续权**（**仅令牌路** —— 会话路无令牌可续）；续期仍走完上面全部判定。 */
