@@ -44,7 +44,7 @@
 const crypto = require('crypto')
 /* **2026-10-29 应急修单**：本文件**不再引入** config 的凭据对解析器（它带平台族回退）——
    云函数侧的凭据名解析改由本文件本地的 `cloudbaseKeyPairFromEnv()` 单点负责（只认 `CLOUDBASE_*`）。 */
-const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf, readEnvId, isDocNotExistError } = require('./config.js')
+const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf, readEnvId, isDocNotExistError, isCollectionNotExistError } = require('./config.js')
 /* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`
    **逐字节相同**（`scripts/verify-code-id.mjs` 机械断言）；本文件只经它编 / 解码，不自写第二套。 */
 const codeId = require('./codeId.js')
@@ -201,6 +201,33 @@ const COLLECTIONS = Object.freeze({
   items: 'xiai_items',
   itemImports: 'xiai_item_imports'
 })
+
+/**
+ * **可选读面白名单**（`readRows` 里唯一允许把「集合不存在」降级成「零行」的集合；封闭名单）。
+ *
+ * 判据（为什么只列这三个）：它们都是**「查有没有行」语义的可选读面** ——
+ *   · `endorsements`       ＝ 采信私有行：**生产从未被创建**（2026-10-04 起 `reviewCorrection` /
+ *     `endorseCorrection` 每次都因读它抛 `DATABASE_COLLECTION_NOT_EXIST` 而整笔零写入，
+ *     集合因此永远没被写过 ⇒ 读它「零行」是真实语义）；
+ *   · `correctionSummaries`＝ 值级公开脱敏摘要行（首单提交才 upsert，可能尚无行 / 未建集合）；
+ *   · `correctionsPublic`  ＝ 公开只读脱敏投影（首条采纳才 upsert，同上）。
+ * 三者**都不是权威写面、也不是防重门 / 引用校验面** ⇒ 「不存在 ≡ 零行」不改变任何判定结果。
+ *
+ * **明确不在名单**（必须原样抛出，绝不降级）：
+ *   · `corrections`（`xiai_corrections`）—— 勘误权威私有行，`reviewCorrection` 的状态门 /
+ *     `expectAtLeast` 防重门都靠它；降级成零行 ⇒ 「未找到该勘誤單」被误报、更新命中 0 行被静默放过；
+ *   · `seals` / `faces` / `images`（`xiai_seals` / `xiai_faces` / `xiai_images`）—— 引用校验与
+ *     号源发号读面，降级 ⇒ 可能对不存在的对象发号 / 落盘；
+ *   · `roles` / `persons` / `*Imports` / `items` / `COUNTERS_COLLECTION` / 积分与 AI 诸集合 ——
+ *     判权（fail-closed）与账本面，真存储故障绝不能伪装成空。
+ * 另：**非白名单集合上的任何错误、白名单集合上的任何非「集合不存在」错误（ETIMEDOUT / 权限 /
+ * 5xx …）一律照旧上抛**（判据单点见 `lib/config.js::isCollectionNotExistError`）。
+ */
+const OPTIONAL_READ_COLLECTIONS = Object.freeze([
+  COLLECTIONS.endorsements,
+  COLLECTIONS.correctionSummaries,
+  COLLECTIONS.correctionsPublic
+])
 
 /**
  * 可勘误字段表（键 → 上屏顯示名）。
@@ -1171,7 +1198,9 @@ function rowsOfReply(reply) {
 
 /**
  * **读**（**唯一读点**）：按等值条件读某集合的行。
- * 失败 ⇒ 抛错（由 `index.js` 统一转 `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。
+ * 失败 ⇒ 抛错（由 `index.js` 统一转 `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）；
+ * **唯一例外** ＝ 白名单可选集合 `OPTIONAL_READ_COLLECTIONS` 上的「集合不存在」
+ * （`DATABASE_COLLECTION_NOT_EXIST`）⇒ 视作**零行**回 `[]`（判据与理由见下方实现处注释）。
  * `collection(` 只在本文件出现 ⇒ 静态判据仍成立。
  * **分页护栏（本单 I-3 真因）**：真实 CloudBase 的 `.get()` **默认上限 100 行** —— 不显式
  * `.limit()` 时 `where({batch_id}).get()` 只回该批**前 100 行**（**与状态无关**）⇒ 批内超过 100 行
@@ -1206,15 +1235,31 @@ async function readRows(collection, match, options) {
     }
     return chain
   }
-  if (orderField) {
-    try {
-      return rowsOfReply(await build(true).get())
-    } catch (error) {
-      /* 退路（**不吞真故障**）：真存储故障会在下面这次重读里再次抛出，仍由 `index.js` 转 `STORAGE_UNAVAILABLE`。 */
-      return rowsOfReply(await build(false).get())
+  /* **可选集合降级（本单真因修）**：CloudBase 对**从未被写过**的集合回
+     `DATABASE_COLLECTION_NOT_EXIST`（生产实测：`xiai_endorsements` 不存在 ⇒ `reviewCorrection`
+     准备阶段读采信计数即抛 ⇒ 整笔零写入）。对**白名单** `OPTIONAL_READ_COLLECTIONS`（「查有没有行」
+     语义的可选读面）「集合不存在 ≡ 零行」⇒ 回 `[]`；**其余集合、其余错误一律原样抛出**
+     （防重门 / 引用校验 / 判权读面绝不把真存储故障吞成空）。判据单点
+     `lib/config.js::isCollectionNotExistError`（只看错误码 / errCode ＋一条特异文本兜底）。 */
+  const downgrade = (error) => isCollectionNotExistError(error) && OPTIONAL_READ_COLLECTIONS.indexOf(collection) !== -1
+  try {
+    if (orderField) {
+      try {
+        return rowsOfReply(await build(true).get())
+      } catch (error) {
+        /* 退路（**不吞真故障**）：真存储故障会在下面这次重读里再次抛出，仍由 `index.js` 转 `STORAGE_UNAVAILABLE`；
+           「集合不存在」也会在下面这次重读里再次抛出，由外层 catch 按白名单统一判定（白名单 ⇒ `[]`，否则上抛）。 */
+        if (!isCollectionNotExistError(error)) {
+          return rowsOfReply(await build(false).get())
+        }
+        throw error
+      }
     }
+    return rowsOfReply(await build(false).get())
+  } catch (error) {
+    if (downgrade(error)) return []
+    throw error
   }
-  return rowsOfReply(await build(false).get())
 }
 
 /**

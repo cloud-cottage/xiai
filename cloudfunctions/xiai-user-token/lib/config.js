@@ -286,6 +286,36 @@ function isDocNotExistError(error) {
   return false
 }
 
+/**
+ * **「集合不存在」类错误判据**（供 `readRows` 的**白名单降级**用；纯函数，**绝不自抛**）。
+ *
+ * 背景（生产实测真因）：CloudBase 里**从未被写过的集合**在 `.where(...).get()` 时回
+ * `code=DATABASE_COLLECTION_NOT_EXIST` ／ `[ResourceNotFound] Db or Table not exist: <name>`
+ * ⇒ `reviewCorrection` 的准备阶段读 `xiai_endorsements`（采信计数）即抛 ⇒ 整笔零写入
+ * （自 2026-10-04 起采纳 / 驳回在生产从未生效）。**只对「可选读面」集合**允许把
+ * 「集合不存在」当「零行」，其余集合与其余错误一律照旧上抛（口径见 `lib/ops.js` 的
+ * `OPTIONAL_READ_COLLECTIONS` 注释）。
+ *
+ * 判据（命中其一即判「集合不存在」）：
+ *   · `error.code === 'DATABASE_COLLECTION_NOT_EXIST'`（生产实测的错误码）；
+ *   · `error.errCode === 'DATABASE_COLLECTION_NOT_EXIST'`（部分 SDK 把同一码放 `errCode`）；
+ *   · message 文本兜底 **`[ResourceNotFound] Db or Table not exist`**（服务端对不存在的表回的
+ *     文本形态；仅此**一条**、足够特异的子串 —— 不做任何泛化文本匹配，避免把真故障吞成空集）。
+ * 其余任何错误（连接失败 / 超时 ETIMEDOUT / 权限 / 5xx / 文档不存在 …）一律**判否** ⇒
+ * 调用方照旧上抛，绝不吞成「无行」。
+ * @param {any} error 捕获到的错误
+ * @returns {boolean} 是否属「集合不存在」类
+ */
+function isCollectionNotExistError(error) {
+  if (!error || typeof error !== 'object') return false
+  const code = typeof error.code === 'string' ? error.code : ''
+  if (code === 'DATABASE_COLLECTION_NOT_EXIST') return true
+  if (typeof error.errCode === 'string' && error.errCode === 'DATABASE_COLLECTION_NOT_EXIST') return true
+  const message = typeof error.message === 'string' ? error.message : ''
+  if (message.indexOf('[ResourceNotFound] Db or Table not exist') !== -1) return true
+  return false
+}
+
 module.exports = {
   REASONS,
   ENV_NAMES,
@@ -306,5 +336,6 @@ module.exports = {
   fingerprint,
   maskedPhone,
   isDocNotExistError,
+  isCollectionNotExistError,
   readConfig
 }
