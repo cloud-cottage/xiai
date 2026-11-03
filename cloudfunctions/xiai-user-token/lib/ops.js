@@ -5644,6 +5644,34 @@ const ADMIN_OPS = Object.freeze({
 })
 
 /**
+ * **重复键类判定**（`set` 建集自愈里 `add` 重试的**幂等门**；纯函数、零 I/O、**绝不自抛**）：
+ * 错误链（本层 ＋ 向下 `cause`，最多三层；与 `index.js::errorFingerprint` 的展开同尺）任一层的
+ * `message` / `name` / `code` / `errCode` 命中 `E11000` 或 `duplicate key`（不区分大小写）
+ * ⇒ `true`。取不到值 / 任何异常 ⇒ `false`（判不出 ⇒ 按真故障走原样上抛，**绝不把不明错误吞成成功**）。
+ * 语义：`add` 报重复键 ＝ **集合与该 `_id` 行都已存在**（并发路先建了集）⇒ 对「确定性文档键
+ * upsert」而言即已达成目标 ⇒ 幂等成功。
+ * @param {any} error `add()` 抛出的错误（可带 `cause` 链）
+ * @returns {boolean} 是否属「重复键」类
+ */
+function isDuplicateKeyError(error) {
+  try {
+    let current = error
+    for (let depth = 0; depth < 3 && current !== null && current !== undefined; depth += 1) {
+      const source =
+        current !== null && typeof current === 'object' ? current : { message: String(current) }
+      const haystack = [source.message, source.name, source.code, source.errCode]
+        .map((value) => (typeof value === 'string' ? value : ''))
+        .join(' ')
+      if (/E11000/i.test(haystack) || /duplicate key/i.test(haystack)) return true
+      current = source.cause
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+/**
  * 落盘（**唯一写点**）。
  *
  * 两种计划形态（互斥）：
@@ -5672,7 +5700,25 @@ async function persist(plan) {
       const step = plan.writes[index]
       try {
         if (step && step.kind === 'set') {
-          await db.collection(step.collection).doc(step.id).set(step.doc)
+          /* **建集自愈（本单真因修）**：CloudBase 的 `doc(id).set()` 对**从未被创建的集合**回
+             `DATABASE_COLLECTION_NOT_EXIST`（`set` 不自动建集，只有 `add` 会）⇒ 生产
+             `xiai_correction_summaries` 从未被写过 ⇒ `submitCorrection` 的第 2/2 步、
+             `reviewCorrection` 的第 3/3 步**恒失败**（用户所见「提交勘误永远报写入中断」
+             「采纳 / 驳回第三步永远失败」，而前置步骤已真写入）。故**仅**对「集合不存在」
+             改走 `add()` 重试一次（首写即建集，且带同一确定性 `_id` ⇒ 幂等）；`add` 报
+             **重复键**（错误链含 `E11000` / `duplicate key`）⇒ 行已存在 ⇒ **幂等成功、不抛**；
+             其余错误原样上抛 ⇒ 由外层 catch 按原样包 `WRITE_STEP_FAILED`（**回包键面 /
+             reason 一字不变**）。`update` / `add` 两分支与本分支的正常路**逐字未改**。 */
+          try {
+            await db.collection(step.collection).doc(step.id).set(step.doc)
+          } catch (error) {
+            if (!isCollectionNotExistError(error)) throw error
+            try {
+              await db.collection(step.collection).add(Object.assign({ _id: step.id }, step.doc))
+            } catch (addError) {
+              if (!isDuplicateKeyError(addError)) throw addError
+            }
+          }
           if (!primary) primary = String(step.id)
           completedSteps += 1
           continue

@@ -147,22 +147,38 @@ function serverNowSeconds() {
  * 供运维在客户端回包里直接看到真因（否则只有「權威存儲不可用」一句，无从定位）。
  * 硬口径：
  *  · **零密钥 / 零令牌 / 零用户隐私**：≥40 位连续字母数字长串（base64 / hex 形态的
- *    密钥、令牌、密文）一律抹成 `<redacted>`；message 只取前 60 字。
+ *    密钥、令牌、密文）一律抹成 `<redacted>`；message 只取前 60 字（**抹除先于截长**）。
  *  · **纯函数、绝不自抛**：异常对象取不到值（null / 非对象 / 无 name / 无 message）⇒
  *    对应段回 `'unknown'`；本函数任何分支都不得抛错（诊断面不得反噬主路）。
+ *  · **cause 向下展开（本单补；与 `lib/aiEnhance.js::errorFingerprint` 同形）**：最多
+ *    **两层** `cause`，各层同样压成三段、以 ` ⇒ ` 连接（外因 ⇒ 内因）—— 不展开就只回显
+ *    我们自己的包装文案 `WRITE_STEP_FAILED:2/2`，平台真因（如 `DATABASE_COLLECTION_NOT_EXIST`
+ *    只挂在 `error.cause` 上）在诊断面等于不存在。无 cause ⇒ 输出与改前**逐字相同**。
  *  · 只进 `message`（仍是 `{ok,reason,message}` 恰 3 键），**不新增 reason 字面值**。
- * @param {*} error 抛出的异常（任意形态）
- * @returns {string} 形如 `TcbError / code=404 / storage timeout after 60000ms`
+ * @param {*} error 抛出的异常（任意形态；可带 `cause` 链）
+ * @returns {string} 形如 `Error / code=WRITE_STEP_FAILED:2/2 / … ⇒ TcbError / code=404 / …`
  */
 function errorFingerprint(error) {
   try {
-    const source = error !== null && typeof error === 'object' ? error : {}
-    const name = typeof source.name === 'string' && source.name !== '' ? source.name : 'unknown'
-    const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
-    const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
-    const rawMessage = typeof source.message === 'string' ? source.message : ''
-    const scrubbed = rawMessage.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 60)
-    return `${name} / code=${code} / ${scrubbed === '' ? 'unknown' : scrubbed}`
+    const segmentOf = (value) => {
+      const source = value !== null && typeof value === 'object' ? value : {}
+      const name = typeof source.name === 'string' && source.name !== '' ? source.name : 'unknown'
+      const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
+      const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
+      const rawMessage = typeof source.message === 'string' ? source.message : ''
+      const scrubbed = rawMessage.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 60)
+      return `${name} / code=${code} / ${scrubbed === '' ? 'unknown' : scrubbed}`
+    }
+    const segments = [segmentOf(error)]
+    let current = error
+    for (let depth = 0; depth < 2; depth += 1) {
+      const source = current !== null && typeof current === 'object' ? current : null
+      const cause = source ? source.cause : undefined
+      if (cause === undefined || cause === null) break
+      segments.push(segmentOf(cause))
+      current = cause
+    }
+    return segments.join(' ⇒ ')
   } catch {
     return 'unknown'
   }
