@@ -7,6 +7,24 @@
 
 const NS = 'xiai:v1:'
 
+/* ============================================================================
+   **写入代数（本单｜读缓存的唯一失效点）**
+   ----------------------------------------------------------------------------
+   本文件是全工程**唯一**允许直接读写 localStorage 的模块 ⇒ 每一次 `writeKey` /
+   `removeKey` 都把 `generation` 递增一次。数据层 `readCollection` 的读缓存以
+   「代数 + 云端快照行身份」为失效判据：同一代内复用已解析的行数组（大数组只解析一次），
+   代数一变即整档失效 ⇒ **缓存失效点可枚举、只此两处**（本文件两处写入口 ＋ 云端快照换代）。
+   注意：跨标签页直接改 localStorage（不走本模块）不会递增代数 —— 工程内无 `storage`
+   事件监听、也无第二写入口，此边界与改前「各页各自重读」的语义差异仅限跨标签页并发。
+   ========================================================================== */
+let generation = 0
+
+/** 当前写入代数（只读；数据层用它做读缓存失效判据）。 */
+export function storageGeneration() {
+  return generation
+}
+
+
 function safeParse(raw) {
   if (raw === null || raw === undefined) return null
   try {
@@ -25,6 +43,7 @@ export function readKey(key) {
 }
 
 export function writeKey(key, value) {
+  generation += 1
   try {
     const target = migrationBackupWriteKey(key, value)
     window.localStorage.setItem(NS + target, JSON.stringify(value))
@@ -42,6 +61,7 @@ export function writeKey(key, value) {
 }
 
 export function removeKey(key) {
+  generation += 1
   try {
     window.localStorage.removeItem(NS + key)
     return true

@@ -649,8 +649,22 @@ const batchRowCount = computed(() => batches.value.reduce((sum, batch) => sum + 
  * **重新取「我的提交 ＋ 待审队列 ＋ 待审批次」**（异步云读 ∪ 本机镜像）。
  * 三者并行；任一失败**如实上屏**（结构化失败 ＋ 可读文案，**不静默、不以空集冒充**）。
  * 批次分组**复用同一次待审读数**（服务层第 2 参）⇒ 管理员面只发一次云读。
+ *
+ * **重入防护（在飞合并）**：已有一轮在飞 ⇒ 直接复用同一个 promise（不并发发两轮云读）；
+ * 只有当前无在飞时才起新轮，结束时清空指针让下一轮正常发起。
  */
-async function refreshCorrectionReads() {
+/** 在飞的那一轮重取（`null` ＝ 无在飞）。 */
+let refreshCorrectionInFlight = null
+
+function refreshCorrectionReads() {
+  if (refreshCorrectionInFlight) return refreshCorrectionInFlight
+  refreshCorrectionInFlight = runCorrectionReads().finally(() => {
+    refreshCorrectionInFlight = null
+  })
+  return refreshCorrectionInFlight
+}
+
+async function runCorrectionReads() {
   myLoading.value = true
   queueLoading.value = true
   try {
@@ -748,9 +762,13 @@ async function confirmBatch() {
       dialog.decision,
       note
     )
-    feedback.value = result.message
+    /* **驳回结果如实上屏（本单）**：不用服务层合并文案，改按**三数实报**——
+       `成功 N 條（採納 a / 駁回 b）· 失敗 M 條`，M>0 ⇒ 附**首条失败文案**。 */
+    feedback.value = formatReviewFeedback(reviewTallyOf(result, dialog.decision))
     batchDialog.value = null
-    dataVersion.value += 1
+    /* **审核后重取**：由 `dataVersion` 自增改为**直接 await**（读完才放 `batchBusy`）⇒
+       按钮回到可点时读数已更新（在飞合并防并发两轮云读）。 */
+    await refreshCorrectionReads()
   } finally {
     batchBusy.value = false
   }
@@ -758,10 +776,55 @@ async function confirmBatch() {
 
 const reward = points.CORRECTION_REWARD
 
+/* ============================================================================
+   **显示标签「每行只算一次」（本单｜主线程卡死修复）**
+   ----------------------------------------------------------------------------
+   改前：模板每渲染一格就同步调 `seals.getSealById()`（内部 `listSeals()` 装配**全部**印章）、
+   `faceLabelOfRow` / `valueLabelOf` / `submitterOf`（各自全量读镜像）⇒ 32 行 × 两处表格
+   ≈ 60+ 次重型装配；实测单次 `getSealById()` = 13.0 s（79 印 / 2,370 面镜像）⇒ 页面卡死。
+   现在：**一次数据变化只算一遍**（`computed`），模板内只做 `Map` 查表（O(1)）；
+   查不到才回落原计算函数（正常路径不走，保证不出现错字）。
+   依赖面：`rows`（我的提交）＋ `batches`（待审批次内行）—— 二者只由
+   `refreshCorrectionReads` 覆盖 ⇒ 每次审核后自动重算一次。
+   ============================================================================ */
+
+/** 待渲染的全部勘误行（我的提交 ＋ 待审批次内行）——显示标签的唯一计算源。 */
+const labeledRows = computed(() => [...rows.value, ...batches.value.flatMap((batch) => batch.rows)])
+
+/** 印章显示名表（`sealId → 采纳值 / 原始印文 /「佚名」`；服务层单点 `resolveSealDisplayName`）。 */
+const sealLabelMap = computed(() => {
+  const map = new Map()
+  const need = new Set()
+  batches.value.forEach((batch) => need.add(batch.sealId))
+  labeledRows.value.forEach((row) => need.add(sealKeyOf(row)))
+  if (need.size === 0) return map
+  /* 印章视图模型**只装配一次**（`listSeals()` 恰一次），再逐印取显示名。 */
+  const views = new Map()
+  seals.listSeals().forEach((seal) => views.set(seal.stamp_id, seal))
+  need.forEach((id) => {
+    const view = id ? views.get(id) : null
+    map.set(id, view ? corrections.resolveSealDisplayName(view) : '未知印章')
+  })
+  return map
+})
+
+/** 逐行标签表（印面归属 / 提交值 / 提交人；键＝行 id）。 */
+const rowLabelMap = computed(() => {
+  const face = new Map()
+  const value = new Map()
+  const submitter = new Map()
+  labeledRows.value.forEach((row) => {
+    face.set(row.id, seals.faceLabelOf(row.faceId, sealKeyOf(row)))
+    value.set(row.id, computeValueLabel(row))
+    submitter.set(row.id, corrections.submitterLabelOf(row.user_id || row.userId))
+  })
+  return { face, value, submitter }
+})
+
 function sealLabel(sealId) {
-  const seal = seals.getSealById(sealId)
-  /* r2 显示名单点：采纳值 → 原始 seal_name →「佚名」（`corrections.resolveSealDisplayName`）；
-     印章行缺失时才用「未知印章」。 */
+  const cached = sealLabelMap.value.get(sealId)
+  if (cached !== undefined) return cached
+  const seal = sealId ? seals.getSealById(sealId) : null /* 兜底（正常路径不走） */
   return seal ? corrections.resolveSealDisplayName(seal) : '未知印章'
 }
 
@@ -771,7 +834,8 @@ function sealKeyOf(row) {
 
 /** 勘误挂在印面上：列出所属印面，旧数据（无 faceId）按主印面标注。 */
 function faceLabelOfRow(row) {
-  return seals.faceLabelOf(row.faceId, sealKeyOf(row))
+  const cached = rowLabelMap.value.face.get(row.id)
+  return cached !== undefined ? cached : seals.faceLabelOf(row.faceId, sealKeyOf(row))
 }
 
 function statusClass(status) {
@@ -781,18 +845,20 @@ function statusClass(status) {
 }
 
 function submitterOf(row) {
+  const cached = rowLabelMap.value.submitter.get(row.id)
   /* **上屏不显示他人手机号**（人类口径 ④）：一律用服务层单点 `submitterLabelOf` ⇒
      `暱稱（uid 短碼）`；**不得**再拼 `user.phone`。 */
-  return corrections.submitterLabelOf(row.user_id || row.userId)
+  return cached !== undefined ? cached : corrections.submitterLabelOf(row.user_id || row.userId)
 }
 
 /**
- * **提交值上屏**：`author` 自 person-model §4.2 起为**引用型**（值是 `author_person_id`）
+ * **提交值上屏（原始计算）**：`author` 自 person-model §4.2 起为**引用型**（值是 `author_person_id`）
  * ⇒ 经**显示名单点链**（`corrections.resolveAuthorDisplayName`：引用命中 ⇒ 印人名 →
  * 未命中 ⇒ 旧文本 →「佚名」）渲染为印人名，便于审核人判读；其余字段原样。
  * 历史行（值为旧自由文本）经同一链回落到原文本，不被吞掉。
+ * 注：**只在 `rowLabelMap` 装配时被调用一次**；模板走下面的查表版 `valueLabelOf`。
  */
-function valueLabelOf(row) {
+function computeValueLabel(row) {
   const value = row && row.value !== undefined && row.value !== null ? String(row.value) : ''
   if (row && row.field === 'author') {
     return corrections.resolveAuthorDisplayName({ author_person_id: value, author: value })
@@ -800,10 +866,56 @@ function valueLabelOf(row) {
   return value
 }
 
-/** 跑一次审核（服务层 `message` 原文展示）；结果原样回传供调用方判断。 */
+/**
+ * **提交值上屏（模板调用）**：优先 `rowLabelMap` O(1) 查表（一次数据变化只算一遍）；
+ * 查不到（表外行 / 表尚未装配）才回落 `computeValueLabel` 逐行计算，**不出现错字**。
+ */
+function valueLabelOf(row) {
+  const cached = rowLabelMap.value.value.get(row.id)
+  return cached !== undefined ? cached : computeValueLabel(row)
+}
+
+/* ============================================================================
+   **审核反馈三数实报（本单｜驳回失败如实上屏）**
+   ----------------------------------------------------------------------------
+   不再单显示服务层合并文案，一律上屏「成功 N 條（採納 a / 駁回 b）· 失敗 M 條」；
+   M>0 时**附首条失败文案**（`failed[0].message`，缺则 `reason`）⇒ 失败不被合并句吞掉。
+   ============================================================================ */
+
+/** 从审核回包派生三数 ＋ 失败列表（键面服务层冻结：批量 `decided`/`failed`；单条 `ok`/`message`）。 */
+function reviewTallyOf(result, decision) {
+  if (result && result.decided && Array.isArray(result.failed)) {
+    const accepted = Number(result.decided.accepted) || 0
+    const rejected = Number(result.decided.rejected) || 0
+    return { success: accepted + rejected, accepted, rejected, failed: result.failed }
+  }
+  /* 单条（`review`）：成功 ⇒ 按所作决定记 1 條；失败 ⇒ 计 1 條失败并带上原文案。 */
+  const ok = !!(result && result.ok)
+  const accepted = ok && decision === corrections.CORRECTION_STATUS.ACCEPTED ? 1 : 0
+  return {
+    success: ok ? 1 : 0,
+    accepted,
+    rejected: ok ? 1 - accepted : 0,
+    failed: ok
+      ? []
+      : [{ id: '', reason: (result && result.reason) || 'ERROR', message: (result && result.message) || '審覈失敗' }]
+  }
+}
+
+/** 统一反馈拼装：`成功 N 條（採納 a / 駁回 b）· 失敗 M 條` ＋（M>0）首条失败文案。 */
+function formatReviewFeedback(tally) {
+  let text = `成功 ${tally.success} 條（採納 ${tally.accepted} / 駁回 ${tally.rejected}）· 失敗 ${tally.failed.length} 條`
+  if (tally.failed.length > 0) {
+    const first = tally.failed[0] || {}
+    text += `；首條失敗：${first.message || first.reason || '未知錯誤'}`
+  }
+  return text
+}
+
+/** 跑一次审核；反馈按**三数实报**（见上），结果原样回传供调用方判断。 */
 async function runReview(row, decision) {
   const result = await corrections.review(actor.value, row.id, decision)
-  feedback.value = result.message
+  feedback.value = formatReviewFeedback(reviewTallyOf(result, decision))
   dataVersion.value += 1
   return result
 }

@@ -24,7 +24,9 @@ import {
      全部只在 `storage.js` 里有一份真源；本文件**只消费**，**不自造名字、不写死键名字面量**。 */
   migrationBackupWriteKey,
   readMigrationBackups,
-  MIGRATION_BACKUP_GENERATIONS
+  MIGRATION_BACKUP_GENERATIONS,
+  /* **本单（读缓存）**：写入代数 —— `readCollection` 的缓存失效判据之一（另一支是云端快照换代）。 */
+  storageGeneration
 } from './storage.js'
 import {
   putBlob,
@@ -390,20 +392,51 @@ function withLocalOverlay(key, cloudRows, localKey = key) {
      ③ 其余（未配置 `off` / 失败 `failed` / 非本层接管的键）⇒ **既有本地实现一字未改**
         （`ensureSeed()` ⇒ `readKey(key)`）。
    ============================================================================ */
+/** **集合读缓存（本单）**：`key -> {gen, state, cloudRows, rows}`；失效判据见 `readCollection` 内注。 */
+const collectionReadCache = new Map()
+
 function readCollection(key, fallback) {
   /* **启动兜底**：`main.js` 不在本单接线面内 ⇒ 首次读取顺带把水合拉起来（幂等；未配置时零成本）。
      这样即使启动引导链被改动，云端接管也不会静默失效。 */
   ensureCloudBaseHydration()
   /* **本机镜像键 → 云集合键**：`cloudBaseReadOf` / 覆盖层认的是 **云集合键**（`CLOUD_COLLECTION_KEYS`
-     的驼峰名）；而本函数由数据层各读入口按**本机镜像键**调用（如 `person-imports`）。
+     的驼峰名）；而本函数由数据层各读入口按 **本机镜像键** 调用（如 `person-imports`）。
      两键同名的集合（`seals`/`faces`/`images`/`persons`）直用；异名者经 `cloudKeyOfLocal` 翻译。 */
   const cloudKey = cloudKeyOfLocal(key)
   const cloud = cloudBaseReadOf(cloudKey)
-  if (cloud.state === 'ready' && Array.isArray(cloud.rows)) return withLocalOverlay(cloudKey, cloud.rows, key)
-  if (cloud.state === 'pending') return []
-  ensureSeed()
-  const value = readKey(key)
-  return Array.isArray(value) ? value : fallback
+  /* ========================================================================
+     **读缓存（本单｜主线程卡死修复）**
+     ------------------------------------------------------------------------
+     为什么：改前**每一次** `readCollection` 都要 `JSON.parse` 整个镜像键（`faces` ≈ 1 MB），
+     并重跑 `ensureSeed()`（`seeded` + `users` 各解析一次）；而视图每渲染一行会调
+     `seals.getSeals…/faceLabelOf/resolve…DisplayName` 若干次 ⇒ 实测**单次
+     `listSeals()` = 12.7 s、`getSealById()` = 13.0 s**（79 印 / 2,370 面 / 800 影像的本机镜像），
+     32 行 × 两处表格 ≈ 60+ 次调用 ⇒ 主线程被同步渲染占死（连 `document.readyState` 都无法求值）。
+     口径（失效点**可枚举，恰两支**）：
+       ① **写入代数**：`storage.js` 每次 `writeKey` / `removeKey` 递增（本文件不自造失效时机）；
+       ② **云端快照换代**：`cloud.state` 或 `cloud.rows`（行数组身份）变化。
+     空集归一：`cloudBaseReadOf` 在「快照缺该集合」时每次回**新 `[]`** ⇒ 空集一律按 `null`
+     参与身份比较（空 ⇒ 结果相同；本地覆盖层由 ① 判失效），否则缓存永远不命中。
+     云模式下**仍不调 `ensureSeed()`**（与改前逐字一致：云模式一行种子都不写进 localStorage）。
+     ======================================================================== */
+  const cloudRows = Array.isArray(cloud.rows) && cloud.rows.length > 0 ? cloud.rows : null
+  const cached = collectionReadCache.get(key)
+  if (cached && cached.gen === storageGeneration() && cached.state === cloud.state && cached.cloudRows === cloudRows) {
+    return cached.rows
+  }
+  let rows
+  if (cloud.state === 'ready' && Array.isArray(cloud.rows)) {
+    rows = withLocalOverlay(cloudKey, cloud.rows, key)
+  } else if (cloud.state === 'pending') {
+    rows = []
+  } else {
+    ensureSeed()
+    const value = readKey(key)
+    rows = Array.isArray(value) ? value : fallback
+  }
+  /* 代数在 `ensureSeed()` **之后**取：种子写盘会递增代数，缓存必须记「写盘后的那一档」。 */
+  collectionReadCache.set(key, { gen: storageGeneration(), state: cloud.state, cloudRows, rows })
+  return rows
 }
 
 function writeCollection(key, rows) {
@@ -412,13 +445,20 @@ function writeCollection(key, rows) {
   return rows
 }
 
-/** 读印面并回填兼容别名（`stamp_id` ＝ `sealId`）。 */
+/** 读印面并回填兼容别名（`stamp_id` ＝ `sealId`）。
+ *  **本单（读缓存）**：别名回填只在**底层行换代**时重算一次（`src` 身份变化即失效）——
+ *  改前每次调用都对全量印面行做一次对象展开（`listSeals()` 内被调 79 次 / 轮）。 */
+let faceRowsCache = { src: null, rows: null }
 function readFaceCollection() {
-  return readCollection(STORAGE_KEYS.faces, []).map((row) => ({
+  const src = readCollection(STORAGE_KEYS.faces, [])
+  if (faceRowsCache.src === src) return faceRowsCache.rows
+  const rows = src.map((row) => ({
     ...row,
     stamp_id: row.sealId || row.stamp_id || '',
     updated_at: row.updated_at || row.created_at || ''
   }))
+  faceRowsCache = { src, rows }
+  return rows
 }
 
 /* ============================================================================
@@ -1351,8 +1391,11 @@ export function saveFaceRows(rows) {
   return writeCollection(STORAGE_KEYS.faces, rows)
 }
 
+/** **影像行读缓存（本单）**：`src` 身份变化即失效（判据同 `collectionReadCache`）。 */
+let imageRowsCache = { src: null, rows: null }
+
 /*
- * **影像行（讀取面）** —— 真源容器 `slice_meta` 的**讀路徑補缺**。
+ * **影像行（讀取面）** —— 真源容器 `slice_meta` 的 **讀路徑補缺**。
  *
  * 為什麼要有：切分元數據（張數 / 刀向 / 切位）的真源恰一處 ＝ 行上的 `slice_meta`
  * （`SLICE_META_FIELD`，容器形狀由本檔的 `sliceMetaOf()` 由 `id` ＋ `kind` **確定性派生**）。
@@ -1367,7 +1410,15 @@ export function saveFaceRows(rows) {
  * 落盤值、雲端行三者不會漂移；本函數**只讀**，不改寫 localStorage / 不動任何行。
  */
 export function listImageRows() {
-  return withSliceMeta(readCollection(STORAGE_KEYS.images, []))
+  /* **本单（读缓存）**：`withSliceMeta` 对**缺 `slice_meta` 的行**（云端快照行、种子行）每次都要
+     按 `sha256Hex(id)` 现派生切位 —— 实测单次 `listSeals()` 里 `sha256Hex` 占 **60.2%（15.8 s /
+     26.3 s 采样）**，因为 `listImageRows()` 在一轮里被调 2,449 次 × 800 行。改为**底层行换代才重算**
+     （`src` 身份变化即失效）；读语义不变（只读、不写存储）。 */
+  const src = readCollection(STORAGE_KEYS.images, [])
+  if (imageRowsCache.src === src) return imageRowsCache.rows
+  const rows = withSliceMeta(src)
+  imageRowsCache = { src, rows }
+  return rows
 }
 
 export function saveImageRows(rows) {
