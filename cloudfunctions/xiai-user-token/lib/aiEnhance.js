@@ -443,6 +443,41 @@ async function readEnhanceRow(imageId) {
   return rows.length > 0 ? rows[0] : null
 }
 
+/** 读同 `(stamp_id, kind)` 的既有影像行（**算 `seq` 用**；`limit: 1000` —— 唯一索引
+ *  `ux_stamp_id_kind_seq` 是**组内**唯一 ⇒ 组内既有行必须看全，否则 `seq` 算小必撞）。
+ *  **读失败不阻断入册**（⇒ 按空集处理：读面抖动不得把成功降级成失败）；无行 ⇒ `[]`。 */
+async function readImageRowsForSeq(stampId, kind) {
+  try {
+    const ops = opsModule()
+    const rows = await ops.readRows(
+      ops.COLLECTIONS.images,
+      { stamp_id: text(stampId), kind: text(kind) },
+      { limit: 1000 }
+    )
+    return Array.isArray(rows) ? rows : []
+  } catch {
+    /* 读抛错 ⇒ 空集（由 `nextImageSeq` 从 1 起算；后续撞键仍走 ⑨ 的递增重试兜底）。 */
+    return []
+  }
+}
+
+/** 下一个 `seq`（**纯函数、零 I/O、零自抛**）：既有行 `Number(row.seq)` 的最大值 + 1；
+ *  无有效值（缺键 / 非数字 / NaN）⇒ **从 1 开始**。`seq` 是唯一索引
+ *  `ux_stamp_id_kind_seq` (kind, seq, stamp_id) 的中段 —— doc 缺 `seq` ⇒ 该三元组恒空 ⇒
+ *  同印同 `kind` 的第二行必撞 `E11000`。形状怪的行只跳过（`seq` 恒为 ≥1 的整数）。 */
+function nextImageSeq(rows) {
+  let max = 0
+  try {
+    for (const row of rows) {
+      const seq = Number(row && typeof row === 'object' ? row.seq : NaN)
+      if (Number.isFinite(seq) && seq > max) max = seq
+    }
+  } catch {
+    /* 不自抛：算不出最大值 ⇒ 落回 1 起算。 */
+  }
+  return Math.floor(max) + 1
+}
+
 /** 读图源字节（存储层取不到 ⇒ 抛错 ⇒ 调用方转 `STORAGE_UNAVAILABLE`）。 */
 async function readSourceBytes(objectKey) {
   const ops = opsModule()
@@ -1078,11 +1113,17 @@ async function enhanceFace(payload, identity, context) {
 
   /* ⑨ 新影像行入册（确定性 `_id` ＝ 幂等 upsert；**不挂印面** —— 不写任何 `face_image_id`）。 */
   const now = text(new Date().toISOString())
+  /* `seq`（**写行前先算**；唯一索引 `ux_stamp_id_kind_seq`＝ (kind, seq, stamp_id) 的中段）：
+     同 `(stamp_id, kind)` 既有影像行 `Number(seq)` 最大值 + 1（无有效值 ⇒ 从 1 开始）；
+     读失败 / 无行 ⇒ 按空集处理。doc 此前**缺 `seq`** ⇒ 该三元组恒空 ⇒ 同印同 `kind` 的
+     第二行必撞 `E11000`（首写能过、再写必炸的真因）。 */
+  const seq = nextImageSeq(await readImageRowsForSeq(sealId, 'FACE'))
   const doc = {
     id: newImageId,
     stamp_id: sealId,
     sealId,
     kind: 'FACE',
+    seq,
     storage: 'server',
     storage_key: productKey,
     sha256: productSha,
@@ -1103,38 +1144,60 @@ async function enhanceFace(payload, identity, context) {
   /* 入册前 doc 清洗：`undefined` / `NaN` 一律不落（缺键 ≠ 非法值）；其余字段与取值不变。 */
   sanitizeEnhanceDoc(doc)
   /* ⑨ 首次 `doc(id).set` 失败 ⇒ 先判**重复键类**（错误链 message 命中 `DUPLICATE_KEY_ANCHORS`
-     —— 平台 bulk write 多写错 `E11000`：`_id` 或 `sha256` 等唯一索引已有行 ⇒ 这一路 `set`
-     永远过不去，重试多少次都一样）：
+     —— 平台 bulk write 多写错 `E11000`：本面真因＝唯一索引 `ux_stamp_id_kind_seq`
+     (kind, seq, stamp_id) 撞车（doc 缺 `seq` ⇒ 该三元组恒空 ⇒ 同印同 `kind` 必撞）；
+     `_id` / `sha256` 撞车同属此类，重试多少次都一样）：
        · 是 ⇒ **读回既有行**（`readBackExistingRow`：先按行号、再按 `sha256`；**只读回 ——
-         不 `add`、不新建第二行、不删不改既有行**）：读回成功 ⇒ **视为成功** —— 回包 `row`
-         ＝ 读回行、`image_id` ＝ 读回行 `id`、**不退款**（上游确已出了一张图、库内也确已有
-         该行），键面仍恰 9 键、**零新增回包键**；读不回 ⇒ 走下面的原策略。
-       · 不是重复键类 / 读不回 ⇒ 原策略不变：用清洗后的同一 doc **重试一次**（`set` 幂等
-         upsert，不新建第二行），**仍失败才退款判失败**（文案与原断逐字一致）。 */
+         不 `add`、不新建第二行、不删不改既有行**）：读回且 **`sha256` ≡ 本次 `productSha`
+         （内容完全相同）** ⇒ **视为成功** —— 回包 `row` ＝ 读回行、`image_id` ＝ 读回行 `id`、
+         **不退款**（上游确已出了一张图、库内也确已有该行），键面仍恰 9 键、**零新增回包键**；
+         读不回 / 读回但内容不同 ⇒ 走下面的 `seq` 递增重写。
+       · 不是重复键类 ⇒ 原策略不变：用清洗后的同一 doc **重试一次**（`set` 幂等 upsert，
+         不新建第二行），**仍失败才退款判失败**（文案与原断逐字一致）。 */
+  /* 重复键读回命中的成功回包（**恰 9 键、零新增键**；`row` ＝ 读回的权威行本体）。 */
+  const recoveredSuccess = (row) => ({
+    ok: true,
+    image_id: text(row.id) || newImageId,
+    source_image_id: imageId,
+    preview: { mime: productMime, sha256: productSha },
+    charge: { amount: AI_ENHANCE_COST, balance: charged.balance },
+    upstream_status: upstreamCall.status,
+    elapsed_ms: Number.isInteger(upstreamCall.elapsedMs) ? upstreamCall.elapsedMs : 0,
+    idempotent: charged.idempotent,
+    row
+  })
   let persistError = null
+  /* 已用掉的 `seq` 递增重试次数（**重复键类专用**；>0 ⇒ 下面的通用重试不再叠加 —— 递增
+     重写自带读回兜底，且「最多 3 次」的重试上限不得被通用重试突破）。 */
+  let seqRetries = 0
   try {
     await persistEnhanceRow(newImageId, doc)
   } catch (error) {
     persistError = error
     if (isDuplicateKeyError(error)) {
       const recoveredRow = await readBackExistingRow(newImageId, productSha)
-      if (recoveredRow) {
-        /* 重复键 + 读回既有行 ⇒ 成功面（**不退款**；不改写既有行 —— 只读回）。 */
-        return {
-          ok: true,
-          image_id: text(recoveredRow.id) || newImageId,
-          source_image_id: imageId,
-          preview: { mime: productMime, sha256: productSha },
-          charge: { amount: AI_ENHANCE_COST, balance: charged.balance },
-          upstream_status: upstreamCall.status,
-          elapsed_ms: Number.isInteger(upstreamCall.elapsedMs) ? upstreamCall.elapsedMs : 0,
-          idempotent: charged.idempotent,
-          row: recoveredRow
+      if (recoveredRow && text(recoveredRow.sha256) === productSha) {
+        /* 重复键 + 读回既有行且内容相同 ⇒ 成功面（**不退款**；不改写既有行 —— 只读回）。 */
+        return recoveredSuccess(recoveredRow)
+      }
+      /* 撞唯一索引（真因：`seq` 撞车）⇒ **`seq += 1` 再写，最多重试 3 次**；每次撞后
+         照旧走上面的读回兜底（同内容重放 `sha` 相等 ⇒ 仍不建第二行、不退款）。 */
+      while (persistError && seqRetries < 3) {
+        seqRetries += 1
+        doc.seq = Number(doc.seq) + 1
+        try {
+          await persistEnhanceRow(newImageId, doc)
+          persistError = null
+        } catch (retryError) {
+          persistError = retryError
+          if (!isDuplicateKeyError(retryError)) break
+          const row = await readBackExistingRow(newImageId, productSha)
+          if (row && text(row.sha256) === productSha) return recoveredSuccess(row)
         }
       }
     }
   }
-  if (persistError) {
+  if (persistError && seqRetries === 0) {
     /* 重试与首试共用同一 `doc` ⇒ 零第二份入册对象（不新建第二行）。 */
     try {
       await persistEnhanceRow(newImageId, doc)

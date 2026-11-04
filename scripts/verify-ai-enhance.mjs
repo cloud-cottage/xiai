@@ -550,7 +550,7 @@ const okReply = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1'
   const newRow = fakeDb.bucketOf('xiai_images').get(okReply.image_id)
   const chargeRows = flowRowsOf(ADMIN_IDENTITY.uid).filter((row) => row.kind === 'CHARGE')
   check('A4', '⑨ 新影像行入册（`source: ai_enhance`、`displayOnly: true`、**不挂印面** —— 零 `face_image_id`）；扣金恰 10：CHARGE 行 delta −10、`ref_type` `AI_IMAGE`、`idem_key` 三段封闭、余额 40', {
-    rowKeys: ['_id', 'id', 'stamp_id', 'sealId', 'kind', 'storage', 'storage_key', 'sha256', 'bytes', 'bytesLength', 'mime', 'width', 'height', 'source', 'displayOnly', 'source_image_id', 'charge_balance_after', 'upstream_status', 'elapsed_ms', 'created_at'].sort().join(','),
+    rowKeys: ['_id', 'id', 'stamp_id', 'sealId', 'kind', 'seq', 'storage', 'storage_key', 'sha256', 'bytes', 'bytesLength', 'mime', 'width', 'height', 'source', 'displayOnly', 'source_image_id', 'charge_balance_after', 'upstream_status', 'elapsed_ms', 'created_at'].sort().join(','),
     source: 'ai_enhance',
     displayOnly: true,
     faceImageIdAbsent: true,
@@ -1547,13 +1547,13 @@ let jDupReply = null
   upstreamMode = 'ok'
   jDupReply = reply
   const setCalls = jSetCallsOf(newId)
-  check('J2', '⑨ 抛重复键错但按 `_id` 与 `sha256` **两路均读不回** ⇒ 同一 doc **再 `set` 一次**、仍失败才判失败：回包**恰 4 键**、`reason` 逐字 `STORAGE_UNAVAILABLE`、`refunded: true` 且 **ledger 恰退款 1 次**（REFUND +10、余额复原到扣前值）、`set` 恰 2 次、零建行；文案前缀与改动前**逐字一致**', {
+  check('J2', '⑨ 抛重复键错但按 `_id` 与 `sha256` **两路均读不回** ⇒ 按 `seq` 递增重试（首试 ＋ 3 次递增 ⇒ `set` 恰 4 次）、仍失败才判失败：回包**恰 4 键**、`reason` 逐字 `STORAGE_UNAVAILABLE`、`refunded: true` 且 **ledger 恰退款 1 次**（REFUND +10、余额复原到扣前值）、零建行；文案前缀与改动前**逐字一致**', {
     keys: 'message,ok,reason,refunded',
     ok: false,
     reason: 'STORAGE_UNAVAILABLE',
     refunded: true,
     refundCalls: 1,
-    setCalls: 2,
+    setCalls: 4,
     imageRowsDelta: 0,
     flow: ['CHARGE:-10', 'REFUND:10'],
     prefixVerbatim: true,
