@@ -317,7 +317,8 @@ check('A4k', '回包带 `summary`（值级公开摘要行）', true, !!okWrite.s
 check('A4l', '摘要行零手机号（11 位数字正则命中 0；uid 允许）', false, /\b1[3-9]\d{9}\b/.test(JSON.stringify(okWrite.summary || {})))
 check('A4m', '摘要行 `submits` ＝ 1、`submitter_uids` ＝ [我 uid]', { submits: 1, submitter_uids: [uidOfPhone(PHONE)] }, { submits: okWrite.summary && okWrite.summary.submits, submitter_uids: okWrite.summary && okWrite.summary.submitter_uids })
 check('A4n', '摘要行 `_id` 前缀 ＝ `cs-`、schema ＝ `xiai-correction-summaries-v1`', true, String(okWrite.summary && okWrite.summary._id).startsWith('cs-') && okWrite.summary.schema === 'xiai-correction-summaries-v1')
-check('A4o', '落盘第 2 处（set）的 doc 逐字 ＝ 回包 summary（服务端权威）', true, JSON.stringify(bucket.adds[beforeA4 + 1].doc) === JSON.stringify(okWrite.summary))
+check('A4o', '落盘第 2 处（set）的 doc 逐字 ＝ 回包 summary（服务端权威；**写入体按平台要求剔除 `_id`**）', true, JSON.stringify(bucket.adds[beforeA4 + 1].doc) === JSON.stringify(Object.fromEntries(Object.entries(okWrite.summary).filter(([k]) => k !== '_id'))))
+check('A4o2', '落盘 set 的 doc **不含 `_id`**（CloudBase 见 doc 内 `_id` 即拒 `INVALID_PARAM`）', false, '_id' in bucket.adds[beforeA4 + 1].doc)
 console.log(
   JSON.stringify({
     A4_readout: {

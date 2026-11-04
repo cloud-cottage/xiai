@@ -1221,10 +1221,22 @@ function rowsOfReply(reply) {
  */
 async function readRows(collection, match, options) {
   const db = resolveDb()
-  const query = db.collection(collection)
-  if (!query || typeof query.where !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
+  /* 形态门（与旧版**同位**：进 `try` 之前抛 `DB_QUERY_UNSUPPORTED`；错误上抛语义一字不变）。
+     这里取的句柄**只看形状、绝不往上链任何条件** —— CloudBase SDK 的查询对象是**可变链**，
+     同一实例上第二次 `where` / `limit` 会把条件叠加或残留 ⇒ 下面 `build` 每次尝试都从
+     `db.collection(collection)` **重新取一条新链**，本句柄不参与查询。 */
+  const probe = db.collection(collection)
+  if (!probe || typeof probe.where !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
   const orderField = options && typeof options.orderByDesc === 'string' ? options.orderByDesc : ''
   const build = (withOrder) => {
+    /* **每次尝试各取新链（2026-11-04 修｜线上两只读 op 恒 0 行的真因）**：旧版在 `build` 内
+       反复复用**外层同一个 `query` 实例** —— 先随 `build(true)` 拼 `where → limit → orderBy`
+       并抛错后，又用**同一个已被拼脏的实例** `build(false)` 重拼 ⇒ 可变链上条件叠加 / 残留
+       ⇒ 退路查询稳定落空（`rows.length === 0` 而 `pendingResult.ok === true`，与线上现象完全吻合）。
+       故：链一律在本闭包内**新建**（`db.collection(collection)` 每次重取）；带 order / 不带 order
+       两条路**各自独立链、互不污染**。子句顺序维持既有 `where → limit → orderBy`（`limit` 与
+       `orderBy` 只各设一个字段、互不相干；语义不变）。 */
+    const query = db.collection(collection)
     let chain = query.where(match)
     const limit = Number(options && options.limit)
     if (Number.isFinite(limit) && limit > 0 && chain && typeof chain.limit === 'function') {
@@ -1248,7 +1260,12 @@ async function readRows(collection, match, options) {
         return rowsOfReply(await build(true).get())
       } catch (error) {
         /* 退路（**不吞真故障**）：真存储故障会在下面这次重读里再次抛出，仍由 `index.js` 转 `STORAGE_UNAVAILABLE`；
-           「集合不存在」也会在下面这次重读里再次抛出，由外层 catch 按白名单统一判定（白名单 ⇒ `[]`，否则上抛）。 */
+           「集合不存在」也会在下面这次重读里再次抛出，由外层 catch 按白名单统一判定（白名单 ⇒ `[]`，否则上抛）。
+           退路链是**新建链**（见上 `build` 注）：即使 `orderBy` 路抛错，重读也不带任何残留条件。
+           **退路仍回 0 行时不得静默**：该情形只可能来自「集合确无匹配行 / 条件本身写错 / 数据侧另有故障」，
+           —— 属于**数据语义**而非链复用；按回包键面冻结口径，此处**不新增任何回包键**
+           （成功恒 4 键 `{ok:true, op, rows, count}`、失败恒 3 键），排序兜底仍由调用方
+           （`readCorrectionRowsSorted`）在服务端自行完成；诊断线索只落在本注释，不进回包。 */
         if (!isCollectionNotExistError(error)) {
           return rowsOfReply(await build(false).get())
         }
@@ -1302,11 +1319,14 @@ async function readPersonRow(ref) {
   const id = text(ref)
   if (!id) return null
   const db = resolveDb()
-  const collection = db.collection(COLLECTIONS.persons)
-  const byId = await collection.where({ id }).get()
+  /* **同形修（2026-11-04）**：检索式一律**每次新建集合句柄**再链 `where` —— 旧版把
+     `const collection = db.collection(...)` 存下来连拼两次 `.where({id})` / `.where({code})`，
+     可变链上二次 `where` 会叠加条件 ⇒ 第二式恒 0 行（与 `readRows` 同一隐患、同形修正）。
+     `doc()` 兜底同理各取新句柄；**只改读面，写面 `persist` 不动**。 */
+  const byId = await db.collection(COLLECTIONS.persons).where({ id }).get()
   const rowsById = rowsOf(byId)
   if (rowsById.length > 0) return rowsById[0]
-  const byCode = await collection.where({ code: id }).get()
+  const byCode = await db.collection(COLLECTIONS.persons).where({ code: id }).get()
   const rowsByCode = rowsOf(byCode)
   if (rowsByCode.length > 0) return rowsByCode[0]
   /* doc() 兜底：`doc(id).get()` 在**文档不存在**时抛错（404）而非回空 ⇒ 这里**仅**吞「不存在」类
@@ -1314,7 +1334,7 @@ async function readPersonRow(ref) {
      照旧上抛，绝不把真存储故障吞成「无行」。 */
   let rowsByDoc = []
   try {
-    rowsByDoc = rowsOf(await collection.doc(id).get())
+    rowsByDoc = rowsOf(await db.collection(COLLECTIONS.persons).doc(id).get())
   } catch (error) {
     if (!isDocNotExistError(error)) throw error
   }
