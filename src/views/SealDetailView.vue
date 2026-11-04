@@ -447,6 +447,41 @@ function markableRegistered(key) {
 const faceEntryDraft = reactive({})
 const faceEntryFeedback = reactive({})
 
+/* ============================================================================
+   勘误反馈的**页面级上屏位**（本单）：弹窗路径提交成功后 `formOpen = false` 把弹窗一起关掉 ⇒
+   反馈文案 `formFeedback` 随弹窗消失，页面上看不到任何「已提交…待審覈」。故把**同一份文案**
+   （一字不改，仍由 `correctionFeedbackOf` / `CORRECTION_SKIP_ALL_MESSAGE` / 首条失败文案拼装）
+   同步写到「可標記屬性」区顶部的提示位（`data-correction-notice`）。弹窗内 `formFeedback` 原样保留。
+   **不设自动消失**（无定时器，避免用户错过）：只在「重开勘误弹窗 / 切换印面 / 重新加载印面」时清空。
+   ============================================================================ */
+const correctionNotice = ref('')
+/* 多印面同页渲染（`v-for="face in faces"`）⇒ 提示只在**提交来源那一块**呈现，不逐块复制。 */
+const correctionNoticeFaceId = ref('')
+
+/** 把最终反馈文案同时写到弹窗内（调用方自理）与页面级提示位。 */
+function publishCorrectionNotice(text, faceId) {
+  correctionNotice.value = text
+  correctionNoticeFaceId.value = faceId || ''
+}
+
+/* 切换印章（路由 id 变）/ 重新加载印面（识别码、面集合或数据源状态变）⇒ 提示随之作废，
+   不把上一枚印章 / 上一次加载的反馈带到新面。
+   **按值比较（拼成字符串）而非数组引用**：`submitFaceEntry` 提交成功后会 `dataVersion + 1`，
+   数组引用每次求值都不同 ⇒ 那样写会把刚写入的提示连带清掉（用户又看不到确认）。 */
+watch(
+  () =>
+    [
+      route.params.id,
+      seal.value ? seal.value.stamp_id : '',
+      faces.value.map((item) => item.id).join(','),
+      seals.dataSourceState().state
+    ].join('|'),
+  () => {
+    correctionNotice.value = ''
+    correctionNoticeFaceId.value = ''
+  }
+)
+
 function faceEntryDraftOf(face) {
   if (!faceEntryDraft[face.id]) faceEntryDraft[face.id] = { content: '', style: '' }
   return faceEntryDraft[face.id]
@@ -487,6 +522,7 @@ async function submitFaceEntry(face) {
   }
   if (!pairs.length) {
     faceEntryFeedback[face.id] = '請先從「印面內容」或「印面風格」中至少選擇一項，再提交勘誤。'
+    publishCorrectionNotice(faceEntryFeedback[face.id], face.id)
     return
   }
   const sealId = seal.value ? seal.value.stamp_id : face.sealId || ''
@@ -507,12 +543,14 @@ async function submitFaceEntry(face) {
   /* 口径 4：有真实失败 ⇒ 仍上屏**首个真实失败**文案（跳过不得覆盖失败）。 */
   if (accepted === 0 && firstError) {
     faceEntryFeedback[face.id] = firstError
+    publishCorrectionNotice(faceEntryFeedback[face.id], face.id)
     return
   }
   faceEntryFeedback[face.id] =
     accepted === 0
       ? CORRECTION_SKIP_ALL_MESSAGE
       : correctionFeedbackOf(accepted, skipped, points.CORRECTION_REWARD)
+  publishCorrectionNotice(faceEntryFeedback[face.id], face.id)
   /* 口径 5：接受数 ＋ 跳过数 === 本次填写项数 ⇒ 整单完成（清空草稿）。 */
   if (accepted + skipped === pairs.length) {
     draft.content = ''
@@ -799,6 +837,9 @@ function openCorrection(face) {
   })
   form.basis = ''
   formFeedback.value = ''
+  /* 重开弹窗 ⇒ 页面级勘误提示作废（否则旧反馈会一直挂着，被当成新结果）。 */
+  correctionNotice.value = ''
+  correctionNoticeFaceId.value = ''
   /* 【作者】引用型选人控件：每次开表单重置检索关键字与提案子表单（不残留上次状态）。 */
   authorKeyword.value = ''
   proposalOpen.value = false
@@ -835,6 +876,7 @@ async function submitCorrection() {
   )
   if (filled.length === 0) {
     formFeedback.value = '請至少填寫一項需要勘誤的屬性'
+    publishCorrectionNotice(formFeedback.value, formFaceId.value)
     return
   }
   let accepted = 0
@@ -861,12 +903,15 @@ async function submitCorrection() {
   /* 口径 4：有真实失败 ⇒ 仍上屏**首个真实失败**文案（跳过不得覆盖失败）。 */
   if (accepted === 0 && firstError) {
     formFeedback.value = firstError || '提交失敗，請稍後重試'
+    publishCorrectionNotice(formFeedback.value, formFaceId.value)
     return
   }
   formFeedback.value =
     accepted === 0
       ? CORRECTION_SKIP_ALL_MESSAGE
       : correctionFeedbackOf(accepted, skipped, points.CORRECTION_REWARD)
+  /* 同一份文案同时落到页面级提示位：下面关弹窗后，`formFeedback` 会随弹窗一起消失。 */
+  publishCorrectionNotice(formFeedback.value, formFaceId.value)
   /* 口径 5：接受数 ＋ 跳过数 === 本次填写项数 ⇒ 整单完成（关闭弹窗）。 */
   if (accepted + skipped === filled.length) formOpen.value = false
 }
@@ -1823,6 +1868,16 @@ onBeforeUnmount(() => {
         </template>
 
         <h3 class="face-block__sub">可標記屬性</h3>
+        <!-- 勘误反馈的**页面级上屏位**（本单）：弹窗提交成功即关 ⇒ 文案随弹窗消失 ⇒ 同一份
+             文案（繁体一字不改）同步落在这里；只在提交来源那一块呈现，不逐块复制。
+             **无定时器**：只在重开勘误弹窗 / 切换印面 / 重新加载印面时清空。 -->
+        <p
+          v-if="correctionNotice && correctionNoticeFaceId === face.id"
+          class="notice detail__notice"
+          data-correction-notice
+        >
+          {{ correctionNotice }}
+        </p>
         <div class="face-block__sub-head">
           <button v-if="canSubmit" class="btn btn--ghost" type="button" @click="openCorrection(face)">勘誤</button>
           <span v-else class="detail__hint">登錄後可提交勘誤，審覈通過後每條獎勵 {{ points.CORRECTION_REWARD }} 金。</span>
