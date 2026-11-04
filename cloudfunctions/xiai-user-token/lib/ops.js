@@ -758,6 +758,31 @@ const REVIEW_ALLOWED_KEYS = Object.freeze(['correction_id', 'decision', 'note'])
 /** 邀请奖励载荷允许键（**封闭键面**：只有 `value`）。 */
 const REWARD_ALLOWED_KEYS = Object.freeze(['value'])
 
+/**
+ * **撤销采纳（`revokeCorrectionAcceptance`）载荷允许键**（**封闭键面**，恰两键：
+ * `correction_id`（必有）＋ `note`（可选，字符串 ≤ `MAX_NOTE_LENGTH` 字）；与
+ * `src/services/corrections.js::REVOKE_PAYLOAD_KEYS` 逐字同值）。
+ *
+ * **身份类键一律不在本表** ⇒ `INVALID_FIELD` ＋ 零写入（身份永远取自已验签令牌 /
+ * 平台会话，与 `REVIEW_IDENTITY_KEYS` 同一套文案）。**零 `decision` 键** —— 撤销的方向
+ * 由 op 本身钉死（只许 `ACCEPTED → REJECTED`），不由前端选。
+ */
+const REVOKE_ALLOWED_KEYS = Object.freeze(['correction_id', 'note'])
+
+/**
+ * **`NOT_FOUND` 字面值**（撤销 op 专用；**既有冻结字面值、零新增 reason**）。
+ *
+ * 为什么不写 `REASONS.NOT_FOUND`：`lib/config.js::REASONS` 的冻结表**未登记** `NOT_FOUND`
+ * ⇒ `REASONS.NOT_FOUND` 取到 `undefined`（既有 `reviewPersonProposal` 等处即此形态，见
+ * `scripts/verify-adopt-atomicity.mjs` B5b 的存疑登记）。本 op 的失败回包**恒须恰 3 键**
+ * `{ok:false, reason, message}`（`reason` 若为 `undefined` 序列化后只剩 2 键）⇒ 直接用字面
+ * 常量，与 `lib/codeId.js::REASON_NOT_FOUND` 同值；**不改 `lib/config.js`、不新增字面值**。
+ */
+/* **按规范映射**：云函数 `REASONS` 冻结表不含 `NOT_FOUND`（该字面值属客户端 / 管理员函数面），
+   规范口径是「`NOT_FOUND` → `INVALID_VALUE`」⇒ 本 op 只用既有 `REASONS.INVALID_VALUE`，
+   **不新增字面值**；文案里写明「該勘誤不存在」以保留可读性。 */
+const REASON_CORRECTION_NOT_FOUND = REASONS.INVALID_VALUE
+
 /** 审核载荷里明令不可由前端提供的身份类键（防御性登记 ⇒ 文案上把「身份类」与「普通未知键」分开）。 */
 const REVIEW_IDENTITY_KEYS = Object.freeze([
   'userId',
@@ -4282,6 +4307,186 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理员撤销采纳（`revokeCorrectionAcceptance`）**（受控 op：**只改状态、不回写原行**）。
+   *
+   * 场景（人类口径 2026-11-04）：采纳是终态 —— 一旦采纳了内容错误的勘误（印文匹配到错印面），
+   * 首页 / 详情页的展示值就跟着错，而既有面**没有任何撤回手段**。本 op 补这一条**唯一**撤回路：
+   * 把 `ACCEPTED` 目标行改判 `REJECTED`（＝「撤销」），让展示值裁决规则（只认 `ACCEPTED`、
+   * 取出现最多、同数取最近）**自然不再计入**该行 —— **不改**三态机（仍 PENDING/ACCEPTED/REJECTED
+   * 三态）、**不改**展示值裁决规则、**不动**提交 / 采信 / 审核单条与批量路径的行为。
+   *
+   * 硬口径（逐条）：
+   *   · **管理员门 ＝ `adminWhitelistDenial`**（判据在**任何读之前**；缺 `XIAI_ADMIN_PHONE`
+   *     ⇒ `STORAGE_UNAVAILABLE` 安全拒 ＋ **零读取**；非白名单 / 无身份 ⇒ `FORBIDDEN` ＋ 零读取）；
+   *   · **载荷封闭恰两键** `correction_id`（必有）/ `note`（可选，字符串 ≤ 200 字）；
+   *     未知键一律 `INVALID_FIELD`（身份类键文案与 `reviewCorrection` 同口径）；
+   *     **零 `decision` 键**（方向由 op 钉死，不由前端选）；
+   *   · **只允许 `ACCEPTED → REJECTED`**：目标不存在 ⇒ `NOT_FOUND`；当前状态不是 `ACCEPTED`
+   *     ⇒ `INVALID_VALUE`（**文案如实写出当前状态**）；**判定全部在写之前**（先判后读写，
+   *     拒绝恒零写入）；
+   *   · **落盘三处**（与既有 `reviewCorrection` 同形 ⇒ 展示一致）：① `xiai_corrections`
+   *     目标行 `update`（`status:'REJECTED'` ＋ 服务端时 `reviewed_at` ＋ 服务端派生
+   *     `reviewer_id` ＋ `revoked:true` ＋ `revoked_at` ＋ 非空才落 `revoke_note`）；
+   *     ② `xiai_corrections_public` 投影行 `set`（`status:'REJECTED'`、**零手机号**）；
+   *     ③ `xiai_correction_summaries` 摘要行 `set`（**重算** `submits` / `endorses`、
+   *     `status` 随之重算）。**① 排在最前**：权威行先落 —— ① 命中 0 行即断 ⇒ 后两步零写入；
+   *   · **只改状态、不回写原行**：`xiai_faces` / `xiai_seals` **一字不动**（本 op 不产出任何
+   *     指向这两集合的写入）、**不删任何行**（三处全是 `update` / `set`，无 `delete`）；
+   *   · **奖励默认不回滚**：采纳时已发的 10 金**不扣回**（本 op 不触碰账本；如需扣回另开单）；
+   *   · 成功回包沿用 `reviewCorrection` 成功路形状（`ok` / `op` / `row` / `projection` /
+   *     `summary` / `plan`，**键面零新增** ⇒ `index.js` 的通用回包信封逐字同形）；
+   *     失败恒为恰 3 键 `{ok:false, reason, message}`，`reason` **零新增**（只用 `FORBIDDEN` /
+   *     `INVALID_FIELD` / `MISSING_REQUIRED` / `INVALID_VALUE` / `NOT_FOUND` /
+   *     `STORAGE_UNAVAILABLE` 这些既有冻结字面值）。
+   *
+   * @param {object} payload 载荷（允许键见 `REVOKE_ALLOWED_KEYS`：恰两键）
+   * @param {{uid:string, phone:string, role?:string}} identity **服务端派生**的身份（唯一来源）
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context] 白名单手机号 ＋ 服务端时钟（秒）
+   * @returns {Promise<{ok:true, op:string, row:object, projection:object, summary:object,
+   *          plan:{op:string, writes:Array<object>}}|{ok:false, reason:string, message:string}>}
+   */
+  async revokeCorrectionAcceptance(payload, identity, context) {
+    /* ① 管理员白名单门（**身份判据，写之前；零读取**；缺 env ⇒ 结构化安全拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷形态 / 封闭键面（恰两键；身份类键 ⇒ `INVALID_FIELD` ＋ 零读取、零写入）。 */
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => REVOKE_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => REVIEW_IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const correctionId = text(payload.correction_id)
+    if (!correctionId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少勘誤單號（correction_id）⇒ 拒絕撤銷；本次零寫入。')
+    }
+    if (correctionId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `勘誤單號超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕撤銷；本次零寫入。`)
+    }
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '撤銷理由必須是文字 ⇒ 拒絕撤銷；本次零寫入。')
+    }
+    const noteText = rawNote.trim()
+    if (noteText.length > MAX_NOTE_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `撤銷理由不得超過 ${MAX_NOTE_LENGTH} 字 ⇒ 拒絕撤銷；本次零寫入。`)
+    }
+    /* ③ 只读目标行（**唯一读点**；网络 / 内部异常由此抛出 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`）。 */
+    const found = await readCorrectionRow(correctionId)
+    if (!found) {
+      return deny(REASON_CORRECTION_NOT_FOUND, `未找到該勘誤單（correction_id）：${correctionId}；本次零寫入。`)
+    }
+    const row = found.row
+    const currentStatus = text(row.status)
+    if (currentStatus !== CORRECTION_STATUS.ACCEPTED) {
+      /* **只许 `ACCEPTED → REJECTED`**；文案如实写出当前状态（不把「不是已采纳」说成「不存在」）。 */
+      return deny(
+        REASONS.INVALID_VALUE,
+        `僅「已採納（ACCEPTED）」的勘誤可撤銷；該勘誤當前狀態：${currentStatus || '（空）'} ⇒ 不可撤銷；本次零寫入。`
+      )
+    }
+    /* ④ 摘要行读面（**只读，在写之前**）：读同 `(faceId, field, value)` 的全部提交行 ＋ 采信行，
+       用于**重算**值级公开摘要行；本次决定**就地覆盖**目标行的 `status`（不改库，仅内存）。 */
+    const summaryFaceId = text(row.faceId)
+    const summaryField = text(row.field)
+    const summaryValue = text(row.value)
+    const summarySeal = text(row.sealId || row.stamp_id)
+    const siblings = await readRows(COLLECTIONS.corrections, {
+      faceId: summaryFaceId,
+      field: summaryField,
+      value: summaryValue
+    })
+    const endorsements = await readRows(COLLECTIONS.endorsements, {
+      faceId: summaryFaceId,
+      field: summaryField,
+      value: summaryValue
+    })
+    const submissions = siblings.map((item) => {
+      const sameRow =
+        text(item && item.id) === correctionId ||
+        text(item && item._id) === correctionId ||
+        text(item && item._id) === text(row._id)
+      return sameRow ? Object.assign({}, item, { status: CORRECTION_STATUS.REJECTED }) : item
+    })
+    /* 兜底：检索式没命中本次被撤的那一行（历史行缺 `faceId` 等）⇒ 显式并入（status ＝ REJECTED）。 */
+    const targetPresent = submissions.some(
+      (item) =>
+        text(item && item.id) === correctionId ||
+        text(item && item._id) === correctionId ||
+        text(item && item._id) === text(row._id)
+    )
+    if (!targetPresent) submissions.push(Object.assign({}, row, { status: CORRECTION_STATUS.REJECTED }))
+    /* ⑤ 服务端时（唯一时源；`context.nowSeconds`）＋ 三处落盘计划。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const projection = buildProjection(row, CORRECTION_STATUS.REJECTED, at, correctionId)
+    const summaryRow = buildCorrectionSummary({
+      faceId: summaryFaceId,
+      sealId: summarySeal,
+      field: summaryField,
+      value: summaryValue,
+      submissions,
+      endorsements,
+      at
+    })
+    /* 撤销面字段：状态 ＋ 服务端时 ＋ 服务端派生撤销人 ＋ 撤销标记 ＋ 可选理由。
+       **不回滚奖励**（`rewarded_at` 原样保留、本 patch 不含它）；**不写** `review_note`
+       （原审核理由属原审核事实，撤销理由落独立键 `revoke_note`）。 */
+    const privatePatch = {
+      status: CORRECTION_STATUS.REJECTED,
+      reviewed_at: at,
+      reviewer_id: identity.uid,
+      revoked: true,
+      revoked_at: at
+    }
+    if (noteText !== '') privatePatch.revoke_note = noteText
+    const revokedRow = Object.assign({}, row, privatePatch)
+    return {
+      ok: true,
+      op: 'revokeCorrectionAcceptance',
+      row: revokedRow,
+      projection,
+      /* 值级公开摘要行（`submits` / `endorses` / `status` 均已按撤销后状态重算）。 */
+      summary: summaryRow,
+      plan: {
+        op: 'revokeCorrectionAcceptance',
+        writes: [
+          /* ① 权威私有行只改状态（命中 0 行即断 ⇒ 后两步零写入）。 */
+          {
+            kind: 'update',
+            collection: COLLECTIONS.corrections,
+            match: found.match,
+            doc: privatePatch,
+            expectAtLeast: 1
+          },
+          /* ② 公开只读投影行（确定性 id ⇒ 幂等 upsert；零身份字段）。 */
+          {
+            kind: 'set',
+            collection: COLLECTIONS.correctionsPublic,
+            id: `${PUBLIC_ID_PREFIX}${correctionId}`,
+            doc: projection
+          },
+          /* ③ 值级公开摘要行（确定性 `_id` ⇒ 幂等 upsert；写前由 `persist` 剔 `_id`）。 */
+          {
+            kind: 'set',
+            collection: COLLECTIONS.correctionSummaries,
+            id: summaryRow._id,
+            doc: summaryRow
+          }
+        ]
+      }
+    }
+  },
+
+  /**
    * 设置邀请奖励数值（**管理员写路径**；值域门 ＋ 白名单门，**均在任何写入之前**）。
    * 明文：**本 op 不产出云落盘计划** —— 站点配置键（`xiai:v1:invite-reward`）活在客户端
    * localStorage（链路 `admin.js → drive.js → storage.js`，与管理员函数 Phase 1 同口径）；
@@ -5849,6 +6054,10 @@ module.exports = {
   VALUE_DOMAINS,
   REVIEW_ALLOWED_KEYS,
   REWARD_ALLOWED_KEYS,
+  /* **撤销采纳（本单新增 `revokeCorrectionAcceptance`）**：封闭键面 ＋ `NOT_FOUND` 字面常量
+     （供离线自检直接断言；失败回包恒恰 3 键 ⇒ reason 不得是 `undefined`）。 */
+  REVOKE_ALLOWED_KEYS,
+  REASON_CORRECTION_NOT_FOUND,
   REVIEW_IDENTITY_KEYS,
   MAX_NOTE_LENGTH,
   MAX_ID_LENGTH,

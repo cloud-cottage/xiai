@@ -983,6 +983,74 @@ async function runReview(row, decision) {
 async function decide(row, decision) {
   await runReview(row, decision)
 }
+
+/* ============================================================================
+   **撤销采纳（本单｜管理员 · 「我的提交」内）**
+   ----------------------------------------------------------------------------
+   · 触发面**极窄**：仅「我的提交」里 `status === ACCEPTED` 且当前账号为**管理员**的行
+     才渲染「撤銷採納」按钮（`v-if` 双条件 ⇒ 非管理员 / 非已采纳行 **DOM 零命中**）；
+   · 二次确认复用 `ConfirmDialog`（显式、可取消、默认不通过）＋ **可选理由**（≤200 字）；
+   · 钩子：按钮 `data-action="correction-revoke"`；弹窗 `correction-revoke-confirm` /
+     `correction-revoke-cancel` —— **只用 `data-action`，不新增 `[data-admin-action]` 取值**；
+   · 成功 ⇒ **重取读面** ＋ 上屏「已撤銷採納…」；失败 ⇒ **如实上屏原因**（reason ＋ 原文案）。
+   ============================================================================ */
+
+/** 撤销二次确认状态（`null` ＝ 未打开）。 */
+const revokeDialog = ref(null)
+/** 撤销的可选理由（≤200 字；默认空 ⇒ 云端不落 `revoke_note`）。 */
+const revokeNote = ref('')
+/** 撤销在飞（防重入；二次点击直接返回）。 */
+const revokeBusy = ref(false)
+const REVOKE_DIALOG_TITLE = '撤銷採納'
+const REVOKE_CONFIRM_TEXT = '確認撤銷'
+/** 弹窗内按钮的 `data-action`（**只用 `data-action`**，不带 `data-admin-action`）。 */
+const REVOKE_CONFIRM_ACTION = 'correction-revoke-confirm'
+const REVOKE_CANCEL_ACTION = 'correction-revoke-cancel'
+
+function askRevoke(row) {
+  revokeNote.value = ''
+  revokeDialog.value = { row }
+}
+
+function cancelRevoke() {
+  if (revokeBusy.value) return
+  revokeDialog.value = null
+}
+
+const revokeDialogMessage = computed(() => {
+  const row = revokeDialog.value && revokeDialog.value.row
+  if (!row) return ''
+  const label = row.field_label || row.field || '該屬性'
+  const faceLabel = faceLabelOfRow(row)
+  return (
+    `這將把「${faceLabel}·${label}」的已採納狀態撤銷為「駁回」，展示值不再計入該勘誤` +
+    `（撤銷為終態，之後不可再重新採納）。已發放的 ${reward} 金獎勵不扣回。`
+  )
+})
+
+/** 执行撤销：成功 ⇒ 重取读面 ＋ 上屏「已撤銷採納…」；失败 ⇒ 如实上屏原因。 */
+async function confirmRevoke() {
+  const dialog = revokeDialog.value
+  if (!dialog || revokeBusy.value) return
+  revokeBusy.value = true
+  try {
+    const result = await corrections.revokeAcceptance(actor.value, dialog.row.id, revokeNote.value)
+    revokeDialog.value = null
+    if (result && result.ok) {
+      feedback.value = result.message || '已撤銷採納該勘誤。'
+      /* **成功后重取读面**（在飞合并 ⇒ 不会并发两轮云读）。 */
+      await refreshCorrectionReads()
+    } else {
+      feedback.value = `撤銷失敗（${(result && result.reason) || 'ERROR'}）：${(result && result.message) || '未知原因'}`
+    }
+  } catch (error) {
+    /* 未预期异常（传输层）⇒ 按工程口径如实上屏 `STORAGE_UNAVAILABLE`，不伪装成别的 reason。 */
+    revokeDialog.value = null
+    feedback.value = `撤銷失敗（STORAGE_UNAVAILABLE）：${(error && error.message) || '未知錯誤'}`
+  } finally {
+    revokeBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -1630,6 +1698,36 @@ async function decide(row, decision) {
       </div>
     </ConfirmDialog>
 
+    <!-- **撤销采纳二次确认（本单）**：显式、可取消、默认不通过；文案写明「采纳 → 驳回」的
+         后果（展示值不再计入、撤销为终态）＋ **已发奖励不扣回**（如实）；
+         可选理由 ≤200 字（空 ⇒ 云端不落 `revoke_note`）；
+         弹窗按钮**只用 `data-action`**（**不新增 `[data-admin-action]` 取值**）。 -->
+    <ConfirmDialog
+      v-if="revokeDialog"
+      :title="REVOKE_DIALOG_TITLE"
+      :message="revokeDialogMessage"
+      :confirm-text="REVOKE_CONFIRM_TEXT"
+      :confirm-action="REVOKE_CONFIRM_ACTION"
+      :cancel-action="REVOKE_CANCEL_ACTION"
+      @confirm="confirmRevoke"
+      @cancel="cancelRevoke"
+    >
+      <div class="batch__note">
+        <label class="batch__note-label" for="correction-revoke-note">
+          撤銷理由（可選，最多 200 字）
+        </label>
+        <textarea
+          id="correction-revoke-note"
+          v-model="revokeNote"
+          class="batch__note-input"
+          maxlength="200"
+          rows="3"
+          data-correction-revoke-note
+        ></textarea>
+        <span class="batch__note-hint">填寫後記錄在該條勘誤的撤銷理由（revoke_note），雲端與本機一致。</span>
+      </div>
+    </ConfirmDialog>
+
     <!-- **本单（W-54）**：加载中 / 云读失败都**如实上屏**；两者都不得落到「暫無勘誤記錄」空态
          （失败时服务层随行回本机镜像 ⇒ 表格照常渲染，文案写明「以下為本機鏡像」）。 -->
     <p v-if="myNotice" class="notice review__notice" data-correction-my-notice>{{ myNotice }}</p>
@@ -1672,6 +1770,8 @@ async function decide(row, decision) {
               <th>依據</th>
               <th>狀態</th>
               <th>提交時間</th>
+              <!-- 管理员专属操作列（非管理员 ⇒ `v-if` 恒 false ⇒ 整列 DOM 零命中）。 -->
+              <th v-if="canReview">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -1692,6 +1792,21 @@ async function decide(row, decision) {
                 <span v-if="row.review_note" class="review__note" data-correction-note>{{ row.review_note }}</span>
               </td>
               <td>{{ formatDateTime(row.created_at) }}</td>
+              <!-- **撤销采纳（本单）**：仅「已采纳 × 管理员」渲染；钩子只用 `data-action`
+                   （**不新增 `[data-admin-action]` 取值**）。 -->
+              <td v-if="canReview" class="review__ops">
+                <button
+                  v-if="row.status === corrections.CORRECTION_STATUS.ACCEPTED"
+                  class="btn btn--ghost"
+                  type="button"
+                  data-action="correction-revoke"
+                  :data-correction-id="row.id"
+                  :disabled="revokeBusy"
+                  @click="askRevoke(row)"
+                >
+                  撤銷採納
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>

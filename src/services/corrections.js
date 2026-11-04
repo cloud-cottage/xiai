@@ -48,7 +48,7 @@ import {
   isKnownFaceStyle,
   isKnownSealClass
 } from '../data/seed.js'
-import { awardCorrectionReward } from './points.js'
+import { awardCorrectionReward, CORRECTION_REWARD } from './points.js'
 /* **身份标识（uid）单点**：上屏短碼（`u-` ＋ sha256 前 16 位 ⇒ 前 6 位展示），**不得回退成手机号**。 */
 import { uidShortOf } from '../data/uid.js'
 /* **不可逆摘要（同步、跨环境）**：值级公开摘要行 `_id` 的 `value` 摘要 —— 与云函数 `hash16`
@@ -1066,6 +1066,22 @@ export const REVIEW_OP = 'reviewCorrection'
 export const REVIEW_PAYLOAD_KEYS = ['correction_id', 'decision', 'note']
 
 /**
+ * **撤销采纳写面（本单）的云端门 op 名**（须与云函数
+ * `cloudfunctions/xiai-user-token/lib/ops.js::ADMIN_OPS` 的注册面逐字一致）。
+ */
+export const REVOKE_OP = 'revokeCorrectionAcceptance'
+
+/**
+ * **撤销采纳载荷的封闭键面**（**须与云函数 `lib/ops.js::REVOKE_ALLOWED_KEYS` 逐字同值**）：
+ * 恰两键 —— `correction_id`（必有）＋ `note`（可选，≤ `MAX_REVIEW_NOTE_LENGTH` 字）。
+ *
+ * **零 `decision`**：撤销的方向由**服务端 op** 钉死（只许 `ACCEPTED → REJECTED`），
+ * 前端不选方向；**零身份类键**（身份永远由服务端从令牌 / 平台会话派生 ⇒ 夹带即 `INVALID_FIELD`
+ * ＋ 零写入，与 `REVIEW_PAYLOAD_KEYS` 同一套服务端判据）。
+ */
+export const REVOKE_PAYLOAD_KEYS = ['correction_id', 'note']
+
+/**
  * 公开只读投影行的**封闭键面**（**须与云函数 `lib/ops.js::PUBLIC_PROJECTION_KEYS` 逐字同值**；
  * 以 `_id` 作文档键 ⇒ 该键**不在**本表，单列在 `PUBLIC_ID_FIELD`）。
  * 身份 / 奖励 / 理由类字段**一律不在本表**（脱敏投影）。
@@ -1148,8 +1164,11 @@ function publicProjectionOf(row, at = '') {
  * 不产生「同一条勘误两行」的重复。
  * @param {object} row 已采纳的勘误行（本机权威行）
  * @param {object} [serverProjection] 云函数回包的公开投影行（可选；服务端权威形态）
+ * @param {string} [status] 投影行目标状态（**缺省 `ACCEPTED`** ⇒ 既有采纳调用方逐字不变）；
+ *   撤销采纳路传 `REJECTED` ⇒ 本机公开投影镜像与云端 `xiai_corrections_public` 投影行同状态
+ *   （不改就会**以本机 `ACCEPTED` 盖掉云端 `REJECTED`** —— `db.js::withLocalOverlay` 是本地优先）。
  */
-function mirrorAcceptedToPublic(row, serverProjection) {
+function mirrorAcceptedToPublic(row, serverProjection, status = CORRECTION_STATUS.ACCEPTED) {
   const source = serverProjection && typeof serverProjection === 'object' ? serverProjection : publicProjectionOf(row)
   const correctionId = canonicalCorrectionIdOf(source)
   if (!correctionId) return null
@@ -1162,7 +1181,7 @@ function mirrorAcceptedToPublic(row, serverProjection) {
     field: String(source.field || ''),
     field_label: String(source.field_label || ''),
     value: String(source.value || ''),
-    status: CORRECTION_STATUS.ACCEPTED,
+    status,
     reviewed_at: String(source.reviewed_at || ''),
     updated_at: String(source.updated_at || source.reviewed_at || ''),
     schema: String(source.schema || PUBLIC_PROJECTION_SCHEMA)
@@ -1364,6 +1383,138 @@ export async function reviewCorrection(id, decision) {
     return { ok: false, message: '該勘誤已審覈，不可重複處理' }
   }
   return await review(user, id, decision)
+}
+
+/* ============================================================================
+   **管理员撤销采纳（本单｜人类口径 2026-11-04）**
+   ----------------------------------------------------------------------------
+   为什么：采纳是**终态** —— 内容错误的勘误一旦被采纳（印文匹配到错印面），首页 / 详情页的
+   展示值就跟着错，而既有面**没有任何撤回手段**。本段补**唯一**撤回路：服务端受控 op
+   `revokeCorrectionAcceptance` 只把 `ACCEPTED` 目标行改判 `REJECTED`。
+
+   硬口径（逐条）：
+     · **先管理员判定、再走登录令牌写面门**（服务端 `adminWhitelistDenial` 才是唯一授权判据；
+       非管理员 ⇒ `FORBIDDEN` ＋ **零发请求、零写入**）；
+     · 载荷**封闭恰两键** `correction_id` / `note`（可选，≤ `MAX_REVIEW_NOTE_LENGTH` 字）；
+     · **成功后用服务端权威行更新本机镜像**（`status` / `reviewed_at` / `reviewer_id` /
+       `revoked` / `revoked_at` / `revoke_note`），**公开投影本机镜像同步为 `REJECTED`**，
+       并**重算本机值级摘要**（服务端回 `summary` ⇒ 镜像权威值；dev / 離線 ⇒ 按本机行重算）；
+     · **奖励不回滚**：已发的 `CORRECTION_REWARD` 金**不扣回**（本段**零触碰账本**；
+       如需扣回另开单）—— 如实写进成功文案，不谎称「已退獎」；
+     · **不改三态机 / 展示值裁决规则**：撤销后该行不再是 `ACCEPTED` ⇒ 自然不再计入
+       （只认 `ACCEPTED`、取出现最多、同数取最近的裁决规则一字未改）；
+     · 失败形状恒为 `{ok:false, reason, message}`（`reason` ⊆ 既有冻结字面值）。
+   ============================================================================ */
+
+/**
+ * **以服务端权威行更正本机勘误镜像**（只覆盖决定面 / 撤销面；本机专有字段 `batchId` /
+ * `rewarded_at` 等**原样保留**）。状态非 `REJECTED` ⇒ 不动本机行、回 `null`（**不写错状态**）。
+ * @param {string} correctionId 勘误单号（本机行身份键 `row.id`）
+ * @param {object} authorityRow 服务端回包的权威行（`gate.row`）或 dev 形态的本地派生行
+ * @returns {object|null} 更正后的本机行
+ */
+function mirrorRevokedFromAuthority(correctionId, authorityRow) {
+  const authority = authorityRow && typeof authorityRow === 'object' ? authorityRow : null
+  if (!authority) return null
+  const status = normalizeCorrectionStatus(authority.status)
+  if (status !== CORRECTION_STATUS.REJECTED) return null
+  const rows = listCorrectionRows()
+  const target = rows.find((row) => row.id === correctionId) || null
+  const next = { ...(target || { id: correctionId }) }
+  next.status = status
+  if (authority.reviewed_at !== undefined && authority.reviewed_at !== null) next.reviewed_at = authority.reviewed_at
+  if (authority.reviewer_id !== undefined && authority.reviewer_id !== null) next.reviewer_id = authority.reviewer_id
+  if (authority.revoked !== undefined && authority.revoked !== null) next.revoked = !!authority.revoked
+  if (authority.revoked_at) next.revoked_at = authority.revoked_at
+  if (authority.revoke_note) next.revoke_note = authority.revoke_note
+  else if (Object.prototype.hasOwnProperty.call(next, 'revoke_note')) delete next.revoke_note
+  const existed = target !== null
+  saveCorrectionRows(existed ? rows.map((row) => (row.id === correctionId ? next : row)) : [...rows, next])
+  return next
+}
+
+/**
+ * **冻结 API ⑤**：管理员**撤销采纳**（`ACCEPTED → REJECTED`）。
+ *
+ * 判定顺序（全部在写之前）：① 客户端管理员判定（省一次往返；**服务端白名单门才是唯一授权判据**）
+ * → ② 理由形态 / 长度（≤200 字）→ ③ **登录令牌写面门** `userWriteGate(REVOKE_OP, {correction_id, note})`
+ * （服务端验签 ＋ 白名单 ＋ 封闭键面 ＋ 目标存在性 ＋ 状态门；拒绝 ⇒ **原样透传 ＋ 零写入**）
+ * → ④ 服务端权威行回写本机镜像 ＋ 公开投影镜像 ＋ 本机摘要重算。
+ *
+ * **只改状态**：不动 `xiai_faces` / `xiai_seals` 原始行、不删行、不回滚奖励（`rewarded_at` 保留）。
+ * @param {object|null} actor 操作者（须为管理员；缺省回落当前登录态）
+ * @param {string} correctionId 勘误单号
+ * @param {string} [note] 撤销理由（可选；≤ `MAX_REVIEW_NOTE_LENGTH` 字；空串 ⇒ 不落 `revoke_note`）
+ * @returns {Promise<{ok:true, status:string, accepted:false, revoked:true, row:object,
+ *   message:string}|{ok:false, reason:string, message:string}>}
+ */
+export async function revokeAcceptance(actor, correctionId, note = '') {
+  const who = actor || currentUser()
+  /* ① 客户端先判管理员（与 `review` 同口径 ⇒ 非管理员**零发请求、零写入**）。 */
+  if (!canReviewCorrections(who)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以撤銷採納' }
+  }
+  const id = String(correctionId === null || correctionId === undefined ? '' : correctionId).trim()
+  const rawNote = note === undefined || note === null ? '' : note
+  if (typeof rawNote !== 'string') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '撤銷理由必須是文字；該勘誤狀態未變更。' }
+  }
+  const noteText = rawNote.trim()
+  if (noteText.length > MAX_REVIEW_NOTE_LENGTH) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `撤銷理由不得超過 ${MAX_REVIEW_NOTE_LENGTH} 字；該勘誤狀態未變更。`
+    }
+  }
+  /* ② 登录令牌写面门（必要时静默补签；dev / 離線形态放行到下面的本地判定）。 */
+  const gate = await userWriteGate(REVOKE_OP, { correction_id: id, note: noteText })
+  if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* ③ 权威行：云端形态取服务端回包行；dev / 離線（或回包缺行）⇒ 本地按同一状态机判定后派生。 */
+  let authority = gate.row && typeof gate.row === 'object' ? gate.row : null
+  if (!authority) {
+    const localRows = listCorrectionRows()
+    const localTarget = localRows.find((row) => row.id === id) || null
+    if (!localTarget) return { ok: false, reason: 'NOT_FOUND', message: '未找到該勘誤；本次零寫入。' }
+    const localStatus = normalizeCorrectionStatus(localTarget.status)
+    if (localStatus !== CORRECTION_STATUS.ACCEPTED) {
+      return {
+        ok: false,
+        reason: 'INVALID_VALUE',
+        message: `僅「已採納（ACCEPTED）」的勘誤可撤銷；該勘誤當前狀態：${localStatus}；本次零寫入。`
+      }
+    }
+    const at = new Date().toISOString()
+    authority = Object.assign({}, localTarget, {
+      status: CORRECTION_STATUS.REJECTED,
+      reviewed_at: at,
+      reviewer_id: who.id,
+      revoked: true,
+      revoked_at: at
+    })
+    if (noteText !== '') authority.revoke_note = noteText
+  }
+  const mirrored = mirrorRevokedFromAuthority(id, authority)
+  if (!mirrored) {
+    return { ok: false, reason: 'INVALID_VALUE', message: '服務端回包的權威行不可辨識；該勘誤狀態未變更。' }
+  }
+  /* 公开投影的本机镜像同步为 `REJECTED`（与云端 `xiai_corrections_public` 投影行同状态）。 */
+  mirrorAcceptedToPublic(mirrored, gate.projection, CORRECTION_STATUS.REJECTED)
+  /* 本机值级摘要：服务端权威摘要优先镜像；无（dev / 離線）⇒ 按本机行**重算**。 */
+  if (gate.summary && typeof gate.summary === 'object') mirrorCorrectionSummaryRow(gate.summary)
+  else syncLocalCorrectionSummary(mirrored.faceId, sealIdOf(mirrored), mirrored.field, mirrored.value)
+
+  const label = mirrored.field_label || (markableMeta(mirrored.field) || {}).label || '該屬性'
+  const faceLabel = faceLabelOf(mirrored.faceId, sealIdOf(mirrored))
+  return {
+    ok: true,
+    status: CORRECTION_STATUS.REJECTED,
+    accepted: false,
+    revoked: true,
+    row: mirrored,
+    /* **如实**：奖励不回滚（已发的 N 金不扣回）。 */
+    message: `已撤銷採納「${faceLabel}·${label}」勘誤（狀態改判為駁回，展示值不再計入）；已發放的 ${CORRECTION_REWARD} 金獎勵不扣回。`
+  }
 }
 
 /* ============================================================================
