@@ -17,9 +17,63 @@ import { saveLocalBinary } from '../utils/file.js'
 import { IMAGE_LIMITS, MIN_CROP_SIDE, describeBytes, exportSquareImage, loadImageFile } from '../utils/image.js'
 /* 剪贴板一键粘贴图片（共用纯函数）：实物照片与替换印面图两处上传面共用判定内核。 */
 import { PASTE_HINT, handleClipboardPaste } from '../utils/clipboardImage.js'
+/* 受控诊断面（`?diag=1`）：读 / 写形态字符串的唯一判据（与 `MyCorrectionsView` 同一真源；
+   同文件的直接引用先例见 `MyCorrectionsView.vue` 的 `isLocalImportFace`）。 */
+import { diagFaceMode } from '../data/writeFaceMode.js'
 
 const route = useRoute()
 const router = useRouter()
+
+/* ========================================================================
+   **受控诊断面（`?diag=1`）**：仅 URL 带 `diag=1` 时渲染（无该参数 ⇒ `v-if` 恒
+   false ⇒ DOM 零命中、零行为变化）。面板只读：不发请求、不写存储、不定时轮询。
+   ======================================================================== */
+const diagOn = computed(() => String(route.query.diag || '') === '1')
+/** 服务层写完一条里程碑后 +1 ⇒ 面板重读观测缓冲（**无定时器**）。 */
+const diagTick = ref(0)
+/** 最近 20 条里程碑（服务层 `correctionsReadout()`，从旧到新）。 */
+const diagLines = computed(() => {
+  void diagTick.value
+  return corrections.correctionsReadout()
+})
+/** 当前读 / 写形态（`cloud` / `local-dev` …）。 */
+const diagMode = computed(() => diagFaceMode())
+/** 主包文件名（`index-<hash>.js`）；取不到写 `unknown`（**不编造**）。 */
+const diagBundle = computed(() => {
+  void diagTick.value
+  try {
+    const script = document.querySelector('script[src*="/assets/index-"]')
+    if (script) {
+      const match = String(script.getAttribute('src') || '').match(/\/assets\/([^/?#]+)/)
+      if (match) return match[1]
+    }
+    const entries = (typeof performance !== 'undefined' && performance.getEntriesByType('resource')) || []
+    for (const entry of entries) {
+      const name = String((entry && entry.name) || '')
+      const bundle = name.match(/\/assets\/(index-[^/?#]+)/)
+      if (bundle) return bundle[1]
+      /* dev 形态没有 `/assets/index-*.js` ⇒ 主包是入口 `/src/main.js`（只认入口，不逐模块）。 */
+      if (/\/src\/main\.js(?:[?#]|$)/.test(name)) return 'main.js'
+    }
+  } catch (err) {
+    /* 取不到就写 unknown；诊断面永不抛错。 */
+  }
+  return 'unknown'
+})
+/** 「复制到剪贴板」的全文（包名 ＋ 形态 ＋ 里程碑）。 */
+const diagText = computed(
+  () => `bundle=${diagBundle.value}\nmode=${diagMode.value}\n${diagLines.value.join('\n')}`
+)
+/** 一键复制（`navigator.clipboard.writeText`；失败**不报错**、不上屏）。 */
+async function copyDiagText() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      await navigator.clipboard.writeText(diagText.value)
+    }
+  } catch (err) {
+    /* 复制失败静默；诊断面零副作用。 */
+  }
+}
 
 const ORDINALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 
@@ -462,6 +516,9 @@ const correctionNoticeFaceId = ref('')
 function publishCorrectionNotice(text, faceId) {
   correctionNotice.value = text
   correctionNoticeFaceId.value = faceId || ''
+  /* 受控诊断面：本函数是**所有勘误提交路径的收口**（表单 / 印面属性都在提交后调它）
+     ⇒ 此刻 +1 让面板重读服务层刚记下的里程碑（无定时器、无请求）。 */
+  diagTick.value += 1
 }
 
 /* 切换印章（路由 id 变）/ 重新加载印面（识别码、面集合或数据源状态变）⇒ 提示随之作废，
@@ -1602,6 +1659,25 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <!-- 受控诊断面：**仅 `?diag=1`** 渲染（无该参数 ⇒ `v-if` 恒 false ⇒ DOM 零命中）。
+       只读取证：包名 / 读写形态 / 勘误服务层最近 20 条里程碑 ＋ 一键复制。 -->
+  <div
+    v-if="diagOn"
+    data-diag-panel
+    class="notice detail__notice"
+    style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5"
+  >
+    <div style="display: flex; gap: 8px; align-items: center; justify-content: space-between">
+      <strong>診斷面（?diag=1）</strong>
+      <button class="btn btn--ghost" type="button" @click="copyDiagText">複製到剪貼板</button>
+    </div>
+    <div>包名：{{ diagBundle }}</div>
+    <div>讀寫形態：{{ diagMode }}</div>
+    <div style="max-height: 240px; overflow: auto; white-space: pre">
+      <div v-for="(line, index) in diagLines" :key="index">{{ line }}</div>
+      <div v-if="!diagLines.length">（尚無里程碑）</div>
+    </div>
+  </div>
   <section v-if="seal">
     <div class="page-head detail__head">
       <div>

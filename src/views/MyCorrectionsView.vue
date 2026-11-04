@@ -12,6 +12,7 @@
  */
 
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { corrections, persons, points, seals, items } from '../services/index.js'
@@ -22,11 +23,63 @@ import { currentUser } from '../data/session.js'
    （与 R-4「采纳后正式行仍落云端」冲突）。
    生产构建（无该开关）⇒ `isLocalImportFace()` 恒 false ⇒「待審導入批次」区块**不渲染**
    （DOM 零命中，不以 CSS 隐藏冒充）**且不發任何取行請求**。**不自造第二套判据、不在本文件读 env。** */
-import { isLocalImportFace } from '../data/writeFaceMode.js'
+import { isLocalImportFace, diagFaceMode } from '../data/writeFaceMode.js'
 import { statusLabel, formatDateTime, importReviewFeedbackText } from '../utils/format.js'
 
 /* 任何一次审核 / 提交后 +1，使下面的派生读数重算。 */
 const dataVersion = ref(0)
+
+/* ============================================================================
+   **受控诊断面（`?diag=1`）**：仅 URL 带 `diag=1` 时渲染（无该参数 ⇒ `v-if` 恒
+   false ⇒ DOM 零命中、零行为变化）。面板只读：不发请求、不写存储、不定时轮询。
+   ============================================================================ */
+const route = useRoute()
+const diagOn = computed(() => String(route.query.diag || '') === '1')
+/** 一轮勘误读数走完（`finally`）后 +1 ⇒ 面板重读观测缓冲（**无定时器**）。 */
+const diagTick = ref(0)
+/** 最近 20 条里程碑（服务层 `correctionsReadout()`，从旧到新）。 */
+const diagLines = computed(() => {
+  void diagTick.value
+  return corrections.correctionsReadout()
+})
+/** 当前读 / 写形态（`cloud` / `local-dev` …）。 */
+const diagMode = computed(() => diagFaceMode())
+/** 主包文件名（`index-<hash>.js`）；取不到写 `unknown`（**不编造**）。 */
+const diagBundle = computed(() => {
+  void diagTick.value
+  try {
+    const script = document.querySelector('script[src*="/assets/index-"]')
+    if (script) {
+      const match = String(script.getAttribute('src') || '').match(/\/assets\/([^/?#]+)/)
+      if (match) return match[1]
+    }
+    const entries = (typeof performance !== 'undefined' && performance.getEntriesByType('resource')) || []
+    for (const entry of entries) {
+      const name = String((entry && entry.name) || '')
+      const bundle = name.match(/\/assets\/(index-[^/?#]+)/)
+      if (bundle) return bundle[1]
+      /* dev 形态没有 `/assets/index-*.js` ⇒ 主包是入口 `/src/main.js`（只认入口，不逐模块）。 */
+      if (/\/src\/main\.js(?:[?#]|$)/.test(name)) return 'main.js'
+    }
+  } catch (err) {
+    /* 取不到就写 unknown；诊断面永不抛错。 */
+  }
+  return 'unknown'
+})
+/** 「复制到剪贴板」的全文（包名 ＋ 形态 ＋ 里程碑）。 */
+const diagText = computed(
+  () => `bundle=${diagBundle.value}\nmode=${diagMode.value}\n${diagLines.value.join('\n')}`
+)
+/** 一键复制（`navigator.clipboard.writeText`；失败**不报错**、不上屏）。 */
+async function copyDiagText() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      await navigator.clipboard.writeText(diagText.value)
+    }
+  } catch (err) {
+    /* 复制失败静默；诊断面零副作用。 */
+  }
+}
 const feedback = ref('')
 /* **E-4**：循環審核期間的進度讀數（`已處理 N · 剩餘 M`）；空串 ⇒ 不顯示。 */
 const importReviewProgress = ref('')
@@ -703,6 +756,9 @@ async function runCorrectionReads() {
   } finally {
     myLoading.value = false
     queueLoading.value = false
+    /* 受控诊断面：本轮 `listMyCorrections` / `listPendingForAdmin` 的里程碑已落缓冲 ⇒
+       此刻 +1 让面板重读（无定时器、无请求）。 */
+    diagTick.value += 1
   }
 }
 
@@ -931,6 +987,25 @@ async function decide(row, decision) {
 
 <template>
   <section>
+    <!-- 受控诊断面：**仅 `?diag=1`** 渲染（无该参数 ⇒ `v-if` 恒 false ⇒ DOM 零命中）。
+         只读取证：包名 / 读写形态 / 勘误服务层最近 20 条里程碑 ＋ 一键复制。 -->
+    <div
+      v-if="diagOn"
+      data-diag-panel
+      class="notice review__notice"
+      style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5"
+    >
+      <div style="display: flex; gap: 8px; align-items: center; justify-content: space-between">
+        <strong>診斷面（?diag=1）</strong>
+        <button class="btn btn--ghost" type="button" @click="copyDiagText">複製到剪貼板</button>
+      </div>
+      <div>包名：{{ diagBundle }}</div>
+      <div>讀寫形態：{{ diagMode }}</div>
+      <div style="max-height: 240px; overflow: auto; white-space: pre">
+        <div v-for="(line, index) in diagLines" :key="index">{{ line }}</div>
+        <div v-if="!diagLines.length">（尚無里程碑）</div>
+      </div>
+    </div>
     <div class="page-head">
       <h1>我的勘誤記錄</h1>
       <p v-if="canReview">

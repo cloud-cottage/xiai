@@ -132,6 +132,19 @@ export function setLocalImportFaceOverride(value) {
   return isLocalImportFace()
 }
 
+/**
+ * **受控诊断面（`?diag=1`）用的形态字符串**（只读、零 I/O、不改任何判据）。
+ *
+ * 返回当前**写入口形态**（`cloud` / `local-dev`；两者皆由 `writeFaceMode()` 唯一判定，
+ * 本仓无第三态 ⇒ 不编造 `off`）；本机专属導入面开着时追加 `+local-import-face`，
+ * 让诊断串一眼分清「读的是本机面还是公网面」。
+ * @returns {'cloud'|'local-dev'|string}
+ */
+export function diagFaceMode() {
+  const mode = writeFaceMode()
+  return isLocalImportFace() ? `${mode}+local-import-face` : mode
+}
+
 /* ---------------------------------------------------------------------------
    清单式标注（**8 个裸 save*Rows ＋ 6 个 drive 裸写入口 ＋ 10 个管理员写入口**）
    --------------------------------------------------------------------------- */

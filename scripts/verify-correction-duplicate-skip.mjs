@@ -564,7 +564,7 @@ const makeViewRunner = () =>
     'formFeedback',
     'formOpen',
     'correctionFieldVisible',
-    `${SKIP_ALL_CONST_SRC}\n${FEEDBACK_HELPER_SRC}\n${FACE_ENTRY_SRC}\n${FORM_SRC}\nreturn { submitFaceEntry, submitCorrection }`
+    `const publishCorrectionNotice = () => {};\n${SKIP_ALL_CONST_SRC}\n${FEEDBACK_HELPER_SRC}\n${FACE_ENTRY_SRC}\n${FORM_SRC}\nreturn { submitFaceEntry, submitCorrection }`
   )
 
 const SKIP_ALL_MESSAGE = '所選項目已有相同提交，本次未新增勘誤。若你贊同該值，請改用【採信】為它佐證。'

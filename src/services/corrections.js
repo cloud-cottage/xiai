@@ -64,6 +64,78 @@ import { userWriteGate } from './userWrite.js'
    一律走**登录令牌写面门** `userWriteGate` —— 服务端在 `xiai-user-token` 上验签 ＋
    判「手机号 ∈ 管理员白名单（环境变量 `XIAI_ADMIN_PHONE`）」⇒ **零弹窗、不需要第二个码**。 */
 
+/* ============================================================================
+   **受控诊断串观测缓冲（`?diag=1` 才上屏；本文件只记、不渲染）**
+   ----------------------------------------------------------------------------
+   为什么：用户浏览器上「提交了勘误却看不到任何提示」时，要能让他自己在 URL 加
+   `?diag=1` 把真因取回来（面板渲染在 `SealDetailView.vue` / `MyCorrectionsView.vue`
+   顶部；**不带该参数 ⇒ 面板 DOM 零命中、本段零渲染**）。
+
+   本段纪律（**只读观测、零副作用**）：
+     · 只是内存里的先进先出缓冲（上限 `CORRECTIONS_DIAG_LIMIT` 条），**不落盘、不发请求、
+       不设定时器、不改任何读 / 写回包的形状与文案**；
+     · **不记令牌、不记完整明文值**（值只留前 20 字 ＋ 总长）、不记手机号 / uid；
+     · `correctionsReadout()` 返回**从旧到新**的**副本**（调用它不推进任何状态）。
+   ============================================================================ */
+
+/** 观测缓冲上限（只留最近 N 条；更旧的被挤出，**不持久化**）。 */
+export const CORRECTIONS_DIAG_LIMIT = 20
+
+/** 模块私有的观测缓冲（外部只能经 `correctionsReadout()` 拿副本）。 */
+const diagLines = []
+
+/**
+ * 最近一次**写面门**的形态读数（`local-dev` / `cloud`；`''` ＝ 该次调用未过门）。
+ * 为什么是模块变量：回包摘要在**包装层**记，而门在内层函数里 —— 同一时刻只有一条
+ * 勘误读 / 写在飞（同会话形态恒定），串台不改变读数含义。
+ */
+let diagGateMode = ''
+
+/** `HH:MM:SS`（只用于对表排序；不带日期、时区外标识或任何身份信息）。 */
+function diagClock() {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+/** 值的脱敏读数：**前 20 字 ＋ 总长**（绝不记全文，也不记令牌）。 */
+function diagValueOf(value) {
+  const text = String(value === null || value === undefined ? '' : value)
+  return `${text.slice(0, 20)}${text.length > 20 ? '…' : ''}(len=${text.length})`
+}
+
+/** 记一条里程碑（**永不外抛** —— 诊断面不得影响主流程）。 */
+function diagNote(text) {
+  try {
+    diagLines.push(`${diagClock()} ${text}`)
+    while (diagLines.length > CORRECTIONS_DIAG_LIMIT) diagLines.shift()
+  } catch (err) {
+    /* 观测失败即丢弃，不打扰调用方。 */
+  }
+}
+
+/** 登记一次写面门的形态（供回包摘要的 `mode`；无门 ⇒ `''` ⇒ 摘要里显示 `—`）。 */
+function diagMarkGate(gate) {
+  diagGateMode = gate && gate.mode ? String(gate.mode) : ''
+}
+
+/** 本機鏡像行数读数（读失败 ⇒ `-1`，**不编造 0**）。 */
+function diagLocalCount() {
+  try {
+    return listCorrectionRows().length
+  } catch (err) {
+    return -1
+  }
+}
+
+/**
+ * **观测缓冲读数（只读、无副作用）**。
+ * @returns {string[]} 最近 `CORRECTIONS_DIAG_LIMIT` 条里程碑，**从旧到新**（新副本）
+ */
+export function correctionsReadout() {
+  return diagLines.slice()
+}
+
 /** 勘误三态（规范冻结字面值）。 */
 export const CORRECTION_STATUS = {
   PENDING: 'PENDING',
@@ -144,7 +216,7 @@ export function buildCorrectionSummaryRow({ faceId, sealId = '', field, value, s
   }
 }
 
-/** **值级公开摘要行的本机镜像幂等 upsert**（按 `_id` 覆盖；重复写不新增第二行）。 */
+/** **值级公开摘要行的本機鏡像幂等 upsert**（按 `_id` 覆盖；重复写不新增第二行）。 */
 export function mirrorCorrectionSummaryRow(row) {
   if (!row || typeof row !== 'object') return null
   const id = String(row._id || '')
@@ -238,7 +310,7 @@ function sortCorrectionRows(list) {
 }
 
 /**
- * **云行 ∪ 本机镜像**：按行 id 去重、**本机行优先**（本机行是提交时落的镜像，带 `batchId`
+ * **云行 ∪ 本機鏡像**：按行 id 去重、**本机行优先**（本机行是提交时落的镜像，带 `batchId`
  * 等前端专有键）；无 id 的行原样保留（**不静默丢行**）。
  * @param {Array<object>} cloudRows 云端权威行
  * @param {Array<object>} localRows 本机镜像行
@@ -285,13 +357,35 @@ function correctionRowsMaybeMore(gate, rows) {
   return cloudCount === CORRECTION_ROWS_LIMIT
 }
 
+/** 诊断串包装：记「入参 / 回包摘要」**不改**回包（原样透传、原样外抛）。 */
 export async function listMyCorrections() {
+  const localBefore = diagLocalCount()
+  diagGateMode = ''
+  diagNote(
+    `listMyCorrections 入參{limit:${CORRECTION_ROWS_LIMIT}, session:${currentUser() ? 'yes' : 'no'}, 本機鏡像:${localBefore}}`
+  )
+  let res
+  try {
+    res = await listMyCorrectionsInner()
+  } catch (err) {
+    diagNote(`listMyCorrections 回包{threw:${(err && err.message) || '未知錯誤'}}`)
+    throw err
+  }
+  diagNote(
+    `listMyCorrections 回包{ok:${!!(res && res.ok)}, reason:${(res && res.reason) || '—'}, ` +
+      `rows:${res && Array.isArray(res.rows) ? res.rows.length : '—'}, mode:${diagGateMode || '—'}, 本機鏡像:${localBefore}}`
+  )
+  return res
+}
+
+async function listMyCorrectionsInner() {
   const user = currentUser()
   /* 未登录 ⇒ 与改前逐字一致：空集（零云端、零本机行）。 */
   if (!user) return { ok: true, rows: [], count: 0, maybeMore: false }
   const local = sortCorrectionRows(listCorrectionRows().filter((row) => row.user_id === user.id))
   /* 经登录令牌只读门（无令牌且有会话 ⇒ 先静默补签；与 `submitCorrection` 同一通道）。 */
   const gate = await userWriteGate(LIST_MY_CORRECTIONS_OP, { limit: CORRECTION_ROWS_LIMIT })
+  diagMarkGate(gate)
   /* local-dev / 离线形态：门不发请求 ⇒ **仅本机镜像**（行为与改前逐字一致）。 */
   if (gate && gate.mode === 'local-dev') {
     return { ok: true, rows: local, count: local.length, maybeMore: false }
@@ -573,7 +667,34 @@ export function submissionGroupsOfFace(face) {
  *      **云端形态** ⇒ 本地只写**服务端回传的那一行**（镜像；不是前端自建行）；回传缺行 ⇒
  *      `STORAGE_UNAVAILABLE`（**不冒充成功、不冒充越权**），返回 `authority` 供调用方区分。
  */
-export async function submitCorrection({
+/** 诊断串包装：记「入参（值只留前 20 字 ＋ 长度）/ 回包摘要 ＋ 本机镜像行数变化」。 */
+export async function submitCorrection(args = {}) {
+  const { faceId = '', sealId = '', stampId = '', field, value, batchId = '' } = args || {}
+  const localBefore = diagLocalCount()
+  diagGateMode = ''
+  diagNote(
+    `submitCorrection 入參{faceId:${faceId || '—'}, sealId:${sealId || stampId || '—'}, ` +
+      `field:${field === undefined || field === null ? '—' : field}, value:${diagValueOf(value)}, ` +
+      `batchId:${batchId ? 'given' : 'auto'}, 本機鏡像:${localBefore}}`
+  )
+  let res
+  try {
+    res = await submitCorrectionInner(args)
+  } catch (err) {
+    diagNote(`submitCorrection 回包{threw:${(err && err.message) || '未知錯誤'}}`)
+    throw err
+  }
+  const localAfter = diagLocalCount()
+  diagNote(
+    `submitCorrection 回包{ok:${!!(res && res.ok)}, reason:${(res && res.reason) || '—'}, ` +
+      `authority:${(res && res.authority) || '—'}, ` +
+      `message:${String((res && res.message) || '—').slice(0, 80)}, mode:${diagGateMode || '—'}, ` +
+      `本機鏡像:${localBefore}→${localAfter}}`
+  )
+  return res
+}
+
+async function submitCorrectionInner({
   faceId = '',
   sealId = '',
   stampId = '',
@@ -650,6 +771,7 @@ export async function submitCorrection({
   /* ② **服务端门**（云端形态下唯一身份判据 ＋ 权威落盘）；经登录令牌写面门 ⇒
      **无令牌且有会话时先静默补签**（修「刷新后提交勘误必失败」）。 */
   const gate = await userWriteGate('submitCorrection', payload)
+  diagMarkGate(gate)
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
 
   if (gate.mode === 'local-dev') {
@@ -841,7 +963,7 @@ export function canReviewCorrections(actor) {
  * （§3.12.10(c) 字面值与数据层同源；**不以空集冒充拒绝**，形状与写入口 `review()` 一致）；
  * 管理员 ⇒ `{ok:true, rows}`。两条路径均**不抛未捕获异常**。
  *
- * **本单（W-54）改为 `async` 云端读**：云端形态 ⇒ 云行 ∪ 本机镜像（按行 id 去重、本机行优先）；
+ * **本单（W-54）改为 `async` 云端读**：云端形态 ⇒ 云行 ∪ 本機鏡像（按行 id 去重、本机行优先）；
  * local-dev / 离线 ⇒ 仅本机镜像（行为与改前逐字一致）；云读失败 ⇒ **恰 3 键结构化拒绝**
  * （**不以本机镜像冒充待审读数**，由调用方上屏「讀數不可用」）。成功回包**增补**两个加性键
  * `count`（＝ `rows.length`）与 `maybeMore`（服务端 `count === limit` 派生；既有调用方不受影响）。
@@ -854,7 +976,29 @@ export function canReviewCorrections(actor) {
  *   |{ok:false, reason:string, message:string}>}
  *   `rows` 为 `PENDING` 勘误行（按提交时间倒序）
  */
+/** 诊断串包装：记「入参 / 回包摘要（含本机镜像行数）」**不改**回包（原样透传、原样外抛）。 */
 export async function listPendingForAdmin(actor) {
+  const localBefore = diagLocalCount()
+  diagGateMode = ''
+  diagNote(
+    `listPendingForAdmin 入參{status:${CORRECTION_STATUS.PENDING}, limit:${CORRECTION_ROWS_LIMIT}, ` +
+      `actor:${canReviewCorrections(actor || currentUser()) ? 'admin' : 'non-admin'}, 本機鏡像:${localBefore}}`
+  )
+  let res
+  try {
+    res = await listPendingForAdminInner(actor)
+  } catch (err) {
+    diagNote(`listPendingForAdmin 回包{threw:${(err && err.message) || '未知錯誤'}}`)
+    throw err
+  }
+  diagNote(
+    `listPendingForAdmin 回包{ok:${!!(res && res.ok)}, reason:${(res && res.reason) || '—'}, ` +
+      `rows:${res && Array.isArray(res.rows) ? res.rows.length : '—'}, mode:${diagGateMode || '—'}, 本機鏡像:${localBefore}}`
+  )
+  return res
+}
+
+async function listPendingForAdminInner(actor) {
   const who = actor || currentUser()
   /* 与写入口 `review` 同判定：非管理员**结构化拒绝**（不是空集）。 */
   if (!canReviewCorrections(who)) {
@@ -889,6 +1033,7 @@ export async function listPendingForAdmin(actor) {
     status: CORRECTION_STATUS.PENDING,
     limit: CORRECTION_ROWS_LIMIT
   })
+  diagMarkGate(gate)
   /* local-dev / 离线形态：门不发请求 ⇒ **仅本机镜像**（行为与改前逐字一致）。 */
   if (gate && gate.mode === 'local-dev') {
     return { ok: true, rows: local, count: local.length, maybeMore: false }
@@ -939,7 +1084,7 @@ export const PUBLIC_PROJECTION_KEYS = [
   'schema'
 ]
 
-/** 公开投影行的文档键名（云端落 `_id`；本机镜像落同名字段 ⇒ 覆盖层可按 `_id` 配对）。 */
+/** 公开投影行的文档键名（云端落 `_id`；本機鏡像落同名字段 ⇒ 覆盖层可按 `_id` 配对）。 */
 export const PUBLIC_ID_FIELD = '_id'
 
 /** 公开投影 schema 版本（与云函数 `PUBLIC_SCHEMA` 逐字同值）。 */
@@ -990,16 +1135,16 @@ function publicProjectionOf(row, at = '') {
 }
 
 /**
- * 把已采纳勘误写进**公开投影的本机镜像**（键 `xiai:v1:corrections-public`）。
+ * 把已采纳勘误写进**公开投影的本機鏡像**（键 `xiai:v1:corrections-public`）。
  *
  * **幂等 upsert**：按**规范行身份**（`correction_id` → `id`，剥 `cp-` 前缀）覆盖既有行、
  * 无则追加（重复采纳 / 重放不会新增第二行；历史 `id` 形态的镜像行也能被覆盖）。
- * 只读 **本机镜像**（`listPublicCorrectionMirrorRows`）——不把云端行一并写回本机键。
+ * 只读 **本機鏡像**（`listPublicCorrectionMirrorRows`）——不把云端行一并写回本机键。
  *
  * **与云端落盘逐字对齐**：优先采用云函数回包的 `projection`（服务端权威公开行）；
  * 缺省（dev / 離線形態，无云端）才由 `publicProjectionOf` 本地派生。落盘统一补
  * `_id = 'cp-<correction_id>'`（与云端文档键同值）⇒ 云端形态下数据层覆盖层
- * （`db.js::withLocalOverlay`，按 `_id` 配对）会把本机镜像与云端投影行**合成一行**，
+ * （`db.js::withLocalOverlay`，按 `_id` 配对）会把本機鏡像与云端投影行**合成一行**，
  * 不产生「同一条勘误两行」的重复。
  * @param {object} row 已采纳的勘误行（本机权威行）
  * @param {object} [serverProjection] 云函数回包的公开投影行（可选；服务端权威形态）
@@ -1039,8 +1184,8 @@ function mirrorAcceptedToPublic(row, serverProjection) {
  * `writeCorrectionDecision` **未成功**（`!decided.ok`；常见成因 `ALREADY_REVIEWED` ——
  * 本机与云端状态不一致，或同一行在另一页签已本地采纳）⇒ **不得把它当失败返回**。
  * 做法：以**服务端回包的权威行**（`gate.row`：仅供「决定面」字段 status / reviewed_at /
- * reviewer_id / field_label / review_note）更正**本机镜像行**（`corrections` 键），
- * 采纳时再同步**公开投影的本机镜像**（`gate.projection` 为服务端权威投影行）。
+ * reviewer_id / field_label / review_note）更正**本機鏡像行**（`corrections` 键），
+ * 采纳时再同步**公开投影的本機鏡像**（`gate.projection` 为服务端权威投影行）。
  * **仅本地镜像写、不额外调云**（云端已由本 op 落盘）。
  *
  * 本机侧**只读 / 只写**「本机状态与云端状态不一致」这一层，**不改**勘误三态语义 / 幂等 /
