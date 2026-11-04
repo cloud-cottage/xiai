@@ -443,40 +443,11 @@ async function readEnhanceRow(imageId) {
   return rows.length > 0 ? rows[0] : null
 }
 
-/** 读同 `(stamp_id, kind)` 的既有影像行（**算 `seq` 用**；`limit: 1000` —— 唯一索引
- *  `ux_stamp_id_kind_seq` 是**组内**唯一 ⇒ 组内既有行必须看全，否则 `seq` 算小必撞）。
- *  **读失败不阻断入册**（⇒ 按空集处理：读面抖动不得把成功降级成失败）；无行 ⇒ `[]`。 */
-async function readImageRowsForSeq(stampId, kind) {
-  try {
-    const ops = opsModule()
-    const rows = await ops.readRows(
-      ops.COLLECTIONS.images,
-      { stamp_id: text(stampId), kind: text(kind) },
-      { limit: 1000 }
-    )
-    return Array.isArray(rows) ? rows : []
-  } catch {
-    /* 读抛错 ⇒ 空集（由 `nextImageSeq` 从 1 起算；后续撞键仍走 ⑨ 的递增重试兜底）。 */
-    return []
-  }
-}
-
-/** 下一个 `seq`（**纯函数、零 I/O、零自抛**）：既有行 `Number(row.seq)` 的最大值 + 1；
- *  无有效值（缺键 / 非数字 / NaN）⇒ **从 1 开始**。`seq` 是唯一索引
- *  `ux_stamp_id_kind_seq` (kind, seq, stamp_id) 的中段 —— doc 缺 `seq` ⇒ 该三元组恒空 ⇒
- *  同印同 `kind` 的第二行必撞 `E11000`。形状怪的行只跳过（`seq` 恒为 ≥1 的整数）。 */
-function nextImageSeq(rows) {
-  let max = 0
-  try {
-    for (const row of rows) {
-      const seq = Number(row && typeof row === 'object' ? row.seq : NaN)
-      if (Number.isFinite(seq) && seq > max) max = seq
-    }
-  } catch {
-    /* 不自抛：算不出最大值 ⇒ 落回 1 起算。 */
-  }
-  return Math.floor(max) + 1
-}
+/* **影像 `seq` 分配（本单收单点）**：本地的 `readImageRowsForSeq` / `nextImageSeq` **已删除** ——
+   `seq` 的既有行读取与算号**只在 `lib/ops.js` 一处**（`imageSeqsOf` / `nextImageSeqOf`），
+   本文件与「印章导入采纳 / 无审核直写」走**同一套实现**（语义逐条同：`limit: 1000` 看全组内行、
+   读抛错 ⇒ **按空集**不阻断入册、既有行 `Number(seq)` 最大值 + 1、无有效值从 1 起算；
+   ⑨ 的「撞键 `seq` 递增重试」兜底**原样保留**）。 */
 
 /** 读图源字节（存储层取不到 ⇒ 抛错 ⇒ 调用方转 `STORAGE_UNAVAILABLE`）。 */
 async function readSourceBytes(objectKey) {
@@ -1116,8 +1087,10 @@ async function enhanceFace(payload, identity, context) {
   /* `seq`（**写行前先算**；唯一索引 `ux_stamp_id_kind_seq`＝ (kind, seq, stamp_id) 的中段）：
      同 `(stamp_id, kind)` 既有影像行 `Number(seq)` 最大值 + 1（无有效值 ⇒ 从 1 开始）；
      读失败 / 无行 ⇒ 按空集处理。doc 此前**缺 `seq`** ⇒ 该三元组恒空 ⇒ 同印同 `kind` 的
-     第二行必撞 `E11000`（首写能过、再写必炸的真因）。 */
-  const seq = nextImageSeq(await readImageRowsForSeq(sealId, 'FACE'))
+     第二行必撞 `E11000`（首写能过、再写必炸的真因）。
+     **本单收单点**：既有行读取与算号一律经 `lib/ops.js` 的 `imageSeqsOf` / `nextImageSeqOf`
+     （与印章导入采纳 / 无审核直写**同一套实现**；本地第二套已删，语义逐条同）。 */
+  const seq = ops.nextImageSeqOf(sealId, 'FACE', await ops.imageSeqsOf(sealId, 'FACE'))
   const doc = {
     id: newImageId,
     stamp_id: sealId,

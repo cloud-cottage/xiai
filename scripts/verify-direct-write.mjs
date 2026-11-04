@@ -271,7 +271,7 @@ check('A13', '**印章行不落** `image_sha256`（口径③：印章行不必�
 check('A14', '印章行 review_status ＝ APPROVED（无审核直写落在既有值上）', 'APPROVED', sealRowA.review_status)
 check('A15', '印章行 stamp_id ＝ sid ＝ id', true, sealRowA.stamp_id === sealRowA.sid && sealRowA.id === sealRowA.sid)
 check('A16', '印章行**不落** batch_id / raw_json / image_status（直写不经暂存行）', [], Object.keys(sealRowA).filter((k) => ['batch_id', 'raw_json', 'image_status'].indexOf(k) !== -1))
-check('A17', '影像登记行字段面恰含设计件 §3.2 ⑤ 的 11 键', ['bytes', 'height', 'id', 'kind', 'mime', 'sha256', 'storage', 'storage_key', 'stamp_id', 'updated_at', 'width'].sort(), sorted(Object.keys(imageRowA).filter((k) => k !== '_id')))
+check('A17', '影像登记行字段面恰含设计件 §3.2 ⑤ 的 11 键 ＋ `seq`（`xiai_images` 唯一索引 `ux_stamp_id_kind_seq` 要求同印同类内 seq 互不重复）', ['bytes', 'height', 'id', 'kind', 'mime', 'seq', 'sha256', 'storage', 'storage_key', 'stamp_id', 'updated_at', 'width'].sort(), sorted(Object.keys(imageRowA).filter((k) => k !== '_id')))
 check('A18', '影像登记行 storage=server / mime=image/tiff / 摘要 ≡ 键内摘要', { storage: 'server', mime: 'image/tiff', match: true }, { storage: imageRowA.storage, mime: imageRowA.mime, match: imageRowA.storage_key === keyOf(SHA_A) && imageRowA.sha256 === SHA_A })
 check('A19', '影像登记行 stamp_id 回填 ＝ sid', sealRowA.stamp_id, imageRowA.stamp_id)
 check('A20', '面行 face_image_id ＝ 影像登记行 id', `img-${SHA_A.slice(0, 16)}`, faceRowA.face_image_id)

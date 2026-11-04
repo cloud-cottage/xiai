@@ -1638,6 +1638,96 @@ function imageOverlayRowOf(overlay, sha, key) {
 }
 
 /* ---------------------------------------------------------------------------
+   **影像行 `seq` 分配单点（唯一实现点；三条写行路径共用）**
+   ---------------------------------------------------------------------------
+   背景（真因，已控制台读数）：`xiai_images` 上有复合唯一索引
+   `ux_stamp_id_kind_seq(kind, seq, stamp_id)`；doc **缺 `seq`** ⇒ 该三元组恒空 ⇒
+   同印同 `kind` 的第二行必撞 `E11000`（AI 修复产物行首写能过、再写必炸即此）。
+   故本文件**只此一处**算 `seq`：
+     · `nextImageSeqOf(stampId, kind, takenSeqs)` ＝ **纯函数**（零 I/O、零自抛）：
+       把「既有行」与「本批已分配号」合并取最大值 + 1（无有效值 ⇒ 从 1 起算）；
+     · `imageSeqsOf(stampId, kind)` ＝ **只读读取包装**：按 `(stamp_id, kind)` 读既有行
+       （`limit: 1000` —— 组内唯一 ⇒ 必须看全，否则算小必撞）；**读抛错 ⇒ 按空集**
+       （分配**不得阻断写入**；也**不把真故障伪装成「有行」** —— 空集就是空集，且
+       `console.warn` 如实记降级；真故障若最终仍撞键，由各写路径的既有兜底处理）。
+   调用点（三条写行路径，全部经此）：
+     ① 印章导入采纳 ＋ 无审核直写（两者共用构造器 `buildSealAcceptanceFromImport`）；
+     ② 直写 op 的 `stamp_id` 回填处（`buildDirectImageRow(face, at, seq)` 定稿）；
+     ③ `lib/aiEnhance.js`（AI 修复产物行）。
+   --------------------------------------------------------------------------- */
+
+/** `seq` 形态门（**正整数**；`0` / 负 / 小数 / NaN / 布尔 / 缺键 ⇒ 不合法）。 */
+function isImageSeq(value) {
+  if (value === null || value === undefined || typeof value === 'boolean') return false
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 1 && Math.floor(n) === n
+}
+
+/**
+ * 下一个可用 `seq`（**纯函数单点**；零 I/O、零自抛、不触库）。
+ *
+ * @param {string} stampId 印章 id（**组标识**；传入的行对象若自带 `stamp_id` 且与之不同 ⇒ 跳过，防串组）
+ * @param {string} kind 影像类别（`FACE` / `EDGE`；同上）
+ * @param {Array<object|number|string>|Set<...>|object|number|string} [takenSeqs] 已占用号：
+ *   **既有行**（行对象取 `Number(row.seq)`）＋ **本批已分配号**（数字 / 数字串 / 行对象皆可；
+ *   缺省 / 空 ⇒ 视作零占用）
+ * @returns {number} 下一个可用正整数（无有效值 ⇒ 从 1 起算）
+ */
+function nextImageSeqOf(stampId, kind, takenSeqs) {
+  const wantStamp = text(stampId)
+  const wantKind = text(kind)
+  let max = 0
+  const absorb = (item) => {
+    if (item !== null && typeof item === 'object') {
+      /* 行对象：只认同组（`stamp_id` / `kind` 行上给出且与本组不同 ⇒ 跳过，防串组）。 */
+      const rowStamp = item.stamp_id === undefined || item.stamp_id === null ? '' : text(item.stamp_id)
+      const rowKind = item.kind === undefined || item.kind === null ? '' : text(item.kind)
+      if (wantStamp && rowStamp && rowStamp !== wantStamp) return
+      if (wantKind && rowKind && rowKind !== wantKind) return
+      if (!isImageSeq(item.seq)) return
+      const own = Number(item.seq)
+      if (own > max) max = own
+      return
+    }
+    if (!isImageSeq(item)) return
+    const own = Number(item)
+    if (own > max) max = own
+  }
+  try {
+    if (takenSeqs === null || takenSeqs === undefined) return 1
+    /* 字符串虽可迭代但**按单值**处理（`'12'` 不得当成字符序列 `'1','2'`）。 */
+    if (typeof takenSeqs !== 'string' && typeof takenSeqs[Symbol.iterator] === 'function') {
+      for (const item of takenSeqs) absorb(item)
+    } else {
+      absorb(takenSeqs)
+    }
+  } catch {
+    /* 不自抛：算不出最大值 ⇒ 落回 1 起算。 */
+  }
+  return Math.floor(max) + 1
+}
+
+/**
+ * 读同 `(stamp_id, kind)` 的既有影像行（**只读读取包装**；`limit: 1000` —— 组内唯一 ⇒
+ * 必须看全，否则 `seq` 算小必撞）。
+ * **读抛错 ⇒ 按空集**（分配不阻断写入；**不把真故障伪装成「有行」**）；降级如实 `console.warn`
+ * （**不进回包** —— 回包键面冻结、零新增键）。
+ * @returns {Promise<Array<object>>}
+ */
+async function imageSeqsOf(stampId, kind) {
+  try {
+    const rows = await readRows(COLLECTIONS.images, { stamp_id: text(stampId), kind: text(kind) }, { limit: 1000 })
+    return Array.isArray(rows) ? rows : []
+  } catch (error) {
+    console.warn(
+      '[xiai] imageSeqsOf 讀既有影像行失敗 ⇒ 按空集繼續（`seq` 從 1 起算；不阻斷寫入、不把真故障偽裝成「有行」）：',
+      error && error.message ? error.message : error
+    )
+    return []
+  }
+}
+
+/* ---------------------------------------------------------------------------
    item 通道切片 A（v1.61）：印谱導入辅助（值域 / 形態門 ＋ 本體归一 ＋ 讀行）
    --------------------------------------------------------------------------- */
 
@@ -3361,6 +3451,36 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
   if (!sealCode.ok) return { ok: false, reason: REASONS.INVALID_VALUE }
   const stampId = sealCode.code
   const serial = sealStampSerialOf(stampId)
+  /* **影像 `seq` 分配（单点）**：本批**新建**的影像登记行（＝ `imageOverlay` 覆蓋層；由无审核直写
+     通道在本构造器之前自建、`stamp_id` 此刻才由发号得出）逐个分配 `seq` 并**落进行对象**：
+       · **同批内互不重复**（`taken` 集递增），且避开该印该类**既有行**（`imageSeqsOf` 读回）；
+       · **同 sha 命中既有行 ⇒ 复用**：不在覆蓋層里的解析结果**不加 `seq`、不改既有行**；
+       · 覆蓋層行**已带合法 `seq`** ⇒ 沿用（只入 `taken` 集），**不重复分配**。
+     无覆蓋層（印章导入采纳 `reviewSealImport` / 修复通道 `repairImportAcceptance`）⇒ 零读、零改
+     （这两条路的影像行都是**既有行**，本就不新建 ⇒ 行为与改动前逐字不变）。 */
+  const overlayImageRows = Array.isArray(imageOverlay) ? imageOverlay : []
+  if (overlayImageRows.length > 0) {
+    const takenByKind = new Map()
+    for (const image of overlayImageRows) {
+      if (!image || typeof image !== 'object') continue
+      const kind = text(image.kind) === 'EDGE' ? 'EDGE' : 'FACE'
+      if (!takenByKind.has(kind)) {
+        const taken = new Set()
+        for (const existing of await imageSeqsOf(stampId, kind)) {
+          if (isImageSeq(existing && existing.seq)) taken.add(Number(existing.seq))
+        }
+        takenByKind.set(kind, taken)
+      }
+      const taken = takenByKind.get(kind)
+      if (isImageSeq(image.seq)) {
+        taken.add(Number(image.seq))
+        continue
+      }
+      const seq = nextImageSeqOf(stampId, kind, taken)
+      taken.add(seq)
+      image.seq = seq
+    }
+  }
   const source = text(row && row.source)
   const sealName = text(row && row.seal_name)
   const sealDoc = {
@@ -3586,17 +3706,26 @@ function directWriteReviewerDenial(identity, env) {
 /**
  * 直写影像**登记行**（B2：`xiai_images` 在生产没有任何 op 写者 ⇒ 直写 op 自写）。
  * 字段面 ＝ 设计件 §1.5 / §3.2 ⑤（`id/stamp_id/kind/storage/storage_key/sha256/bytes/mime/
- * width/height/updated_at`）；`_id` ＝ **内容寻址**（`img-` ＋摘要前 16 位）⇒ 同图恒同 `_id`
- * ⇒ 幂等覆写、不增行、**不消耗号**。`stamp_id` 由调用方在拿到 `sid` 后回填（发号在构建期之后）。
+ * width/height/updated_at`）＋ **`seq`（仅新增字段）**；`_id` ＝ **内容寻址**（`img-` ＋摘要前 16 位）
+ * ⇒ 同图恒同 `_id` ⇒ 幂等覆写、不增行、**不消耗号**。`stamp_id` 由调用方在拿到 `sid` 后回填
+ * （发号在构建期之后）；`seq` 同样由调用方在拿到 `stamp_id` 后经**单点分配器**
+ * （`nextImageSeqOf` / `imageSeqsOf`）取号传入 —— 唯一索引 `ux_stamp_id_kind_seq(kind, seq,
+ * stamp_id)` 的中段，缺它则同印同 `kind` 第二行必撞 `E11000`。**缺省 / 非法 `seq` ⇒ 不落该键**
+ * （键面与取值相对旧版逐字不变）。
  * 像素尺寸：直写载荷不带、服务端不为此整图解码 ⇒ 如实落 `null`（读面按行派生展示键，不据此判定）。
+ * @param {object} face 印面（含影像引用键 / 摘要 / 体量）
+ * @param {string} at 更新时间（ISO）
+ * @param {number|string} [seq] 已分配的 `seq`（正整数；缺省 / 非法 ⇒ 行内不带 `seq` 键）
  */
-function buildDirectImageRow(face, at) {
+function buildDirectImageRow(face, at, seq) {
   const sha = text(face && face.image_sha256)
   const size = Number(face && face.image_bytes)
-  return {
+  const row = {
     id: `${DIRECT_IMAGE_ID_PREFIX}${sha.slice(0, DIRECT_IMAGE_ID_HEX_LENGTH)}`,
     stamp_id: '',
     kind: text(face && face.kind) === 'EDGE' ? 'EDGE' : 'FACE',
+    /* **`seq` 仅新增字段**（条件落键；其余键面与值一字不动）。 */
+    ...(isImageSeq(seq) ? { seq: Number(seq) } : {}),
     storage: 'server',
     storage_key: text(face && face.image_storage_key),
     sha256: sha,
@@ -3608,6 +3737,7 @@ function buildDirectImageRow(face, at) {
     height: null,
     updated_at: at
   }
+  return row
 }
 
 /** 印面行 ⇒ 回包用 `image_id`（＝ `face_image_id`［FACE］/ `edge_image_ids[0]`［EDGE］/ `null`）。 */
@@ -5626,6 +5756,8 @@ const ADMIN_OPS = Object.freeze({
     /* ⑦ 影像登记行（**先传对象 → 本 op 只校验引用**）：集合里已有行 ⇒ **不改写既有行**；
        内容寻址键无行 ⇒ 自建登记行（同 sha 恒同 `_id` ⇒ 幂等覆写、不增行）。 */
     const imageRows = []
+    /* 与 `imageRows` **一一对应**的源印面（发号前先建行只为覆蓋層解析；发号后据此**定稿重建**）。 */
+    const pendingImageFaces = []
     for (const face of faces) {
       if (text(face.image_sha256) === '' && text(face.image_storage_key) === '') continue
       const resolved = await findSealImportImageRow(face)
@@ -5633,7 +5765,9 @@ const ADMIN_OPS = Object.freeze({
       if (text(face.image_storage_key) === SEAL_PLACEHOLDER_IMAGE_KEY) {
         return deny(REASONS.INVALID_VALUE, '佔位圖登記行不存在 ⇒ 拒絕直寫；本次零寫入。')
       }
+      /* **此刻不带 `seq`**：`stamp_id` 尚未发号 ⇒ 无组可分配；`seq` 由下面 ⑩ 收口。 */
       imageRows.push(buildDirectImageRow(face, at))
+      pendingImageFaces.push(face)
     }
     /* ⑥ **幂等读**（`source` ＋ `source_seal_id`；命中 ⇒ 零新增行、**不改写既有行**、**无 `plan`**）。 */
     const seals = await readRows(COLLECTIONS.seals, {}, { limit: DIRECT_WRITE_READ_LIMIT })
@@ -5669,10 +5803,40 @@ const ADMIN_OPS = Object.freeze({
         kind: text(doc.kind) === 'EDGE' ? 'EDGE' : 'FACE'
       })
     })
-    /* ⑩ plan：**影像登记行 → 印章正式行 → 逐印面行**（先落被引用的登记行；`stamp_id` 此刻才有值）。 */
-    imageRows.forEach((row) => {
-      row.stamp_id = built.stampId
-    })
+    /* ⑩ **`stamp_id` 回填 ＋ `seq` 收口（单点分配）**，然后 plan：**影像登记行 → 印章正式行 →
+       逐印面行**（先落被引用的登记行；`stamp_id` 此刻才有值 —— 发号在构造器内完成）。
+       行内 `seq` 已由构造器（`buildSealAcceptanceFromImport`）按组分配（同批不重复、避开该印
+       该类既有行）；此处**兜漏配**（正常不触发：仅当构造器未分配时按单点补号并先补读既有行），
+       再经 `buildDirectImageRow(face, at, seq)` **定稿重建**（`seq` 仅新增字段，其余键面与值
+       逐字不变），`stamp_id` 照旧回填。 */
+    const takenSeqsByKind = new Map()
+    const seqReadKinds = new Set()
+    for (const row of imageRows) {
+      if (!isImageSeq(row.seq)) continue
+      const kind = text(row.kind)
+      if (!takenSeqsByKind.has(kind)) takenSeqsByKind.set(kind, new Set())
+      takenSeqsByKind.get(kind).add(Number(row.seq))
+    }
+    for (let index = 0; index < imageRows.length; index += 1) {
+      const row = imageRows[index]
+      const kind = text(row.kind)
+      if (!takenSeqsByKind.has(kind)) takenSeqsByKind.set(kind, new Set())
+      const taken = takenSeqsByKind.get(kind)
+      if (!isImageSeq(row.seq)) {
+        /* 兜漏配（构造器已分配 ⇒ 不走此支）：先补读该组既有行，再按单点取号。 */
+        if (!seqReadKinds.has(kind)) {
+          seqReadKinds.add(kind)
+          for (const existing of await imageSeqsOf(built.stampId, kind)) {
+            if (isImageSeq(existing && existing.seq)) taken.add(Number(existing.seq))
+          }
+        }
+        row.seq = nextImageSeqOf(built.stampId, kind, taken)
+      }
+      taken.add(Number(row.seq))
+      const finalRow = buildDirectImageRow(pendingImageFaces[index], at, row.seq)
+      finalRow.stamp_id = built.stampId
+      imageRows[index] = finalRow
+    }
     const primaryIndex = built.faceDocs.findIndex((doc) => text(doc.kind) !== 'EDGE')
     const primaryAt = primaryIndex === -1 ? 0 : primaryIndex
     return {
@@ -6106,6 +6270,11 @@ module.exports = {
   directWriteSourceDenial,
   directWriteReviewerDenial,
   buildDirectImageRow,
+  /* **影像 `seq` 分配单点（本单新增）**：纯函数 ＋ 只读读取包装 ＋ 形态门 —— 三条写行路径
+     （印章导入采纳 / 无审核直写 / AI 修复）共用；供 `lib/aiEnhance.js` 与离线自检直接调用。 */
+  nextImageSeqOf,
+  imageSeqsOf,
+  isImageSeq,
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,
