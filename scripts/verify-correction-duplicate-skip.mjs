@@ -688,6 +688,34 @@ const expectedPartial = (accepted, skipped) =>
   check('C5', 'AC-635① 表单部分跳过（N=3 / K=2）上屏**逐字**', expectedPartial(1, 2), out.feedback)
   check('C5b', 'AC-635 表单收尾：1＋2 ＝ 3 ⇒ 关闭弹窗', false, out.formOpen)
 }
+/* C5c：表单 —— 4 项中 3 项重复（人类口径：重复只跳该项，**剩余项照常提交**）。 */
+{
+  const out = await runForm([dupResult(), dupResult(), okResult(), dupResult()], {
+    seal_name: '印文戊',
+    dynasty: '清初',
+    seal_class: '流派印',
+    transcription: '釋義戊'
+  })
+  check('C5c', 'AC-635 多数项重复（K=3 / N=4）⇒ 剩余 1 项仍提交为勘误记录并如实上屏', expectedPartial(1, 3), out.feedback)
+  check('C5d', 'AC-635 多数项重复 ⇒ 收尾仍按「接受＋跳过 ＝ 填写项数」关闭弹窗（不因重复阻断整单）', false, out.formOpen)
+}
+/* C5e：表单 —— 7 项全填、5 项重复（人类 2026-11-04 原话的最小可行放大）。 */
+{
+  const out = await runForm(
+    [dupResult(), dupResult(), dupResult(), dupResult(), okResult(), dupResult(), okResult()],
+    {
+      seal_name: '印文己',
+      dynasty: '民國',
+      seal_type: '姓名印',
+      face_style: '漢白文鑄印',
+      seal_class: '流派印',
+      author: 'p-qa-author',
+      transcription: '釋義己'
+    }
+  )
+  check('C5e', 'AC-635 7 项中 5 项重复 ⇒ 剩余 2 项照常提交（成功 2 / 跳过 5 逐字上屏）', expectedPartial(2, 5), out.feedback)
+  check('C5f', 'AC-635 7 项 5 重复 ⇒ 2＋5 ＝ 7 ⇒ 关闭弹窗', false, out.formOpen)
+}
 /* C6：表单 —— 全部跳过。 */
 {
   const out = await runForm([dupResult(), dupResult()], { seal_name: '印文乙', transcription: '釋義乙' })
