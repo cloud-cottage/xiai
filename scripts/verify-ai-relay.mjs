@@ -11,7 +11,7 @@
  *   · **注入 store / clock / fetch / 图片签名链**：四个 lib 的既有注入缝接内存假 DB；
  *     `now` 固定、`resolveImageUrl` 回签名链假值（**不连云、不下载字节**）。
  *
- * 断言面（本套 **85** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
+ * 断言面（本套 **89** 条 ＝ 基线 38 ＋ v1.74 data_url 面 10 ＋ 嘗試序號冪等鍵面 5 ＋ 路由形態面 2
  * 〔F6/F7：薄壳文件在场且各自导出 handler ＋ `fixedPath` 分支被走 ⇒ 非白名单 url 打真薄壳得 401 而非 404〕
  * ＋ 密鑰變量名面 3〔S1〜S3：`secretPairOf` 純函數層、不連雲〕
  * ＋ 形狀診斷面 4〔T1〜T4：上游 2xx 無圖 ⇒ message 只帶**鍵名輪廓**（`shapeOutlineOf` 零值泄露、
@@ -26,7 +26,9 @@
  * ＋ **參數如實透傳面 6〔P1〜P6（2026-10-30 單）：`size` / `resolution` 有給就逐字送上游、
  * 不給就不帶、不替調用方補缺省值；成功回包 `upstream_request.sent_keys` **逐字等於**
  * 實際上游體鍵集（只回鍵名、零值）；`resolution` 1〜16 字非空字符串的值域門（17 字 /
- * 非字符串 ⇒ 400 ＋ 零扣費）〕**，
+ * 非字符串 ⇒ 400 ＋ 零扣費）〕**＋ 異步任務輪詢面 12〔R0〜R7 既有 8 ＋ R8〜R11 派單方
+ * 2026-11-03 點名新增四例：同步不變 / `pending`×2→`completed` / 始終 `processing` 超時 /
+ * `failed` 零洩露〕，
  * 覆盖派单方点名的 ①〜⑭ 与 v1.75 AC-604 / AC-605）：
  *   A. 路由面：① 无 / 错 scheme / 错前缀 / 未知金鑰 ⇒ **同一** 401 `KEY_INVALID`
  *      （不泄露具体原因）；③ 非白名单 path ⇒ 404、GET ⇒ 405；② 缺 / 短 / 超长 `X-Request-Id`
@@ -1106,7 +1108,7 @@ check('M5', '⑤ 嘗試序號讀不出（流水面故障）⇒ **fail-closed 503
   間隔 4s ／ 總預算 45s〔自首次 POST 發出〕／ 單查 20s ／ 最多 12 次；
   **零真睡**（`sleep` 注入假睡並推進時鐘 ⇒ 預算判據可被機械走完）、**零真網絡**（全走假上游回環））
   =========================================================================== */
-section('R', '異步任務輪詢：task_id ⇒ completed 一次 / pending→processing→completed 三次 / failed 帶原話 / 始終 pending 超預算 / 無 task_id 仍「上游 200 但無圖」')
+section('R', '異步任務輪詢：task_id ⇒ completed 一次 / pending→processing→completed 三次 / failed 帶原話 / 始終 pending 超預算 / 無 task_id 仍「上游 200 但無圖」 ＋ 新增四例（同步不變 / pending×2→completed / 始終 processing 超時 / failed 零洩露）')
 
 /* 專屬 uid ＋ 預置 50 金（不動其餘段的餘額 / 用量基線）。 */
 issued.task = await aiKeys.issueAiKey({ uid: 'u-task', label: '自检-异步任务', day_limit: 100, minute_limit: 60 })
@@ -1188,6 +1190,68 @@ check('R6', '⑥ 异步成功回包键集**仍恰 6 鍵**、且 `upstream_reques
 
 /* R7：本段三发失败**各退款恰 1 次**、reason 零新增；末余额可由三发净额机械反推。 */
 check('R7', '⑦ 三发失败（failed ／ 超预算 ／ 无 task_id）**各退款恰 1 次**、reason 仍 `UPSTREAM_ERROR`（reason 零新增）；段末余额 ＝ 50 − 3 次成功扣费 ＝ 20', { refunds: [1, 1, 1], reasons: ['UPSTREAM_ERROR', 'UPSTREAM_ERROR', 'UPSTREAM_ERROR'], balance: 20 }, { refunds: [r3Refund.length, r4Refund.length, r5Refund.length], reasons: [R3.reason, R4.reason, R5.reason], balance: balanceOf('u-task') })
+
+/* ===========================================================================
+  R 段·续：**派单方 2026-11-03 点名新增四例**（R0〜R7 一字未改、条数只增）
+  ① 同步上游（`data[0].url`）行为不变 ② `pending`×2 → `completed`（图＝上游
+  `result_urls[0]`、1 提交 ＋ ≥2 轮询、扣费恰 1）③ 始终 `processing` ⇒ 超时 502 ＋ 退款恰 1
+  ④ `status=failed` ⇒ 502 ＋ 退款恰 1 ＋ 回包 / 日志零 `task_id`、零任务 URL、零金鑰
+  =========================================================================== */
+
+/* 專屬 uid ＋ 預置 50 金（與 u-task 分開記账 ⇒ R7 的段末餘額断言不受影响）。 */
+issued.task2 = await aiKeys.issueAiKey({ uid: 'u-task2', label: '自检-异步任务v2', day_limit: 100, minute_limit: 60 })
+fakeDb.bucketOf('xiai_balances').set('bl-u-task2', { _id: 'bl-u-task2', uid: 'u-task2', points: 50, updated_at: 'seed' })
+const t2Balance = () => balanceOf('u-task2')
+const postHits = () => upstreamHits.filter((hit) => hit.method === 'POST').length
+
+/* R8：① 同步取图路行为不变（200、图逐字、零轮询、扣费恰 1）。 */
+upstreamMode = 'url'
+const r8PostsBefore = postHits()
+const r8QueriesBefore = taskQueryHits()
+const R8 = await call({ key: issued.task2.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R08-0001', handler: taskHandler })
+const r8Charge = flowOfRid('rid-R08-0001', 'CHARGE')
+const r8Refund = flowOfRid('rid-R08-0001', 'REFUND')
+check('R8', '① 同步上游（`data[0].url`）行为不变：200 ＋ `image.url` 逐字 ＋ 回包恰 6 鍵 ＋ `sent_keys` 同 R0 基线 ＋ 上游恰 1 次提交 ＋ **零任务查询** ＋ 扣费恰 1（退款 0、余额 50→40）', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', url: IMG_URL, sentKeysSame: true, postSubmits: 1, taskQueries: 0, chargeRows: 1, refundRows: 0, balance: 40 }, { status: R8.status, keys: shapeOf(R8.body), url: R8.body && R8.body.image && R8.body.image.url, sentKeysSame: JSON.stringify(R8.body && R8.body.upstream_request && R8.body.upstream_request.sent_keys) === JSON.stringify(r0SentKeys), postSubmits: postHits() - r8PostsBefore, taskQueries: taskQueryHits() - r8QueriesBefore, chargeRows: r8Charge.length, refundRows: r8Refund.length, balance: t2Balance() })
+
+/* R9：② `pending` → `pending` → `completed`（图＝腳本裡那一步的 `result_urls[0]` 逐字）。 */
+const r9Steps = [{ status: 'pending' }, { status: 'pending' }, { status: 'completed', result_urls: [TASK_IMG_URL] }]
+const r9ScriptedUrl = r9Steps[2].result_urls[0]
+resetTask(r9Steps)
+upstreamMode = 'task-enqueue'
+const r9PostsBefore = postHits()
+const r9QueriesBefore = taskQueryHits()
+const R9 = await call({ key: issued.task2.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R09-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r9Charge = flowOfRid('rid-R09-0001', 'CHARGE')
+const r9Refund = flowOfRid('rid-R09-0001', 'REFUND')
+const r9Reply = R9.raw + JSON.stringify(R9.headers)
+const r9Queries = taskQueryHits() - r9QueriesBefore
+check('R9', '② 异步 `pending`×2 → `completed`：200 ＋ 客户端 `image.url` **逐字等于上游 `result_urls[0]`** ＋ 上游恰 **1 次提交** ＋ **≥2 次轮询**（實測 3）＋ **扣费恰 1**（CHARGE 1 / REFUND 0、余额 40→30）＋ 回包恰 6 鍵 ＋ 回包零 `task_id`・零任务 URL', { status: 200, keys: 'charge,idempotent,image,ok,upstream_request,usage', urlIsResultUrls0: true, postSubmits: 1, taskQueries: 3, atLeastTwoPolls: true, chargeRows: 1, refundRows: 0, balance: 30, taskIdHits: 0, taskUrlHits: 0 }, { status: R9.status, keys: shapeOf(R9.body), urlIsResultUrls0: Boolean(R9.body && R9.body.image && R9.body.image.url === r9ScriptedUrl), postSubmits: postHits() - r9PostsBefore, taskQueries: r9Queries, atLeastTwoPolls: r9Queries >= 2, chargeRows: r9Charge.length, refundRows: r9Refund.length, balance: t2Balance(), taskIdHits: countIn(r9Reply, 't-relay-0001'), taskUrlHits: countIn(r9Reply, '/tasks/') })
+
+/* R10：③ 始终 `processing` ⇒ **超预算**（假睡推进时钟 ⇒ 45 秒护栏真实走到）。 */
+resetTask([{ status: 'processing' }])
+upstreamMode = 'task-enqueue'
+const r10QueriesBefore = taskQueryHits()
+const r10BalanceBefore = t2Balance()
+const R10 = await call({ key: issued.task2.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R10-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r10Charge = flowOfRid('rid-R10-0001', 'CHARGE')
+const r10Refund = flowOfRid('rid-R10-0001', 'REFUND')
+const r10Message = (R10.body && R10.body.message) || ''
+const r10Queries = taskQueryHits() - r10QueriesBefore
+check('R10', '③ 异步超时（任务始终 `processing`）⇒ 502 `UPSTREAM_ERROR` ＋ **退款恰 1 次**（扣费恰 1、余额复原）＋ 确实走过轮询（任务查询 ≥1）＋ message 含超预算文案、**不含**「上游 200 但無圖」', { status: 502, reason: 'UPSTREAM_ERROR', refundRows: 1, chargeRows: 1, balanceRestored: true, balance: 30, polled: true, hasBudgetText: true, hasNoImageText: false }, { status: R10.status, reason: R10.reason, refundRows: r10Refund.length, chargeRows: r10Charge.length, balanceRestored: t2Balance() === r10BalanceBefore, balance: t2Balance(), polled: r10Queries >= 1, hasBudgetText: countIn(r10Message, '未在 45 秒內完成') >= 1, hasNoImageText: countIn(r10Message, '上游 200 但無圖') >= 1 })
+
+/* R11：④ `status=failed`（**不带** `error_msg`）⇒ 502 ＋ 退款恰 1 ＋ 零泄露。 */
+resetTask([{ status: 'failed' }])
+upstreamMode = 'task-enqueue'
+const r11QueriesBefore = taskQueryHits()
+const R11 = await call({ key: issued.task2.key, routePath: EDITS, body: EDITS_BODY, requestId: 'rid-R11-0001', handler: taskHandler })
+upstreamMode = 'url'
+const r11Charge = flowOfRid('rid-R11-0001', 'CHARGE')
+const r11Refund = flowOfRid('rid-R11-0001', 'REFUND')
+const r11Reply = R11.raw + JSON.stringify(R11.headers)
+const r11Logs = logs.join('\n')
+check('R11', '④ 异步失败（`status=failed`、无 `error_msg`）⇒ 502 `UPSTREAM_ERROR` ＋ **退款恰 1 次**（扣费恰 1、余额复原 30）＋ 任务查询恰 1 ＋ **回包与日志零 `task_id`、零任务 URL、零上游金鑰**', { status: 502, reason: 'UPSTREAM_ERROR', refundRows: 1, chargeRows: 1, balance: 30, taskQueries: 1, taskIdHits: 0, taskUrlHits: 0, keyInReply: 0, keyInLogs: 0 }, { status: R11.status, reason: R11.reason, refundRows: r11Refund.length, chargeRows: r11Charge.length, balance: t2Balance(), taskQueries: taskQueryHits() - r11QueriesBefore, taskIdHits: countIn(r11Reply, 't-relay-0001') + countIn(r11Logs, 't-relay-0001'), taskUrlHits: countIn(r11Reply, '/tasks/') + countIn(r11Logs, '/tasks/'), keyInReply: countIn(r11Reply, UPSTREAM_KEY), keyInLogs: countIn(r11Logs, UPSTREAM_KEY) })
 
 /* ===========================================================================
    F 段：交付面静态门

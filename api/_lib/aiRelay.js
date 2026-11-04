@@ -57,11 +57,15 @@
  *      （2026-10-30 单：不转换、不因上游可能不认就丢掉；`edits` 另带 `image` 签名链））
  *      失败 / 超时 / 非 2xx / 非 JSON / 缺图片字段 ⇒ **退款**（`refundPoints` 同 `ref_id`、
  *      kind=`REFUND`）＋ 502 `UPSTREAM_ERROR`（带上游状态码；网络错与超时为 `0`）；
- *      **2026-11-02 異步任務路**：2xx 但 `imageOf` 認不出圖且 `data[0].task_id` 非空 ⇒ 改走
+ *      **2026-11-02 異步任務路**：2xx 但 `imageOf` 認不出圖且 `task_id` 非空（**兩形都認**：
+ *      `data[0].task_id`〔实测生产上游〕与顶层 `task_id`〔2026-11-03 单补的兼容形〕）⇒ 改走
  *      `GET <base_url>/tasks/<task_id>` 輪詢取圖（間隔 4 秒 / 總預算 45 秒〔自首次 POST 發出
- *      時刻〕/ 單查 20 秒 / 最多 12 次；`completed` 取 `result_urls` 首項下載、`failed`・
- *      `violation` 帶抹除後 `error_msg`）；**無 `task_id` 才維持「上游 200 但無圖」**；輪詢任一
- *      失敗仍走本步的**退款 ＋ 502 `UPSTREAM_ERROR`**（`reason` 零新增、成功回包鍵面不變）
+ *      時刻〕/ 單查 20 秒 / 最多 12 次；成功態 `completed`・`succeeded`・`success` 取
+ *      `result_urls` 首項下載；失敗態 `failed`・`error`・`canceled`・`violation` **或 `error_msg`
+ *      非空亦判失敗**，帶抹除後 `error_msg`）；**無 `task_id` 才維持「上游 200 但無圖」**；輪詢任一
+ *      失敗仍走本步的**退款 ＋ 502 `UPSTREAM_ERROR`**（`reason` 零新增、成功回包鍵面不變；
+ *      **輪詢零扣費**〔⑨ 恆只扣一次、本路不碰账〕、日誌只記 `{stage,status,tries,elapsed_ms,
+ *      refunded}` 這類計數 —— **零 `task_id` / 零上游任務 URL / 零金鑰**，兩者亦不進客户端回包）
  *   ⑪ 成功 ⇒ `commitUsage` ＋ 200；回包**恰 6 键**
  *      `{ok, image, charge, usage, idempotent, upstream_request}`（上游回 url 就回 url、回 b64 就回 b64，
  *      **不再自己编码一次**；`upstream_request.sent_keys` ＝ 本次实际上游体的**键名清单**，
@@ -588,12 +592,25 @@ export function upstreamErrorDigestOf(parsed) {
  *  Vercel 侧 `vercel.json` 的 `functions.maxDuration ＝ 60 秒` **已定、本单不得改** ⇒ 护栏必须给
  *  退款 / `commitUsage` 的写入留余量：总预算 **45 秒**（自**首次 POST 发出时刻**算起）、
  *  轮询间隔 **4 秒**、单次查询超时 **20 秒**、最多 **12 次**查询。
+ *  **预算与函数上限对齐依据（2026-11-03 单复核；派单口径「总预算收到 ~50 s 以内」满足）**：
+ *  45 s ＜ `maxDuration` 60 s ⇒ 留 **15 s 余量**给 ⑪ `commitUsage` / 退款写入与平台初始化；
+ *  预算**不从 `timeout_ms` 推导** —— `timeout_ms` 是**单次 POST 的中止阀**（自检配 2000 ms，
+ *  拿它当轮询预算会把轮询压塌；生产 60000 ms ≥ 45 s 预算、并不构成更紧的约束）；
+ *  且 **12 次 × 4 s ＋ 末段 1 s ＝ 45 s 恰好收在预算上**（预算护栏与次数护栏**两道都活着**、
+ *  「未在 45 秒內完成」文案与实际收口时刻一致 —— 改间隔或改次数必须同步重算这道等式）。
  *  （与云函数 `lib/aiEnhance.js` 的 5000 / 90000 / 30000 / 20 是**两套常量**：那边 SCF 时限宽、
  *  这边卡在 60 秒函数上限内；两文件互不 require、各持一份纯函数与轮询实现。） */
 export const TASK_POLL_INTERVAL_MS = 4000
 export const TASK_POLL_BUDGET_MS = 45000
 export const TASK_POLL_QUERY_TIMEOUT_MS = 20000
 export const TASK_POLL_MAX_QUERIES = 12
+
+/** 异步任务**成功态**取值（**封闭**；本文件唯一定义点）：官方协议实测 `completed`，
+ *  另兼容 `succeeded` / `success`（上游方言；2026-11-03 单补）。 */
+export const TASK_DONE_STATES = Object.freeze(['completed', 'succeeded', 'success'])
+/** 异步任务**失败态**取值（**封闭**；本文件唯一定义点）：`failed` / `error` / `canceled`
+ *  （2026-11-03 单补 `error` / `canceled`）＋ 既有 `violation`。 */
+export const TASK_FAILED_STATES = Object.freeze(['failed', 'error', 'canceled', 'violation'])
 
 /** 轮询间隔的缺省睡（**注入缝优先**：自检注入假睡即回 ⇒ 不真睡；生产不注入 ⇒ 真睡）。 */
 function defaultSleep(ms) {
@@ -684,10 +701,12 @@ export function taskErrorOf(parsed) {
  * `TASK_POLL_QUERY_TIMEOUT_MS`（20 秒，**并以剩余预算封顶** ⇒ 整条路恒在 45 秒内收口）、
  * 最多 `TASK_POLL_MAX_QUERIES`（12）次查询；**接进任何一次查询之前先判预算** ⇒ 超预算
  * 文案写「上游任務未在 45 秒內完成」（**绝不**退化成「上游 200 但無圖」——两种成因可区分）。
- * 状态口径（每次回包先取状态，兼容顶层与 `data` 两形态）：
- *   · `completed` ⇒ 取 `result_urls`（同样两形态）**首项非空字符串** ⇒ 下载（超时以剩余预算封顶）；
+ * 状态口径（每次回包先取状态，兼容顶层与 `data` 两形态；**状态取值封闭**）：
+ *   · 成功态 `completed` / `succeeded` / `success` ⇒ 取 `result_urls`（同样两形态）
+ *     **首项非空字符串** ⇒ 下载（超时以剩余预算封顶）；
  *     拿不到 ⇒ 「任務已完成但缺 result_urls」；下载失败 / 空字节 ⇒ 「取圖下載失敗」；
- *   · `failed` / `violation` ⇒ 文案带**抹除后**的 `error_msg`（长随机串 / base64 一律
+ *   · 失败态 `failed` / `error` / `canceled` / `violation`，**或 `error_msg` 非空**（任一命中
+ *     即判失败）⇒ 文案带**抹除后**的 `error_msg`（长随机串 / base64 一律
  *     `<redacted>`、截 120 字；缺失 ⇒ 「上游未給 error_msg」）；
  *   · 其他状态（`pending` / `processing` / 空）⇒ 睡后继续；
  *   · 单次查询非 2xx ⇒ 带 HTTP 码与错误体摘要（沿 `upstreamErrorDigestOf`，**不循环**）；
@@ -695,7 +714,10 @@ export function taskErrorOf(parsed) {
  * @param {{baseUrl:string, auth:string, taskId:string, fetchImpl:Function, sleep?:Function,
  *          now?:Function, startedAt?:number, intervalMs?:number, budgetMs?:number,
  *          queryTimeoutMs?:number, maxQueries?:number}} deps
- * @returns {Promise<{ok:true, url:string}|{ok:false, message:string}>}
+ * @returns {Promise<{ok:true, url:string, tries:number, elapsedMs:number}
+ *                  |{ok:false, message:string, tries:number, elapsedMs:number}>}
+ *   `tries` / `elapsedMs` 是**纯计数与毫秒**（调用方只把它们写进日志的 `{tries, elapsed_ms}`；
+ *   **不带回 task_id、不带回任务 URL**）。
  */
 export async function pollTaskUntilImage(deps = {}) {
   const baseUrl = text(deps.baseUrl).replace(/\/+$/, '')
@@ -717,7 +739,9 @@ export async function pollTaskUntilImage(deps = {}) {
   }
   let lastState = '未知'
   let queries = 0
-  const fail = (detail) => ({ ok: false, message: detail })
+  /* 失败面恒带**纯计数**（`tries` / `elapsedMs`）；`message` 只含状态名与抹除后的 `error_msg`，
+     **零 task_id、零任务 URL**（两者只在本函数内部拼 `taskUrl`，不外流）。 */
+  const fail = (detail) => ({ ok: false, message: detail, tries: queries, elapsedMs: spentMs() })
   const timeoutNote = (extra) => `上游任務未在 ${seconds} 秒內完成（${extra ? `${extra}；` : ''}最後狀態＝${lastState}）`
   if (typeof fetchImpl !== 'function') return fail('任務查詢失敗（fetch 不可用）')
   for (;;) {
@@ -774,7 +798,7 @@ export async function pollTaskUntilImage(deps = {}) {
     }
     const state = taskStatusOf(payload)
     if (state) lastState = state
-    if (state === 'completed') {
+    if (TASK_DONE_STATES.indexOf(state) !== -1) {
       const urls = taskResultUrlsOf(payload)
       const firstUrl = urls.length > 0 ? urls[0] : ''
       if (firstUrl === '') return fail('任務已完成但缺 result_urls')
@@ -801,12 +825,15 @@ export async function pollTaskUntilImage(deps = {}) {
         byteLength = 0
       }
       if (byteLength < 1) return fail('取圖下載失敗')
-      return { ok: true, url: firstUrl }
+      return { ok: true, url: firstUrl, tries: queries, elapsedMs: spentMs() }
     }
-    if (state === 'failed' || state === 'violation') {
-      const errorText = taskErrorOf(payload)
+    /* 失败态（`failed` / `error` / `canceled` / `violation`）**或 `error_msg` 非空** ⇒ 判失败
+       （2026-11-03 单：`error_msg` 非空即失败，不看状态字面）；`error_msg` 只以**抹除后**形态
+       进诊断文案（短原话不被抹除规则误伤 ⇒ R3 口径），**绝不带 task_id / 任务 URL**。 */
+    const errorText = taskErrorOf(payload)
+    if (TASK_FAILED_STATES.indexOf(state) !== -1 || errorText !== '') {
       const detail = errorText ? errorText.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 120) : '上游未給 error_msg'
-      return fail(`任務失敗（狀態＝${state}：${detail}）`)
+      return fail(`任務失敗（狀態＝${state || '未知'}：${detail}）`)
     }
     /* 其他状态（`pending` / `processing` / 空 / 读不懂）⇒ 睡后继续（睡亦以剩余预算封顶）。 */
     await sleep(Math.max(0, Math.min(intervalMs, budgetMs - spentMs())))
@@ -1233,9 +1260,11 @@ export function createAiRelay(options = {}) {
     if (timer) clearTimeout(timer)
 
     const upstreamStatus = Number(response && response.status) || 0
-    const failUpstream = async (stage, status, message) => {
+    /* `extra` 只许放**布尔与计数**（如轮询的 `{tries, elapsed_ms}`）；固定键**后写** ⇒ 调用方
+       改不动 `outcome / stage / status / refunded`（日志面封闭：零 task_id、零上游 URL、零凭据）。 */
+    const failUpstream = async (stage, status, message, extra) => {
       const refunded = await safeRefund(keyInfo.uid, refId, chargeIdemKey)
-      audit({ outcome: REASONS.UPSTREAM_ERROR, stage, status, refunded })
+      audit(Object.assign({}, extra || {}, { outcome: REASONS.UPSTREAM_ERROR, stage, status, refunded }))
       return denyResult(502, REASONS.UPSTREAM_ERROR, message || MSG.UPSTREAM, {}, { status })
     }
 
@@ -1278,14 +1307,21 @@ export function createAiRelay(options = {}) {
       return failUpstream('non-json', upstreamStatus)
     }
     let image = imageOf(upstreamJson)
+    /** 轮询统计（**只有计数与毫秒**；成功 / 失败两面都进日志的 `{tries, elapsed_ms}`；
+     *  零 `task_id`、零上游任务 URL、零凭据）。 */
+    let pollStat = null
     if (!image) {
-      /* 2xx 但同步取图路认不出图 ⇒ **先判异步入队回执**（`data[0].task_id` 非空）才进轮询取图路；
+      /* 2xx 但同步取图路认不出图 ⇒ **先判异步入队回执**（`task_id` 非空，**两形都认**：
+         `data[0].task_id`〔实测生产上游〕与顶层 `task_id`〔2026-11-03 单补的兼容形〕）才进轮询取图路；
          确实没有 `task_id` 才保持既有「上游 200 但無圖」诊断 —— 两种成因可区分、旧文案一字不改。 */
       const queued = upstreamJson && Array.isArray(upstreamJson.data) && upstreamJson.data.length > 0 ? upstreamJson.data[0] : null
-      const queuedTaskId = queued && typeof queued === 'object' && !Array.isArray(queued) ? queued.task_id : null
-      const taskId = typeof queuedTaskId === 'string' || typeof queuedTaskId === 'number' ? text(queuedTaskId) : ''
+      const pickTaskId = (value) => (typeof value === 'string' || typeof value === 'number' ? text(value) : '')
+      const taskId =
+        pickTaskId(queued && typeof queued === 'object' && !Array.isArray(queued) ? queued.task_id : '') ||
+        pickTaskId(upstreamJson && !Array.isArray(upstreamJson) ? upstreamJson.task_id : '')
       if (taskId) {
-        /* 轮询（纯 I/O；`fetchImpl` / `sleep` / `now` 全走既有注入缝，key 只进请求头）。 */
+        /* 轮询（纯 I/O；`fetchImpl` / `sleep` / `now` 全走既有注入缝，key 只进请求头；
+           **轮询零扣费** —— 预扣只在 ⑨ 一次，本路不碰账）。 */
         const polled = await pollTaskUntilImage({
           baseUrl: resolved.base_url,
           auth: upstreamAuth,
@@ -1295,7 +1331,8 @@ export function createAiRelay(options = {}) {
           now,
           startedAt: upstreamSentAt
         })
-        if (!polled.ok) return failUpstream('task-poll', upstreamStatus, `${MSG.UPSTREAM}（診斷：${polled.message}）`)
+        pollStat = { tries: polled.tries, elapsed_ms: polled.elapsedMs }
+        if (!polled.ok) return failUpstream('task-poll', upstreamStatus, `${MSG.UPSTREAM}（診斷：${polled.message}）`, pollStat)
         image = { url: polled.url }
       } else {
         /* 2xx 但无图：message 末尾附**键名轮廓**诊断（`shapeOutlineOf` 零值泄露；键集不变）。 */
@@ -1314,7 +1351,7 @@ export function createAiRelay(options = {}) {
       audit({ outcome: REASONS.CONFIG_MISSING, stage: 'commit-usage', refunded })
       return denyResult(503, REASONS.CONFIG_MISSING, MSG.CONFIG_MISSING)
     }
-    audit({ outcome: 'OK', stage: 'done', status: 200, idempotent: charge.idempotent === true })
+    audit(Object.assign({ outcome: 'OK', stage: 'done', status: 200, idempotent: charge.idempotent === true }, pollStat || {}))
     return {
       status: 200,
       body: {
