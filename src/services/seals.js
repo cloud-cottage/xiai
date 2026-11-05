@@ -560,6 +560,12 @@ export function canReplaceFaceImage(actor) {
   return user !== null && user !== undefined && user.role === 'admin'
 }
 
+/** 当前（或指定）账号是否可**删除印章** —— 供详情页决定入口是否渲染（管理员专属）。 */
+export function canDeleteSeal(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
 /* ============================================================================ *
    **刪除印章（管理員面｜本單）**
    ----------------------------------------------------------------------------
