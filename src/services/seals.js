@@ -560,6 +560,106 @@ export function canReplaceFaceImage(actor) {
   return user !== null && user !== undefined && user.role === 'admin'
 }
 
+/* ============================================================================ *
+   **刪除印章（管理員面｜本單）**
+   ----------------------------------------------------------------------------
+   · 能力判定 `canDeleteSeal`：与 `canEditSealAttributes` / `canReplaceFaceImage`
+     **同一套**口径（`role === 'admin'`；缺省回落当前登录态）——**不另造第二把尺子**。
+   · 通道（唯一、不另造第二条）：`userWrite.js::userWriteGate` → `token.js::userGate`
+     → `data/cloudbaseFn.js::callCloudFunction('xiai-user-token', …)`，与勘误 / 采纳 /
+     AI 弃候选图**同一条**用户令牌写面通道；本文件不直连、不自建装载。
+   · **`local-dev` / 離線形態 ⇒ 结构化拒绝 `STORAGE_UNAVAILABLE`**（照
+     `aiEnhance.discardFaceImage` 先例：门放行但**未经云端** ⇒ **不做本地假成功**、
+     **不编造**删数与释放读数）。
+   · 成功返回**恰 4 键** `{ok:true, deleted, skipped, released}`（读数逐字取自服务端，
+     零补编、零派生）；失败**原样透传**（`reason` / `message` 一字不改写）。
+   ============================================================================ */
+
+/** 雲端 op 名（与 `lib/ops.js` 注册面逐字一致）。 */
+const SEAL_DELETE_OP = 'deleteSeal'
+
+/**
+ * 刪印章回包读数键面：`value` 是云函数信封的**通用读数位**（服务端把
+ * `deleted` / `skipped` / `released` 三组放在这里带到前端）；后三键为直取位
+ * （服务端若直接回出即原样叠出）。两处同源、**以服务端回包为准**，本文件零派生。
+ */
+const SEAL_DELETE_READOUT_KEYS = Object.freeze(['value', 'deleted', 'skipped', 'released'])
+
+/**
+ * **刪除一枚印章（＋編號釋放）**（仅管理员；服务端裁决）。
+ *
+ * 判定顺序（**全部在发出请求之前**，拒绝即零网络、零写入）：
+ * ① 管理员门（`canDeleteSeal`）→ ② 印章编号形态（缺 ⇒ `INVALID_INPUT`）
+ * → ③ 理由长度（>200 ⇒ `INVALID_INPUT`）→ ④ 过云端写面门（服务端再判白名单 /
+ * 键面 / 行存在性）→ ⑤ `local-dev` 形态如实拒绝 → ⑥ 回包形状校验（缺读数 ⇒ 如实拒绝，
+ * **不编造**删数 / 释放读数）。
+ *
+ * @param {{role?:string}|null} [actor] 操作者（缺省回落当前登录态）
+ * @param {string} sealId 印章编号（`stamp_id` / `sid` / 行 `id` 任一形态）
+ * @param {string} [reason] 删除理由（可选，≤200 字；服务端同口径复判）
+ * @returns {Promise<{ok:true, deleted:object, skipped:object, released:object}
+ *          |{ok:false, reason:string, message:string}>}
+ */
+export async function deleteSeal(actor, sealId, reason) {
+  if (!canDeleteSeal(actor)) {
+    return {
+      ok: false,
+      reason: 'NOT_ADMIN',
+      message: '僅管理員可以刪除印章（前端前置；未發出任何請求、零寫入）。'
+    }
+  }
+  const id = String(sealId === undefined || sealId === null ? '' : sealId).trim()
+  if (!id) {
+    return {
+      ok: false,
+      reason: 'INVALID_INPUT',
+      message: '刪除印章需要印章編號（seal_id），本次未發出任何請求。'
+    }
+  }
+  const note = String(reason === undefined || reason === null ? '' : reason).trim()
+  if (note.length > 200) {
+    return {
+      ok: false,
+      reason: 'INVALID_INPUT',
+      message: '刪除理由最多 200 字，本次未發出任何請求。'
+    }
+  }
+  const payload = { seal_id: id }
+  if (note !== '') payload.reason = note
+
+  const gate = await userWriteGate(SEAL_DELETE_OP, payload, { readoutKeys: SEAL_DELETE_READOUT_KEYS })
+  /* 傳輸層 / 補簽 / 服務端結構化拒絕 ⇒ **原樣透傳**（`reason` / `message` 一字不改寫）。 */
+  if (!gate || gate.ok !== true) {
+    if (gate && typeof gate === 'object') return gate
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '刪除印章服務暫時不可用，請稍後再試。'
+    }
+  }
+  if (gate.dev === true || gate.mode === 'local-dev') {
+    /* dev / 離線形態：門放行但**未經雲端** ⇒ 如實結構化拒絕（不編造已刪除 / 已釋放假讀數）。 */
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: 'dev / 離線形態：未經雲端驗證，刪除印章不可用（非正式路徑；本次零寫入）。'
+    }
+  }
+  /* **回包形状校验**：三组读数是「删了什么 / 放了什么号」的唯一凭据 ⇒ 缺位即如实拒绝。 */
+  const readout = gate.value && typeof gate.value === 'object' ? gate.value : gate
+  const deleted = readout.deleted
+  const skipped = readout.skipped
+  const released = readout.released
+  if (!deleted || typeof deleted !== 'object' || !skipped || typeof skipped !== 'object' || !released || typeof released !== 'object') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '刪除印章回包形狀不可辨識（未附刪數與編號釋放讀數），請刷新後再試。'
+    }
+  }
+  return { ok: true, deleted, skipped, released }
+}
+
 /* ============================================================================
    能力 6「上传印章（新增进藏品库）」（v1.3｜口径 B）
 

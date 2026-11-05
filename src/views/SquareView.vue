@@ -56,6 +56,16 @@ function retryDataSource() {
 }
 
 /* ============================================================================
+   一次性提示（刪印章後跳回廣場｜本單）
+   ----------------------------------------------------------------------------
+   载体 ＝ 路由 query `notice`（跳转时带上，**读后立即 replace 清除**）：
+   ① 只消费一次（刷新 / 返回都不会再弹）；② **不新增全局状态库**（零 store、零持久层）。
+   ============================================================================ */
+const SQUARE_NOTICES = Object.freeze({
+  'seal-deleted': '已刪除印章（編號已釋放）。'
+})
+
+/* ============================================================================
    識別編碼精確查（口径件 §5｜R-4）
    ----------------------------------------------------------------------------
    · 唯一入口 ＝ **頁頭單框雙態搜索**（`HeaderSearch.vue`：5 / 8 格、首字符自動判型、
@@ -132,6 +142,17 @@ const sealClasses = computed(() => SEAL_CLASS_LISTED)
 
 const pendingSeal = ref(null)
 const feedback = ref('')
+
+/* 一次性提示的消费点（**放在 `feedback` 声明之后**：首拍同步执行时不得踩 TDZ）。 */
+watchEffect(() => {
+  const notice = typeof route.query.notice === 'string' ? route.query.notice : ''
+  if (!notice || !Object.prototype.hasOwnProperty.call(SQUARE_NOTICES, notice)) return
+  feedback.value = SQUARE_NOTICES[notice]
+  const query = Object.assign({}, route.query)
+  delete query.notice
+  const nav = router.replace({ name: 'square', query })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+})
 
 const uploadOpen = ref(false)
 const uploadFeedback = ref('')

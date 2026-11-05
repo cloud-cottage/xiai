@@ -226,6 +226,74 @@ const canEditFixed = computed(() => seals.canEditFixedAttributes())
 const canExportSeal = computed(() => sealExport.canExportSealData())
 
 /* ============================================================================
+   **刪除印章（管理员面｜本单）**
+   ----------------------------------------------------------------------------
+   · 渲染条件＝服务层判定 `seals.canDeleteSeal`（普通用户 / 游客 ⇒ false ⇒ 不渲染，
+     DOM 零命中；**不得** CSS 隐藏 / `disabled` 冒充）；钩子只用 `data-action="seal-delete"`
+     （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。
+   · 二次确认复用 `ConfirmDialog`（显式、可取消、默认不通过）：文案**必须列明**
+     将删印面数 / 影像数、**不可恢复**、**編號將被釋放**；可选理由 ≤200 字。
+   · 成功 ⇒ 跳回广场（`/`）并带**一次性**提示（`?notice=seal-deleted`）；失败 ⇒ 本页上屏。
+   ============================================================================ */
+const canDeleteSeal = computed(() => seals.canDeleteSeal())
+const sealDeleteOpen = ref(false)
+const sealDeleteBusy = ref(false)
+const sealDeleteReason = ref('')
+const sealDeleteFeedback = ref('')
+
+/** 本印引用的影像编号数（去重；印面图 ＋ 边款图）——**仅上屏读数**；实际删数以服务端回包为准。 */
+const sealDeleteImageCount = computed(() => {
+  const ids = new Set()
+  faces.value.forEach((face) => {
+    if (face.face_image_id) ids.add(String(face.face_image_id))
+    ;(face.edge_image_ids || []).forEach((id) => {
+      if (id) ids.add(String(id))
+    })
+  })
+  return ids.size
+})
+
+/** 二次确认主文案（**必须列明**：印面数 / 影像数、不可恢复、編號將被釋放）。 */
+const sealDeleteMessage = computed(
+  () =>
+    `將刪除本印的 ${faces.value.length} 個印面、${sealDeleteImageCount.value} 張影像（仍被其他印面共用者保留）；刪後不可恢復，印章與印面編號將被釋放。`
+)
+
+/** 打开二次确认（每次打开重置可选理由与旧反馈）。 */
+function openSealDelete() {
+  sealDeleteReason.value = ''
+  sealDeleteFeedback.value = ''
+  sealDeleteOpen.value = true
+}
+
+/** 确认刪除：过服务层管理员写面门；成功 ⇒ 跳广场并带一次性提示，失败 ⇒ 本页上屏。 */
+async function confirmSealDelete() {
+  if (sealDeleteBusy.value) return
+  const target = seal.value
+  const stampId = target ? String(target.stamp_id || '') : ''
+  if (!stampId) {
+    sealDeleteOpen.value = false
+    sealDeleteFeedback.value = '未能取得本印編號（seal_id），本次零寫入。'
+    return
+  }
+  sealDeleteBusy.value = true
+  let result = null
+  try {
+    result = await seals.deleteSeal(null, stampId, sealDeleteReason.value)
+  } catch {
+    result = { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '刪除印章服務暫時不可用，請稍後再試。' }
+  }
+  sealDeleteBusy.value = false
+  sealDeleteOpen.value = false
+  if (!result || result.ok !== true) {
+    sealDeleteFeedback.value = (result && result.message) || '刪除印章失敗，本次零寫入。'
+    return
+  }
+  const nav = router.push({ name: 'square', query: { notice: 'seal-deleted' } })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+}
+
+/* ============================================================================
    影像展示（R-85 / R-87 / R-88）：**印面图 4 块 / 实拍图 8 块**，张数与切位一律读元数据
    ----------------------------------------------------------------------------
    - 切分与拼接在 `SliceImage.vue` 内完成（前端现场切分 → 拼接 → 对外展示输出 webp）；
@@ -1713,8 +1781,26 @@ onBeforeUnmount(() => {
         >
           一鍵導出印章數據
         </button>
+        <!-- 「刪除印章」（管理员专属｜本单）：非管理员 / 游客 ⇒ **不渲染**（DOM 零命中；
+             不得 CSS 隐藏 / `disabled` 冒充）。钩子只用 `data-action="seal-delete"`
+             （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。 -->
+        <button
+          v-if="canDeleteSeal"
+          class="btn btn--ghost"
+          type="button"
+          data-action="seal-delete"
+          :disabled="sealDeleteBusy"
+          @click="openSealDelete"
+        >
+          刪除印章
+        </button>
       </div>
     </div>
+
+    <!-- 刪除印章的可读反馈（**失败**上屏；成功已跳回广场并带一次性提示）。 -->
+    <p v-if="sealDeleteFeedback" class="notice detail__notice" data-seal-delete-feedback>
+      {{ sealDeleteFeedback }}
+    </p>
 
     <!-- **O-1**：雲讀失敗已回落本機示範資料（此刻 `seal` 來自示範集）⇒ 顯式提示 ＋ 重試入口。 -->
     <p v-if="dataSource.failed" class="notice detail__notice" data-source-fallback="seal-detail">
@@ -2583,6 +2669,34 @@ onBeforeUnmount(() => {
       @confirm="confirmDownload"
       @cancel="downloadOpen = false"
     />
+
+    <!-- **刪除印章的二次确认（本单新增）**：复用 `ConfirmDialog`（显式、可取消、默认不通过）。
+         文案**必须列明**：将删印面数 / 影像数、**不可恢復**、**編號將被釋放**；
+         可选理由（≤200 字）走正文插槽；确认 / 取消钮只挂 `data-action`
+         （`seal-delete-confirm` / `seal-delete-cancel`，**不新增 `data-admin-action`**）。 -->
+    <ConfirmDialog
+      v-if="sealDeleteOpen"
+      title="刪除印章"
+      :message="sealDeleteMessage"
+      hint="刪除為不可恢復操作：確認後本印將自藏品庫移除，印章與印面編號會被釋放回號源（可再次發放）。"
+      confirm-text="確認刪除"
+      confirm-action="seal-delete-confirm"
+      cancel-action="seal-delete-cancel"
+      @confirm="confirmSealDelete"
+      @cancel="sealDeleteOpen = false"
+    >
+      <div class="seal-delete__note">
+        <label for="seal-delete-reason">刪除理由（可選，最多 200 字）</label>
+        <textarea
+          id="seal-delete-reason"
+          v-model="sealDeleteReason"
+          class="seal-delete__reason"
+          maxlength="200"
+          rows="3"
+          data-seal-delete-reason
+        ></textarea>
+      </div>
+    </ConfirmDialog>
 
     <div v-if="formOpen" class="correction-mask" role="dialog" aria-modal="true" aria-label="提交勘誤">
       <div class="correction-box">

@@ -199,7 +199,14 @@ const COLLECTIONS = Object.freeze({
      与印谱外部批量導入暂存 / PENDING 集合（`xiai_item_imports`；单写者）。
      本机镜像键见 `src/data/db.js` 的 `items` / `item-imports`。 */
   items: 'xiai_items',
-  itemImports: 'xiai_item_imports'
+  itemImports: 'xiai_item_imports',
+  /* **實物照片（§3.33.3 既有集合；本单 `deleteSeal` **只读计数**）**：删印时照片行
+     **全保留**（审计用）⇒ 本键只进读面、**零删行**。 */
+  photos: 'xiai_photos',
+  /* **管理員寫面審計行（§3.33.3 第 14 項｜AC-373 落点）**：`deleteSeal` 的**第二处审计载体**
+     （第一处＝`index.js::audit` 的结构化日志）。**只写一行**、封闭键面；**不进云读面**
+     （不入 `CLOUD_COLLECTIONS` / 客户端镜像），**不新建集合**（沿用规范在册名称）。 */
+  adminAudit: 'xiai_admin_audit'
 })
 
 /**
@@ -1911,6 +1918,75 @@ const COUNTER_CAPACITY = Object.freeze({ seal: codeId.SID_MAX - 1, face: codeId.
 const COUNTER_MAX_ATTEMPTS = 8
 
 /**
+ * 号源**播种基线**（**单点**）：既有行的最大业务号（`seal_no` / `face_no`；单次 1000 行护栏），
+ * 无行 ⇒ 0。
+ *
+ * 两个消费点共用同一份实现（**不写第二套**）：
+ *   · `issueCodeNumber` 首次建计数文档时播种 `seq`；
+ *   · `lib/sealDelete.js` 删印后**补建**计数文档（该文档此前从未建过）时播种 `seq` ——
+ *     两处口径若各写一份，必然漂移出「重号」。
+ * @param {'seal'|'face'} kind 号别
+ * @returns {Promise<number>} 播种基线（非负整数）
+ */
+async function counterSeedBaseOf(kind) {
+  let base = 0
+  if (kind === 'seal') {
+    const seals = await readRows(COLLECTIONS.seals, {}, { limit: 1000 })
+    seals.forEach((row) => {
+      const own = Number(row && row.seal_no)
+      if (Number.isInteger(own) && own > base) base = own
+    })
+  } else {
+    const faces = await readRows(COLLECTIONS.faces, {}, { limit: 1000 })
+    faces.forEach((row) => {
+      const own = Number(row && row.face_no)
+      if (Number.isInteger(own) && own > base) base = own
+    })
+  }
+  return base
+}
+
+/**
+ * 归一化计数文档的 **`released` 释放名单**（纯函数、零 I/O、绝不自抛）：
+ * 非数组 ⇒ `[]`；元素只留**正整数**、去重、**升序**（口径件：去重、升序）。
+ * @param {*} value 文档上的 `released` 原值
+ * @returns {number[]} 归一后的升序号表
+ */
+function normalizeReleased(value) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  value.forEach((item) => {
+    const n = Number(item)
+    if (Number.isInteger(n) && n > 0 && out.indexOf(n) === -1) out.push(n)
+  })
+  return out.sort((a, b) => a - b)
+}
+
+/** 释放号取用时的**占用扫描护栏**（单次读取上限；口径同既有 1000 行护栏）。 */
+const RELEASE_SCAN_LIMIT = 1000
+/** 释放号 CAS 未命中的**回落上限**（命中 0 行连续 2 次 ⇒ 本次调用改走 `seq+1`，不让发号卡死）。 */
+const RELEASE_CAS_MAX_MISSES = 2
+
+/**
+ * 当前库内**已占用**的号值集（`seal_no` / `face_no`；单次 1000 行护栏）。
+ * 为什么必须扫：`released` 里的号可能**又被人占上了**（计数文档补建、并发采纳、
+ * 手工回填）⇒ 直接把释放号发出去就会造出**同一编号两枚印章**（AC §6.4 红线）。
+ * @param {'seal'|'face'} kind 号别
+ * @returns {Promise<Set<number>>} 已占用号集合
+ */
+async function occupiedNosOf(kind) {
+  const collection = kind === 'seal' ? COLLECTIONS.seals : COLLECTIONS.faces
+  const field = kind === 'seal' ? 'seal_no' : 'face_no'
+  const rows = await readRows(collection, {}, { limit: RELEASE_SCAN_LIMIT })
+  const used = new Set()
+  rows.forEach((row) => {
+    const n = Number(row && row[field])
+    if (Number.isInteger(n) && n > 0) used.add(n)
+  })
+  return used
+}
+
+/**
  * **原子发号（唯一号源）**：按 `_id` 认领计数文档的下一个号。
  *
  * 实现口径 ＝ **单文档条件更新（CAS）＋ SDK 原子自增算子 `db.command.inc(1)`**：
@@ -1934,25 +2010,18 @@ async function issueCodeNumber(kind) {
   if (!id) return deny(REASONS.INVALID_VALUE, `未知的識別編號發號類別：${String(kind)}；本次零寫入。`)
   const capacity = COUNTER_CAPACITY[kind]
   const db = resolveDb()
+  /* **释放号 CAS 未命中回落计数（本单缺陷修：原引用未声明 ⇒ `released` 非空必抛
+     `ReferenceError`）**：`released` 非空时按「数组相等」做 CAS 认领，未命中累计；
+     连续 `RELEASE_CAS_MAX_MISSES` 次 ⇒ 本次调用改走 `seq+1`（**绝不把发号卡死**）。
+     计数**按整次调用**归零（一次 `issueCodeNumber` 只发一枚号）。 */
+  let releasedCasMisses = 0
   for (let attempt = 0; attempt < COUNTER_MAX_ATTEMPTS; attempt += 1) {
     const rows = await readRows(COUNTERS_COLLECTION, { _id: id })
     if (rows.length === 0) {
       /* 首次发号：以**既有行的最大号**播种（迁移后 `seq` ＝ 已分配总数 ⇒ 采纳从 N+1 起），
-         避免计数器与既有 `seal_no` / `face_no` 分裂出重号。 */
-      let base = 0
-      if (kind === 'seal') {
-        const seals = await readRows(COLLECTIONS.seals, {}, { limit: 1000 })
-        seals.forEach((row) => {
-          const own = Number(row && row.seal_no)
-          if (Number.isInteger(own) && own > base) base = own
-        })
-      } else {
-        const faces = await readRows(COLLECTIONS.faces, {}, { limit: 1000 })
-        faces.forEach((row) => {
-          const own = Number(row && row.face_no)
-          if (Number.isInteger(own) && own > base) base = own
-        })
-      }
+         避免计数器与既有 `seal_no` / `face_no` 分裂出重号。
+         播种口径收口到单点 `counterSeedBaseOf`（`lib/sealDelete.js` 补建同一文档时共用）。 */
+      const base = await counterSeedBaseOf(kind)
       if (base >= capacity) {
         return deny(REASONS.INVALID_VALUE, `識別編碼號源已達容量上限（${capacity}）；本次零寫入。`)
       }
@@ -1970,6 +2039,31 @@ async function issueCodeNumber(kind) {
     }
     if (current >= capacity) {
       return deny(REASONS.INVALID_VALUE, `識別編碼號源已達容量上限（${capacity}）；本次零寫入。`)
+    }
+    /* ★ **释放号优先（本单）**：`deleteSeal` 把删掉的 `seal_no` / `face_no` 写进 `released`
+       ⇒ 发号先取 `released` 里**最小的、且当前库内确实未被占用**的号（取走即从数组移除）；
+       `released` 为空（或本次已回落）才走下面既有的 `seq+1` 路。三条硬口径：
+         ① **占用扫描**：`released` 里的号可能又被占上 ⇒ 必须回库核对，绝不发重号；
+         ② **CAS 条件带上 `released` 原值**：数组相等匹配是这一步的并发闸（只有仍看到
+            「这份名单」的那一路能改它）⇒ 同一个释放号不会被两路同时领走；
+         ③ **回落**：CAS 连续 2 次命中 0 行（数组相等匹配不可用 / 并发交错）⇒ 本次调用
+            改走 `seq+1`，**绝不把发号卡死**（释放号留待下次认领）。 */
+    const released = normalizeReleased(rows[0].released)
+    if (released.length > 0 && releasedCasMisses < RELEASE_CAS_MAX_MISSES) {
+      const used = await occupiedNosOf(kind)
+      const pick = released.find((no) => no <= capacity && !used.has(no))
+      if (pick !== undefined) {
+        const nextReleased = released.filter((no) => no !== pick)
+        const releaseReply = await db
+          .collection(COUNTERS_COLLECTION)
+          .where({ _id: id, seq: current, released })
+          .update({ released: nextReleased, updated_at: text(new Date().toISOString()) })
+        const releaseUpdated = updatedCountOf(releaseReply)
+        if (releaseUpdated === 1) return { ok: true, no: pick }
+        releasedCasMisses += 1
+        continue /* 重读重试（或达到回落上限后改走 seq+1） */
+      }
+      /* `released` 里**全被占用** ⇒ 名单本轮无号可发 ⇒ 正常落回 `seq+1`（数组原样不动）。 */
     }
     const command = db && db.command
     const increment = command && typeof command.inc === 'function' ? command.inc(1) : current + 1
@@ -3852,6 +3946,33 @@ const ADMIN_OPS = Object.freeze({
     /* 延遲 require：與 `lib/aiUpstream.js` 同法（打破加載環；離線自檢不需要 SDK）。 */
     const { enhanceFace } = require('./aiEnhance.js')
     return enhanceFace(payload, identity, context)
+  },
+
+  /**
+   * **管理員「刪除印章 ＋ 編號釋放」（`deleteSeal`）** —— 薄委派：業務邏輯單點在
+   * `lib/sealDelete.js::deleteSeal`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **管理員寫面**（`adminWhitelistDenial` 門同既有；**任何讀之前**；非管理員 ⇒
+   *    `FORBIDDEN` ＋ 零寫入）；② 載荷**封閉兩鍵** `seal_id` / `reason`（未知 / 身份類鍵 ⇒
+   *    `INVALID_FIELD`；`seal_id` 缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`；
+   *    `reason` 非字符串或 >200 ⇒ `INVALID_VALUE`；以上均零寫入）；③ 印章行 `stamp_id` →
+   *    `sid` → 行 `id` **三形態依次檢索**，無行 ⇒ `INVALID_VALUE`（文案「未找到該印章…本次
+   *    零寫入」）；④ **共用影像保護**（仍被其它印面引用者保留，計入 `skipped.images_shared`）；
+   * ⑤ **刪行確定序**：非共用影像行（＋去重保護下刪對象，失敗計入 `deleted.objects_failed`、
+   *    不阻斷）→ 全部印面行 → 印章行 → 審計行（`persist` 的 `kind:'add'` → `adminAudit`）→
+   *    **最後一步**把 `seal_no` / `face_no` 並入計數器文檔 `released`（`kind:'set'`、
+   *    doc 不帶 `_id`、去重升序）；⑥ 成功回包**恰 4 鍵**（`ok, deleted, skipped, released`；
+   *    另以**不可枚別** `value` 別名供 `index.js` 既有通用讀數位透傳，回包鍵面仍恰 4）、
+   *    失敗回包**恰 3 鍵**（`ok, reason, message`，**零 `refunded`**）；⑦ `reason` **零新增**
+   *    （只用既有凍結值）、**零新集合**（讀走 `readRows`、刪行走 `deleteRow` /
+   *    `deleteArtifactObject`、落盤走 `persist`；照片行 / 勘誤行只讀計數、零刪行）。
+   * @param {object} payload 載荷（封閉兩鍵 `seal_id` / `reason`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  deleteSeal: async function sealDeleteDelegate(payload, identity, context) {
+    /* 延遲 require：與弃候選圖面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { deleteSeal } = require('./sealDelete.js')
+    return deleteSeal(payload, identity, context)
   },
 
   /**
@@ -6321,8 +6442,13 @@ module.exports = {
   ADMIN_OPS,
   /* **识别编码（本单新增）**：号源发号单点 ＋ 号源集合名（供离线自检注入假体直接跑）。 */
   COUNTERS_COLLECTION,
+  COUNTER_IDS,
   issueCodeNumber,
   issueCodeNumberAvoiding,
+  /* **识别编码（本单「編號釋放」）**：播种单点 ＋ `released` 归一 ＋ 号别 doc id 表 ——
+     `lib/sealDelete.js` 补建 / 并入计数器文档时**与发号器共用同一份实现**（零第二套）。 */
+  counterSeedBaseOf,
+  normalizeReleased,
   /* **積分賬本（「金」上雲｜本單）**：集合句柄供給點 ＋ 载荷封闭键面 ＋ 账本模块本体
      （供离线自检注入假体直接断言；账本实现单点在 `lib/ledger.js`）。 */
   resolveLedgerStore,
