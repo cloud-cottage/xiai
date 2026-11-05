@@ -425,8 +425,19 @@ async function submit() {
       faceBytes = result.bytes
     }
 
-    const result = await seals.createSealWithFace(null, buildPayload(faceBytes))
-    feedback.value = result.message || (result.ok ? '已提交' : '上傳失敗，請稍後重試')
+    let result = null
+    try {
+      result = await seals.createSealWithFace(null, buildPayload(faceBytes))
+    } catch (err) {
+      /* 未結構化的異常也一律上屏（不靜默、不留「按了沒反應」；本分支只上屏文案）。 */
+      feedback.value = `上傳印章失敗：${(err && err.message) || '未知原因'}（本次未提交任何內容）`
+      return
+    }
+    /* 錯誤上屏：優先服務端 / 數據層原文（雲端形態的硬失敗文案在此原樣上屏）；
+       無文案時補一句可讀提示並帶出結構化 `reason`。 */
+    feedback.value = result.ok
+      ? result.message || '已提交'
+      : result.message || `上傳失敗（${result.reason || 'ERROR'}），請稍後重試`
     if (result.ok) emit('uploaded', result)
   } finally {
     submitting.value = false

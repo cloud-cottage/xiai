@@ -3943,6 +3943,66 @@ const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
 /** `kind` 合法取值（与 `FACE_KIND` / `buildDirectImageRow` 同口径；缺省 `FACE`）。 */
 const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
 
+/* ---------------------------------------------------------------------------
+  **上傳印章即上雲（本單新增 op｜`createSealUpload`｜管理員面）**
+  ---------------------------------------------------------------------------
+  场景（线上实证真因）：「上傳印章」此前**只写本机**（`db.js::createSealWithFaceRows` 纯本地落盘，
+  且用**本机号源** `nextSealNo` 发 `seal_no`）⇒ 干净浏览器（管理员）查不到该印、AI 修復按
+  `image_id` 严格查行必报「原圖影像編號不存在」、删除也删不到云端。本 op 就是那条**云端权威**写入面：
+  **服务端发号 ＋ 内容寻址影像行 ＋ `persist` 单点落盘**，客户端只做本机镜像（本机不再发号）。
+  --------------------------------------------------------------------------- */
+
+/** 上傳印章载荷**封闭键面**：印章级 8 鍵 ＝ `SEAL_IMPORT_SEAL_FIELDS` **逐字沿用（不新造字段）**
+ *  ＋ `faces[]` ＋ 冪等鍵 `client_request_id`；身份类键一律不在面内 ⇒ `INVALID_FIELD`。 */
+const SEAL_UPLOAD_ALLOWED_KEYS = Object.freeze([...SEAL_IMPORT_SEAL_FIELDS, 'faces', 'client_request_id'])
+
+/** 单印面**封闭键面**（必給 4 鍵 ＋ 可選 7 個自由文本鍵；其余键 ⇒ `INVALID_FIELD`）。 */
+const SEAL_UPLOAD_FACE_KEYS = Object.freeze([
+  'kind',
+  'image_sha256',
+  'image_bytes',
+  'image_storage_key',
+  'seal_name',
+  'dynasty',
+  'seal_type',
+  'face_style',
+  'seal_class',
+  'author',
+  'transcription'
+])
+
+/** 单印面**必給键**（缺 / 空 ⇒ `MISSING_REQUIRED`）。 */
+const SEAL_UPLOAD_FACE_REQUIRED_KEYS = Object.freeze(['kind', 'image_sha256', 'image_bytes', 'image_storage_key'])
+
+/** 单印面 `kind` 值域（恰二值；给出即必须逐字命中，**不静默归一**）。 */
+const SEAL_UPLOAD_FACE_KINDS = Object.freeze(['FACE', 'EDGE'])
+
+/** 本通道印章行的 `source` 取值（＝ 本机 `MANUAL_SOURCE` 同值；行字段，**不是载荷键**）。 */
+const SEAL_UPLOAD_SOURCE = 'manual'
+
+/**
+ * **冪等命中時的回包读数**（**只读、零写**）：按 `sealId` 取该印全部印面，按 `face_no` 升序 ⇒
+ * `face_ids` / `image_ids` / `face_nos` 三数组恒**一一对应**（与新建路径的按面序同构）。
+ * @param {object} sealRow 既有正式印章行
+ * @returns {Promise<{stamp_id:string, sid:string, seal_no:number, face_ids:string[],
+ *          image_ids:Array<string|null>, face_nos:number[]}>}
+ */
+async function sealUploadReadoutsOf(sealRow) {
+  const sid = text(sealRow && (sealRow.sid || sealRow.stamp_id))
+  const faceRows = sid === '' ? [] : await readRows(COLLECTIONS.faces, { sealId: sid }, { limit: 64 })
+  const ordered = (Array.isArray(faceRows) ? faceRows : []).slice().sort(
+    (a, b) => Number(a && a.face_no) - Number(b && b.face_no)
+  )
+  return {
+    stamp_id: sid,
+    sid,
+    seal_no: Number(sealRow && sealRow.seal_no),
+    face_ids: ordered.map((doc) => text(doc && doc.id)),
+    image_ids: ordered.map((doc) => faceImageIdOf(doc)),
+    face_nos: ordered.map((doc) => Number(doc && doc.face_no))
+  }
+}
+
 const ADMIN_OPS = Object.freeze({
   /**
    * **管理員「弃候選圖」（`ai-enhance-discard`）** —— 薄委派：業務邏輯單點在
@@ -6305,6 +6365,198 @@ const ADMIN_OPS = Object.freeze({
       image_id: row.id,
       plan: {
         writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }]
+      }
+    }
+  },
+
+  /**
+   * **上傳印章即上雲（本單新增 op｜`createSealUpload`｜管理員面）**：管理员在【上傳印章】弹窗
+   * 提交一枚印章（1 印面 ＋ 可选边款）⇒ **服务端发号 ＋ 内容寻址影像行 ＋ `persist` 单点落盘**，
+   * 客户端只落本机镜像（**本机不再发号** —— 本地号源只留给 `local-dev` 显式分支）。
+   *
+   * 顺序（**全部判定在任何读 / 写之前**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 的唯一写点执行）：
+   *   ① 管理员门 `adminWhitelistDenial`（**任何读之前**；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝
+   *      ＋ 零读零写；非白名单 ⇒ `FORBIDDEN`）；
+   *   ② 载荷封闭键面 `SEAL_UPLOAD_ALLOWED_KEYS`（印章级 8 鍵 **＝ `SEAL_IMPORT_SEAL_FIELDS`
+   *      逐字沿用、不新造字段** ＋ `faces[]` ＋ `client_request_id`；未知键 / 身份类键 ⇒
+   *      `INVALID_FIELD`，与其余 op 同一条文案）；
+   *   ③ 冪等鍵 `client_request_id` 必給：缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`、
+   *      超 `MAX_ID_LENGTH` ⇒ `INVALID_VALUE`（**不新建任何集合** —— 幂等键落**印章行**）；
+   *   ④ `faces[]` 1..N ＋ 逐面封闭键面 `SEAL_UPLOAD_FACE_KEYS`（必給 `kind` / `image_sha256` /
+   *      `image_bytes` / `image_storage_key`；可選 7 個自由文本鍵）⇒ 未知键 `INVALID_FIELD`；
+   *   ⑤ 形态门（与 `registerArtifact` / `registerFaceImage` **同一张表**）：摘要
+   *      `ARTIFACT_DIGEST_PATTERN`、对象键 `ARTIFACT_OBJECT_KEY_PATTERN` **且键内摘要 ≡
+   *      `image_sha256`**、`image_bytes` ∈ 1〜`ARTIFACT_MAX_BYTES` 整数、`kind` ∈ {FACE, EDGE}
+   *      （给出即必须逐字命中，**不静默归一**）⇒ 任一不符 `INVALID_VALUE` ＋ 零写入；
+   *   ⑥ 自由文本长度门 `sealTextLengthDenial` ＋ 值域门 `sealValueDomainDenial`
+   *      （`dynasty` / `seal_type` / `face_style` / `seal_class`）；
+   *   ⑦ 影像引用：集合已有行 ⇒ 复用（**不改写既有行**）；无行 ⇒ 自建内容寻址登记行覆蓋層
+   *      （`_id` ＝ `img-<sha 前 16 位>`，唯一构造点仍是 `buildDirectImageRow`）；
+   *   ⑧ **幂等读**：同 `client_request_id` 已有正式行 ⇒ 回既有读数 ＋ `idempotent:true`、
+   *      **零新增行、不改写既有行、无 `plan`**（重放不消耗号）；
+   *   ⑨ **服务端发号**（复用 `buildSealAcceptanceFromImport` 单点，本 op 不自算号）：
+   *      `seal_no = issueCodeNumber('seal')`（含 released 优先）、`sid`/`stamp_id` 由 `seal_no`
+   *      恒重算；每面 `face_no = issueCodeNumber('face')`、`fid` 由其恒重算、
+   *      `face id = fc-<sid>-<f|e><n>`（`nextFaceIdOf`）；影像行 `seq` 走 `imageSeqsOf` /
+   *      `nextImageSeqOf` 单点；
+   *   ⑩ `plan` ＝ 影像行 `kind:'set'` ＋ 印章行 `kind:'add'` ＋ 逐印面行 `kind:'add'`
+   *      （**全部判定通过才交 plan** ⇒ 任一门失败恒零写入）；印章行 `review_status='APPROVED'`；
+   *   ⑪ 成功回包业务键**全塞 `row`**（`index.js` 对 `row` 零过滤 ⇒ `sid` / `seal_no` /
+   *      `face_nos` / `idempotent` 不必改全局白名单），`index.js` 另按 op 收窄透传
+   *      `stamp_id` / `face_ids` / `image_ids` 三项；失败恒恰 3 键、`reason` 只用既有冻结值
+   *      （**零新增**）。
+   * @param {object} payload 载荷（封闭键面见 `SEAL_UPLOAD_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<object>} 成功 ⇒ `{ok, op, stamp_id, sid, seal_no, face_ids, image_ids,
+   *          face_nos, idempotent, row, plan}`（`plan` 为内部落盘计划、绝不外传）；失败 ⇒ 恰 3 键
+   */
+  async createSealUpload(payload, identity, context) {
+    /* ① 管理员门（**任何读之前**；缺 env ⇒ 结构化拒绝 ＋ 零读零写）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷形态 ＋ 封闭键面（未知键 / 身份类键 ⇒ `INVALID_FIELD`；与其余 op 同一条文案）。 */
+    const keyDenial = pointsPayloadDenial(payload, SEAL_UPLOAD_ALLOWED_KEYS)
+    if (keyDenial) return keyDenial
+    /* ③ 冪等鍵 `client_request_id`（必給；类型 / 长度形态门，全部在任何读之前）。 */
+    const rawRequestId = payload.client_request_id
+    if (rawRequestId === undefined || rawRequestId === null || rawRequestId === '') {
+      return deny(REASONS.MISSING_REQUIRED, '缺少冪等鍵（client_request_id）；本次零寫入。')
+    }
+    if (typeof rawRequestId !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '冪等鍵（client_request_id）必須是字符串；本次零寫入。')
+    }
+    const requestId = text(rawRequestId)
+    if (requestId === '') {
+      return deny(REASONS.MISSING_REQUIRED, '缺少冪等鍵（client_request_id）；本次零寫入。')
+    }
+    if (requestId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `冪等鍵（client_request_id）超出上限（${MAX_ID_LENGTH} 字）；本次零寫入。`)
+    }
+    /* ④ `faces[]` 1..N ＋ 逐面封闭键面 ＋ 必給键 ＋ `kind` 值域（不静默归一）。 */
+    const rawFaces = payload.faces
+    if (!Array.isArray(rawFaces) || rawFaces.length === 0) {
+      return deny(REASONS.MISSING_REQUIRED, '請至少提供一個印面（faces[] 1..N）；本次零寫入。')
+    }
+    const faces = []
+    for (let index = 0; index < rawFaces.length; index += 1) {
+      const face = rawFaces[index]
+      const label = `faces[${index}]`
+      if (!face || typeof face !== 'object' || Array.isArray(face)) {
+        return deny(REASONS.INVALID_VALUE, `${label} 必須是對象；本次零寫入。`)
+      }
+      const unknown = Object.keys(face).filter((key) => SEAL_UPLOAD_FACE_KEYS.indexOf(key) === -1)
+      if (unknown.length > 0) {
+        return deny(REASONS.INVALID_FIELD, `${label} 含未知欄位：${unknown.join('、')}；本次零寫入。`)
+      }
+      for (const key of SEAL_UPLOAD_FACE_REQUIRED_KEYS) {
+        const value = face[key]
+        if (value === undefined || value === null || (typeof value === 'string' && text(value) === '')) {
+          return deny(REASONS.MISSING_REQUIRED, `${label} 缺少必要欄位（${key}）；本次零寫入。`)
+        }
+      }
+      if (typeof face.kind !== 'string' || SEAL_UPLOAD_FACE_KINDS.indexOf(face.kind) === -1) {
+        return deny(REASONS.INVALID_VALUE, `${label} 的影像類別（kind）只能是 FACE 或 EDGE；本次零寫入。`)
+      }
+      const normalized = normalizeSealImportFace(face)
+      /* ⑤ 形态门（与 `registerArtifact` / `registerFaceImage` 同一张表；归一后判定）。 */
+      const sha = text(normalized.image_sha256).toLowerCase()
+      normalized.image_sha256 = sha
+      if (!ARTIFACT_DIGEST_PATTERN.test(sha)) {
+        return deny(REASONS.INVALID_VALUE, `${label} 影像摘要（image_sha256）必須是 64 位小寫十六進制；本次零寫入。`)
+      }
+      const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(text(normalized.image_storage_key))
+      if (!matched || matched[2] !== sha || matched[1] !== sha.slice(0, 2)) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `${label} 影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff，且鍵內摘要 ≡ image_sha256）；本次零寫入。`
+        )
+      }
+      const bytes = Number(normalized.image_bytes)
+      if (!Number.isInteger(bytes) || bytes <= 0 || bytes > ARTIFACT_MAX_BYTES) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `${label} 影像字節數（image_bytes）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+        )
+      }
+      faces.push(normalized)
+    }
+    /* ⑥ 自由文本长度门 ＋ 值域门（全部在任何读之前）。 */
+    const lengthDenial = sealTextLengthDenial(payload, faces)
+    if (lengthDenial) return lengthDenial
+    const domainDenial = sealValueDomainDenial(payload, faces)
+    if (domainDenial) return domainDenial
+    /* ⑦ 影像引用：集合已有行 ⇒ 复用（不改写既有行）；无行 ⇒ 自建内容寻址登记行覆蓋層。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const imageRows = []
+    for (const face of faces) {
+      const resolved = await findSealImportImageRow(face)
+      if (resolved) continue
+      /* **此刻不带 `seq`**：`stamp_id` 尚未发号 ⇒ `seq` 由构造器按单点分配器补齐。 */
+      imageRows.push(buildDirectImageRow(face, at))
+    }
+    /* ⑧ 幂等读（同 `client_request_id` ⇒ 零新增、不改写既有行、无 `plan`）＋ 撞号避让读数。 */
+    const seals = await readRows(COLLECTIONS.seals, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    const existing = seals.find((item) => text(item && item.client_request_id) === requestId)
+    if (existing) {
+      const readouts = await sealUploadReadoutsOf(existing)
+      return {
+        ok: true,
+        op: 'createSealUpload',
+        ...readouts,
+        idempotent: true,
+        row: { ...readouts, idempotent: true },
+        message: '該冪等鍵（client_request_id）已有正式行 ⇒ 未新增任何行、未改寫既有行（冪等）。'
+      }
+    }
+    /* ⑨ 复用构造器（行构造 ＋ **服务端原子发号** ＋ 影像 `seq` 单点分配）。 */
+    const faceRows = await readRows(COLLECTIONS.faces, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    const importRow = { ...pickSealImportSealFields(payload), source: SEAL_UPLOAD_SOURCE, faces }
+    const built = await buildSealAcceptanceFromImport(importRow, seals, faceRows, identity, at, imageRows)
+    if (!built.ok) {
+      return built.reason
+        ? deny(built.reason, '上傳印章落點構造失敗（號源 / 影像引用判定未過）⇒ 拒絕寫入；本次零寫入。')
+        : deny(REASONS.MISSING_REQUIRED, '印面（kind=FACE）必須帶可解析的影像引用 ⇒ 拒絕寫入；本次零寫入。')
+    }
+    /* 冪等键落**印章行**（**不新建集合**：本函数零新集合）。 */
+    built.sealDoc.client_request_id = requestId
+    for (const row of imageRows) row.stamp_id = built.stampId
+    /* ⑪ 回包业务键（`face_ids` / `image_ids` / `face_nos` 三数组**按面序一一对应**）。 */
+    const readouts = {
+      stamp_id: built.stampId,
+      sid: built.stampId,
+      seal_no: Number(built.sealDoc.seal_no),
+      face_ids: built.faceDocs.map((doc) => text(doc.id)),
+      image_ids: built.faceDocs.map((doc) => faceImageIdOf(doc)),
+      face_nos: built.faceDocs.map((doc) => Number(doc.face_no))
+    }
+    return {
+      ok: true,
+      op: 'createSealUpload',
+      ...readouts,
+      idempotent: false,
+      row: { ...readouts, idempotent: false },
+      /* ⑩ 全部判定已通过 ⇒ 此刻才交落盘计划（任一门失败都到不了这里 ⇒ 恒零写入）。 */
+      plan: {
+        op: 'createSealUpload',
+        writes: [
+          ...imageRows.map((row) => ({ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row })),
+          {
+            kind: 'add',
+            collection: COLLECTIONS.seals,
+            id: built.stampId,
+            doc: Object.assign({ _id: built.stampId }, built.sealDoc)
+          },
+          ...built.faceDocs.map((doc) => ({
+            kind: 'add',
+            collection: COLLECTIONS.faces,
+            id: doc.id,
+            doc: Object.assign({ _id: doc.id }, doc)
+          }))
+        ]
       }
     }
   }

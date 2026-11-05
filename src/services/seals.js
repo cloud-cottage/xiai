@@ -62,6 +62,11 @@ import {
   /* **上傳即入册（本單）**：影像行 `id` 改寫成雲端內容尋址編號時的整表落盤
      （與 `insertImageRow` 同一寫入口，不另立第二套存儲寫）。 */
   saveImageRows,
+  /* **上傳印章即上雲（本單）**：寫前校驗面（雲端 / 本地共用同一道門）＋ 鏡像行落盤要用的
+     `MANUAL_SOURCE` 與顯示名單點（不自寫第二套名表 / 第二套門）。 */
+  planSealWithFaceInput,
+  MANUAL_SOURCE,
+  sealDisplayName,
   PermissionError
 } from '../data/db.js'
 /* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
@@ -126,7 +131,7 @@ import { bytesToDataUrl } from '../data/assetmeta.js'
 import { isSealPlaceholderImageRow, loadSealPlaceholderBytes } from './sealPlaceholderAsset.js'
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：行級分流判據的唯一真源在 `imageAuthority.js`
    （行內有 digest 且二進制在服務端權威庫 ⇒ `digest`；否則 ⇒ `local`）。本層只消費，不自立第二把尺子。 */
-import { digestOfRow, readViaOfRow, artifactObjectKeyOf } from './imageAuthority.js'
+import { digestOfRow, readViaOfRow, artifactObjectKeyOf, storeArtifactBytes, AUTHORITY_STORAGE_SERVER } from './imageAuthority.js'
 /* **搜索面扩展（§3.54.9｜单点）**：关键字面扩到印人「姓 / 名 / 字 / 号 / 别名 / cbdb_id」——
    复用印人检索的**唯一实现** `persons.searchPersons`（**不另造第二套同名逻辑**）；命中印人 ⇒
    该印人（`author_person_id`）名下的印章一并命中。 */
@@ -686,6 +691,323 @@ function isPermissionError(err) {
   return err instanceof PermissionError || (err && err.name === 'PermissionError')
 }
 
+/* ============================================================================
+   能力 6 · 雲端形態「上傳印章即上雲」（`writeFaceMode() === 'cloud'`）
+   --------------------------------------------------------------------------
+   線上實證真因：「上傳印章」此前**只寫本機**（`db.js::createSealWithFaceRows` 純本地落盤 ＋
+   本機號源 `nextSealNo` 發 `seal_no`）⇒ 乾淨瀏覽器查不到該印、AI 修復按 `image_id` 嚴格查行
+   必報「原圖影像編號不存在」、刪除也刪不到雲端。本分支把它收口為：
+
+   ① 與本地形態**共用同一道寫前校驗**（`planSealWithFaceInput`，零副作用、零寫入）；
+   ② 影像二進制經**現有** `storeArtifactBytes` 交權威存儲（拿 `sha256` / `bytesLength` / 對象鍵）；
+   ③ 調雲函數 **`createSealUpload`**（**服務端發號**；本機**不調** `nextSealNo` / `reserveSealNo`）；
+   ④ 成功 ⇒ 用**服務端下發的 id / 號**寫本機鏡像行（`saveSealRows` / `saveFaceRows` /
+      `saveImageRows` 現有單點；行形狀與本地路徑逐鍵同構）；
+   ⑤ **入雲失敗 ⇒ 硬失敗**：`ok:false` ＋ 如實文案、**不落任何本機行**
+      （禁止誕生「只有本機看得到」的印章）。
+
+   本地 dev（`local-dev`）**顯式走舊本地路徑**（見下方 `createSealWithFace` 的分支），
+   兩形態互不濛混。
+   ========================================================================== */
+
+/** 雲函數上傳 op 名（**唯一字面值落點**；雲端 `ADMIN_OPS` 註冊面同名）。 */
+const CLOUD_SEAL_UPLOAD_OP = 'createSealUpload'
+
+/** 每次提交一枚的冪等鍵（與雲端 `client_request_id` 形態門同尺：非空字符串、≤128 字）。 */
+function newClientRequestId() {
+  try {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+      return `csu-${globalThis.crypto.randomUUID()}`
+    }
+  } catch {
+    /* 無 `randomUUID` ⇒ 落時間戳 + 隨機兜底（同一提交內唯一即可）。 */
+  }
+  return `csu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+/** 雲端上傳的**硬失敗**（入雲失敗 ⇒ 零本機行；`reason` 只用既有凍結字面值）。 */
+function cloudUploadFail(reason, message) {
+  return { ok: false, reason: reason || 'STORAGE_UNAVAILABLE', message }
+}
+
+/**
+ * 雲端形態的「上傳印章」：**先校驗 → 再入雲 → 成功才落本機鏡像行**。
+ * 返回形狀與 `createSealWithFaceRows` **同構**（由 `createSealWithFace` 的收口統一處理）。
+ * @param {{id:string, role:string}} actor 管理員（寫前校驗面會獨立再判一次權限）
+ * @param {object} payload 組合入口載荷（鍵面 `SEAL_COMPOSITE_INPUT_FIELDS`）
+ * @returns {Promise<object>} 成功 / 防重 ⇒ `ok:true`；任何失敗 ⇒ `ok:false` ＋ 零本機行
+ */
+async function createSealWithFaceViaCloud(actor, payload = {}) {
+  /* ① 與本地形態**同一道**寫前校驗（鍵白名单 / 必填 / 值域 / 引用 / 影像可解析；零副作用）。 */
+  const planned = planSealWithFaceInput(actor, payload)
+  if (!planned.ok) return planned
+  const { clean, faceImage, edgeImage, equivalent } = planned
+  if (equivalent) {
+    return {
+      ok: true,
+      deduped: true,
+      seal: equivalent.seal,
+      face: equivalent.face,
+      imageId: equivalent.imageId,
+      message: '該印章與印面圖此前已上傳，本次未重複新增'
+    }
+  }
+  /* ② 影像二進制交權威存儲（內容尋址；拿 sha / bytes / 對象鍵）。**入雲前失敗 ⇒ 零本機行**。 */
+  const faceStored = await storeArtifactBytes(faceImage.bytes)
+  if (!faceStored.ok) {
+    return cloudUploadFail(faceStored.reason, `上傳印章失敗：${faceStored.message}（入雲前中止；本次未寫入任何本機行）`)
+  }
+  let edgeStored = null
+  if (edgeImage) {
+    edgeStored = await storeArtifactBytes(edgeImage.bytes)
+    if (!edgeStored.ok) {
+      return cloudUploadFail(edgeStored.reason, `上傳印章失敗（邊款圖）：${edgeStored.message}（入雲前中止；本次未寫入任何本機行）`)
+    }
+  }
+  const faceKey = faceStored.storageKey || artifactObjectKeyOf(faceStored.sha256)
+  const edgeKey = edgeStored ? edgeStored.storageKey || artifactObjectKeyOf(edgeStored.sha256) : ''
+  if (!faceKey || (edgeStored && !edgeKey)) {
+    return cloudUploadFail('STORAGE_UNAVAILABLE', '上傳印章失敗：權威對象鍵缺席，無法入雲；本次未寫入任何本機行。')
+  }
+  /* ③ 載荷（**封閉鍵面**：印章級 8 鍵沿用 `SEAL_IMPORT_SEAL_FIELDS` 白名单；每面 4 必給鍵 ＋ 7 可選文本鍵）。 */
+  const faceText = {
+    seal_name: clean.seal_name,
+    dynasty: clean.dynasty,
+    seal_type: clean.category,
+    face_style: clean.faceStyle,
+    seal_class: clean.sealClass,
+    author: clean.author,
+    transcription: clean.transcription
+  }
+  const faces = [
+    {
+      kind: FACE_KIND.FACE,
+      image_sha256: faceStored.sha256,
+      image_bytes: faceStored.bytesLength,
+      image_storage_key: faceKey,
+      ...faceText
+    }
+  ]
+  if (edgeStored) {
+    faces.push({
+      kind: FACE_KIND.EDGE,
+      image_sha256: edgeStored.sha256,
+      image_bytes: edgeStored.bytesLength,
+      image_storage_key: edgeKey,
+      ...faceText
+    })
+  }
+  const gate = await userWriteGate(
+    CLOUD_SEAL_UPLOAD_OP,
+    {
+      seal_name: clean.seal_name,
+      dynasty: clean.dynasty,
+      seal_type: clean.category,
+      seal_style: clean.sealStyle,
+      material: clean.material,
+      shape: clean.shape,
+      author: clean.author,
+      transcription: clean.transcription,
+      faces,
+      client_request_id: newClientRequestId()
+    },
+    { readoutKeys: ['stamp_id', 'face_ids', 'image_ids'] }
+  )
+  if (!gate || gate.ok !== true) {
+    if (gate && (gate.dev === true || gate.mode === WRITE_FACE_MODES.LOCAL_DEV)) {
+      return cloudUploadFail(
+        'STORAGE_UNAVAILABLE',
+        '上傳印章失敗：雲端形態未取得服務端回包（未經雲端驗證，本地門不算授權）；本次未寫入任何本機行。'
+      )
+    }
+    return cloudUploadFail(
+      gate && gate.reason,
+      `上傳印章失敗：${(gate && gate.message) || '雲端服務暫時不可用'}（本次未寫入任何本機行）`
+    )
+  }
+  if (gate.dev === true || gate.mode === WRITE_FACE_MODES.LOCAL_DEV) {
+    return cloudUploadFail(
+      'STORAGE_UNAVAILABLE',
+      '上傳印章失敗：雲端形態未取得服務端回包（未經雲端驗證，本地門不算授權）；本次未寫入任何本機行。'
+    )
+  }
+  /* ④ 回包形狀門：服務端下發的 id / 號是本機鏡像行的**唯一來源**（缺位即硬失敗、零本機行）。 */
+  const readouts = gate.row && typeof gate.row === 'object' ? gate.row : {}
+  const stampId = String(readouts.stamp_id || gate.stamp_id || '')
+  const sealNo = Number(readouts.seal_no)
+  const faceIds = Array.isArray(readouts.face_ids) ? readouts.face_ids : gate.face_ids
+  const imageIds = Array.isArray(readouts.image_ids) ? readouts.image_ids : gate.image_ids
+  const faceNos = Array.isArray(readouts.face_nos) ? readouts.face_nos : []
+  const shaped =
+    stampId !== '' &&
+    Number.isInteger(sealNo) &&
+    sealNo > 0 &&
+    Array.isArray(faceIds) &&
+    Array.isArray(imageIds) &&
+    Array.isArray(faceNos) &&
+    faceIds.length > 0 &&
+    faceIds.length === imageIds.length &&
+    faceIds.length === faceNos.length &&
+    faceIds.every((value) => typeof value === 'string' && value !== '') &&
+    imageIds.every((value) => typeof value === 'string' && value !== '') &&
+    faceNos.every((value) => Number.isInteger(value) && value > 0)
+  if (!shaped) {
+    return cloudUploadFail(
+      'STORAGE_UNAVAILABLE',
+      '上傳印章失敗：雲端回包形狀不可辨識（缺 id / 號讀數）；本次未寫入任何本機行。'
+    )
+  }
+  /* ⑤ 本機鏡像行（**號 / id 一律取服務端回包；本機不發號**）—— 行形狀與本地路徑逐鍵同構。 */
+  const at = new Date().toISOString()
+  const seal = {
+    seal_no: sealNo,
+    sid: stampId,
+    sealGroupId: `g-${stampId}`,
+    stamp_id: stampId,
+    id: stampId,
+    seal_name: clean.seal_name,
+    name: clean.seal_name,
+    transcription: clean.transcription,
+    dynasty: clean.dynasty,
+    seal_type: clean.category,
+    category: clean.category,
+    seal_style: clean.sealStyle,
+    material: clean.material,
+    shape: clean.shape,
+    asset_kind: 'SEAL',
+    review_status: 'APPROVED',
+    author: clean.author,
+    source: MANUAL_SOURCE,
+    uploaded_by: actor.id,
+    created_at: at,
+    updated_at: at
+  }
+  /* `faces` 與三個讀數數組**按面序一一對應**（雲端按載荷序回包）。 */
+  const faceRows = faces.map((def, index) => ({
+    id: faceIds[index],
+    sealId: stampId,
+    stamp_id: stampId,
+    kind: def.kind,
+    face_no: faceNos[index],
+    /* `fid` 由 `face_no` **恆重算**（雙端同一份 `codeId` 純函數；不是本機發號）。 */
+    fid: CODE_ID.encodeFaceCode(faceNos[index]).code,
+    face_image_id: def.kind === FACE_KIND.FACE ? imageIds[index] : null,
+    edge_image_ids: def.kind === FACE_KIND.EDGE ? [imageIds[index]] : [],
+    seal_name: clean.seal_name,
+    dynasty: clean.dynasty,
+    seal_type: clean.category,
+    face_style: clean.faceStyle,
+    seal_class: clean.sealClass,
+    author: clean.author,
+    author_person_id: clean.authorPersonId,
+    transcription: clean.transcription,
+    source: MANUAL_SOURCE,
+    uploaded_by: actor.id,
+    created_at: at,
+    updated_at: at
+  }))
+  const imageRows = faces.map((def, index) => {
+    const stored = index === 0 ? faceStored : edgeStored
+    const normalized = index === 0 ? faceImage : edgeImage
+    const id = imageIds[index]
+    return {
+      id,
+      assetId: id,
+      stamp_id: stampId,
+      sealId: stampId,
+      ownerType: 'face',
+      ownerId: '',
+      kind: def.kind,
+      sha256: stored.sha256,
+      bytes: stored.bytesLength,
+      bytesLength: stored.bytesLength,
+      width: normalized.width,
+      height: normalized.height,
+      colorMode: normalized.colorMode,
+      color_mode: normalized.colorMode,
+      colorType: normalized.colorType,
+      bitDepth: normalized.bitDepth,
+      paletteEntries: normalized.paletteEntries,
+      neutral: normalized.neutral,
+      mime: normalized.mime,
+      storage: AUTHORITY_STORAGE_SERVER,
+      storage_key: def.image_storage_key,
+      authority_rel_path: stored.relPath || '',
+      [SLICE_META_FIELD]: dataSliceMetaOf(id, def.kind),
+      source: MANUAL_SOURCE,
+      uploaded_by: actor.id,
+      created_at: at
+    }
+  })
+  /* ⑥ 本機鏡像三表落盤（**入雲已成功**；任一表寫失敗 ⇒ 還原三表，不留半成品本機行）。 */
+  const before = { seals: listSealRows(), faces: listFaceRows(), images: listImageRows() }
+  let step = ''
+  try {
+    step = '印章行'
+    if (saveSealRows([...before.seals, seal]) === false) throw new Error('saveSealRows')
+    step = '印面行'
+    if (saveFaceRows([...before.faces, ...faceRows]) === false) throw new Error('saveFaceRows')
+    step = '影像行'
+    if (saveImageRows([...before.images, ...imageRows]) === false) throw new Error('saveImageRows')
+  } catch {
+    saveSealRows(before.seals)
+    saveFaceRows(before.faces)
+    saveImageRows(before.images)
+    return cloudUploadFail(
+      'STORAGE_UNAVAILABLE',
+      `上傳印章失敗：本機鏡像行寫入中斷（${step}）⇒ 已還原本機三個集合、未產生半成品；` +
+        '雲端正式行已建立，刷新後可見（本次本機零新增行）。'
+    )
+  }
+  return {
+    ok: true,
+    deduped: false,
+    seal,
+    face: faceRows[0],
+    faces: faceRows,
+    images: imageRows,
+    stampId,
+    faceId: faceRows[0].id,
+    edgeFaceId: faceRows.length > 1 ? faceRows[1].id : '',
+    /* **如實回顯識別編碼**：號源＝服務端計數器（`number_source` 標明權威來源）。 */
+    code: {
+      seal_no: sealNo,
+      sid: stampId,
+      number_source: 'SERVER_COUNTER',
+      faces: faceRows.map((row) => ({ id: row.id, face_no: row.face_no, fid: row.fid }))
+    },
+    message: `已新增印章《${sealDisplayName(clean)}》（${stampId}）與 ${faceRows.length} 個印面`
+  }
+}
+
+/** 失敗回包收口（**兩個形態共用**；形狀逐字一致 ⇒ 調用方零分叉）。 */
+function failSealWithFace(written) {
+  return {
+    ok: false,
+    reason: written.reason || 'ERROR',
+    missing: written.missing || [],
+    message: written.message
+  }
+}
+
+/** 成功回包收口（**兩個形態共用**；形狀逐字一致 ⇒ 調用方零分叉）。 */
+function finishSealWithFace(written) {
+  const stampId = written.stampId || (written.seal && (written.seal.stamp_id || written.seal.id)) || ''
+  const faceId = written.faceId || (written.face && written.face.id) || ''
+  return {
+    ok: true,
+    deduped: written.deduped === true,
+    id: stampId,
+    stampId,
+    faceId,
+    seal: getSealById(stampId) || written.seal || null,
+    face: faceId ? getFaceById(faceId) : null,
+    faces: listFacesOf(stampId),
+    images: listImagesByStamp(stampId),
+    message: written.message
+  }
+}
+
 /**
  * **冻结 API ①**：管理员新增一枚印章（含 1 个印面 + 印面图，可选边款图）。
  *
@@ -710,6 +1032,21 @@ function isPermissionError(err) {
  */
 export async function createSealWithFace(actor, payload = {}) {
   const who = actor || currentUser()
+  /* **雲端形態（`cloud`）＝上傳即上雲**：服務端發號；**入雲失敗 ⇒ 硬失敗、零本機行**。 */
+  if (writeFaceMode() === WRITE_FACE_MODES.CLOUD) {
+    const written = await createSealWithFaceViaCloud(who, payload)
+    return written.ok ? finishSealWithFace(written) : failSealWithFace(written)
+  }
+  /* **本機 dev / 離線形態（`local-dev`）＝顯式本地分支**：舊本地路徑一字不改（含本機號源）。
+     兩分支之外的形態一律硬失敗（**不讓雲端形態濛混到本地、也不讓未知形態靜默落本機行**）。 */
+  if (writeFaceMode() !== WRITE_FACE_MODES.LOCAL_DEV) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      missing: [],
+      message: '未識別的寫入形態（既非雲端亦非本機 dev）；本次未寫入任何內容。'
+    }
+  }
   let written
   try {
     written = await createSealWithFaceRows(who, payload)
@@ -717,28 +1054,8 @@ export async function createSealWithFace(actor, payload = {}) {
     if (isPermissionError(err)) return deniedResult(err.message)
     return { ok: false, reason: 'ERROR', message: `上傳印章失敗：${(err && err.message) || '未知原因'}` }
   }
-  if (!written.ok) {
-    return {
-      ok: false,
-      reason: written.reason || 'ERROR',
-      missing: written.missing || [],
-      message: written.message
-    }
-  }
-  const stampId = written.stampId || (written.seal && (written.seal.stamp_id || written.seal.id)) || ''
-  const faceId = written.faceId || (written.face && written.face.id) || ''
-  return {
-    ok: true,
-    deduped: written.deduped === true,
-    id: stampId,
-    stampId,
-    faceId,
-    seal: getSealById(stampId) || written.seal || null,
-    face: faceId ? getFaceById(faceId) : null,
-    faces: listFacesOf(stampId),
-    images: listImagesByStamp(stampId),
-    message: written.message
-  }
+  if (!written.ok) return failSealWithFace(written)
+  return finishSealWithFace(written)
 }
 
 /* ============================================================================

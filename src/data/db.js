@@ -3767,16 +3767,20 @@ export async function replaceFaceImage(actor, faceId, imageInput) {
 /* ------------------ 组合写：新增印章 + 印面 + 印面图（原子，无半成品） ------------------ */
 
 /**
- * 「上传印章」的一次性组合写（数据层入口，服务层 `seals.createSealWithFace` 调它）。
- * 顺序：**先校验（必填 / 防重 / 影像可解析）→ 再落盘**；中途任何失败**回滚**
- * （三个集合还原 + 删除本次新写的二进制）⇒ 不产生半成品记录（AC-34）。
+ * 「上传印章」的**写前校验面**（**零副作用、零写入**）—— 本地形态（`local-dev`）与云端形态
+ * （`cloud`）**共用同一道门**，不长出第二套判据：键白名单（R-49）→ 归一 → 必填 → 朝代 / 印面内容 /
+ * 印面风格 / 大類值域门 → 作者引用值域门 → 影像可解析（印面必填、边款可选）→ 印面号规划 →
+ * 印章级语义防重。
  *
- * **R-49**：本入口是**组合入口**（一次写印章 / 印面 / 影像三个实体），键面＝三者之并集
- * （`SEAL_COMPOSITE_INPUT_FIELDS`）—— 之外的键 ⇒ `INVALID_FIELD` ＋ 零写入；
- * 分派给各实体时**由各实体入口各自再判一次自己的门**（`insertSealRow` 只收印章键，
- * 故这里用 `pickSealInsertPayload` 只挑印章键传下去，**不把印面级的键硬塞给印章级入口**）。
+ * **本机号源只归本地形态**：`plannedFaceNos` 是 `local-dev` 形态用的；云端形态**一律不采信**
+ * （`seal_no` / `face_no` 由云函数 `xiai_counters` 发放，以服务端回包为准）。
+ * @param {{id:string, role:string}|null} actor
+ * @param {object} payload 组合入口载荷（键面 `SEAL_COMPOSITE_INPUT_FIELDS`）
+ * @returns {{ok:true, clean:object, faceImage:object, faceInput:any, edgeInput:any,
+ *            edgeImage:object|null, plannedFaceNos:object, equivalent:object|null}
+ *          |{ok:false, reason:string, message:string, missing?:string[]}}
  */
-export async function createSealWithFaceRows(actor, payload = {}) {
+export function planSealWithFaceInput(actor, payload = {}) {
   const denied = forbiddenFor(actor, '僅管理員可以上傳印章（新增進藏品庫）')
   if (denied) return denied
   /* **R-49 第 1 条（键白名单门）**：在任何副作用（影像解析 / 落盘）之前拒绝（零写入）。 */
@@ -3814,8 +3818,9 @@ export async function createSealWithFaceRows(actor, payload = {}) {
   const faceImage = normalizeImagePayload(faceInput)
   if (!faceImage.ok) return { ok: false, reason: imageReasonOf(faceImage), message: faceImage.message }
   let edgeInput = ''
+  let edgeImage = null
   if (payload.edgeImage !== undefined && payload.edgeImage !== null && payload.edgeImage !== '') {
-    const edgeImage = normalizeImagePayload(payload.edgeImage)
+    edgeImage = normalizeImagePayload(payload.edgeImage)
     if (!edgeImage.ok) return { ok: false, reason: imageReasonOf(edgeImage), message: `邊款圖：${edgeImage.message}` }
     edgeInput = payload.edgeImage
   }
@@ -3830,6 +3835,25 @@ export async function createSealWithFaceRows(actor, payload = {}) {
 
   /* 防重（印章级）：语义等价的整枚印章不重复新增。 */
   const equivalent = findEquivalentSeal(clean, faceImage.sha256)
+  return { ok: true, clean, faceImage, faceInput, edgeInput, edgeImage, plannedFaceNos, equivalent }
+}
+
+/**
+ * 「上传印章」的一次性组合写（数据层入口，服务层 `seals.createSealWithFace` 调它）。
+ * 顺序：**先校验（必填 / 防重 / 影像可解析）→ 再落盘**；中途任何失败**回滚**
+ * （三个集合还原 + 删除本次新写的二进制）⇒ 不产生半成品记录（AC-34）。
+ *
+ * **R-49**：本入口是**组合入口**（一次写印章 / 印面 / 影像三个实体），键面＝三者之并集
+ * （`SEAL_COMPOSITE_INPUT_FIELDS`）—— 之外的键 ⇒ `INVALID_FIELD` ＋ 零写入；
+ * 分派给各实体时**由各实体入口各自再判一次自己的门**（`insertSealRow` 只收印章键，
+ * 故这里用 `pickSealInsertPayload` 只挑印章键传下去，**不把印面级的键硬塞给印章级入口**）。
+ *
+ * **本机号源只在此形态生效**（`local-dev`）：云端形态不走本函数，号由云函数发放。
+ */
+export async function createSealWithFaceRows(actor, payload = {}) {
+  const planned = planSealWithFaceInput(actor, payload)
+  if (!planned.ok) return planned
+  const { clean, faceImage, faceInput, edgeInput, plannedFaceNos, equivalent } = planned
   if (equivalent) {
     return {
       ok: true,

@@ -491,6 +491,18 @@ async function handleVerify(event, config, callContext) {
   if (op === 'registerFaceImage' && Object.prototype.hasOwnProperty.call(opResult, 'image_id')) {
     response.image_id = opResult.image_id
   }
+  /* **上傳印章即上雲（additive 透傳｜按 op 收窄｜本單）**：`stamp_id` / `face_ids` / `image_ids`
+     **僅當 `op === 'createSealUpload'` 且 `opResult` 確有該鍵時**才逐字疊進回包（前端據此用
+     **服務端下發的 id / 號**寫本機鏡像行 —— 本機不再發號）；其余键（`sid` / `seal_no` /
+     `face_nos` / `idempotent`）由 `opResult.row` 承载（本文件对 `row` **零过滤** ⇒ 不必再叠）。
+     **其余任何 op 一律不透传这 3 个键** ⇒ 既有回包逐字不变（序列化后亦不新增键）；
+     **`plan` 是内部落盘计划（内部面）⇒ 绝不外传**。既有字段一律不刪、不改。 */
+  if (op === 'createSealUpload') {
+    const SEAL_UPLOAD_READOUT_KEYS = ['stamp_id', 'face_ids', 'image_ids']
+    for (const key of SEAL_UPLOAD_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   /* **遷移讀數面（additive 透傳｜**按 `op` 收窄**）**：`dry_run` / `scanned` / `changed` / `samples` /
      `idempotent` **僅當 `op === 'migrateDynastyValues'` / `'migrateSealValueDomains'` 且
      `opResult` 確有該鍵時**才逐字疊進回包；
