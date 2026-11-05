@@ -3902,6 +3902,47 @@ async function directWriteRowOfExistingSeal(sealRow, idempotent) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   **印面圖入册面（本單新增 op `registerFaceImage`）**
+   ---------------------------------------------------------------------------
+   场景（线上实测真因）：本机新建印章 + 本机上传的印面图，其**本机镜像影像行 id 是序号式**
+   （`img-<印章序号>f`，见 `src/data/db.js::nextImageId`），而云端 `xiai_images` 的行 `_id` 是
+   **内容寻址**（`buildDirectImageRow` ⇒ `img-` ＋ sha256 前 16 位）；`dbReplaceFaceImage` 只把
+   字节交权威存储、**从未在 `xiai_images` 建行** ⇒ `lib/aiEnhance.js` ④ 步严格按 `id` 查行必然
+   查不到 ⇒ AI 修复恒报「原圖影像編號在影像行中不存在」。本 op 就是那一行的**入册口**。
+   硬口径（逐条）：
+     · **管理员面**：`adminWhitelistDenial` 门，判在**任何读之前**（缺 `XIAI_ADMIN_PHONE` ⇒
+       结构化拒绝 ＋ 零读取、零写入）；
+     · **载荷封闭键面** `FACE_IMAGE_REGISTER_ALLOWED_KEYS`（前六必有、`kind` 缺省 `FACE`；
+       未知键 / 身份类键 ⇒ `INVALID_FIELD`，与其余 op 同一张表、同一条文案）；
+     · **值域门**：`sha256` 64 位小写十六进制（`ARTIFACT_DIGEST_PATTERN`）；`storage_key` 必须
+       匹配 `ARTIFACT_OBJECT_KEY_PATTERN` **且键内摘要 ≡ 声称摘要**（一路径只能指一份内容）；
+       `bytes` ∈ 1〜`ARTIFACT_MAX_BYTES` 整数；`kind` ∈ {`FACE`,`EDGE`}；任一不符 ⇒ `INVALID_VALUE`
+       ＋ **零写入**（判定全部在落盘之前，`reason` 只用既有冻结值 ⇒ **零新增**）；
+     · **行体字段面 ＝ `buildDirectImageRow` 逐字复用**（`id/stamp_id/kind/storage/storage_key/
+       sha256/bytes/mime/width/height/updated_at` ＋ 条件 `seq`），`stamp_id` 回填 `seal_id`；
+     · **`seq` 单点取号**：同 `id` 已有行且属同印 ⇒ **沿用其 `seq`（幂等、不消耗号）**；否则
+       `nextImageSeqOf(seal_id, kind, await imageSeqsOf(...))`（**本 op 不自算号**）；
+     · **幂等**：`kind:'set'` 覆写式落盘计划 ⇒ 同 `id` 重放**不建第二行**；
+     · **零对象存储读写**（字节已由 `registerArtifact` 回读覆核过；本 op 只写集合行）；
+     · **回包**：成功恰 **2 键** `{ok:true, image_id}`（＋ 内部落盘计划 `plan`，`index.js` 绝不
+       外传）；失败恒 **3 键** `{ok:false, reason, message}`。
+   --------------------------------------------------------------------------- */
+
+/** 印面圖入册载荷允许键（**封闭键面**；身份类键一律拒 —— 与其余 op 同口径）。 */
+const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
+  'seal_id',
+  'face_id',
+  'sha256',
+  'bytes',
+  'mime',
+  'storage_key',
+  'kind'
+])
+
+/** `kind` 合法取值（与 `FACE_KIND` / `buildDirectImageRow` 同口径；缺省 `FACE`）。 */
+const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
+
 const ADMIN_OPS = Object.freeze({
   /**
    * **管理員「弃候選圖」（`ai-enhance-discard`）** —— 薄委派：業務邏輯單點在
@@ -6150,6 +6191,122 @@ const ADMIN_OPS = Object.freeze({
       key: payload.key,
       timeout_ms: payload.timeout_ms
     })
+  },
+
+  /**
+   * **印面圖入册（本單新增 op｜`registerFaceImage`｜管理員面）**：把「本機已交權威存儲的印面圖」
+   * 在云端 `xiai_images` **建 / 覆写那一行**（内容寻址 `_id`），让 `lib/aiEnhance.js` ④ 步的
+   * 严格查行（按 `id`）能命中 —— 本机镜像的序号式 id（`img-<印章序号>f`）由客户端在成功后
+   * 统一改写成本回包的 `image_id`（**一图一身份**）。
+   * 顺序（**全部判定在落盘之前**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 的唯一写点执行）：
+   *   ① 管理员门 `adminWhitelistDenial`（**任何读之前**；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝）；
+   *   ② 载荷封闭键面 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`（未知 / 身份类键 ⇒ `INVALID_FIELD`）；
+   *   ③ 必填六键：缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`（`bytes` 另判整数）；
+   *   ④ 值域门：`sha256` 64 位小写十六进制；`storage_key` 匹配 `ARTIFACT_OBJECT_KEY_PATTERN`
+   *      **且键内摘要 ≡ sha256**；`bytes` ∈ 1〜`ARTIFACT_MAX_BYTES`；`kind` ∈ {FACE, EDGE}
+   *      （缺省 `FACE`）⇒ 任一不符 `INVALID_VALUE` ＋ 零写入、零读取之外的任何副作用；
+   *   ⑤ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用、不消耗号；否则经
+   *      `imageSeqsOf` / `nextImageSeqOf`，**本 op 不自算号**）；
+   *   ⑥ 行体 ＝ `buildDirectImageRow` 字段面（`stamp_id` 回填 `seal_id`）＋ `kind:'set'`
+   *      覆写计划 ⇒ **同 `id` 重放不建第二行、不消耗号**；
+   *   ⑦ 成功回包**恰 2 键** `{ok:true, image_id}`（＋ `plan` 内部面，`index.js` 不外传）；
+   *      失败恒**恰 3 键**，`reason` 只用既有冻结值（**零新增**）。
+   * @param {object} payload 载荷（封闭七键，见 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, image_id:string, plan:object}|{ok:false, reason:string, message:string}>}
+   */
+  async registerFaceImage(payload, identity, context) {
+    /* ① 管理员门（任何读之前）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷封闭键面（未知键 / 身份类键 ⇒ `INVALID_FIELD`；与其余 op 同一条文案）。 */
+    const payloadDenial = pointsPayloadDenial(payload, FACE_IMAGE_REGISTER_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    /* ③ 必填五串 ＋ 一体量整数（缺 / 空 ⇒ `MISSING_REQUIRED`；非字符串 ⇒ `INVALID_VALUE`）。 */
+    const requiredTextKeys = ['seal_id', 'face_id', 'sha256', 'mime', 'storage_key']
+    for (const key of requiredTextKeys) {
+      const value = payload[key]
+      if (value === undefined || value === null || text(value) === '') {
+        return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${key}）；本次零寫入。`)
+      }
+      if (typeof value !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串；本次零寫入。`)
+      }
+    }
+    const claimedBytes = payload.bytes
+    if (claimedBytes === undefined || claimedBytes === null) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（bytes）；本次零寫入。')
+    }
+    /* ④a 体量门（与 `registerArtifact` 同值域、同文案族）。 */
+    if (!Number.isInteger(claimedBytes) || claimedBytes <= 0 || claimedBytes > ARTIFACT_MAX_BYTES) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `字節數（bytes）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+      )
+    }
+    const digest = text(payload.sha256).toLowerCase()
+    const storageKey = text(payload.storage_key)
+    /* ④b 对象键形态 ＋ 摘要形态 ＋ 两者一致（与 `registerArtifact` 同一张形态表）。 */
+    const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(storageKey)
+    if (!matched) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff）；本次零寫入。'
+      )
+    }
+    if (!ARTIFACT_DIGEST_PATTERN.test(digest)) {
+      return deny(REASONS.INVALID_VALUE, '摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+    }
+    if (matched[2] !== digest || matched[1] !== digest.slice(0, 2)) {
+      return deny(REASONS.INVALID_VALUE, '影像對象鍵內含的摘要與聲稱的 sha256 不一致；本次零寫入。')
+    }
+    /* ④c 类别门（缺省 `FACE`；给出即必须是 FACE / EDGE，**不静默归一**）。 */
+    let kind = 'FACE'
+    if (Object.prototype.hasOwnProperty.call(payload, 'kind') && payload.kind !== undefined && payload.kind !== null) {
+      if (typeof payload.kind !== 'string' || FACE_IMAGE_REGISTER_KINDS.indexOf(payload.kind) === -1) {
+        return deny(REASONS.INVALID_VALUE, '影像類別（kind）只能是 FACE 或 EDGE；本次零寫入。')
+      }
+      kind = payload.kind
+    }
+    const sealId = text(payload.seal_id)
+    const at = new Date().toISOString()
+    /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
+    const id = buildDirectImageRow({ image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind }, at).id
+    /* ⑤ `seq` 单点取号：同 `id` 已有行且属同印 ⇒ 沿用（幂等、不消耗号）；否则经单点分配器。
+       读抛错 ⇒ 按「无既有行」继续（与 `imageSeqsOf` 同一降级口径：如实 `console.warn`、
+       不把真故障伪装成「有行」；真故障若最终撞唯一键，由 `index.js` 如实报 `STORAGE_UNAVAILABLE`）。 */
+    let existing = null
+    try {
+      const hits = await readRows(COLLECTIONS.images, { id }, { limit: 1 })
+      existing = Array.isArray(hits) && hits.length > 0 ? hits[0] : null
+    } catch (error) {
+      console.warn(
+        '[xiai] registerFaceImage 讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）：',
+        error && error.message ? error.message : error
+      )
+    }
+    const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
+    const seq = sameSealExisting
+      ? Number(existing.seq)
+      : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
+    /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`。 */
+    const row = {
+      ...buildDirectImageRow(
+        { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
+        at,
+        seq
+      ),
+      stamp_id: sealId
+    }
+    /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
+    return {
+      ok: true,
+      image_id: row.id,
+      plan: {
+        writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }]
+      }
+    }
   }
 })
 

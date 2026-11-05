@@ -485,6 +485,12 @@ async function handleVerify(event, config, callContext) {
     response.renewedExpiresAt = renewed.claims.exp
     response.renewedTtlSeconds = config.ttlSeconds
   }
+  /* **影像入册面（`registerFaceImage`）**：`image_id` **僅當 `op === 'registerFaceImage'` 且
+     `opResult` 確有該鍵時**逐字疊進回包（前端據此把本機影像行 id 與印面 `face_image_id`
+     統一改寫為雲端內容尋址編號）；**其餘任何 op 一律不透傳** ⇒ 既有回包逐字不變。 */
+  if (op === 'registerFaceImage' && Object.prototype.hasOwnProperty.call(opResult, 'image_id')) {
+    response.image_id = opResult.image_id
+  }
   /* **遷移讀數面（additive 透傳｜**按 `op` 收窄**）**：`dry_run` / `scanned` / `changed` / `samples` /
      `idempotent` **僅當 `op === 'migrateDynastyValues'` / `'migrateSealValueDomains'` 且
      `opResult` 確有該鍵時**才逐字疊進回包；

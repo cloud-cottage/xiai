@@ -519,8 +519,8 @@ section('G', '静态门：ADMIN_OPS 恰 19 项且含 ai-enhance-discard（排序
   const opsSource = readFileSync(path.join(FN_DIR, 'lib/ops.js'), 'utf8')
   const implSource = readFileSync(path.join(FN_DIR, 'lib/aiEnhanceDiscard.js'), 'utf8')
   const adminKeys = Object.keys(ops.ADMIN_OPS)
-  check('G1', '⑦ `ADMIN_OPS` **恰 21 项**、含 `ai-enhance-discard`（函数；薄委派）、排序位在 `ai-enhance-face` 之前', {
-    count: 21,
+  check('G1', '⑦ `ADMIN_OPS` **恰 22 项**、含 `ai-enhance-discard`（函数；薄委派）、排序位在 `ai-enhance-face` 之前', {
+    count: 22,
     type: 'function',
     beforeEnhanceFace: true
   }, {

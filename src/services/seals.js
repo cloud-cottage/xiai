@@ -59,6 +59,9 @@ import {
   planFaceNumbers,
   saveSealRows,
   saveFaceRows,
+  /* **上傳即入册（本單）**：影像行 `id` 改寫成雲端內容尋址編號時的整表落盤
+     （與 `insertImageRow` 同一寫入口，不另立第二套存儲寫）。 */
+  saveImageRows,
   PermissionError
 } from '../data/db.js'
 /* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
@@ -123,7 +126,7 @@ import { bytesToDataUrl } from '../data/assetmeta.js'
 import { isSealPlaceholderImageRow, loadSealPlaceholderBytes } from './sealPlaceholderAsset.js'
 /* **K-P5b（2026-09-23｜讀取面雙路分流）**：行級分流判據的唯一真源在 `imageAuthority.js`
    （行內有 digest 且二進制在服務端權威庫 ⇒ `digest`；否則 ⇒ `local`）。本層只消費，不自立第二把尺子。 */
-import { digestOfRow, readViaOfRow } from './imageAuthority.js'
+import { digestOfRow, readViaOfRow, artifactObjectKeyOf } from './imageAuthority.js'
 /* **搜索面扩展（§3.54.9｜单点）**：关键字面扩到印人「姓 / 名 / 字 / 号 / 别名 / cbdb_id」——
    复用印人检索的**唯一实现** `persons.searchPersons`（**不另造第二套同名逻辑**）；命中印人 ⇒
    该印人（`author_person_id`）名下的印章一并命中。 */
@@ -134,7 +137,7 @@ import { searchPersons } from './persons.js'
 import { userWriteGate } from './userWrite.js'
 /* **E-4/E-5（阶段乙｜2026-10-12）**：写面形态真源（`local-dev` ⇒ 本机面 ＝ 本机权威；
    `cloud` ⇒ 只认服务端回包）。**不自造第二套判据**。 */
-import { WRITE_FACE_MODES } from '../data/writeFaceMode.js'
+import { WRITE_FACE_MODES, writeFaceMode } from '../data/writeFaceMode.js'
 
 export { FACE_KIND }
 
@@ -1099,6 +1102,187 @@ export function inputDenialOf(loaded) {
   }
 }
 
+/* ============================================================================
+   **上傳即入册（A 層收口｜本單）：本地寫成功後入雲端影像行 ＋ 身份統一改寫
+   ---------------------------------------------------------------------------- 線上真因（Kevin 實測）：`dbReplaceFaceImage` 只把字節交權威存儲、**從未在雲端 `xiai_images`
+   建行**，而本機鏡像的影像行 id 是序號式（`img-<印章序號>f`）⇒ 雲端按 id 嚴格查行必然查不到
+   ⇒ 人工智能修復恒報「原圖影像編號在影像行中不存在」。
+   本段在**本地寫成功之後**調雲 op `registerFaceImage`（管理員門 ／ 封閉鍵面 ／ 內容尋址 `_id` ／
+   `seq` 單點 ／ 冪等），成功即把**本機影像行 `id` 與印面 `face_image_id`（含 `edge_image_ids`）
+   一併改寫成雲端 `image_id`** —— 一圖一身份，不留 `img-AAADQf` 與 `img-<sha16>` 兩個身份。
+   硬口徑（逐條）：
+   ① **入册失敗絕不編造 id**：本地行**保留**、印面指向**不動**，回 `ok:false` ＋ 可讀文案
+      ＋「重新上傳同一張圖即可重試入册（內容相同不會重複建行）」——**不得靜默降級**；
+   ② **無雲端對象可入册**（`storage_key` 非內容尋址 ⇒ 字節只在本機權威庫 / 本機影像庫）
+      ⇒ **不發請求**（發了也必被服務端形態門拒）、**不改寫 id**，並在文案裡**如實點名**
+      「未入雲端影像行 ⇒ 該圖暫不可人工智能修復」——不靜默、不編造；
+   ③ **dev / 離線形態**（`writeFaceMode() === local-dev`）**沒有雲端** ⇒ 不發請求、不改寫，
+      成功文案裡如實標明（該形態人工智能修復本就不可用，不存在「靜默降級」）；
+   ④ 回包 `image_id` 只取**服務端信封**：`gate.image_id`（若透傳）⇒ 逐字採用；否則 `gate.docId`
+      ＝ `persist` 回的 `set` 文檔標識（本 op 單步 `set` ⇒ 逐字即該行 `_id`）；**兩者皆空 ⇒
+      如實拒絕、不按規則自行推導**；
+   ⑤ 改寫只在**雲端入册成功後**發生；改寫失敗 ⇒ 回 `ok:false`（本地行與指向保持改寫前狀態）。
+   ============================================================================ */
+
+/** 雲端入册 op 名（與雲函數 `ADMIN_OPS` 註册面逐字一致；本文件唯一出現處）。 */
+export const FACE_IMAGE_REGISTER_OP = 'registerFaceImage'
+
+/** 雲端回包讀數鍵面（`gate()` 的 additive 透傳聲明；真源＝雲函數成功回包的非信封鍵）。 */
+const FACE_IMAGE_REGISTER_READOUT_KEYS = Object.freeze(['image_id'])
+
+/**
+ * 把剛寫好的本機影像行**入册到雲端 `xiai_images`**（不改任何本地行 —— 改寫交給調用方）。
+ *
+ * @param {{sealId:string, faceId:string, image:object}} input
+ * @returns {Promise<{ok:true, imageId:string, localId:string, dev?:boolean, note?:string}
+ *          |{ok:false, reason:string, message:string, localId:string}>}
+ *   - `ok:true` ＋ `dev:true` ＝ dev / 離線形態（**未經雲端**、未入册、id 不改寫）；
+ *   - `ok:true`（非 dev）＝ 雲端已建 / 已覆寫該行，`imageId` ＝ 服務端給的 `image_id`。
+ */
+async function registerFaceImageOnCloud({ sealId, faceId, image }) {
+  const row = image && typeof image === 'object' ? image : {}
+  const localId = String(row.id || '')
+  const sha256 = String(row.sha256 || '').trim()
+  const storageKey = String(row.storage_key || '').trim()
+  const bytes = Number(row.bytes)
+  const kind = row.kind === FACE_KIND.EDGE ? FACE_KIND.EDGE : FACE_KIND.FACE
+  const gate = await userWriteGate(
+    FACE_IMAGE_REGISTER_OP,
+    {
+      seal_id: String(sealId || ''),
+      face_id: String(faceId || ''),
+      sha256,
+      bytes,
+      mime: String(row.mime || ''),
+      storage_key: storageKey,
+      kind
+    },
+    { readoutKeys: FACE_IMAGE_REGISTER_READOUT_KEYS }
+  )
+  if (gate && gate.dev === true) {
+    /* dev / 離線形態：門放行但**未經雲端** ⇒ 如實登記為「未入册」，id 不改寫。 */
+    return { ok: true, dev: true, imageId: localId, localId }
+  }
+  if (!gate || gate.ok !== true) {
+    /* 服務端結構化拒絕 / 傳輸失敗 ⇒ **原樣透傳**（reason / message 一個都不改寫）。 */
+    return {
+      ok: false,
+      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      message: (gate && gate.message) || '雲端入冊服務暫時不可用，請稍後再試。',
+      localId
+    }
+  }
+  /* **回包形狀校驗**：`image_id`（未透傳時取信封 `docId` ＝ `persist` 回的 set 文檔標識）
+     缺位 / 形態不可辨 ⇒ 如實拒絕，**不按規則自行推導影像編號**。 */
+  const fromReadout = typeof gate.image_id === 'string' ? gate.image_id.trim() : ''
+  const fromDocId = typeof gate.docId === 'string' ? gate.docId.trim() : ''
+  const imageId = fromReadout || fromDocId
+  if (!imageId.startsWith('img-')) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '雲端入冊回包形狀不可辨識（未附影像編號 image_id）；本地影像行與印面指向保持不變，請稍後重試。',
+      localId
+    }
+  }
+  return { ok: true, imageId, localId }
+}
+
+/**
+ * 把**本機鏡像影像行**的 `id` 改寫成雲端內容尋址編號，並把**所有指向它的印面**
+ * （`face_image_id` ／ `edge_image_ids`）一併改過去 ——「一圖一身份」的唯一收口點。
+ *
+ * 硬口徑：改影像行**先**、改印面**後**；後者失敗 ⇒ **把影像行編號改回**（不留
+ * 「行在新號、印面指舊號」的半成品）；兩步都做**回讀校驗**（`writeCollection` 不回報
+ * 寫入失敗 ⇒ 只能靠回讀判，與 `dbReplaceFaceImage` 同尺）。
+ *
+ * @param {object|null} actor 操作者（須為管理員；沿數據層既有門）
+ * @param {string} fromId 原影像編號（本機序號式）
+ * @param {string} toId 目標編號（雲端內容尋址 `img-<sha16>`）
+ * @returns {{ok:boolean, changed:boolean, reason?:string, message:string}}
+ */
+function reassignLocalImageIdentity(actor, fromId, toId) {
+  const from = String(fromId === undefined || fromId === null ? '' : fromId).trim()
+  const to = String(toId === undefined || toId === null ? '' : toId).trim()
+  if (!from || !to) {
+    return { ok: false, changed: false, reason: 'STORAGE_UNAVAILABLE', message: '改寫影像編號需要原編號與目標編號（均非空）；本次未改寫。' }
+  }
+  if (from === to) return { ok: true, changed: false, message: '影像編號已是雲端編號，無需改寫。' }
+  const images = listImageRows()
+  const index = images.findIndex((row) => row && row.id === from)
+  if (index < 0) {
+    return { ok: false, changed: false, reason: 'STORAGE_UNAVAILABLE', message: `未找到本機影像行 ${from}，無法改寫編號；本次未改寫。` }
+  }
+  const source = images[index]
+  const occupiedIndex = images.findIndex((row, i) => i !== index && row && row.id === to)
+  if (occupiedIndex >= 0) {
+    /* 目標編號已被另一行佔用：內容相同 ⇒ 複用該行（**絕不製造兩個同 id 行**）；
+       內容不同 ⇒ 如實拒絕（內容尋址下不應發生）。 */
+    if (String(images[occupiedIndex].sha256 || '') !== String(source.sha256 || '')) {
+      return { ok: false, changed: false, reason: 'STORAGE_UNAVAILABLE', message: `目標影像編號 ${to} 已被另一影像行佔用（內容不同）；本次未改寫。` }
+    }
+    const reuse = repointFaceImageRefs(actor, from, to)
+    if (!reuse.ok) return reuse
+    return { ok: true, changed: false, message: `同內容影像行已在（${to}），印面指向已改為該編號。` }
+  }
+  const kind = source.kind === FACE_KIND.EDGE ? FACE_KIND.EDGE : FACE_KIND.FACE
+  const renamed = { ...source, id: to, assetId: to, [SLICE_META_FIELD]: sliceMetaOf(to, kind) }
+  const nextImages = images.map((row, i) => (i === index ? renamed : row))
+  saveImageRows(nextImages)
+  if (!listImageRows().some((row) => row && row.id === to)) {
+    return { ok: false, changed: false, reason: 'STORAGE_UNAVAILABLE', message: '影像行編號改寫未能落盤（本地存儲不可寫）；本次未改寫。' }
+  }
+  const repointed = repointFaceImageRefs(actor, from, to)
+  if (!repointed.ok) {
+    /* 印面指向沒改成 ⇒ 把影像行編號改回，避免半成品。 */
+    saveImageRows(images.map((row, i) => (i === index ? { ...source, id: from, assetId: from, [SLICE_META_FIELD]: sliceMetaOf(from, kind) } : row)))
+    return repointed
+  }
+  return { ok: true, changed: true, message: `影像編號已改寫：${from} → ${to}` }
+}
+
+/**
+ * 把所有指向 `fromId` 的印面指向改成 `toId`（`face_image_id` ＋ `edge_image_ids` 兩處）。
+ * 落盤走**既有單點** `writeFaceFixedAttributes`（白名单 / 權限門 / `updated_at` 一字不另立）。
+ * @returns {{ok:boolean, reason?:string, message:string}}
+ */
+function repointFaceImageRefs(actor, fromId, toId) {
+  const faces = listFaceRows()
+  const affected = faces.filter((row) => {
+    if (!row) return false
+    if (row.face_image_id === fromId) return true
+    return Array.isArray(row.edge_image_ids) && row.edge_image_ids.indexOf(fromId) !== -1
+  })
+  if (affected.length === 0) return { ok: true, message: '無印面引用該影像編號，無需改指向。' }
+  for (const face of affected) {
+    const patch = {}
+    if (face.face_image_id === fromId) patch.face_image_id = toId
+    if (Array.isArray(face.edge_image_ids) && face.edge_image_ids.indexOf(fromId) !== -1) {
+      patch.edge_image_ids = face.edge_image_ids.map((value) => (value === fromId ? toId : value))
+    }
+    let written = null
+    try {
+      written = writeFaceFixedAttributes(actor, face.id, patch)
+    } catch (err) {
+      return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: `印面指向改寫失敗：${(err && err.message) || '未知原因'}；本次未改寫。` }
+    }
+    if (!written || written.ok === false) {
+      return { ok: false, reason: (written && written.reason) || 'STORAGE_UNAVAILABLE', message: (written && written.message) || '印面指向改寫失敗；本次未改寫。' }
+    }
+  }
+  const after = listFaceRows()
+  const stillOld = affected.some((face) => {
+    const fresh = after.find((row) => row && row.id === face.id)
+    if (!fresh) return true
+    if (fresh.face_image_id === fromId) return true
+    return Array.isArray(fresh.edge_image_ids) && fresh.edge_image_ids.indexOf(fromId) !== -1
+  })
+  if (stillOld) {
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '印面指向改寫未能落盤（本地存儲不可寫）；本次未改寫。' }
+  }
+  return { ok: true, message: '印面指向已改寫。' }
+}
+
 /**
  * 重新上传某个印面的印面图（管理员专属；旧影像行与二进制保留）。
  *
@@ -1107,13 +1291,18 @@ export function inputDenialOf(loaded) {
  *        `bytes` ＝ 浏览器端处理后的图片字节（方形 WebP）；`mime` / `width` / `height`
  *        仅为调用方的声称值（**入库元数据以字节解析为准**，出入会在 `message` 里如实并列）。
  * @returns {Promise<{ok:boolean, faceImageId?:string, previousFaceImageId?:string|null, face?:object,
- *   image?:object, sealId?:string, deduped?:boolean, reason?:string, message:string}>}
+ *   image?:object, sealId?:string, deduped?:boolean, registered?:boolean, reason?:string, message:string}>}
  *   - 成功：`face` 为**替换后**的印面视图模型（`faceImage` / `face_image_id` 已指向新影像），
  *     详情页据此重读即可显示新图（刷新后一致）。
+ *   - **上傳即入册（本單）**：本地写成功后调云 op `registerFaceImage` 入云端 `xiai_images`，
+ *     成功即把本机影像行 `id` 与印面 `face_image_id` 统一改写成云端 `image_id`（`registered: true`，
+ *     `faceImageId` ＝ 云端编号）；`registered: false` ＝ **未入册**（dev / 離線形態，或本机权威库
+ *     路径未产生云端对象键）⇒ 编号保持本机原值，`message` 如实点名「未入雲端影像行」。
  *   - 拒绝路径（均可读、均有 `reason`）：未登录 ⇒ `UNAUTHENTICATED`；非管理员 ⇒ `FORBIDDEN`；
  *     未指定印面 ⇒ `MISSING_FACE`；内容空 ⇒ `EMPTY_CONTENT`；
  *     **产物超上限（4 MiB）⇒ `ARTIFACT_TOO_LARGE`**（文案＝「本机影像生成失败」，与输入侧分开）；
- *     非图片字节 ⇒ `NOT_IMAGE`；印面不存在 ⇒ `UNKNOWN_FACE`；影像库写失败 ⇒ `STORAGE_UNAVAILABLE`。
+ *     非图片字节 ⇒ `NOT_IMAGE`；印面不存在 ⇒ `UNKNOWN_FACE`；影像库写失败 ⇒ `STORAGE_UNAVAILABLE`；
+ *     **云入册失败 ⇒ 服务端原样 `reason`**（本地行与印面指向**保留不动**、不编造编号、可重试）。
  */
 export async function replaceFaceImage(faceId, payload = {}) {
   const id = String(faceId || '').trim()
@@ -1194,17 +1383,100 @@ export async function replaceFaceImage(faceId, payload = {}) {
         message: written.message
       }
     }
+
+    /* ------------------------------------------------------------------
+       **上傳即入册（本單 A 層）**：本地寫成功後 —— ① 入雲端影像行；② 把本機影像行 `id`
+       與印面指向統一改寫成雲端 `image_id`（一圖一身份）。判定樹與硬口徑見本文件頭
+       「上傳即入册」段；**入册失敗絕不編造 id**（本地行保留、指向不動、明確報錯可重試）。 */
+    const localImage = written.image || null
+    const localImageId = String((localImage && localImage.id) || written.faceImageId || '')
+    const localSha = String((localImage && localImage.sha256) || '').trim()
+    const localKey = String((localImage && localImage.storage_key) || '').trim()
+    /* ① 無雲端對象可入册（字節只在本機權威庫 / 本機影像庫 ⇒ 內容尋址鍵缺席）⇒ **不發請求**
+       （發了也必被服務端形態門拒）、**不改寫 id**，並在文案裡如實點名「未入雲端影像行」。 */
+    if (localSha === '' || localKey !== artifactObjectKeyOf(localSha)) {
+      const devNote = writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV ? '（dev / 離線形態：本來就沒有雲端寫入面）' : ''
+      return {
+        ok: true,
+        deduped: written.deduped === true,
+        sealId: written.sealId || '',
+        faceId: id,
+        registered: false,
+        face: getFaceById(id),
+        faceImageId: localImageId,
+        previousFaceImageId: written.previousFaceImageId ?? previousFaceImageId,
+        image: localImage,
+        message:
+          `${written.message}；未入雲端影像行（本機權威庫路徑未產生雲端對象鍵）${devNote}` +
+          '⇒ 該圖暫不可人工智能修復；本地影像行與印面指向保持不變。'
+      }
+    }
+    const registration = await registerFaceImageOnCloud({
+      sealId: written.sealId || '',
+      faceId: id,
+      image: localImage
+    })
+    /* ② dev / 離線形態：門放行但未經雲端 ⇒ 如實告知（不改寫 id、不入册）。 */
+    if (registration.ok && registration.dev === true) {
+      return {
+        ok: true,
+        deduped: written.deduped === true,
+        sealId: written.sealId || '',
+        faceId: id,
+        registered: false,
+        face: getFaceById(id),
+        faceImageId: localImageId,
+        previousFaceImageId: written.previousFaceImageId ?? previousFaceImageId,
+        image: localImage,
+        message:
+          `${written.message}（dev / 離線形態：未經雲端入册，本機影像編號未改寫；` +
+          '該形態人工智能修復本就不可用）'
+      }
+    }
+    /* ③ 入册失敗 ⇒ **不編造 id**：本地行與印面指向原樣保留，明確報錯＋可重試。 */
+    if (!registration.ok) {
+      return {
+        ok: false,
+        reason: registration.reason,
+        previousFaceImageId: written.previousFaceImageId ?? previousFaceImageId,
+        message:
+          `印面圖已寫入本機，但雲端入冊失敗：${registration.message} ` +
+          '本地影像行與印面指向保持不變（未編造影像編號）；' +
+          '請重新上傳同一張圖重試入冊（內容相同不會重複建行）。'
+      }
+    }
+    /* ④ 成功 ⇒ 本機影像行 `id` 與印面指向統一改寫成雲端 `image_id`。 */
+    let finalImageId = registration.imageId
+    let registeredNote = `；已入雲端影像行（image_id: ${registration.imageId}）`
+    if (registration.imageId !== localImageId) {
+      const moved = reassignLocalImageIdentity(user, localImageId, registration.imageId)
+      if (!moved.ok) {
+        return {
+          ok: false,
+          reason: moved.reason || 'STORAGE_UNAVAILABLE',
+          previousFaceImageId: written.previousFaceImageId ?? previousFaceImageId,
+          message:
+            `雲端入冊成功（image_id: ${registration.imageId}），但本機影像編號改寫失敗：${moved.message} ` +
+            '請重新整理後重試（本機影像行仍為原編號，未產生半成品指向）。'
+        }
+      }
+      registeredNote =
+        `；已入雲端影像行（image_id: ${registration.imageId}），` +
+        '本機影像行編號與印面指向已統一改為該編號'
+    }
     return {
       ok: true,
       deduped: written.deduped === true,
       sealId: written.sealId || '',
       faceId: id,
-      /* 视图模型按**当前库态**重建 ⇒ `faceImage` / `face_image_id` 立即反映替换结果。 */
+      registered: true,
+      /* 视图模型按**当前库态**重建 ⇒ `faceImage` / `face_image_id` 立即反映替换结果
+         （身份改寫之後重建 ⇒ 指向已是雲端編號）。 */
       face: getFaceById(id),
-      faceImageId: written.faceImageId,
+      faceImageId: finalImageId,
       previousFaceImageId: written.previousFaceImageId ?? previousFaceImageId,
-      image: written.image || null,
-      message: written.message
+      image: listImageRows().find((row) => row && row.id === finalImageId) || localImage,
+      message: `${written.message}${registeredNote}`
     }
   } catch (err) {
     if (isPermissionError(err)) {
