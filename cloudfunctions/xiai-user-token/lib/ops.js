@@ -6760,6 +6760,18 @@ function isCollectionAlreadyExistsError(error) {
  */
 async function ensureCollection(name) {
   const db = resolveDb()
+  /* **先探存在（读 1 行）**：集合已在库 ⇒ 直接回 `'exists'`，**不调用 `createCollection`**
+     —— CloudBase `@cloudbase/node-sdk` 3.x 未必暴露该方法（线上实测：集合明明存在，
+     旧实现仍判「審計集合不可用」⇒ 删印被 fail-safe 拦住）。探读非「不存在」类错误 ⇒ 照旧上抛。 */
+  try {
+    await db.collection(name).limit(1).get()
+    return 'exists'
+  } catch (error) {
+    if (!isCollectionNotExistError(error)) throw error
+  }
+  if (typeof db.createCollection !== 'function') {
+    throw new Error(`當前 SDK 不提供 createCollection ⇒ 無法自動建集：${name}`)
+  }
   try {
     await db.createCollection(name)
     return 'created'
