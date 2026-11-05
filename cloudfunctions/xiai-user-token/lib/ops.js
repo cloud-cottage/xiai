@@ -6310,6 +6310,56 @@ async function deleteRow(collection, docId) {
   await db.collection(collection).doc(docId).delete()
 }
 
+/**
+ * **「集合已存在」类错误判据**（纯函数；供 `ensureCollection` 用，**绝不自抛**）。
+ *
+ * 判据（命中其一即判「已存在」，与派单口径逐字一致）：
+ *   · 错误码（`error.code` / `error.errCode`）**含** `ALREADY_EXISTS` 或 `DATA_BASE_COLLECTION_EXIST`；
+ *   · 文案（`error.message`）**含** `already exists` 或 `存在`。
+ * 其余任何错误（网络 ETIMEDOUT / 权限 / 5xx / 参数 …）一律判否 ⇒ 调用方**原样上抛**
+ * （绝不把真存储故障伪装成「已存在」）。
+ * @param {any} error 捕获到的错误
+ * @returns {boolean} 是否属「集合已存在」类
+ */
+function isCollectionAlreadyExistsError(error) {
+  if (!error || typeof error !== 'object') return false
+  const code = typeof error.code === 'string' ? error.code : ''
+  if (code.indexOf('ALREADY_EXISTS') !== -1) return true
+  if (code.indexOf('DATA_BASE_COLLECTION_EXIST') !== -1) return true
+  const errCode = typeof error.errCode === 'string' ? error.errCode : ''
+  if (errCode.indexOf('ALREADY_EXISTS') !== -1) return true
+  if (errCode.indexOf('DATA_BASE_COLLECTION_EXIST') !== -1) return true
+  const message = typeof error.message === 'string' ? error.message : ''
+  if (message.indexOf('already exists') !== -1) return true
+  if (message.indexOf('存在') !== -1) return true
+  return false
+}
+
+/**
+ * **确保存在集合**（**唯一建集点**：`db.createCollection` 字面只在本函数出现）。
+ *
+ * 背景（生产真因，2026-11-05）：`xiai_admin_audit` 规范在册（§3.33.3 第 14 项 / AC-373）、
+ * 也在 `COLLECTIONS` 注册，但**库里从未建过** ⇒ `deleteSeal` 的审计 `kind:'add'` 恒
+ * `DATABASE_COLLECTION_NOT_EXIST` ⇒ 整批 `persist` 失败 ⇒ 原子回滚（零写入正确、功能死锁）。
+ * 故调用方（`lib/sealDelete.js`）在**任何删行之前**先经本函数 preflight。
+ *
+ * 口径：`createCollection(name)` 成功 ⇒ `'created'`；**已存在**（判据单点
+ * `isCollectionAlreadyExistsError`）⇒ 视作成功、回 `'exists'`（**不重复建、不抛**）；
+ * **其它错误原样抛**（由调用方转 `STORAGE_UNAVAILABLE`，不伪装成功、不伪装 `FORBIDDEN`）。
+ * @param {string} name 集合名（调用方一律经 `COLLECTIONS` 取值）
+ * @returns {Promise<'created'|'exists'>}
+ */
+async function ensureCollection(name) {
+  const db = resolveDb()
+  try {
+    await db.createCollection(name)
+    return 'created'
+  } catch (error) {
+    if (isCollectionAlreadyExistsError(error)) return 'exists'
+    throw error
+  }
+}
+
 module.exports = {
   COLLECTIONS,
   MARKABLE_FIELDS,
@@ -6505,5 +6555,8 @@ module.exports = {
   adminWhitelistDenial,
   readCorrectionRow,
   buildProjection,
+  /* **審計載體 preflight（本單新增）**：唯一建集点（`db.createCollection`）＋「已存在」判据 ——
+     `lib/sealDelete.js` 删任何行之前先确保 `COLLECTIONS.adminAudit` 在库（离线自检可注入假 DB）。 */
+  ensureCollection,
   persist
 }

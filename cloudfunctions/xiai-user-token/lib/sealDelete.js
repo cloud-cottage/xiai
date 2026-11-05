@@ -27,6 +27,11 @@
  *  ⑧ **零新集合、零删照片行、零删勘误行**：照片 / 勘误**只读计数**（`photos_kept` /
  *     `corrections_kept`）；读走 `ops.readRows`、删行走 `ops.deleteRow`、
  *     删对象走 `ops.deleteArtifactObject`、落盘走 `ops.persist`。
+ *  ⑨ **審計載體 preflight（本單新增）**：**任何删行之前**先
+ *     `await ops.ensureCollection(ops.COLLECTIONS.adminAudit)`（建集只在 `ops.js` 内做；
+ *     **不新造集合名** —— 名称仍只活在 `ops.js::COLLECTIONS`，规范在册 §3.33.3 第 14 項 /
+ *     AC-373）。抛错 ⇒ **直接 `STORAGE_UNAVAILABLE` ＋ 零写入**（此时尚未删任何行）；
+ *     成功（`created` / `exists`）才继续删行确定序 —— **「審計載體沒有 ⇒ 就不刪」**。
  *
  * 存储纪律：本文件**零集合名字面、零取库句柄字面**（一切读写经 `lib/ops.js` 的既有导出；
  * 集合名只活在 `ops.js` 的 `COLLECTIONS` 登记表与 `COUNTERS_COLLECTION` 导出面）；
@@ -182,7 +187,9 @@ function objectKeyOf(row, digest) {
  * **刪一枚印章（＋編號釋放）**（管理员面；服务端裁决）。
  * 顺序（**判定全部早于删行**）：① 载荷形态 → ② 封闭键面 → ③ 管理员门（任何读之前）
  * → ④ `seal_id` / `reason` 值域 → ⑤ 印章行三形态检索 → ⑥ 引用汇总（印面 / 影像 / 共用判定
- * / 照片与勘误只读计数 / 计数器读）→ ⑦ 删非共用影像行 ＋ 删对象 → ⑧ 删全部印面行
+ * / 照片与勘误只读计数 / 计数器读）→ ⑥⁺ **審計載體 preflight**（`ops.ensureCollection`；
+ * **任何删行之前**；失败 ⇒ `STORAGE_UNAVAILABLE` ＋ 零写入）
+ * → ⑦ 删非共用影像行 ＋ 删对象 → ⑧ 删全部印面行
  * → ⑨ 删印章行 → ⑩ 审计行 → ⑪ **編號釋放**（最后一步）→ ⑫ 成功回包恰 4 键。
  * @param {object} payload 载荷（封闭两键 `seal_id` / `reason`）
  * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
@@ -335,6 +342,23 @@ async function deleteSeal(payload, identity, context) {
   for (let index = 0; index < counterSpecs.length; index += 1) {
     if (counterSpecs[index].nos.length === 0) continue
     await ops.readRows(ops.COUNTERS_COLLECTION, { _id: ops.COUNTER_IDS[counterSpecs[index].kind] }, { limit: 1 })
+  }
+
+  /* ⑧-後 **審計載體 preflight（本單新增）**：`ops.COLLECTIONS.adminAudit` 是 ⑩ 审计行
+     （`kind:'add'`）的落点 —— 集合不在库 ⇒ 该步必失败 ⇒ `persist` 整批原子回滚（生产真因：
+     规范在册、注册在册、**库里从未建过** ⇒ 管理员点「確認刪除」恒零写入、功能死锁）。
+     故在**管理员门（③）之后、任何删行（⑨-①）之前**先确保集合存在：
+     `ops.ensureCollection`（`createCollection`；已存在 ⇒ 视作成功、不重复建）。
+     · 抛错 ⇒ **直接 `STORAGE_UNAVAILABLE` 失败**（此时尚未删除任何行 ⇒ 恰 3 键、零写入）；
+     · 成功（`created` / `exists`）才继续下面的删行确定序 —— **「審計載體沒有 ⇒ 就不刪」**，
+       绝不出现「删了但审计落不下」。 */
+  try {
+    await ops.ensureCollection(ops.COLLECTIONS.adminAudit)
+  } catch {
+    return failure(
+      REASONS.STORAGE_UNAVAILABLE,
+      `管理員審計集合（${ops.COLLECTIONS.adminAudit}）不可用 ⇒ 拒絕刪除印章；本次尚未刪除任何行、零寫入。`
+    )
   }
 
   /* ⑨ 计数器（读）已毕 ⇒ 进入写面。删行确定序见文件头 ⑤。 */
