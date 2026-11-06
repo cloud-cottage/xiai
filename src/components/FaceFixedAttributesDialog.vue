@@ -68,7 +68,7 @@ function edgeIdsOf(text) {
     .filter(Boolean)
 }
 
-function submit() {
+async function submit() {
   if (saving.value) return
   saving.value = true
   feedback.value = ''
@@ -85,13 +85,17 @@ function submit() {
       feedback.value = '沒有檢測到改動：請先修改要保存的項目。'
       return
     }
-    const result = seals.updateSealFixedAttributes(null, props.face.id, patch)
+    /* **寫面入口已改 async**（雲端形態走 `updateFaceAttributes` op）：必須 `await`，
+       否则拿到的是 Promise ⇒ `result.ok` 恒为假而把成功报成失败。 */
+    const result = await seals.updateSealFixedAttributes(null, props.face.id, patch)
     /* 数据层的拒绝文案**原文展示**（不做 toast、不吞 reason）：值域门 / 白名单门的可读说明都经此上屏。 */
     feedback.value = result.ok
       ? `${result.message || '印面固定屬性已保存。'}（已保存：${Object.keys(patch).join('、')}）`
       : `保存未生效：${result.message}`
     if (result.ok) {
-      const fresh = seals.getFaceById(props.face.id)
+      /* **視圖按回包 `row` 重建**（成功回包已帶更新後的印面行）：雲端形態本机庫不再回寫，
+         不得再从本機取「新」值 —— 回包缺席才回落到讀入口。 */
+      const fresh = result.face || seals.getFaceById(props.face.id)
       if (fresh) {
         const next = seals.fixedAttributesOf(fresh)
         form.face_image_id = next.face_image_id || ''

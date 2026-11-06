@@ -6559,6 +6559,323 @@ const ADMIN_OPS = Object.freeze({
         ]
       }
     }
+  },
+
+  /**
+   * **管理員「修改印章固定屬性」（`updateSealAttributes`｜形制 `shape` / 材質 `material`）**
+   * —— **内联实现**（派单口径：不新建文件、不动 `index.js`；本 op 自己调 `persist`，**不返回 `plan`**
+   * ⇒ `index.js` 既有的「只在 `plan` 存在时才落盘」分支自然不会重复落盘）。
+   *
+   * 硬口徑（逐条）：
+   *   ① **管理员门先于一切读写**（`adminWhitelistDenial`；非管理员 / 缺白名单 env ⇒ 结构化拒绝
+   *      ＋ **零读零写**）；② 载荷**封闭恰两键** `seal_id` / `patch`（**未知键 / 身份类键 ⇒
+   *      `INVALID_FIELD`**，文案区分身份类键；载荷非物件 ⇒ `INVALID_FIELD`）；
+   *   ③ `seal_id` 缺 / 空 / 非字符串 ⇒ **`INVALID_VALUE`**（目标类问题一律 `INVALID_VALUE`，
+   *      **不新增任何 `reason`**）；④ 印章行 `stamp_id` → `sid` → 行 `id` **三形态依次检索**
+   *      （与 `lib/sealDelete.js` 同一检索序，零第二套）；**无行 ⇒ `INVALID_VALUE`** ＋ 零写入；
+   *   ⑤ `patch` 键面封闭 `['shape','material']`（真源 `src/data/seed.js::SEAL_FIXED_ATTR_FIELDS`）：
+   *      未知键 ⇒ `INVALID_FIELD`；**缺 / 空（无任何可写键）⇒ `INVALID_VALUE`**；值处理 ＝
+   *      `normalizeShape` / `normalizeMaterial` 同尺（**字符串 trim**；`null` / 缺省 ⇒ 空串＝清空；
+   *      非字符串 ⇒ `INVALID_VALUE`）；**长度门按 `MAX_TEXT_LENGTH`＝500 字对齐**（超限 ⇒
+   *      `INVALID_VALUE`；本地无对应物 ⇒ 以云侧既有自由文本上限为准）；
+   *   ⑥ 落盘＝ `persist` 的 `kind:'update'`（`expectAtLeast:1`；**写入体只含 patch 内的键 ＋
+   *      `updated_at`**，**不重写其它字段、不碰 `_id`** —— 封闭键面已保证 `_id` 进不来）；
+   *   ⑦ 成功回包**恰 2 键** `{ok:true, row}`（`row` ＝ **更新后服务端行**：回读优先，回读空
+   *      退路为「原行 ＋ 本次写入体」的本地合并行，不谎报）；失败**恰 3 键**
+   *      `{ok:false, reason, message}`；`reason` **零新增**（只用 `lib/config.js::REASONS`
+   *      既有冻结值：本面实际只会产出 `FORBIDDEN` / `INVALID_FIELD` / `INVALID_VALUE`）。
+   * @param {object} payload 载荷（封闭两键 `seal_id` / `patch`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:string|number}} [context]
+   * @returns {Promise<{ok:true, row:object}|{ok:false, reason:string, message:string}>}
+   */
+  async updateSealAttributes(payload, identity, context) {
+    /* ① 管理员门（**先于一切读写**；非管理员 / 缺白名单 env ⇒ 结构化拒绝 ＋ 零读零写）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷形态（非物件 ⇒ `INVALID_FIELD`；早于任何键面展开）。 */
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const allowedKeys = ['seal_id', 'patch']
+    const allowedFields = ['shape', 'material']
+    /* ③ 封闭键面（未知键 / 身份类键 ⇒ `INVALID_FIELD` ＋ 零写入）。 */
+    const unknown = Object.keys(payload).filter((key) => allowedKeys.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端派生，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(
+        REASONS.INVALID_FIELD,
+        `載荷含未知欄位：${unknown.join('、')}（${hint}；封閉兩鍵：seal_id / patch）；本次零寫入。`
+      )
+    }
+    /* ④ `seal_id` 值域（缺 / 空 / 非字符串 ⇒ `INVALID_VALUE`；**不引入 `MISSING_REQUIRED`** —
+       派单口径把目标类问题一律归 `INVALID_VALUE`）。 */
+    const sealRaw = payload.seal_id
+    if (sealRaw === undefined || sealRaw === null || sealRaw === '') {
+      return deny(REASONS.INVALID_VALUE, '缺少印章編號（seal_id）；本次零寫入。')
+    }
+    if (typeof sealRaw !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '印章編號（seal_id）必須是字符串；本次零寫入。')
+    }
+    const sealId = text(sealRaw)
+    if (sealId === '') {
+      return deny(REASONS.INVALID_VALUE, '缺少印章編號（seal_id）；本次零寫入。')
+    }
+    /* ⑤ `patch` 形态 / 键面 / 空判定（形态与键面 ⇒ `INVALID_FIELD`；空 ⇒ `INVALID_VALUE`）。 */
+    const patchRaw = payload.patch
+    if (patchRaw === undefined || patchRaw === null) {
+      return deny(REASONS.INVALID_VALUE, '修改內容缺省（patch 無任何可寫鍵）；本次零寫入。')
+    }
+    if (typeof patchRaw !== 'object' || Array.isArray(patchRaw)) {
+      return deny(REASONS.INVALID_FIELD, '修改內容形態不合法（patch 應為物件）；本次零寫入。')
+    }
+    const patchKeys = Object.keys(patchRaw)
+    const unknownPatch = patchKeys.filter((key) => allowedFields.indexOf(key) === -1)
+    if (unknownPatch.length > 0) {
+      const identityPatchKeys = unknownPatch.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityPatchKeys.length > 0
+          ? `其中身份類欄位（${identityPatchKeys.join('、')}）由服務端派生，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(
+        REASONS.INVALID_FIELD,
+        `patch 含未知欄位：${unknownPatch.join('、')}（${hint}；印章級固定屬性僅 shape / material）；本次零寫入。`
+      )
+    }
+    if (patchKeys.length === 0) {
+      return deny(REASONS.INVALID_VALUE, '修改內容為空（patch 無任何可寫鍵）；本次零寫入。')
+    }
+    /* ⑥ 值处理（**与 `normalizeShape` / `normalizeMaterial` 同尺**：字符串 trim、空缺 ⇒ 空串）
+       ＋ **500 字长度门**（超限 ⇒ `INVALID_VALUE`；全部早于任何读写）。 */
+    const clean = {}
+    for (const key of patchKeys) {
+      const raw = patchRaw[key]
+      if (raw !== null && raw !== undefined && typeof raw !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 必須是文字（或留空）；本次零寫入。`)
+      }
+      const value = raw === null || raw === undefined ? '' : raw.trim()
+      if (value.length > MAX_TEXT_LENGTH) {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 超出文字上限（${MAX_TEXT_LENGTH} 字）；本次零寫入。`)
+      }
+      clean[key] = value
+    }
+    /* ⑦ 印章行检索（`stamp_id` → `sid` → 行 `id` **三形态依次**；无行 ⇒ `INVALID_VALUE` ＋ 零写入）。 */
+    const probeKeys = ['stamp_id', 'sid', 'id']
+    let sealRow = null
+    let probeField = ''
+    for (let index = 0; index < probeKeys.length && sealRow === null; index += 1) {
+      const rows = await readRows(COLLECTIONS.seals, { [probeKeys[index]]: sealId }, { limit: 8 })
+      if (rows.length > 0) {
+        sealRow = rows[0]
+        probeField = probeKeys[index]
+      }
+    }
+    if (sealRow === null) {
+      return deny(REASONS.INVALID_VALUE, `未找到該印章（seal_id：${sealId}）；本次零寫入。`)
+    }
+    /* ⑧ 落盘（`kind:'update'` ＋ `expectAtLeast:1`；**只写 patch 键 ＋ `updated_at`**，
+       匹配键优先行 `_id`、无 `_id` 时退回⑦的命中检索键）。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const doc = Object.assign({}, clean, { updated_at: at })
+    const match = text(sealRow._id) ? { _id: text(sealRow._id) } : { [probeField]: sealId }
+    await persist({ writes: [{ kind: 'update', collection: COLLECTIONS.seals, match, doc, expectAtLeast: 1 }] })
+    /* ⑨ 回读更新后服务端行（**回读优先**；空 ⇒ 退路为本地合并行 —— 只会出现在行被并发删除时，
+       不谎报成功、也不改写其它字段读数）。 */
+    const after = await readRows(COLLECTIONS.seals, match, { limit: 1 })
+    const row = after.length > 0 ? after[0] : Object.assign({}, sealRow, doc)
+    return { ok: true, row }
+  },
+
+  /**
+   * **管理員「修改印面屬性」（`updateFaceAttributes`｜印面级 7 字段）** —— **内联实现**
+   * （同上：不新建文件、不返回 `plan`、自己调 `persist`；`index.js` 零改动）。
+   *
+   * 硬口徑（逐条）：
+   *   ① **管理员门先于一切读写**（同 `updateSealAttributes`；非管理员 ⇒ `FORBIDDEN` ＋ 零读零写）；
+   *   ② 载荷**封闭恰两键** `face_id` / `patch`（未知键 / 身份类键 ⇒ `INVALID_FIELD`；载荷非物件
+   *      ⇒ `INVALID_FIELD`）；③ `face_id` 缺 / 空 / 非字符串 ⇒ **`INVALID_VALUE`**；印面行按
+   *      `fc-…` 的行 `id` 查 `COLLECTIONS.faces`（`id` → `_id` 两形态依次），**无行 ⇒
+   *      `INVALID_VALUE`** ＋ 零写入；
+   *   ④ `patch` 键面封闭**恰 7 字段** `dynasty / seal_type / face_style / seal_class /
+   *      seal_name / author / transcription`：未知键 ⇒ `INVALID_FIELD`；**缺 / 空 ⇒
+   *      `INVALID_VALUE`**；
+   *   ⑤ **值域门取 `VALUE_DOMAINS`**（真源副本与 `src/data/db.js:2565-2638` 的
+   *      `dynastyValueDenial` / `faceContentValueDenial` / `faceStyleValueDenial` /
+   *      `sealClassValueDenial` **同表同值**：15 / 9 / 23 / 3）—— **空值放行**（空串 ＝ 未填，
+   *      不进门）、非空且 ∉ 域 ⇒ **`INVALID_VALUE`**；`seal_name` / `author` / `transcription`
+   *      为自由文本，只受**长度门**约束；
+   *   ⑥ **长度门按 500 字对齐**（`MAX_TEXT_LENGTH`；本地无对应物 ⇒ 超限 ⇒ `INVALID_VALUE`）；
+   *   ⑦ 落盘 ＝ `persist` 的 `kind:'update'`（`expectAtLeast:1`；**写入体只含 patch 内的键 ＋
+   *      `updated_at`**，不重写其它字段、不碰 `_id`）；⑧ 成功**恰 2 键** `{ok:true, row}`
+   *      （`row` ＝ 更新后服务端行）、失败**恰 3 键**；`reason` **零新增**。
+   * @param {object} payload 载荷（封闭两键 `face_id` / `patch`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, row:object}|{ok:false, reason:string, message:string}>}
+   */
+  async updateFaceAttributes(payload, identity, context) {
+    /* ① 管理员门（**先于一切读写**）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷形态。 */
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const allowedKeys = ['face_id', 'patch']
+    /* 印面级 7 字段（真源：`dynasty/seal_type/face_style/seal_class/seal_name/author/transcription`）
+       ＋ **影像指向 2 键**（`face_image_id` / `edge_image_ids`）—— 后者是「編輯固定屬性」对话框
+       实际提交的键面（云模式停写本机镜像后必须由云端承接），值不过域表/长度门，改为
+       **引用存在性校验**（非空 id 必须在 `xiai_images` 有行）。 */
+    const allowedFields = [
+      'dynasty',
+      'seal_type',
+      'face_style',
+      'seal_class',
+      'seal_name',
+      'author',
+      'transcription',
+      'face_image_id',
+      'edge_image_ids'
+    ]
+    const IMAGE_REF_FIELDS = ['face_image_id', 'edge_image_ids']
+    /* ③ 封闭键面（未知键 / 身份类键 ⇒ `INVALID_FIELD`）。 */
+    const unknown = Object.keys(payload).filter((key) => allowedKeys.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端派生，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(
+        REASONS.INVALID_FIELD,
+        `載荷含未知欄位：${unknown.join('、')}（${hint}；封閉兩鍵：face_id / patch）；本次零寫入。`
+      )
+    }
+    /* ④ `face_id` 值域（缺 / 空 / 非字符串 ⇒ `INVALID_VALUE`）。 */
+    const faceRaw = payload.face_id
+    if (faceRaw === undefined || faceRaw === null || faceRaw === '') {
+      return deny(REASONS.INVALID_VALUE, '缺少印面編號（face_id）；本次零寫入。')
+    }
+    if (typeof faceRaw !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '印面編號（face_id）必須是字符串；本次零寫入。')
+    }
+    const faceId = text(faceRaw)
+    if (faceId === '') {
+      return deny(REASONS.INVALID_VALUE, '缺少印面編號（face_id）；本次零寫入。')
+    }
+    /* ⑤ `patch` 形态 / 键面 / 空判定。 */
+    const patchRaw = payload.patch
+    if (patchRaw === undefined || patchRaw === null) {
+      return deny(REASONS.INVALID_VALUE, '修改內容缺省（patch 無任何可寫鍵）；本次零寫入。')
+    }
+    if (typeof patchRaw !== 'object' || Array.isArray(patchRaw)) {
+      return deny(REASONS.INVALID_FIELD, '修改內容形態不合法（patch 應為物件）；本次零寫入。')
+    }
+    const patchKeys = Object.keys(patchRaw)
+    const unknownPatch = patchKeys.filter((key) => allowedFields.indexOf(key) === -1)
+    if (unknownPatch.length > 0) {
+      const identityPatchKeys = unknownPatch.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityPatchKeys.length > 0
+          ? `其中身份類欄位（${identityPatchKeys.join('、')}）由服務端派生，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(
+        REASONS.INVALID_FIELD,
+        `patch 含未知欄位：${unknownPatch.join('、')}（${hint}；印面級字段僅 7 鍵 ＋ 影像指向 2 鍵）；本次零寫入。`
+      )
+    }
+    if (patchKeys.length === 0) {
+      return deny(REASONS.INVALID_VALUE, '修改內容為空（patch 無任何可寫鍵）；本次零寫入。')
+    }
+    /* ⑥ 值域门 ＋ 500 字长度门（**全部早于任何读写**；空值放行、非空越域 ⇒ `INVALID_VALUE`）。
+       域表单点 ＝ `VALUE_DOMAINS`（与 `src/data/db.js` 四道值域门同表同值；其余 3 个自由文本
+       字段无域表 ⇒ 只受长度门约束）。**影像指向 2 键**不过域表/长度门，改为引用存在性校验。 */
+    const clean = {}
+    for (const key of patchKeys) {
+      const raw = patchRaw[key]
+      if (IMAGE_REF_FIELDS.indexOf(key) !== -1) {
+        if (key === 'face_image_id') {
+          if (raw !== null && raw !== undefined && typeof raw !== 'string') {
+            return deny(REASONS.INVALID_VALUE, `欄位 ${key} 必須是影像編號字符串（或留空）；本次零寫入。`)
+          }
+          const one = raw === null || raw === undefined ? '' : raw.trim()
+          if (one !== '') {
+            const found = await readRows(COLLECTIONS.images, { id: one }, { limit: 1 })
+            if (found.length === 0) {
+              return deny(REASONS.INVALID_VALUE, `影像編號（${one}）在影像行中不存在；本次零寫入。`)
+            }
+          }
+          clean[key] = one
+          continue
+        }
+        if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
+          return deny(REASONS.INVALID_VALUE, `欄位 ${key} 必須是影像編號數組（或留空）；本次零寫入。`)
+        }
+        const cleanedRefs = []
+        for (const item of Array.isArray(raw) ? raw : []) {
+          if (typeof item !== 'string') {
+            return deny(REASONS.INVALID_VALUE, `欄位 ${key} 內的影像編號必須是字符串；本次零寫入。`)
+          }
+          const one = item.trim()
+          if (one === '' || cleanedRefs.indexOf(one) !== -1) continue
+          const found = await readRows(COLLECTIONS.images, { id: one }, { limit: 1 })
+          if (found.length === 0) {
+            return deny(REASONS.INVALID_VALUE, `影像編號（${one}）在影像行中不存在；本次零寫入。`)
+          }
+          cleanedRefs.push(one)
+        }
+        clean[key] = cleanedRefs
+        continue
+      }
+      if (raw !== null && raw !== undefined && typeof raw !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 必須是文字（或留空）；本次零寫入。`)
+      }
+      const value = raw === null || raw === undefined ? '' : raw.trim()
+      if (value.length > MAX_TEXT_LENGTH) {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 超出文字上限（${MAX_TEXT_LENGTH} 字）；本次零寫入。`)
+      }
+      const domain = VALUE_DOMAINS[key]
+      if (domain && value !== '' && domain.indexOf(value) === -1) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `欄位 ${key} 取值「${value}」不在允許的 ${domain.length} 類之內；本次零寫入。`
+        )
+      }
+      clean[key] = value
+    }
+    /* ⑦ 印面行检索（`fc-…` 行 `id` → 文档 `_id` 两形态依次；无行 ⇒ `INVALID_VALUE` ＋ 零写入）。 */
+    const probeKeys = ['id', '_id']
+    let faceRow = null
+    let probeField = ''
+    for (let index = 0; index < probeKeys.length && faceRow === null; index += 1) {
+      const rows = await readRows(COLLECTIONS.faces, { [probeKeys[index]]: faceId }, { limit: 8 })
+      if (rows.length > 0) {
+        faceRow = rows[0]
+        probeField = probeKeys[index]
+      }
+    }
+    if (faceRow === null) {
+      return deny(REASONS.INVALID_VALUE, `未找到該印面（face_id：${faceId}）；本次零寫入。`)
+    }
+    /* ⑧ 落盘（`kind:'update'` ＋ `expectAtLeast:1`；只写 patch 键 ＋ `updated_at`）。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    const doc = Object.assign({}, clean, { updated_at: at })
+    const match = text(faceRow._id) ? { _id: text(faceRow._id) } : { [probeField]: faceId }
+    await persist({ writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc, expectAtLeast: 1 }] })
+    /* ⑨ 回读更新后服务端行（回读空 ⇒ 退路为本地合并行）。 */
+    const after = await readRows(COLLECTIONS.faces, match, { limit: 1 })
+    const row = after.length > 0 ? after[0] : Object.assign({}, faceRow, doc)
+    return { ok: true, row }
   }
 })
 

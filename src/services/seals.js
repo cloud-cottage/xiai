@@ -1118,9 +1118,72 @@ export async function createSealWithFace(actor, payload = {}) {
  * @param {string} stampId 目标印章编号（**必给**；空 ⇒ 结构化 `MISSING_REQUIRED`、零写入）
  * @param {{shape?:string, material?:string}} patch 印章级固定属性（自由文本，可空＝清空）
  */
-export function updateSealAttributes(actor, stampId, patch = {}) {
+
+/* **雲端寫面 op 名**（與雲函數 `lib/ops.js` 註冊面逐字一致；未部署 ⇒ 回「未知的寫入操作」）。 */
+const SEAL_ATTRIBUTES_OP = 'updateSealAttributes'
+const FACE_ATTRIBUTES_OP = 'updateFaceAttributes'
+
+/** 雲函數「未知 op」拒絕的服務端字面（`index.js`：`未知的寫入操作（op）：…；本次零寫入。`）。 */
+const CLOUD_OP_UNKNOWN_MARKER = '未知的寫入操作'
+
+/** 該 op 未接通雲端寫入時的**硬拒兜底**文案（雲函數尚未部署 ⇒ 明示未儲存，絕不靜默成功）。 */
+const CLOUD_OP_UNWIRED_MESSAGE = '此操作暫未接通雲端寫入；本次未儲存'
+
+/**
+ * 雲端寫面失敗 ⇒ **恰 3 鍵**結構化回出（`ok:false` / `reason` / `message`）。
+ *
+ * `reason` / `message` **逐字透傳**服務端原文（調用方直接上屏）；
+ * 唯一改寫：「未知 op」（op 未在雲函數註冊面內 ⇒ 未部署）⇒ 換**硬拒兜底**文案。
+ * @param {object|null} gate `userWriteGate` 的失敗回包
+ * @param {string} fallback 回包無可讀 `message` 時的通用文案
+ * @returns {{ok:false, reason:string, message:string}}
+ */
+function cloudWriteFailure(gate, fallback) {
+  const raw = gate && typeof gate.message === 'string' ? gate.message : ''
+  return {
+    ok: false,
+    reason: (gate && typeof gate.reason === 'string' && gate.reason) || 'STORAGE_UNAVAILABLE',
+    message: raw.indexOf(CLOUD_OP_UNKNOWN_MARKER) !== -1 ? CLOUD_OP_UNWIRED_MESSAGE : raw || fallback
+  }
+}
+
+export async function updateSealAttributes(actor, stampId, patch = {}) {
   const who = actor || currentUser()
   const target = String(stampId === undefined || stampId === null ? '' : stampId).trim()
+  /* **雲端形態（`cloud`）＝服務端落權威行**：經同一登錄令牌寫面門（`userWriteGate`），
+     成功**只認回包 `row`**並按它重建視圖（**本機庫零寫入** —— 停寫鏡像後不得再把鏡像寫回來）。
+     失敗**結構化回出原文**（`reason` / `message` 一字不改寫；調用方直接上屏）；
+     回包為「未知 op」（雲函數尚未部署該 op）⇒ **硬拒兜底文案**，絕不靜默成功。 */
+  if (writeFaceMode() === WRITE_FACE_MODES.CLOUD) {
+    let gate
+    try {
+      gate = await userWriteGate(SEAL_ATTRIBUTES_OP, { seal_id: target, patch: patch || {} })
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        message: (err && err.message) || '印章固定屬性保存失敗（雲端寫入通道異常）'
+      }
+    }
+    if (!gate || gate.ok !== true) return cloudWriteFailure(gate, '印章固定屬性保存失敗')
+    const row = gate.row && typeof gate.row === 'object' ? gate.row : null
+    if (!row) {
+      return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回包未帶更新後的印章行（row）；本次未儲存。' }
+    }
+    const stamp = String(row.stamp_id || row.id || target)
+    const shape = typeof row.shape === 'string' ? row.shape : ''
+    const material = typeof row.material === 'string' ? row.material : ''
+    /* 視圖按回包 `row` 重建（`row` 的權威鍵覆蓋其上；快照已有的派生面如印面集合原樣保留）。 */
+    const base = getSealById(stamp)
+    return {
+      ok: true,
+      stampId: stamp,
+      seal: base ? { ...base, ...row, id: stamp, stamp_id: stamp } : { ...row, id: stamp, stamp_id: stamp },
+      shape,
+      material,
+      message: '印章固定屬性已保存'
+    }
+  }
   try {
     const row = dbWriteSealFixedAttributes(who, target, patch)
     /* 数据层为**结构化拒绝**（不抛错）⇒ 显式透传，不能把它当成印章行走下去。 */
@@ -1162,9 +1225,31 @@ export function updateSealAttributes(actor, stampId, patch = {}) {
  * 数据层判 `INVALID_FIELD` 且零写入；材质请走印章级入口 `updateSealAttributes`）。
  * @returns {{ok:boolean, reason?:string, message:string, face?:object}}
  */
-export function updateSealFixedAttributes(actor, faceId, patch = {}) {
+export async function updateSealFixedAttributes(actor, faceId, patch = {}) {
   const who = actor || currentUser()
   const facePatch = patch || {}
+  /* **雲端形態（`cloud`）**：印面固定屬性同樣上雲（op `updateFaceAttributes`），
+     成功按回包 `row` 重建印面視圖（**本機庫零寫入**）；失敗結構化回出原文
+     （「未知 op」⇒ 硬拒兜底文案，絕不靜默成功）。 */
+  if (writeFaceMode() === WRITE_FACE_MODES.CLOUD) {
+    const target = String(faceId === undefined || faceId === null ? '' : faceId).trim()
+    let gate
+    try {
+      gate = await userWriteGate(FACE_ATTRIBUTES_OP, { face_id: target, patch: facePatch })
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        message: (err && err.message) || '固定屬性保存失敗（雲端寫入通道異常）'
+      }
+    }
+    if (!gate || gate.ok !== true) return cloudWriteFailure(gate, '固定屬性保存失敗')
+    const row = gate.row && typeof gate.row === 'object' ? gate.row : null
+    if (!row) {
+      return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回包未帶更新後的印面行（row）；本次未儲存。' }
+    }
+    return { ok: true, face: faceViewModel(row), message: '固定屬性已保存' }
+  }
   try {
     const row = writeFaceFixedAttributes(who, faceId, facePatch)
     if (row && row.ok === false) {

@@ -434,7 +434,7 @@ function closeSealAttributes() {
  * 「先只提交 shape、再二次提交 material」降级分支：那是白名单尚未含 `material` 时的
  * 过渡兼容代码，现为**死分支**，按仓库纪律不得留存）。
  */
-function submitSealAttributes() {
+async function submitSealAttributes() {
   if (!SEAL_ATTR_READY) {
     sealAttrsFeedback.value = SEAL_ATTR_MISSING_MESSAGE
     return
@@ -455,7 +455,7 @@ function submitSealAttributes() {
        `actor` 传 `null` 走当前会话 —— 与项目现有取法一致（`FaceFixedAttributesDialog.vue` 同口径）。
        `stampId` 是**第 2 个位置参数**；空 ⇒ 结构化 MISSING_REQUIRED、零写入。
        印章级白名单自 R-32 起为 `['shape','material']` ⇒ 两键可**一次**提交。 */
-    result = seals.updateSealAttributes(null, seal.value.stamp_id, patch)
+    result = await seals.updateSealAttributes(null, seal.value.stamp_id, patch)
   } catch (err) {
     /* 契约要求结构化返回、不抛未捕获异常；这里仍兜一道，避免异常中断界面。 */
     result = { ok: false, message: `印章固定屬性保存失敗：${(err && err.message) || '未知原因'}` }
@@ -1762,7 +1762,7 @@ async function acceptAiEnhance() {
   const nextId = String(result.imageId)
   aiEnhanceAccepting.value = true
   try {
-    const written = seals.updateSealFixedAttributes(null, face.id, { face_image_id: nextId })
+    const written = await seals.updateSealFixedAttributes(null, face.id, { face_image_id: nextId })
     if (!written || written.ok !== true) {
       aiEnhanceFeedback.value = `取用修復圖未生效：${(written && written.message) || '未知原因'}（印面指向未變）`
       return
