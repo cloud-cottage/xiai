@@ -1477,6 +1477,73 @@ export function saveFaceRows(rows) {
 /** **影像行读缓存（本单）**：`src` 身份变化即失效（判据同 `collectionReadCache`）。 */
 let imageRowsCache = { src: null, rows: null }
 
+/* ============================================================================
+
+   **候選行「雲端快照內存 upsert」（本單｜零落盤）
+   ----------------------------------------------------------------------------
+   背景（本單根因）：`ai-enhance-face` 成功回包的 `row` 由服務端已落庫，但雲模式下
+   `saveImageRows` 停寫本機（提交 `b98bc47`）⇒ 整表鏡像步**什麼都沒寫** ⇒
+   `listImageRows()` 裡沒有這一行 ⇒ `seals.js::loadImageDataUrl` 取不到 meta ⇒
+   回落本機 blobstore ⇒ 右格報「影像二進制不在本地存儲中」。
+
+   口徑（逐條，**只影響內存 / 快照緩存**）：
+     · **零落盤**：不寫 localStorage、**不寫 IndexedDB**（本機停寫口徑一字不動）；
+       行只存在本模塊的 `Map` 裏，頁面刷新即消失（雲端快照落定後由雲端行接管）；
+     · **讀面合併**：`listImageRows()` 讀時把內存行**補在尾部**，身份已在底層行
+       （雲端快照 / 本機鏡像）裏的**不重複追加** ⇒ 底層（雲端）優先、**冪等不重行**；
+     · **只補缺、不覆蓋**：既有的 `imageRowsCache` 讀緩存失效判據**只多一條**
+       （內存代數 `imageRowMemoryGen` 變了才重算），其餘失效點一字未改；
+     · `clearLocalDatabase()` 清的是本機存儲 ⇒ **不清這份內存行**（它們是雲端權威行，
+       不是本機資料）；讀緩存仍照舊以 `src: null` 失效。
+   ============================================================================ */
+
+/** **內存影像行（雲端快照補位）**：身份鍵 → 行；**只在本模塊內存**，永不落盤。 */
+const imageRowMemory = new Map()
+
+/** 內存行**代數**（`listImageRows` 讀緩存的失效判據之一；只在真的變動時 +1）。 */
+let imageRowMemoryGen = 0
+
+/**
+ * 把一行 upsert 進**雲端快照內存緩存**（本單單點；**零落盤**）。
+ *
+ * 為什麼在數據層：雲模式下 `saveImageRows` 停寫本機（本檔上方「雲模式停寫本機鏡像行」），
+ * 而 `loadImageDataUrl` 的雲端分支前提是 `listImageRows()` 找得到該行 ⇒ 需要一個
+ * **只影響讀面快照**的補位單點（服務層不得自己另存一份行）。
+ *
+ * @param {*} row 服務端回包的影像行（已落庫的那一行本身）
+ * @returns {boolean} 是否已成立（行非對象 / 無身份鍵 ⇒ `false`；**不拋**）
+ */
+export function upsertImageRowCache(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false
+  const id = overlayIdentityOf(row)
+  if (id === '') return false
+  const existing = imageRowMemory.get(id)
+  if (existing === row) return true /* 逐字同一行 ⇒ 代數不動（冪等；不引發重算）。 */
+  imageRowMemory.set(id, row)
+  imageRowMemoryGen += 1
+  return true
+}
+
+/**
+ * 讀面合併：底層行（雲端快照 ∪ 本機鏡像）**優先**，內存 upsert 的行**只補缺**
+ * （身份已存在 ⇒ 不追加、不覆蓋）；內存為空 ⇒ **原數組原樣交出**（零額外分配）。
+ * @param {Array<object>} src 底層影像行（`readCollection` 的產出）
+ * @returns {Array<object>} 合併後的行（新數組；`src` 為空且無內存行時原樣返回）
+ */
+function withImageRowMemoryOverlay(src) {
+  if (imageRowMemory.size === 0) return src
+  const present = new Set()
+  src.forEach((row) => {
+    const id = overlayIdentityOf(row)
+    if (id) present.add(id)
+  })
+  const extra = []
+  imageRowMemory.forEach((row, id) => {
+    if (!present.has(id)) extra.push(row)
+  })
+  return extra.length === 0 ? src : src.concat(extra)
+}
+
 /*
  * **影像行（讀取面）** —— 真源容器 `slice_meta` 的 **讀路徑補缺**。
  *
@@ -1498,9 +1565,11 @@ export function listImageRows() {
      26.3 s 采样）**，因为 `listImageRows()` 在一轮里被调 2,449 次 × 800 行。改为**底层行换代才重算**
      （`src` 身份变化即失效）；读语义不变（只读、不写存储）。 */
   const src = readCollection(STORAGE_KEYS.images, [])
-  if (imageRowsCache.src === src) return imageRowsCache.rows
-  const rows = withSliceMeta(src)
-  imageRowsCache = { src, rows }
+  /* **本單（內存 upsert 失效）**：`imageRowMemoryGen` 變了（雲端候選行剛補進來）⇒ 重算一次；
+     與上面 `src` 身份判據**並列**，不新增任何其它失效時機。 */
+  if (imageRowsCache.src === src && imageRowsCache.gen === imageRowMemoryGen) return imageRowsCache.rows
+  const rows = withSliceMeta(withImageRowMemoryOverlay(src))
+  imageRowsCache = { src, rows, gen: imageRowMemoryGen }
   return rows
 }
 

@@ -30,14 +30,17 @@
  *     `preview` / `charge` 缺位 ⇒ 對應讀數為 `null`（**不編造 mime / 摘要 / 扣費數字**）。
  *  ④ 組件 / 視圖**只經本文件**；op 名字面值與讀數鍵面**全倉只在此處**。
  *  ⑤ **dev / 離線形態**：過門但未經雲端 ⇒ 如實結構化拒絕（非正式路徑；**零扣費、零影像**）。
- *  ⑥ **候選行本地鏡像（本單）**：`ai-enhance-face` 成功回包的 `row` ⇒ 追加進本地影像行鏡像
- *     （先讀現有行再 append、**冪等**）；鏡像讀 / 寫失敗或 `row` 缺席 ⇒ **只降級**成
- *     `mirror: false`（仍 `ok: true`、仍回 `image_id`，UI 可據此提示刷新），**絕不改判成功**。
+ *  ⑥ **候選行鏡像（本單）**：`ai-enhance-face` 成功回包的 `row` ⇒ 先按既有范式整表寫
+ *     （`db.saveImageRows`；`local-dev` 舊路徑一字不變），雲模式下 `saveImageRows` 停寫本機
+ *     ⇒ 再 upsert 進**雲端快照內存緩存**（`db.upsertImageRowCache`：**零落盤、零 IndexedDB**），
+ *     讓 `listImageRows()` 立刻看得見該行（`loadImageDataUrl` 的雲端分支才成立）；
+ *     讀 / 寫 / upsert 任何失敗或 `row` 缺席 ⇒ **只降級**成 `mirror: false`
+ *     （仍 `ok: true`、仍回 `image_id`，UI 可據此提示刷新），**絕不改判成功**。
  * ============================================================================
  */
 
 import { isAdmin, isLoggedIn } from '../data/session.js'
-import { listImageRows, saveImageRows } from '../data/db.js'
+import { listImageRows, saveImageRows, upsertImageRowCache } from '../data/db.js'
 import { userWriteGate } from './userWrite.js'
 
 /** 雲函數 op 名（與 `lib/ops.js` 注册面逐字一致；全倉唯一出現處）。 */
@@ -82,19 +85,23 @@ const READOUT_KEYS = Object.freeze(['image_id', 'source_image_id', 'preview', 'c
 const DISCARD_READOUT_KEYS = Object.freeze(['image_id', 'deleted_objects'])
 
 /* ============================================================================
-   候選行**本地鏡像**（服務端成功回包帶 `row` ⇒ 客戶端把它追加進本地影像行鏡像）
+   候選行**鏡像**（服務端成功回包帶 `row` ⇒ 客戶端把它補進 `listImageRows()` 讀面）
    ----------------------------------------------------------------------------
    為什麼要這一步：`seals.js::loadImageDataUrl` 走雲端分支的前提是 `listImageRows()`
-   找得到該行；服務端已落庫、本機鏡像卻沒有 ⇒ `meta = null` ⇒ 回落本地 blobstore ⇒
-   右格報「影像二進制不在本地存儲中」。本段把服務端權威行**鏡像回本機**，讓右格立即出圖。
+   找得到該行；服務端已落庫、讀面卻沒有 ⇒ `meta = null` ⇒ 回落本地 blobstore ⇒
+   右格報「影像二進制不在本地存儲中」。
+   **本單改口徑**：雲模式下 `db.saveImageRows` 停寫本機（提交 `b98bc47`）⇒ 單靠整表寫
+   **什麼都沒寫**（回 `rows`、不落任何存儲）⇒ 整表寫照舊走（`local-dev` 舊路徑一字不變），
+   雲模式**再補一步** `db.upsertImageRowCache(row)` —— 只進**雲端快照內存緩存**
+   （零落盤、**零 IndexedDB**、不寫 localStorage），`listImageRows()` 立刻看得見該行。
 
    硬口徑（逐條）：
    ① 只在**成功**回包上做；`reply.row` 非對象 ⇒ **不追加、不崩**（照常返回 `image_id`）。
-   ② **冪等**：該 id 已在鏡像裡 ⇒ **不重複追加**（行數不變）。
-   ③ 鏡像讀 / 寫**任何失敗只降級**：仍返回 `ok: true` 與 `image_id`，並給可讀提示位
+   ② **冪等**：該 id 已在讀面裡 ⇒ **不重複追加**（行數不變）。
+   ③ 鏡像讀 / 寫 / upsert **任何失敗只降級**：仍返回 `ok: true` 與 `image_id`，並給可讀提示位
       `mirror: false`（UI 據此提示刷新）；**絕不把成功改判成失敗**。
-   ④ `mirror` 只是「本機鏡像此刻是否已有該行」的如實讀數，不是服務端判定；
-      `reply.row` 缺席（舊服務端 / 未透傳）同樣回 `mirror: false`。
+   ④ `mirror` 只是「`listImageRows()` 此刻是否真有該行」的**如實讀數**（寫完再讀一次核對），
+      不是服務端判定；`reply.row` 缺席（舊服務端 / 未透傳）同樣回 `mirror: false`。
    ⑤ 讀寫一律走 `db` 的 `listImageRows` / `saveImageRows` 同族入口（**先讀現有行再 append**，
       與 `db.js::insertImageRow` 的落盤範式逐字同構），本文件零 localStorage 字面值。
 
@@ -125,9 +132,14 @@ function mirrorSaveRows(rows) {
 }
 
 /**
- * 把候選行追加進本地影像行鏡像（**冪等**）。
+ * 把候選行補進 `listImageRows()` 讀面（**冪等**；兩步：整表寫 ＋ 雲端快照內存 upsert）。
+ *
+ * 為什麼是兩步：雲模式下 `db.saveImageRows` 停寫本機（提交 `b98bc47`）⇒ 只走整表寫
+ * **不落任何存儲**、讀面仍看不見該行；`local-dev` 形態則仍由整表寫落盤（**舊路徑一字不變**），
+ * 內存 upsert 只是補位（身份已在底層行裡 ⇒ 不重複追加）。
+ *
  * @param {*} row 服務端回包的 `row`（已落庫的那一行）
- * @returns {boolean} 本機鏡像此刻是否已有該行（任何失敗一律 `false`，**不拋**）
+ * @returns {boolean} `listImageRows()` 此刻是否真有該行（任何失敗一律 `false`，**不拋**）
  */
 function mirrorCandidateRow(row) {
   if (!row || typeof row !== 'object' || Array.isArray(row)) return false
@@ -143,7 +155,12 @@ function mirrorCandidateRow(row) {
     const rows = Array.isArray(current) ? current : []
     const already = rows.some((item) => item && (item.id === id || item._id === id))
     if (already) return true
-    return mirrorSaveRows(rows.concat([row])) !== false
+    /* ① 整表寫（**先讀現有行再 append**；`local-dev` 舊路徑逐字不變）。 */
+    if (mirrorSaveRows(rows.concat([row])) === false) return false
+    /* ② 雲端快照內存 upsert（**零落盤、零 IndexedDB**）：雲模式下讀面由此看得見該行。 */
+    if (upsertImageRowCache(row) !== true) return false
+    /* ③ 如實讀數：再讀一次讀面核對 —— 不拿「寫呼叫沒報錯」冒充「已經有了」。 */
+    return mirrorListRows().some((item) => item && (item.id === id || item._id === id))
   } catch {
     /* 鏡像讀 / 寫失敗 ⇒ 只降級（`mirror: false`），**不改判成功**。 */
     return false

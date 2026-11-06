@@ -125,6 +125,7 @@ import {
   cloudBaseActive,
   cloudBaseConfigured,
   cloudBaseObjectKeyOf,
+  cloudBaseReadOf,
   cloudBaseStatus,
   cloudObjectBytesOfRow,
   retryCloudBaseHydration
@@ -1294,6 +1295,25 @@ function imageRowsPendingReadout(extra = {}) {
 }
 
 /**
+ * **雲端快照行按編號查找（本單｜第二道查找面）**：本機鏡像無行時，再從雲端快照找一次。
+ *
+ * 為什麼需要：雲模式下本機行**停寫**（提交 `b98bc47`）⇒ `listImageRows()` 裏可能還沒有
+ * 剛在服務端落庫的候選行（內存補位未生效 / 快照未帶該集合 / 頁面剛刷新），而服務端**已落庫**
+ * ⇒ 此刻**不能**判「本機沒有這張圖」。**只讀、零網路**；雲端讀取面未落定 ⇒ 快照行未到位
+ * ⇒ `null`（調用方照舊走 `imageRowsUnsettled()` 的 pending 判定，語義不變）。
+ * @param {string} imageId 影像編號
+ * @returns {object|null} 雲端快照裡的該行；找不到 ⇒ `null`
+ */
+function findCloudImageRow(imageId) {
+  const id = imageId === null || imageId === undefined ? '' : String(imageId)
+  if (id === '') return null
+  /* 雲集合鍵 ＝ 本機鏡像鍵（`images` 同名；真源＝`cloudbase.js::CLOUD_COLLECTION_KEYS`）。 */
+  const cloud = cloudBaseReadOf('images')
+  if (cloud.state !== 'ready' || !Array.isArray(cloud.rows)) return null
+  return cloud.rows.find((row) => row && (row.id === id || row._id === id)) || null
+}
+
+/**
  * **附加能力（非冻结项，UI 单可直接用）**：按影像编号取回二进制并转 dataURL（**仅运行时渲染**）。
  * 二进制只在 IndexedDB，页面要用 `<img>` 显示时必须走这里（不得直接读 IndexedDB，§3.2 收口注）。
  * @returns {Promise<{ok:boolean, dataUrl?:string, bytes?:Uint8Array, meta?:object, message:string}>}
@@ -1311,7 +1331,10 @@ function imageRowsPendingReadout(extra = {}) {
  *          meta?:object, message:string}>}
  */
 export async function loadImageDataUrl(imageId) {
-  const meta = listImageRows().find((row) => row.id === imageId) || null
+  let meta = listImageRows().find((row) => row.id === imageId) || null
+  /* **雲端快照第二道查找（本單）**：本機鏡像無行 ＋ 雲端讀取面在場 ⇒ 再按編號從雲端快照找一次
+     （雲模式本機停寫；找到即走下面既有的雲端展示件分支，**不改任何取字節口徑**）。 */
+  if (!meta && cloudBaseActive()) meta = findCloudImageRow(imageId)
   /* **就緒門檻（M1）**：行查不到 ＋ 讀取面未落定 ⇒ **非終態**（「還沒讀到」不是「沒有這張圖」）。 */
   if (!meta && imageRowsUnsettled()) return imageRowsPendingReadout({ meta: null })
   /* **占位圖（本單新增｜影像例外）**：`placeholder/seal-no-image` 不是内容寻址键（云端桶无此对象），
