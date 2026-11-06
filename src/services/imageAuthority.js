@@ -80,6 +80,203 @@ const CLOUD_UPLOAD_FAIL_MESSAGE = '影像暫時無法入庫，請稍後再試（
 const CLOUD_VERIFY_FAIL_MESSAGE = '影像入庫失敗：未取得雲端回讀校驗，本次未寫入任何影像行'
 const CLOUD_UNCONFIGURED_MESSAGE = '影像入庫失敗：雲端寫入面未配置，無法完成回讀校驗'
 
+/* ---------------------------------------------------------------------------
+   失敗診斷（本單新增；**只在失敗時填**，成功路徑回包形狀一字不動）
+   ---------------------------------------------------------------------------
+   為什麼要有這一段：線上實測出現「重傳同一張圖（同一 sha）恆失敗」，而三面可能的真因
+   （A 路回包、直傳這一步、`registerArtifact` 回讀覆核）在對外文案上**長得一模一樣**
+   ⇒ 拿不到真因就無從修。本段把三面**串成一條可讀診斷**，只落兩處：
+     ① 只讀單槽 `storeArtifactAttemptSnapshot()`（與 `displayArtifactAttemptSnapshot()` 同構）；
+     ② **B 路**失敗的 `message` 末尾追加 `｜診斷：…`（A 路業務性拒絕的文案**一字不改** ——
+        既有自檢「A 路失敗文案沿用舊口徑」的字面斷言照舊成立）。
+   硬口徑：診斷串**不含密鑰 / URL / 手機號 / 摘要原文**（一律打碼）；不改變任何**成功**回包。
+   --------------------------------------------------------------------------- */
+
+/** 診斷標記前綴（繁體；固定分隔符，便於肉眼與腳本切分）。 */
+const STORE_DIAG_TAG = '｜診斷：'
+
+/** 最近一次寫入口失敗的結構化診斷（單槽只讀；無失敗 ⇒ `null`）。 */
+let lastStoreAttempt = null
+
+/** 讀取最近一次 `storeArtifactBytes` 失敗的結構化診斷（不改變任何回包形狀）。 */
+export function storeArtifactAttemptSnapshot() {
+  return lastStoreAttempt
+}
+
+/** 診斷打碼：URL / `cloud://` / 40 位以上長串（token、摘要、fileID）/ 手機號一律不落。 */
+function redactDiagnostic(raw) {
+  return String(raw === null || raw === undefined ? '' : raw)
+    .replace(/https?:\/\/\S+/gi, '<URL>')
+    .replace(/\bcloud:\/\/\S+/gi, '<CLOUD>')
+    .replace(/[A-Za-z0-9_-]{40,}/g, '<REDACTED>')
+    .replace(/\b\d{11}\b/g, '<PHONE>')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** 回包文本摘要（剝 HTML 標籤、截斷、打碼）。 */
+function replySummaryOf(raw) {
+  return redactDiagnostic(String(raw || '').replace(/<[^>]*>/g, ' ')).slice(0, 160)
+}
+
+/** 拋出物摘要（只取判別字段、打碼截斷；**不落載荷、不落地址**）。 */
+function errorSummaryOf(error) {
+  if (!error) return ''
+  const picked = error.code || error.message || error.name || String(error)
+  return redactDiagnostic(picked).slice(0, 160)
+}
+
+/**
+ * A 路失敗回包的**可讀診斷面**：HTTP status ＋ 回包摘要文本 ＋ 結構化 `reason`。
+ *
+ * 讀法（**與既有行為逐字等價**）：有 `text()` ⇒ 先取文本、再自行 `JSON.parse`
+ * （真實 `fetch` 的 `json()` 本來就是 `text().then(JSON.parse)`；先調 `json()` 會把體消耗掉、
+ * 摘要文本就沒了）；無 `text()`（離線自檢的假回包只有 `json`）⇒ 退回 `json()`。
+ * 取不到結構化 `reason` ⇒ 仍按舊口徑兜底 `'NOT_IMAGE'`。
+ * @param {object|null} reply HTTP 回包
+ * @returns {Promise<{status:number, reason:string, summary:string}>}
+ */
+async function readAuthorityFailureFace(reply) {
+  const status = Number(reply && reply.status) || 0
+  let raw = null
+  if (reply && typeof reply.text === 'function') {
+    try {
+      raw = await reply.text()
+    } catch {
+      raw = null
+    }
+  }
+  let payload = null
+  if (raw !== null) {
+    try {
+      payload = JSON.parse(raw)
+    } catch {
+      payload = null
+    }
+  } else if (reply && typeof reply.json === 'function') {
+    try {
+      payload = await reply.json()
+    } catch {
+      payload = null
+    }
+  }
+  const hasPayload = Boolean(payload) && typeof payload === 'object'
+  const reason = hasPayload ? String(payload.reason || '') : ''
+  const summary = hasPayload
+    ? redactDiagnostic(String(payload.message || payload.error || JSON.stringify(payload))).slice(0, 160)
+    : replySummaryOf(raw || '')
+  return { status, reason: reason || 'NOT_IMAGE', summary }
+}
+
+/**
+ * 「同一內容已存在」類回包判定（機械可判）：HTTP **409**，或 `reason` 字面含
+ * `duplicate` / `exists` / `already` / `已存在` / `重複`（`重复`）。
+ * **只**服務於「不當失敗、轉 B 路回讀覆核」這一個分支；不改寫任何 `reason` 字面值。
+ * @param {number} status HTTP 狀態碼
+ * @param {string} reason 結構化 `reason`
+ * @returns {boolean}
+ */
+function isAuthorityExistsFace(status, reason) {
+  if (Number(status) === 409) return true
+  const text = String(reason || '').toLowerCase()
+  if (!text) return false
+  return (
+    text.indexOf('duplicate') !== -1 ||
+    text.indexOf('exists') !== -1 ||
+    text.indexOf('already') !== -1 ||
+    text.indexOf('已存在') !== -1 ||
+    text.indexOf('重複') !== -1 ||
+    text.indexOf('重复') !== -1
+  )
+}
+
+/* A 路「已存在」類回包的內部標記 ＋ 失敗回包上的診斷側信道：一律用 `Symbol`（不進
+   `Object.keys` / `JSON`）⇒ **失敗回包恰 3 鍵的形狀逐字不變**、成功回包一個鍵都不多。 */
+const AUTHORITY_REPLAY_MARK = Symbol('xiai.authorityReplay')
+const ATTEMPT_DIAG_MARK = Symbol('xiai.storeAttempt')
+
+/** 在回包上掛診斷側信道（只掛失敗面；定義不了就沒有診斷，**不影響任何判定**）。 */
+function attachAttemptDiag(result, diag) {
+  if (result && typeof result === 'object') {
+    try {
+      Object.defineProperty(result, ATTEMPT_DIAG_MARK, { value: diag, enumerable: false, configurable: true, writable: true })
+    } catch {
+      /* 忽略：診斷是附加品，絕不改變判定 */
+    }
+  }
+  return result
+}
+
+/** 讀回包上的診斷側信道（無 ⇒ `null`）。 */
+function attemptDiagOf(result) {
+  return (result && result[ATTEMPT_DIAG_MARK]) || null
+}
+
+/** 標記「A 路回的是已存在類回包」（`storeArtifactBytes` 據此單開冪等回放分支）。 */
+function markAuthorityReplay(result) {
+  if (result && typeof result === 'object') {
+    try {
+      Object.defineProperty(result, AUTHORITY_REPLAY_MARK, { value: true, enumerable: false, configurable: true, writable: true })
+    } catch {
+      /* 標記不了 ⇒ 按一般失敗走（**不會**誤轉 B 路） */
+    }
+  }
+  return result
+}
+
+/** 讀「A 路回了已存在類回包」標記（導出供離線自檢斷言；不改變任何回包形狀）。 */
+export function isAuthorityReplay(result) {
+  return Boolean(result && result[AUTHORITY_REPLAY_MARK])
+}
+
+/** 把三面診斷壓成一條可讀串（打碼 ＋ 截斷；**零密鑰 / 零 URL / 零手機號**）。 */
+function describeAttempt(diag) {
+  const parts = []
+  const authority = (diag && diag.authority) || null
+  if (authority) {
+    parts.push(
+      `A路 HTTP ${authority.status || '-'} reason=${authority.reason || '-'}${authority.summary ? ` ${authority.summary}` : ''}`
+    )
+  }
+  const cloud = (diag && diag.cloud) || null
+  if (cloud) {
+    const upload = cloud.upload || {}
+    parts.push(`直傳 step=${upload.step || '-'} existedBefore=${upload.existedBefore === true ? 'true' : 'false'}`)
+    if (upload.detail) parts.push(`直傳細節=${upload.detail}`)
+    parts.push(
+      cloud.register
+        ? `register ok=${cloud.register.ok === true ? 'true' : 'false'} reason=${cloud.register.reason || '-'}${
+            cloud.register.message ? ` ${cloud.register.message}` : ''
+          }`
+        : 'register 未執行'
+    )
+  }
+  return redactDiagnostic(parts.join('；')).slice(0, 420)
+}
+
+/**
+ * 失敗收口（**只在失敗時調**）：登記只讀單槽 ＋（僅當本輪走過 B 路）在 `message` 末尾追加診斷。
+ * A 路業務性拒絕 / 預檢失敗 ⇒ **回包原樣返回**（文案一字不改，只登記快照）。
+ * @returns {{ok:false, reason:string, message:string}} 恰 3 鍵
+ */
+function recordStoreFailure(result, authorityDiag, cloudDiag) {
+  const diag = {
+    at: new Date().toISOString(),
+    route: cloudDiag ? 'A→B' : authorityDiag ? 'A' : 'pre-check',
+    reason: String((result && result.reason) || ''),
+    authority: authorityDiag || null,
+    cloud: cloudDiag || null
+  }
+  lastStoreAttempt = diag
+  if (!cloudDiag) return result
+  const base = String((result && result.message) || STORE_FAIL_MESSAGE)
+  return {
+    ok: false,
+    reason: (result && result.reason) || 'STORAGE_UNAVAILABLE',
+    message: `${base}${STORE_DIAG_TAG}${describeAttempt(diag)}`
+  }
+}
+
 /**
  * **A 路回包落到「改用 B 路」的 `reason` 面**（機械可判；**封閉集合**）。
  *
@@ -219,40 +416,86 @@ async function artifactObjectExisted(app, fileID) {
  */
 async function cloudUploadArtifact(bytes, digest) {
   const cloudPath = artifactObjectKeyOf(digest)
-  if (!cloudPath) return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: CLOUD_UPLOAD_FAIL_MESSAGE }
+  if (!cloudPath) {
+    return attachAttemptDiag(
+      { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: CLOUD_UPLOAD_FAIL_MESSAGE },
+      { step: 'bad-key', existedBefore: false, retryRegister: false }
+    )
+  }
   const fileID = cloudBaseFileIdOf(cloudPath)
   if (artifactStorageProvider) {
     try {
       const injected = await artifactStorageProvider({ cloudPath, fileID, bytes })
       if (!injected || injected.ok !== true) {
-        return {
-          ok: false,
-          reason: (injected && injected.reason) || 'STORAGE_UNAVAILABLE',
-          message: (injected && injected.message) || CLOUD_UPLOAD_FAIL_MESSAGE
-        }
+        return attachAttemptDiag(
+          {
+            ok: false,
+            reason: (injected && injected.reason) || 'STORAGE_UNAVAILABLE',
+            message: (injected && injected.message) || CLOUD_UPLOAD_FAIL_MESSAGE
+          },
+          {
+            step: 'provider-failed',
+            existedBefore: Boolean(injected && injected.existedBefore === true),
+            /* 注入面失敗 ⇒ 對象可能本就在（內容尋址）⇒ 允許交 `registerArtifact` 回讀覆核一次。 */
+            retryRegister: true,
+            detail: errorSummaryOf(injected && injected.message)
+          }
+        )
       }
-      return { ok: true, cloudPath, fileID, existedBefore: injected.existedBefore === true, message: '' }
-    } catch {
-      return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_FAIL_MESSAGE }
+      return attachAttemptDiag(
+        { ok: true, cloudPath, fileID, existedBefore: injected.existedBefore === true, message: '' },
+        { step: 'provider-ok', existedBefore: injected.existedBefore === true, retryRegister: false }
+      )
+    } catch (error) {
+      return attachAttemptDiag(
+        { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_FAIL_MESSAGE },
+        { step: 'provider-threw', existedBefore: false, retryRegister: true, detail: errorSummaryOf(error) }
+      )
     }
   }
   const app = await cloudBaseApp()
   if (!app || typeof app.uploadFile !== 'function') {
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_DOWN_MESSAGE }
+    return attachAttemptDiag(
+      { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_DOWN_MESSAGE },
+      { step: 'app-unavailable', existedBefore: false, retryRegister: true }
+    )
   }
   const existedBefore = await artifactObjectExisted(app, fileID)
+  /* **內容尋址 ⇒ 冪等（本單）**：同一 sha 的對象在本輪之前已存在 ⇒ **跳過 `uploadFile`**，
+     直接回 `ok:true, existedBefore:true`（後續 `registerArtifact` 會做服務端回讀覆核，
+     不需要重複寫字節；覆核不成立仍會明確失敗，零偽數據）。 */
+  if (existedBefore === true) {
+    return attachAttemptDiag(
+      { ok: true, cloudPath, fileID, existedBefore: true, message: '', skippedUpload: true },
+      { step: 'skipped-existing', existedBefore: true, retryRegister: false }
+    )
+  }
   const file = makeUploadFile(bytes)
-  if (!file) return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_DOWN_MESSAGE }
+  if (!file) {
+    return attachAttemptDiag(
+      { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_DOWN_MESSAGE },
+      { step: 'no-file', existedBefore: false, retryRegister: true }
+    )
+  }
   try {
     await app.uploadFile({ cloudPath, filePath: file })
-  } catch {
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_FAIL_MESSAGE }
+  } catch (error) {
+    /* 直傳失敗 **≠** 對象不在（線上實測「重傳同一張圖恆失敗」即此形態：對象本就在桶裡）
+       ⇒ 不當場判死，交 `storeViaCloud` 走一次 `registerArtifact` 服務端回讀覆核。 */
+    return attachAttemptDiag(
+      { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UPLOAD_FAIL_MESSAGE, cloudPath, fileID },
+      { step: 'upload-failed', existedBefore: false, retryRegister: true, detail: errorSummaryOf(error) }
+    )
   }
-  return { ok: true, cloudPath, fileID, existedBefore, message: '' }
+  return attachAttemptDiag(
+    { ok: true, cloudPath, fileID, existedBefore, message: '' },
+    { step: 'uploaded', existedBefore, retryRegister: false }
+  )
 }
 
 /**
- * **A 路**：交本機權威存儲 api（既有實作**一字未改**，只把「不可用」這一類標出來供上層回落）。
+ * **A 路**：交本機權威存儲 api（**回包口徑一字未改**；本單只加「失敗可讀診斷面」與
+ * 「已存在類回包」的內部標記 —— 標記用 `Symbol`，不進 `Object.keys` / `JSON`）。
  * @returns {Promise<{ok:true, sha256, bytesLength, mime, relPath, storageKey, idempotent, message}
  *          |{ok:false, reason:string, message:string}>}
  */
@@ -265,11 +508,28 @@ async function storeViaAuthorityApi(body, localDigest) {
       body
     })
   } catch {
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: STORE_DOWN_MESSAGE }
+    return attachAttemptDiag(
+      { ok: false, reason: 'STORAGE_UNAVAILABLE', message: STORE_DOWN_MESSAGE },
+      { route: 'A', status: 0, reason: 'STORAGE_UNAVAILABLE', summary: 'fetch 抛错（連不上本機權威存儲 api）', existsFace: false }
+    )
   }
   if (!reply || !reply.ok) {
-    const reason = reply ? await reasonOfReply(reply) : 'STORAGE_UNAVAILABLE'
-    return { ok: false, reason: reason || 'STORAGE_UNAVAILABLE', message: STORE_FAIL_MESSAGE }
+    /* 診斷面（HTTP status ＋ 回包摘要文本 ＋ 結構化 reason）**與判定分開取**：判定仍只認
+       結構化 `reason`（取不到 ⇒ 舊口徑 `'NOT_IMAGE'`），診斷只進側信道，不改判定、不改文案。 */
+    const face = reply
+      ? await readAuthorityFailureFace(reply)
+      : { status: 0, reason: 'STORAGE_UNAVAILABLE', summary: '' }
+    const reason = face.reason || 'STORAGE_UNAVAILABLE'
+    const existsFace = isAuthorityExistsFace(face.status, reason)
+    const result = attachAttemptDiag(
+      { ok: false, reason, message: STORE_FAIL_MESSAGE },
+      { route: 'A', status: face.status, reason, summary: face.summary, existsFace }
+    )
+    /* 「同一內容已存在」類回包 ⇒ **不當失敗**：掛冪等回放標記，交 `storeArtifactBytes` 轉 B 路
+       回讀覆核。這一分支**不在** `ARTIFACT_FALLBACK_REASONS` 之內（那張表仍只管「本機這一側
+       不可用 / 形狀不可辨」），業務性拒絕的既有口徑一字不動。 */
+    if (existsFace) markAuthorityReplay(result)
+    return result
   }
   let payload = null
   try {
@@ -282,7 +542,16 @@ async function storeViaAuthorityApi(body, localDigest) {
   /* ④ 摘要自檢：形態不對 / 體量不符 / 與本地按字節算出的摘要不一致 ⇒ **明確失敗**
      （線上 Vercel 的 200 HTML 走的就是這一支 ⇒ 上層據 `reason` 表回落到 B 路）。 */
   if (!digest || !Number.isFinite(bytesLength) || bytesLength !== body.length || digest !== localDigest) {
-    return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: STORE_FAIL_MESSAGE }
+    return attachAttemptDiag(
+      { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: STORE_FAIL_MESSAGE },
+      {
+        route: 'A',
+        status: Number(reply.status) || 0,
+        reason: 'UNRECOGNIZED_IMAGE',
+        summary: '回包摘要面不成立（缺 sha256 / bytesLength，或與本地按字節算出的摘要不一致）',
+        existsFace: false
+      }
+    )
   }
   return {
     ok: true,
@@ -387,32 +656,63 @@ async function ensureDisplayArtifactBestEffort(cloudPath, digest) {
  * @returns {Promise<{ok:boolean, sha256?:string, bytesLength?:number, mime?:string, relPath?:string,
  *          storageKey?:string, idempotent?:boolean, reason?:string, message:string}>}
  */
-async function storeViaCloud(body, localDigest) {
+async function storeViaCloud(body, localDigest, options = {}) {
   const uploaded = await cloudUploadArtifact(body, localDigest)
+  const uploadDiag = attemptDiagOf(uploaded) || { step: 'unknown', existedBefore: false, retryRegister: false }
+  /* 內容尋址 ⇒ 對象鍵只由摘要派生（唯一構造點）；直傳面沒吐鍵時按同一規則補齊，
+     好讓「回讀覆核」這一支不依賴直傳這一步的回包形狀。 */
+  let cloudPath = uploaded.cloudPath || artifactObjectKeyOf(localDigest)
+  let existedBefore = uploaded.existedBefore === true
   if (!uploaded.ok) {
-    return { ok: false, reason: uploaded.reason || 'STORAGE_UNAVAILABLE', message: uploaded.message }
+    /* **內容尋址 ⇒ 冪等（本單）**：直傳這一步失敗 **不等於**「對象不在」—— 同一 sha 的對象
+       可能本就在桶裡（線上實測「重傳同一張圖恆失敗」正是這一形態：對象在、直傳這一步恆紅）。
+       ⇒ 不當場判死：改交 `registerArtifact` **服務端回讀覆核**一次；回讀逐字驗過 ⇒ 成功
+       （＝「同一 sha 的對象已存在」視作成功，且 `idempotent:true`）。
+       回讀也不成立 ⇒ **照原樣結構化失敗**（零偽數據：一個字節都沒驗過就不報成功）。 */
+    const retryable = uploadDiag.retryRegister === true && Boolean(cloudPath)
+    if (!retryable) {
+      return attachAttemptDiag(
+        { ok: false, reason: uploaded.reason || 'STORAGE_UNAVAILABLE', message: uploaded.message },
+        { route: 'B', upload: uploadDiag, register: null }
+      )
+    }
+    /* 直傳沒寫成而回讀讀到 ⇒ 對象在本輪之前就已在（內容尋址下讀到的必是同一份字節）。 */
+    existedBefore = true
   }
-  const cloudPath = uploaded.cloudPath
   const gate = await userWriteGate(ARTIFACT_REGISTER_OP, {
     cloudPath,
     sha256: localDigest,
     bytesLength: body.length
   })
+  const registerDiag = { ok: false, reason: '', message: '' }
   if (gate && gate.dev === true) {
     /* dev / 離線形態：`userGate` 直接放行（**本門不算授權**）⇒ 未經雲端回讀覆核 ⇒ **結構化失敗**。 */
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UNCONFIGURED_MESSAGE }
+    registerDiag.reason = 'STORAGE_UNAVAILABLE'
+    registerDiag.message = 'dev / 離線形態：未經雲端回讀覆核'
+    return attachAttemptDiag(
+      { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_UNCONFIGURED_MESSAGE },
+      { route: 'B', upload: uploadDiag, register: registerDiag }
+    )
   }
   if (!gate || gate.ok !== true) {
     /* 服務端業務拒絕 ⇒ **原樣透傳**（`reason` / `message` 一個都不改寫）。 */
-    return {
-      ok: false,
-      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
-      message: (gate && gate.message) || CLOUD_UPLOAD_FAIL_MESSAGE
-    }
+    registerDiag.reason = (gate && gate.reason) || 'STORAGE_UNAVAILABLE'
+    registerDiag.message = (gate && gate.message) || CLOUD_UPLOAD_FAIL_MESSAGE
+    return attachAttemptDiag(
+      { ok: false, reason: registerDiag.reason, message: registerDiag.message },
+      { route: 'B', upload: uploadDiag, register: registerDiag }
+    )
   }
   const artifact = gate.artifact || null
   /* 雲端形態下成功回包**必須**帶回讀覆核面；缺它 ⇒ 形同「只信客戶端自報」⇒ 明確失敗。 */
-  if (!artifact) return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_VERIFY_FAIL_MESSAGE }
+  if (!artifact) {
+    registerDiag.reason = 'STORAGE_UNAVAILABLE'
+    registerDiag.message = CLOUD_VERIFY_FAIL_MESSAGE
+    return attachAttemptDiag(
+      { ok: false, reason: 'STORAGE_UNAVAILABLE', message: CLOUD_VERIFY_FAIL_MESSAGE },
+      { route: 'B', upload: uploadDiag, register: registerDiag }
+    )
+  }
   const serverDigest = normalizeDigest(artifact && artifact.sha256)
   const serverBytes = Number(artifact && artifact.bytesLength)
   const serverMime = String((artifact && artifact.mime) || '').trim().toLowerCase()
@@ -425,8 +725,16 @@ async function storeViaCloud(body, localDigest) {
     serverMime === STORAGE_MIME &&
     serverKey === cloudPath
   if (!verified) {
-    return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: CLOUD_VERIFY_FAIL_MESSAGE }
+    registerDiag.reason = 'UNRECOGNIZED_IMAGE'
+    registerDiag.message = CLOUD_VERIFY_FAIL_MESSAGE
+    return attachAttemptDiag(
+      { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: CLOUD_VERIFY_FAIL_MESSAGE },
+      { route: 'B', upload: uploadDiag, register: registerDiag }
+    )
   }
+  registerDiag.ok = true
+  registerDiag.reason = ''
+  registerDiag.message = ''
   /* ③ **best-effort 展示件轉碼（本單追加的一次 op 調用）**：`registerArtifact` 成功後追加
      `ensureDisplayArtifact`（服務端把 `.tiff` 原圖轉碼成展示件 PNG 並上傳到內容尋址展示鍵）。
      **失敗隔離**：一切失敗只結構化登記（`displayArtifactAttemptSnapshot()`），不上拋、
@@ -439,8 +747,10 @@ async function storeViaCloud(body, localDigest) {
     mime: serverMime,
     relPath: artifactRelPathOf(serverDigest),
     storageKey: serverKey,
-    /* `idempotent` 語義與 A 路對齊：**本輪之前對象已存在**（內容尋址 ⇒ 未新增字節 / 未新增寫入）。 */
-    idempotent: uploaded.existedBefore === true,
+    /* `idempotent` 語義與 A 路對齊：**本輪之前對象已存在**（內容尋址 ⇒ 未新增字節 / 未新增寫入）。
+       本單兩個「已存在」來源都算數：① 本機探針 `existedBefore === true`（跳過直傳那一支）；
+       ② A 路回「已存在類回包」後轉來的冪等回放（`options.knownExisting`）。 */
+    idempotent: existedBefore === true || options.knownExisting === true,
     message: ''
   }
 }
@@ -461,11 +771,27 @@ async function storeViaCloud(body, localDigest) {
  */
 export async function storeArtifactBytes(bytes, options = {}) {
   const body = bytesViewOf(bytes)
-  if (body === null) return { ok: false, reason: 'NOT_IMAGE', message: STORE_FAIL_MESSAGE }
-  if (body.length === 0) return { ok: false, reason: 'EMPTY_CONTENT', message: STORE_FAIL_MESSAGE }
+  if (body === null) return recordStoreFailure({ ok: false, reason: 'NOT_IMAGE', message: STORE_FAIL_MESSAGE }, null, null)
+  if (body.length === 0) {
+    return recordStoreFailure({ ok: false, reason: 'EMPTY_CONTENT', message: STORE_FAIL_MESSAGE }, null, null)
+  }
   const localDigest = sha256Hex(body)
   const apiResult = await storeViaAuthorityApi(body, localDigest)
   if (apiResult.ok) return apiResult
-  if (ARTIFACT_FALLBACK_REASONS.indexOf(apiResult.reason || '') === -1) return apiResult
-  return await storeViaCloud(body, localDigest)
+  const authorityDiag = attemptDiagOf(apiResult)
+  /* ②′ **冪等回放分支（本單；在 `ARTIFACT_FALLBACK_REASONS` 之外單開）**：A 路回的是「同一
+     內容已存在」類回包（HTTP 409 / `reason` 含 duplicate·exists·已存在）⇒ **不當失敗**，
+     轉 **B 路回讀覆核**（由 `registerArtifact` 服務端回讀重算、逐字比對才算數）。
+     只在這一條件下走這條分支；其餘業務性拒絕仍按 ③ 原樣上拋、不換路。 */
+  if (isAuthorityReplay(apiResult)) {
+    const replayed = await storeViaCloud(body, localDigest, { knownExisting: true })
+    if (replayed.ok) return replayed
+    return recordStoreFailure(replayed, authorityDiag, attemptDiagOf(replayed))
+  }
+  if (ARTIFACT_FALLBACK_REASONS.indexOf(apiResult.reason || '') === -1) {
+    return recordStoreFailure(apiResult, authorityDiag, null)
+  }
+  const cloudResult = await storeViaCloud(body, localDigest)
+  if (cloudResult.ok) return cloudResult
+  return recordStoreFailure(cloudResult, authorityDiag, attemptDiagOf(cloudResult))
 }
