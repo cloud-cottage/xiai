@@ -59,6 +59,10 @@ import {
   planFaceNumbers,
   saveSealRows,
   saveFaceRows,
+  /* **清除本機資料（Kevin 2026-11-06）**：執行點與孤兒印章行讀數都只在數據層有一份，
+     本服務只轉口（視圖一律經服務層，不直碰 `data/*`）。 */
+  clearLocalDatabase as dbClearLocalDatabase,
+  localOrphanSealReadout as dbLocalOrphanSealReadout,
   /* **上傳即入册（本單）**：影像行 `id` 改寫成雲端內容尋址編號時的整表落盤
      （與 `insertImageRow` 同一寫入口，不另立第二套存儲寫）。 */
   saveImageRows,
@@ -572,6 +576,39 @@ export function canReplaceFaceImage(actor) {
 export function canDeleteSeal(actor) {
   const user = actor || currentUser()
   return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/* ============================================================================ *
+   **清除本機資料（管理員面｜Kevin 2026-11-06「本地不要留數據庫了」）**
+   ----------------------------------------------------------------------------
+   · 能力判定 `canClearLocalData`：与 `canDeleteSeal` / `canEditSealAttributes`
+     **同一套**口径（`role === 'admin'`；缺省回落当前登录态）——**不另造第二把尺子**。
+   · 钩子取值一律 `data-action="local-db-clear"`（**不新增 `data-admin-action` 取值**）。
+   · 執行點唯一 ＝ `data/db.js::clearLocalDatabase()`（清 localStorage 資料鍵 ＋
+     IndexedDB 全部物件倉），本服務只轉口；**雲端零請求、零寫入**（雲端資料不受影響）。
+   · 孤兒印章行讀數 `localOrphanSealReadout()` 同理只轉口（真源在數據層覆蓋層）。
+   ============================================================================ */
+
+/** 当前（或指定）账号是否可**清除本机资料** —— 供广场 / 详情页决定入口是否渲染（管理员专属）。 */
+export function canClearLocalData(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/**
+ * **本机有、云端快照没有**的印章行读数（顶部提示「本机有 N 枚印章不在云端」用）。
+ * @returns {{count:number, ids:string[]}}
+ */
+export function localOrphanSealReadout() {
+  return dbLocalOrphanSealReadout()
+}
+
+/**
+ * **清除本机资料**（管理员入口的唯一执行点）。
+ * @returns {Promise<{ok:boolean, keys:object, idb:object, messages:string[]}>}
+ */
+export function clearLocalDatabase() {
+  return dbClearLocalDatabase()
 }
 
 /* ============================================================================ *

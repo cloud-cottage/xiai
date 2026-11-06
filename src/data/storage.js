@@ -365,3 +365,69 @@ export function clearMigrationBackups() {
   })
   return { ok: Object.values(results).every((flag) => flag === true), removed, results }
 }
+
+/* ============================================================================
+   **「清除本機資料」的鍵面口徑（Kevin 2026-11-06「本地不要留數據庫了，直接清掉」）**
+   ----------------------------------------------------------------------------
+   · **清什麼**：命名空間 `xiai:v1:` 下的**全部資料鍵**（印章 / 印面 / 影像行、勘誤、積分、
+     雲盤、導入行、回滾副本 … 一律清）—— 與確認文案「清空本機全部 … 資料行」逐字對應。
+   · **保留什麼（非資料鍵）**：`session`（登錄會話）＋ `users`（帳號 / 憑據行 ——
+     `session.js::restoreSession(lookupUserById)` 要靠它把 `userId` 換回使用者，
+     清掉它等於把人登出）＋ `theme`（主題）＋ `seeded`（種子與遷移記帳 ——
+     **必須留**：`ensureSeed()` 見到該記帳才不會把整套種子重新灌回本機，
+     也就是「清完不再自己長回來」的開關）。
+   · **命名空間外的鍵一律不碰**（CloudBase SDK 的登錄態、其它來源的鍵都不在 `NS` 前綴下）。
+   · 本函數只做**鍵的枚舉與刪除**；IndexedDB 那一半在 `data/db.js::clearLocalDatabase()`。
+   ========================================================================== */
+
+/** 清除本機資料時**保留**的非資料鍵（真源；視圖的確認文案與自檢都讀它）。 */
+export const LOCAL_DATA_PRESERVE_KEYS = Object.freeze(['session', 'users', 'theme', 'seeded'])
+
+/**
+ * 枚舉本命名空間下的全部鍵並分類（**不寫入任何東西**）。
+ * @returns {{all:string[], preserved:string[], data:string[]}}
+ */
+export function listLocalDataKeys() {
+  const out = { all: [], preserved: [], data: [] }
+  const collect = (full) => {
+    if (typeof full !== 'string' || full.indexOf(NS) !== 0) return
+    const key = full.slice(NS.length)
+    out.all.push(key)
+    if (LOCAL_DATA_PRESERVE_KEYS.indexOf(key) !== -1) out.preserved.push(key)
+    else out.data.push(key)
+  }
+  try {
+    const store = window.localStorage
+    if (store && typeof store.length === 'number' && typeof store.key === 'function') {
+      for (let i = 0; i < store.length; i += 1) collect(store.key(i))
+      return out
+    }
+    /* 兜底（假體只有 getItem / setItem / removeItem 沒有鍵枚舉面）：按可枚舉自有鍵走一遍。 */
+    if (store) Object.keys(store).forEach(collect)
+  } catch {
+    /* 枚舉失敗 ⇒ 如實回空（呼叫方據此報錯，不假報成功）。 */
+  }
+  return out
+}
+
+/**
+ * **清除本命名空間下的全部資料鍵**（保留 `LOCAL_DATA_PRESERVE_KEYS`）。
+ * 逐鍵刪除；**單鍵失敗不中斷**，最後如實彙總（`failed` 非空 ⇒ `ok:false`）。
+ * @returns {{ok:boolean, removed:string[], kept:string[], failed:string[], scanned:string[]}}
+ */
+export function clearLocalDataKeys() {
+  const listed = listLocalDataKeys()
+  const removed = []
+  const failed = []
+  listed.data.forEach((key) => {
+    try {
+      window.localStorage.removeItem(NS + key)
+      /* 刪後回讀確認（**不以呼叫成功當成功**）。 */
+      if (window.localStorage.getItem(NS + key) === null) removed.push(key)
+      else failed.push(key)
+    } catch {
+      failed.push(key)
+    }
+  })
+  return { ok: failed.length === 0, removed, kept: listed.preserved.slice(), failed, scanned: listed.all.slice() }
+}

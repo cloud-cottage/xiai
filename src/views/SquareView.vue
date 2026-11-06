@@ -62,7 +62,8 @@ function retryDataSource() {
    ① 只消费一次（刷新 / 返回都不会再弹）；② **不新增全局状态库**（零 store、零持久层）。
    ============================================================================ */
 const SQUARE_NOTICES = Object.freeze({
-  'seal-deleted': '已刪除印章（編號已釋放）。'
+  'seal-deleted': '已刪除印章（編號已釋放）。',
+  'local-db-cleared': '本機資料已清除（雲端資料不受影響）。'
 })
 
 /* ============================================================================
@@ -264,6 +265,63 @@ function askSaveSeal(seal) {
 
 /** 保存反馈由选择器内给出（成功 / 幂等 / 失败三类逐字）⇒ 此处只保留选择器打开态。 */
 function onSealSaved() {}
+
+/* ============================================================================ *
+   **清除本機資料（管理員面）＋ 孤兒印章行提示（Kevin 2026-11-06）**
+   ----------------------------------------------------------------------------
+   · 入口只按服务层 `seals.canClearLocalData()` 渲染（非管理员 / 游客 ⇒ **不渲染**，
+     不得 CSS 隐藏 / `disabled` 冒充）；钩子**只用** `data-action="local-db-clear"`
+     （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。
+   · 二次确认文案**必须列明**：清空本機全部印章 / 印面 / 影像行与影像二进制、**不可恢复**、
+     **雲端資料不受影響**（另点名保留登录会话 / 账号 / 主题）。
+   · 成功 ⇒ **强制从云端重载**（`seals.retryDataSource()`）＋ 回广场带一次性提示
+     `?notice=local-db-cleared`；失败 ⇒ **本页如实上屏**（不假报成功）。
+   · 孤儿行提示：本机有、云端快照没有的印章行（计数真源＝数据层 `localOrphanSealReadout()`）
+     ⇒ 顶部一行「本機有 N 枚印章不在雲端（已不再顯示）」＋同一入口按钮；**不渲染孤儿行**。
+   ============================================================================ */
+const canClearLocal = computed(() => seals.canClearLocalData())
+/** 依赖面必须含**数据源状态**：云端水合晚到 / 重新加载后要重算（与 `list` 同源）。 */
+const orphanReadout = computed(() => {
+  void dataVersion.value
+  void dataSource.value.state
+  return seals.localOrphanSealReadout()
+})
+const orphanCount = computed(() => orphanReadout.value.count)
+const clearOpen = ref(false)
+const clearBusy = ref(false)
+
+/** 二次确认主文案（**必须列明**：清空范围、不可恢复、云端不受影响）。 */
+const CLEAR_MESSAGE =
+  '將清空本機全部印章、印面與影像行、影像二進制，以及其餘本機資料行；清除後不可恢復，雲端資料不受影響（登錄會話、帳號與主題會保留）。'
+
+function askClearLocal() {
+  clearOpen.value = true
+}
+
+/** 确认清除：过服务层执行点；成功 ⇒ 强制从云端重载并回广场带一次性提示，失败 ⇒ 本页上屏。 */
+async function confirmClearLocal() {
+  if (clearBusy.value) return
+  clearBusy.value = true
+  let result = null
+  try {
+    result = await seals.clearLocalDatabase()
+  } catch {
+    result = { ok: false, messages: ['清除本機資料時發生未預期錯誤。'] }
+  }
+  clearBusy.value = false
+  clearOpen.value = false
+  if (!result || result.ok !== true) {
+    /* **失败如实上屏**：取数据层 / 存储层原话，不假报成功。 */
+    const detail = result && Array.isArray(result.messages) && result.messages.length ? `（${result.messages.join('；')}）` : ''
+    feedback.value = `清除本機資料失敗，本次未完成清除。${detail}`
+    return
+  }
+  dataVersion.value += 1
+  /* **强制从云端重载**（清完必须重读云端，不拿本机残留充数）。 */
+  void seals.retryDataSource()
+  const nav = router.push({ name: 'square', query: { notice: 'local-db-cleared' } })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+}
 </script>
 
 <template>
@@ -281,6 +339,37 @@ function onSealSaved() {}
         @click="uploadOpen = true"
       >
         上傳印章
+      </button>
+      <!-- 「清除本機資料」（管理员专属）：非管理员 / 游客 ⇒ **不渲染**（DOM 零命中；
+           不得 CSS 隐藏 / `disabled` 冒充）。钩子只用 `data-action="local-db-clear"`
+           （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。 -->
+      <button
+        v-if="canClearLocal"
+        class="btn btn--ghost"
+        type="button"
+        data-action="local-db-clear"
+        @click="askClearLocal"
+      >
+        清除本機資料
+      </button>
+    </div>
+
+    <!-- **孤兒印章行提示**（本機有、雲端快照沒有 ⇒ 已不再渲染，只提示＋給同一入口）。
+         計數真源＝數據層覆蓋層；雲端未落定時計數為 0 ⇒ 本塊不渲染。 -->
+    <div
+      v-if="orphanCount > 0"
+      class="notice square__notice"
+      data-local-orphan="square"
+    >
+      <span>本機有 {{ orphanCount }} 枚印章不在雲端（已不再顯示）。</span>
+      <button
+        v-if="canClearLocal"
+        class="btn btn--ghost"
+        type="button"
+        data-action="local-db-clear"
+        @click="askClearLocal"
+      >
+        清除本機資料
       </button>
     </div>
 
@@ -376,6 +465,18 @@ function onSealSaved() {}
       confirm-text="確認下載"
       @confirm="confirmDownload"
       @cancel="pendingSeal = null"
+    />
+
+    <!-- 「清除本機資料」二次确认（**必须列明**：清空范围、不可恢复、雲端資料不受影響）。
+         默认不通过；确认走 `confirmClearLocal`（失败本页如实上屏、成功回广场带一次性提示）。 -->
+    <ConfirmDialog
+      v-if="clearOpen"
+      title="清除本機資料"
+      :message="CLEAR_MESSAGE"
+      hint="此操作只影響本機瀏覽器裡的資料；清除後需重新從雲端載入。"
+      confirm-text="確認清除"
+      @confirm="confirmClearLocal"
+      @cancel="clearOpen = false"
     />
 
     <UploadSealDialog

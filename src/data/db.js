@@ -25,8 +25,12 @@ import {
   migrationBackupWriteKey,
   readMigrationBackups,
   MIGRATION_BACKUP_GENERATIONS,
-  /* **本单（读缓存）**：写入代数 —— `readCollection` 的缓存失效判据之一（另一支是云端快照换代）。 */
-  storageGeneration
+  /* **本單（读缓存）**：写入代数 —— `readCollection` 的缓存失效判据之一（另一支是云端快照换代）。 */
+  storageGeneration,
+  /* **清除本機資料（Kevin 2026-11-06）**：localStorage 那一半的鍵面枚舉 / 刪除與保留清單，
+     真源在 `storage.js`（全工程唯一碰 localStorage 的模組），本文件只調用、不自寫第二份。 */
+  clearLocalDataKeys,
+  LOCAL_DATA_PRESERVE_KEYS
 } from './storage.js'
 import {
   putBlob,
@@ -36,7 +40,12 @@ import {
   assetBlobKey,
   photoBlobKey,
   listBlobKeys,
-  blobstoreInfo
+  blobstoreInfo,
+  /* **清除本機資料**：IndexedDB 那一半要用的**庫名 / 版本 / 物件倉名**（真源在 `blobstore.js`）。
+     本文件**不寫死**這些字面量 —— 倉名一律由 `db.objectStoreNames` **現列現清**。 */
+  BLOBSTORE_DB_NAME,
+  BLOBSTORE_DB_VERSION,
+  BLOBSTORE_STORE
 } from './blobstore.js'
 import { normalizeImagePayload, bytesToDataUrl, dataUrlToBytes, imageSize, sha256Hex, toUint8Array } from './assetmeta.js'
 /* **识别编码（sid / fid）纯函数单点**：`src/utils/codeId.js`（与云函数副本**逐字节相同**）。
@@ -50,6 +59,9 @@ import { uidOf } from './uid.js'
    本文件在 `readCollection` 裏**只讀它** —— 是否接管、接管到哪一步（pending / ready / failed）
    全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。 */
 import { cloudBaseReadOf, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS } from './cloudbase.js'
+/* **雲模式停寫本機鏡像行（本單）**：`writeFaceMode()` 是「寫入口形態」的**唯一判據來源**
+   （`data/writeFaceMode.js` 文件頭明文：頁面 / 服務不得各自判斷）；本文件只讀它。 */
+import { writeFaceMode, WRITE_FACE_MODES } from './writeFaceMode.js'
 /* **K-P5b（2026-09-23｜寫入面切遠端）**：新增產物的容器 ＝ **單頁 8bit Deflate TIFF**（`STORAGE_MIME`，
    字面定義點仍恰 1 處 ＝ `utils/tiff.js::TIFF_MIME`，本處**只 import 轉口**、不另立同值字面量）。 */
 import { STORAGE_MIME } from '../utils/image.js'
@@ -350,7 +362,11 @@ function withLocalOverlay(key, cloudRows, localKey = key) {
   if (!OVERLAY_COLLECTION_KEYS.includes(key)) return cloud
   /* **不调 `ensureSeed()`**：云模式下一行种子都不许写进 localStorage；这里只读**已有**的本地行。 */
   const local = readKey(localKey)
-  if (!Array.isArray(local) || local.length === 0) return cloud
+  if (!Array.isArray(local) || local.length === 0) {
+    /* 本機沒有行 ⇒ 孤兒印章行必為 0（**早退也要歸零**，否則清庫後計數會殘留）。 */
+    if (key === ORPHAN_TRACKED_CLOUD_KEY) setOrphanSeals([])
+    return cloud
+  }
   const overlays = new Map()
   local.forEach((row) => {
     const id = overlayIdentityOf(row)
@@ -358,7 +374,10 @@ function withLocalOverlay(key, cloudRows, localKey = key) {
     if (isVerbatimSeedRow(localKey, row)) return // 本机示范种子 ⇒ 不并入（见本节头注）
     overlays.set(id, row)
   })
-  if (overlays.size === 0) return cloud
+  if (overlays.size === 0) {
+    if (key === ORPHAN_TRACKED_CLOUD_KEY) setOrphanSeals([])
+    return cloud
+  }
   const out = []
   const matched = new Set()
   cloud.forEach((row) => {
@@ -371,11 +390,51 @@ function withLocalOverlay(key, cloudRows, localKey = key) {
     }
     out.push(row)
   })
-  /* 本地有、云端没有的行 ⇒ **照读**（本地行原样交出；本地行序稳定）。 */
+  /* **本機有、雲端沒有的行（孤兒行）**：
+     · 印章行（`seals`）⇒ **不再渲染**（本單 Kevin 2026-11-06：雲端是唯一權威；
+       「本機有 N 枚印章不在雲端（已不再顯示）」的計數即取自這裡）；
+       ⚠️ 取代本節頭注「本地有、云端没有的行也要能读到」那條舊口徑 —— 舊口徑會把
+       已刪 / 未上雲的本機行當正常資料上屏，正是本單要收掉的「雲端無、本機有」孤兒行。
+     · 其餘覆蓋層鍵（印面 / 影像 / 公開勘誤投影）**照舊交出**：它們不獨立渲染，
+       只經已顯示的印章 join，動它們只會多冒讀取風險（本單不動）。 */
+  const orphans = []
   overlays.forEach((row, id) => {
-    if (!matched.has(id)) out.push(row)
+    /* 匹配行：**已在上面的雲端迴圈裡以「逐鍵合併」的形態輸出過 ⇒ 這裡不再推**
+       （推了會把同一枚印章渲染成兩張卡；實測過一次，正是這行寫錯）。 */
+    if (matched.has(id)) return
+    if (key === ORPHAN_TRACKED_CLOUD_KEY) {
+      orphans.push(id)
+      return
+    }
+    out.push(row)
   })
+  if (key === ORPHAN_TRACKED_CLOUD_KEY) setOrphanSeals(orphans)
   return out
+}
+
+/* ============================================================================
+   **孤兒印章行讀數（本單）**
+   ----------------------------------------------------------------------------
+   `orphanSealState` 只由 `withLocalOverlay('seals', …)` 寫（雲端快照 ready 才會跑到那裡）；
+   快照沒落定 / 本機沒行 ⇒ 計數 0（**不得**在讀不到雲端時把本機行報成孤兒）。
+   ============================================================================ */
+
+/** 孤兒追蹤的雲集合鍵（＝`CLOUD_COLLECTION_KEYS` 裏的 `seals`；真源不另立字面量副本。） */
+const ORPHAN_TRACKED_CLOUD_KEY = 'seals'
+
+/** 孤兒印章行讀數（計數 + id 清單；**只讀**，不寫任何存儲）。 */
+let orphanSealState = { count: 0, ids: Object.freeze([]) }
+
+function setOrphanSeals(ids) {
+  orphanSealState = { count: ids.length, ids: Object.freeze(ids.slice()) }
+}
+
+/**
+ * **本機有、雲端快照沒有**的印章行讀數（視圖頂部提示用）。
+ * @returns {{count:number, ids:string[]}}
+ */
+export function localOrphanSealReadout() {
+  return { count: orphanSealState.count, ids: orphanSealState.ids }
 }
 
 /* ============================================================================
@@ -1377,7 +1436,30 @@ export function listSealRows() {
   return readCollection(STORAGE_KEYS.seals, [])
 }
 
+/* ============================================================================
+   **雲模式停寫本機鏡像行（本單｜Kevin 2026-11-06「本地不要留數據庫了」）**
+   ----------------------------------------------------------------------------
+   口徑（逐條）：
+     · `writeFaceMode() === 'cloud'` ⇒ **印章行 / 印面行 / 影像行一律不寫本機**，
+       收口點就是下面三個 `save*Rows`（`insertSealRow` / `insertFaceRow` /
+       `insertImageRow` 與各服務層回寫**全部經它們** ⇒ 收口在此，不再逐處加門）；
+     · **返回成功形狀**（與 `writeCollection` 逐字同形：回傳 `rows`、不回 `false`）——
+       既有呼叫方的 `=== false` 判錯、回滾分支、`{ok}` 形狀**一字不改**；
+     · `local-dev` 形態**一字不改**（相機 / 本機 dev 的本地行為照舊）；
+     · 圖片二進制與展示件緩存（`putImageBinary` / `readImageDataUrl` 一族）**本單不動**
+       （讀面性能依賴它）；
+     · **本機行不再更新 ⇒ 孤兒行**（雲端快照裡找不到的本機印章行）由
+       `withLocalOverlay()` **不再渲染** + `localOrphanSealReadout()` 出計數，
+       視圖頂部提示「本機有 N 枚印章不在雲端（已不再顯示）」。
+   ============================================================================ */
+
+/** 當前是否「雲模式」⇒ 本機鏡像行**停寫**（唯一判據＝`writeFaceMode()`）。 */
+function cloudMirrorWriteSkipped() {
+  return writeFaceMode() === WRITE_FACE_MODES.CLOUD
+}
+
 export function saveSealRows(rows) {
+  if (cloudMirrorWriteSkipped()) return rows
   return writeCollection(STORAGE_KEYS.seals, rows)
 }
 
@@ -1388,6 +1470,7 @@ export function listFaceRows() {
 }
 
 export function saveFaceRows(rows) {
+  if (cloudMirrorWriteSkipped()) return rows
   return writeCollection(STORAGE_KEYS.faces, rows)
 }
 
@@ -1422,7 +1505,182 @@ export function listImageRows() {
 }
 
 export function saveImageRows(rows) {
+  if (cloudMirrorWriteSkipped()) return rows
   return writeCollection(STORAGE_KEYS.images, rows)
+}
+
+/* ============================================================================
+   **清除本機資料（Kevin 2026-11-06「本地不要留數據庫了，直接清掉」）**
+   ----------------------------------------------------------------------------
+   一次做完兩半：
+     ① **localStorage 資料鍵** —— 調 `storage.js::clearLocalDataKeys()`（真源在那裡：
+       枚舉、保留清單 `LOCAL_DATA_PRESERVE_KEYS` ＝ 登錄會話 / 帳號憑據 / 主題 / 種子記帳）；
+     ② **IndexedDB 全部物件倉** —— **先列庫、再逐庫現列 `objectStoreNames`、再逐倉 `clear()`**
+       （**不寫死任何倉名**；`blobstore.js` 的庫名 / 倉名是真源常量，只用來保證本應用自己的
+       影像庫一定在枚舉結果裡，不是拿來猜倉名）。
+   清完**讀緩存一律失效**（`collectionReadCache` / 影像行 / 印面行 / 種子指紋 / 孤兒計數）
+   ⇒ 下一次讀必重讀，不得拿舊快照充數。
+   失敗**如實回報**（`ok:false` ＋ 逐項 `messages`），絕不假報成功。
+   ============================================================================ */
+
+/** 取 IndexedDB factory（與 `blobstore.js` 同一容錯口徑；不支持 ⇒ `null`）。 */
+function idbFactory() {
+  if (typeof indexedDB !== 'undefined' && indexedDB) return indexedDB
+  if (typeof globalThis !== 'undefined' && globalThis.indexedDB) return globalThis.indexedDB
+  return null
+}
+
+/** 枚舉本源（origin）下已存在的 IndexedDB 庫名；老實現不支持 `databases()` ⇒ 回空陣列。 */
+async function listIndexedDbNames(factory) {
+  if (typeof factory.databases !== 'function') return []
+  try {
+    const list = await factory.databases()
+    if (!Array.isArray(list)) return []
+    return list.map((entry) => (entry && typeof entry.name === 'string' ? entry.name : '')).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** 打開一個庫（不傳版本＝沿用現有版本；本應用影像庫缺失時按真源補建結構）。 */
+function openIndexedDb(factory, name) {
+  return new Promise((resolve) => {
+    let request
+    try {
+      request = name === BLOBSTORE_DB_NAME ? factory.open(name, BLOBSTORE_DB_VERSION) : factory.open(name)
+    } catch (err) {
+      resolve({ ok: false, message: `本機存儲庫打開失敗（${name}）：${(err && err.message) || '未知原因'}` })
+      return
+    }
+    request.onupgradeneeded = () => {
+      /* 只對**本應用自己的影像庫**按真源補建物件倉；其它庫不臆造結構。 */
+      const db = request.result
+      if (name === BLOBSTORE_DB_NAME && !db.objectStoreNames.contains(BLOBSTORE_STORE)) {
+        db.createObjectStore(BLOBSTORE_STORE)
+      }
+    }
+    request.onsuccess = () => resolve({ ok: true, db: request.result })
+    request.onerror = () =>
+      resolve({ ok: false, message: `本機存儲庫打開失敗（${name}）：${(request.error && request.error.message) || '未知原因'}` })
+    request.onblocked = () => resolve({ ok: false, message: `本機存儲庫被其它標籤頁佔用（${name}），請關閉其它標籤頁後重試` })
+  })
+}
+
+/** 清空**一個**物件倉（名字由呼叫方從 `objectStoreNames` 現列現傳）。 */
+function clearIndexedDbStore(db, storeName) {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (value) => {
+      if (!settled) {
+        settled = true
+        resolve(value)
+      }
+    }
+    let tx
+    try {
+      tx = db.transaction(storeName, 'readwrite')
+    } catch (err) {
+      done({ ok: false, message: `物件倉「${storeName}」清除失敗：${(err && err.message) || '未知原因'}` })
+      return
+    }
+    try {
+      const store = tx.objectStore(storeName)
+      const request = store.clear()
+      if (request) {
+        request.onerror = () =>
+          done({ ok: false, message: `物件倉「${storeName}」清除失敗：${(request.error && request.error.message) || '未知原因'}` })
+      }
+      tx.oncomplete = () => done({ ok: true })
+      tx.onabort = () => done({ ok: false, message: `物件倉「${storeName}」清除中止：${(tx.error && tx.error.message) || '存儲空間狀態異常'}` })
+      tx.onerror = () => done({ ok: false, message: `物件倉「${storeName}」清除失敗：${(tx.error && tx.error.message) || '未知原因'}` })
+    } catch (err) {
+      done({ ok: false, message: `物件倉「${storeName}」清除失敗：${(err && err.message) || '未知原因'}` })
+    }
+  })
+}
+
+/**
+ * 清空**全部** IndexedDB 物件倉（先列庫 → 逐庫列倉 → 逐倉清；**倉名零硬編碼**）。
+ * @returns {Promise<{ok:boolean, available:boolean, databases:Array<{name:string, stores:string[]}>,
+ *   cleared:string[], failed:string[], messages:string[]}>}
+ */
+async function clearAllIndexedDbStores() {
+  const factory = idbFactory()
+  const report = { ok: false, available: factory !== null, databases: [], cleared: [], failed: [], messages: [] }
+  if (!factory) {
+    report.messages.push('IndexedDB 不可用（當前環境不支持），本機影像二進制未能清除。')
+    return report
+  }
+  const names = new Set(await listIndexedDbNames(factory))
+  /* 兜底：老實現不提供 `databases()` 時，至少覆蓋本應用自己的影像庫（庫名取真源常量）。 */
+  names.add(BLOBSTORE_DB_NAME)
+  for (const name of names) {
+    const opened = await openIndexedDb(factory, name)
+    if (!opened.ok) {
+      report.failed.push(name)
+      report.messages.push(opened.message)
+      continue
+    }
+    const db = opened.db
+    let storeNames = []
+    try {
+      storeNames = Array.from(db.objectStoreNames)
+    } catch (err) {
+      report.failed.push(name)
+      report.messages.push(`本機存儲庫（${name}）的物件倉清單不可讀：${(err && err.message) || '未知原因'}`)
+      try {
+        db.close()
+      } catch {
+        /* 關庫失敗不影響已回報的失敗。 */
+      }
+      continue
+    }
+    report.databases.push({ name, stores: storeNames.slice() })
+    for (const storeName of storeNames) {
+      const out = await clearIndexedDbStore(db, storeName)
+      if (out.ok) report.cleared.push(`${name}::${storeName}`)
+      else {
+        report.failed.push(`${name}::${storeName}`)
+        report.messages.push(out.message)
+      }
+    }
+    try {
+      db.close()
+    } catch {
+      /* 關庫失敗不影響清除結果。 */
+    }
+  }
+  report.ok = report.failed.length === 0
+  if (!report.ok && report.messages.length === 0) report.messages.push('本機影像存儲清除失敗（原因未知）。')
+  return report
+}
+
+/**
+ * **清除本機資料**（管理員入口「清除本機資料」的唯一執行點）。
+ * @returns {Promise<{ok:boolean, keys:object, idb:object, messages:string[]}>}
+ */
+export async function clearLocalDatabase() {
+  const report = { ok: false, keys: null, idb: null, messages: [] }
+  /* ① localStorage 資料鍵（保留清單見 `storage.js::LOCAL_DATA_PRESERVE_KEYS`）。 */
+  const keys = clearLocalDataKeys()
+  report.keys = {
+    scanned: keys.scanned,
+    removed: keys.removed,
+    kept: keys.kept,
+    failed: keys.failed
+  }
+  if (!keys.ok) report.messages.push(`本機資料鍵清除失敗（${keys.failed.join('、')}）。`)
+  /* ② IndexedDB 全部物件倉。 */
+  report.idb = await clearAllIndexedDbStores()
+  report.messages.push(...report.idb.messages)
+  /* ③ 讀緩存一律失效 ⇒ 下一次讀必重讀（不得拿舊快照充數）。 */
+  collectionReadCache.clear()
+  imageRowsCache = { src: null, rows: null }
+  faceRowsCache = { src: null, rows: null }
+  SEED_FINGERPRINT_CACHE.clear()
+  setOrphanSeals([])
+  report.ok = keys.ok && report.idb.ok
+  return report
 }
 
 /* ============================================================================
