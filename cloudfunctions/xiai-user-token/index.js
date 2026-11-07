@@ -498,6 +498,17 @@ async function handleVerify(event, config, callContext) {
   if (op === 'registerCorrectionImage' && Object.prototype.hasOwnProperty.call(opResult, 'image_id')) {
     response.image_id = opResult.image_id
   }
+  /* **印面圖替換讀數面（additive 透传｜**按 op 收窄**｜本單 `replaceFaceImage`）**：`image_id` /
+     `previous_image_id`（原本无图 ⇒ `null`，逐字透传、**不补编、不改写**）**僅當 `op === 'replaceFaceImage'`
+     且 `opResult` 確有該鍵時**才逐字疊進回包（前端据此把印面指向改成云端编号、并如实报旧指向）；
+     **其餘任何 op 一律不透傳這 2 個鍵** ⇒ 既有回包逐字不變（序列化後亦不新增鍵）。
+     **`plan` 是内部落盘计划（内部面）**：本 op 不产 `plan` ⇒ 这里也**零透传 `plan`**（既有字段一律不刪、不改）。 */
+  if (op === 'replaceFaceImage') {
+    const FACE_IMAGE_REPLACE_READOUT_KEYS = ['image_id', 'previous_image_id']
+    for (const key of FACE_IMAGE_REPLACE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   /* **影像刪除讀數面（additive 透傳｜**按 op 收窄**｜本單 `deleteFaceImage`）**：`face_id` /
      `image_id` / `removed`（＝ `{rows, objects}` 实际删数）**僅當 `op === 'deleteFaceImage'` 且
      `opResult` 確有該鍵時**才逐字疊進回包（前端据此就地刷新印面指向并如实报删数）；

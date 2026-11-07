@@ -1898,6 +1898,244 @@ function repointFaceImageRefs(actor, fromId, toId) {
   return { ok: true, message: '印面指向已改寫。' }
 }
 
+/* ============================================================================
+   **雲端模式「重新上傳印面圖」分流（本單）
+   ---------------------------------------------------------------------------- 線上真因（Kevin 2026-11-07 實測）：雲模式（`writeFaceMode() === 'cloud'`，生產即此）下
+   `dbReplaceFaceImage` 的**本地落盘回读校验必空** ⇒ 該路徑 **100% 失敗**、永遠到不了雲端入册。
+   本段把雲端模式分流到**服務端原子替換 op `replaceFaceImage`**（管理員面）：
+     ① `storeArtifactBytes`（既有單點）拿 `sha256` / `storage_key`（內容尋址、冪等）；
+     ② 經既有寫面門 `userWriteGate` 調 op `replaceFaceImage`（服務端原子入册影像行 ＋ 改面行指向）；
+     ③ 用回包 `image_id` 做**讀回校驗** —— **只讀雲端快照 / 既有讀口，絕不靠本機鏡像**；
+     ④ `faceImageId` 回雲端編號、`registered: true`，`previousFaceImageId` ＝ 服務端回的
+        `previous_image_id`（**舊圖與舊指向如實透出；舊影像行與二進制一律保留**）。
+   硬口徑：雲端模式**一行本機都不寫**（`dbReplaceFaceImage` / `saveImageRows` /
+   `writeFaceFixedAttributes` 一律不碰）；**dev / 離線形態走下面既有本地路徑，一字不改**；
+   失敗文案**不吞上游原話**（服務端 `message` 原文並列），且一律**繁體**（`s2t` 不變）。
+   ============================================================================ */
+
+/** 雲端替换 op 名（與雲函數 `ADMIN_OPS` 註册面逐字一致；本文件唯一出現處）。 */
+export const FACE_IMAGE_REPLACE_OP = 'replaceFaceImage'
+
+/** 雲端回包讀數鍵面（`userWriteGate` 的 additive 透传声明；真源＝雲函數成功回包的非信封鍵）。 */
+const FACE_IMAGE_REPLACE_READOUT_KEYS = Object.freeze(['image_id', 'previous_image_id'])
+
+/**
+ * **雲端快照裡該印面是否已指向 `imageId`**（只讀雲端快照 `faces`，**不讀本機鏡像**）。
+ * 快照未落定 / 找不到該面 ⇒ `false`（**不拿本機行冒充雲端行**）。
+ * @param {string} faceId 印面编号
+ * @param {string} imageId 影像编号
+ * @returns {boolean}
+ */
+function cloudFacePointsAt(faceId, imageId) {
+  const cloud = cloudBaseReadOf('faces')
+  if (cloud.state !== 'ready' || !Array.isArray(cloud.rows)) return false
+  const row = cloud.rows.find(
+    (item) => item && (String(item.id || '') === faceId || String(item._id || '') === faceId)
+  )
+  if (!row) return false
+  if (String(row.face_image_id || '') === imageId) return true
+  return Array.isArray(row.edge_image_ids) && row.edge_image_ids.some((value) => String(value || '') === imageId)
+}
+
+/**
+ * **讀回校驗（雲端模式）**：按回包 `image_id` 從**雲端快照**確認「影像行在 ＋ 印面指向已改」。
+ *
+ * 为什么必然要刷新：雲端快照在**寫入之前**就已拉取 ⇒ 剛在服務端落庫的行 / 剛改的指向不在其中
+ * （本機鏡像在雲模式下停寫，**更不能**拿它充數）⇒ 命中不了時走**既有讀口**
+ * `retryDataSource()`（＝ `cloudbase.js::retryCloudBaseHydration`）重拉一輪雲端快照，再讀一次；
+ * 仍確認不到 ⇒ **如實回失敗**（不把「未讀到」當成功、不編造已替換）。
+ * @param {string} faceId 印面编号
+ * @param {string} imageId 雲端內容尋址影像編號
+ * @returns {Promise<{ok:true, row:object, refreshed:boolean}|{ok:false, state:string, message:string,
+ *                    rowFound:boolean, pointed:boolean}>}
+ */
+async function readBackCloudReplace(faceId, imageId) {
+  const direct = findCloudImageRow(imageId)
+  if (direct && cloudFacePointsAt(faceId, imageId)) return { ok: true, row: direct, refreshed: false }
+  let status = null
+  try {
+    status = await retryDataSource()
+  } catch (err) {
+    return {
+      ok: false,
+      state: 'failed',
+      message: (err && err.message) || '未知原因',
+      rowFound: Boolean(findCloudImageRow(imageId)),
+      pointed: cloudFacePointsAt(faceId, imageId)
+    }
+  }
+  const fresh = findCloudImageRow(imageId)
+  const pointed = cloudFacePointsAt(faceId, imageId)
+  if (fresh && pointed) return { ok: true, row: fresh, refreshed: true }
+  const statusState = status && typeof status.state === 'string' ? status.state : ''
+  return {
+    ok: false,
+    state: statusState || (cloudBaseStatus() || {}).state || 'unknown',
+    message: (status && status.message) || '',
+    rowFound: Boolean(fresh),
+    pointed
+  }
+}
+
+/**
+ * **雲端模式的替換本體**（`replaceFaceImage` 的 `cloud` 分支；**零本機寫入**）。
+ * 判定樹：① 取所屬印章編號 → ② 字節交權威存儲 → ③ 容器 / 內容尋址自检 → ④ 調雲端 op →
+ * ⑤ 回包形狀校验 → ⑥ **雲端回讀校验** → ⑦ 成功（`registered: true`）。任一步失敗 ⇒ 結構化
+ * 失敗 ＋ 如實文案（**上游原話不吞**），且**印面指向保持不變**。
+ * @param {{faceId:string, faceRow:object|null, bytes:Uint8Array, previousFaceImageId:string|null}} input
+ * @returns {Promise<{ok:boolean, faceImageId?:string, previousFaceImageId?:string|null, face?:object|null,
+ *   image?:object|null, sealId?:string, deduped?:boolean, registered?:boolean,
+ *   reason?:string, message:string}>}
+ */
+async function replaceFaceImageViaCloud({ faceId, faceRow, bytes, previousFaceImageId }) {
+  try {
+    const source = faceRow && typeof faceRow === 'object' ? faceRow : {}
+    const sealId = String(source.sealId || source.stamp_id || '').trim()
+    /* ① 所屬印章編號取不到 ⇒ 不發請求（缺它服務端必判 `MISSING_REQUIRED`），如實報因。 */
+    if (!sealId) {
+      return {
+        ok: false,
+        reason: 'UNKNOWN_FACE',
+        previousFaceImageId,
+        message:
+          `未找到該印面（face_id：${faceId}）或它未掛到任何印章 ⇒ 無法取得所屬印章編號；` +
+          '本次未提交任何內容、印面指向未改動（雲端資料可能尚未載入完成，請稍後重試）。'
+      }
+    }
+    /* ② 字节交权威存储（既有单点；内容寻址、幂等；失败原样抬 reason 与文案）。 */
+    const stored = await storeArtifactBytes(bytes)
+    if (!stored || stored.ok !== true) {
+      return {
+        ok: false,
+        reason: (stored && stored.reason) || 'STORAGE_UNAVAILABLE',
+        previousFaceImageId,
+        message: `印面圖上傳失敗：${(stored && stored.message) || '權威存儲暫時不可用'}；本次未建立任何雲端影像行、印面指向未改動。`
+      }
+    }
+    const sha256 = String(stored.sha256 || '').toLowerCase()
+    const storageKey = String(stored.storageKey || stored.storage_key || '')
+    const storedBytes = Number(stored.bytesLength)
+    /* ③a 內容尋址讀數齊全 ＋ 鍵 ≡ 摘要（与 `corrections.js` 同一条自检口径）。 */
+    if (!sha256 || !storageKey || !Number.isInteger(storedBytes) || storedBytes <= 0 || storageKey !== artifactObjectKeyOf(sha256)) {
+      return {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        previousFaceImageId,
+        message:
+          `印面圖上傳回包缺少內容尋址讀數（sha256 / bytes / storage_key；storage_key＝${storageKey || '空'}）` +
+          '⇒ 未產生雲端內容尋址對象鍵；本次未入雲端影像行、印面指向未改動，請重試。'
+      }
+    }
+    /* ③b 存储回包的容器自检（不是存儲容器 ⇒ 如实拒，绝不把非容器冒充成容器）。 */
+    const storedMime = String(stored.mime || '').trim().toLowerCase()
+    if (storedMime && storedMime !== STORAGE_MIME) {
+      return {
+        ok: false,
+        reason: 'ENCODE_FAILED',
+        previousFaceImageId,
+        message:
+          `印面圖處理失敗：入庫對象不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${storedMime}）` +
+          '⇒ 已拒絕入冊；本次未建立任何雲端影像行、印面指向未改動。'
+      }
+    }
+    /* ④ 調雲端原子替換 op（管理員面；本機一行不寫）。 */
+    const gate = await userWriteGate(
+      FACE_IMAGE_REPLACE_OP,
+      {
+        face_id: faceId,
+        seal_id: sealId,
+        sha256,
+        bytes: storedBytes,
+        mime: storedMime || STORAGE_MIME,
+        storage_key: storageKey,
+        kind: FACE_KIND.FACE
+      },
+      { readoutKeys: FACE_IMAGE_REPLACE_READOUT_KEYS }
+    )
+    if (gate && gate.dev === true) {
+      /* 形态判定已在此之上判过（cloud）⇒ 此支只作兜底：**不做本机假成功**。 */
+      return {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        previousFaceImageId,
+        message: '本機為 dev / 離線形態（沒有雲端替換面）⇒ 本次未提交任何內容、印面指向未改動。'
+      }
+    }
+    if (!gate || gate.ok !== true) {
+      /* **服务端原话原样透传**（reason / message 一字不改写），并如实交代旧图与指向未动。 */
+      const upstream = gate && typeof gate === 'object' ? gate : null
+      return {
+        ok: false,
+        reason: (upstream && upstream.reason) || 'STORAGE_UNAVAILABLE',
+        previousFaceImageId,
+        message:
+          `雲端替換失敗：${(upstream && upstream.message) || '替換服務暫時不可用，請稍後再試。'}` +
+          `（舊影像 ${previousFaceImageId || '（原無）'} 與印面指向保持不變，可重試）`
+      }
+    }
+    /* ⑤ 回包形状校验：`image_id` 只取服务端信封，**不按规则自行推导**。 */
+    const imageId = typeof gate.image_id === 'string' ? gate.image_id.trim() : ''
+    if (!imageId.startsWith('img-')) {
+      return {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        previousFaceImageId,
+        message: '雲端替換回包形狀不可辨識（未附影像編號 image_id）；印面指向以服務端為準，請重新整理後重試。'
+      }
+    }
+    /* **旧指向以服务端为准**：回包确有 `previous_image_id` ⇒ 逐字采用（`null` ＝ 原本无图）；
+       服务端未回该键（旧部署）⇒ 退回本机读数并照实标出。 */
+    const hasServerPrevious = Object.prototype.hasOwnProperty.call(gate, 'previous_image_id')
+    const previousFaceImageIdNext = hasServerPrevious
+      ? typeof gate.previous_image_id === 'string' && gate.previous_image_id !== ''
+        ? gate.previous_image_id
+        : null
+      : previousFaceImageId
+    /* ⑥ **读回校验（云端快照 / 既有读口；不靠本机镜像）**。 */
+    const verified = await readBackCloudReplace(faceId, imageId)
+    if (!verified.ok) {
+      const missing = []
+      if (!verified.rowFound) missing.push('該影像行')
+      if (!verified.pointed) missing.push('印面指向')
+      return {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        previousFaceImageId: previousFaceImageIdNext,
+        message:
+          `雲端已回報替換成功（影像編號 ${imageId}），但雲端回讀未確認到${missing.join('與')}` +
+          `（雲端資料狀態：${verified.state}${verified.message ? `；${verified.message}` : ''}）；` +
+          '印面指向以服務端為準，請稍後重新整理再試（重複提交會按冪等回放，不會重複建行）。'
+      }
+    }
+    /* ⑦ 成功：`faceImageId` ＝ 雲端編號、`registered: true`、舊指向如實透出。 */
+    return {
+      ok: true,
+      deduped: previousFaceImageIdNext === imageId,
+      sealId,
+      faceId,
+      registered: true,
+      face: getFaceById(faceId),
+      faceImageId: imageId,
+      previousFaceImageId: previousFaceImageIdNext,
+      image: verified.row,
+      message:
+        `印面圖已替換：影像編號 ${previousFaceImageIdNext || '（原無）'} → ${imageId}；` +
+        `舊影像行與二進制保留未刪；已入雲端影像行並經雲端回讀校驗` +
+        `${verified.refreshed ? '（重拉雲端資料快照後確認）' : '（雲端快照）'}。`
+    }
+  } catch (err) {
+    if (isPermissionError(err)) {
+      return { ok: false, reason: 'FORBIDDEN', previousFaceImageId, message: err.message }
+    }
+    return {
+      ok: false,
+      reason: 'ERROR',
+      previousFaceImageId,
+      message: `替換印面圖失敗：${(err && err.message) || '未知原因'}（本次未確認替換結果，請重新整理後重試）`
+    }
+  }
+}
+
 /**
  * 重新上传某个印面的印面图（管理员专属；旧影像行与二进制保留）。
  *
@@ -1907,6 +2145,12 @@ function repointFaceImageRefs(actor, fromId, toId) {
  *        仅为调用方的声称值（**入库元数据以字节解析为准**，出入会在 `message` 里如实并列）。
  * @returns {Promise<{ok:boolean, faceImageId?:string, previousFaceImageId?:string|null, face?:object,
  *   image?:object, sealId?:string, deduped?:boolean, registered?:boolean, reason?:string, message:string}>}
+ *   - **雲端分流（本單｜`writeFaceMode() === 'cloud'` 即生產）**：**不走**本机路径
+ *     （`dbReplaceFaceImage` 的本地落盘回读在云模式必空 ⇒ 那条路 100% 失败），改走云 op
+ *     `replaceFaceImage`：`storeArtifactBytes` → 服务端原子入册影像行 ＋ 改面行指向 →
+ *     **云端回读校验**（云端快照 / 既有读口，不靠本机镜像）。成功 ⇒ `registered: true`、
+ *     `faceImageId` ＝ 云端编号、`previousFaceImageId` ＝ 服务端 `previous_image_id`
+ *     （**旧影像行与二进制保留未删**）；**dev / 離線形態走本机路径，判定树一字不改**。
  *   - 成功：`face` 为**替换后**的印面视图模型（`faceImage` / `face_image_id` 已指向新影像），
  *     详情页据此重读即可显示新图（刷新后一致）。
  *   - **上傳即入册（本單）**：本地写成功后调云 op `registerFaceImage` 入云端 `xiai_images`，
@@ -1981,6 +2225,14 @@ export async function replaceFaceImage(faceId, payload = {}) {
         '這不是可用的圖片內容（無法識別圖片格式），請重新選擇 JPG / PNG / WebP 圖片'
         + (claimed ? `（聲稱類型 ${claimed}）` : '')
     }
+  }
+
+  /* ---------------------------------------------------------------------------
+     **雲端分流点（本單｜唯一一处）**：云模式 ⇒ 走服务端原子替换 op，**一行本机都不写**；
+     dev / 離線形態 ⇒ 下面既有本地路径（`dbReplaceFaceImage` ＋ 云入册判定树）**一字不改**。
+     ---------------------------------------------------------------------------- */
+  if (writeFaceMode() === WRITE_FACE_MODES.CLOUD) {
+    return replaceFaceImageViaCloud({ faceId: id, faceRow: before, bytes, previousFaceImageId })
   }
 
   try {

@@ -4335,6 +4335,58 @@ const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
 const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
 
 /* ---------------------------------------------------------------------------
+   **印面圖替換面（本單新增 op｜`replaceFaceImage`｜管理員面）**
+   ---------------------------------------------------------------------------
+   场景（线上真因，Kevin 2026-11-07 实测）：「重新上傳印面圖」的本地落盘回读校验在**云模式**
+   （`writeFaceMode() === 'cloud'`，生产即此）下必空 ⇒ 那条路径 **100% 失败**、永远到不了
+   云端入册。本 op 就是云模式的那一口：**服务端原子入册影像行 ＋ 改面行指向**。
+   硬口径（逐条）：
+     · **管理员门 `adminWhitelistDenial`**，与 `registerFaceImage` **同一张门**，判在**任何读之前**
+       （缺 `XIAI_ADMIN_PHONE` ⇒ 既有结构化拒抱 ＋ 零读零写；非白名单 ⇒ `FORBIDDEN`）；
+     · **载荷封闭恰 7 键** `FACE_IMAGE_REPLACE_ALLOWED_KEYS`：`face_id` / `seal_id` / `sha256` /
+       `bytes` / `mime` / `storage_key`（前六必有）＋ `kind`（**可缺省，缺省 `FACE`**）；
+       未知键与身份类键 ⇒ `INVALID_FIELD`（**既有冻结 reason，零新增**）；
+     · **值域门照 `registerFaceImage` 同一张表、同一条文案**：`sha256` 64 位小写十六进制、
+       `storage_key` 匹配 `ARTIFACT_OBJECT_KEY_PATTERN` **且键内摘要 ≡ 声称摘要**、`bytes` ∈
+       1〜`ARTIFACT_MAX_BYTES` 整数、`kind` ∈ {FACE, EDGE} ⇒ 任一不符 `INVALID_VALUE` ＋ **零写入**；
+     · **原子顺序（失败必须可回滚，不留半成品）**：
+       ① **读该面行**（`id` → `_id` 两形态；不存在 ⇒ `INVALID_VALUE` ＋ 文案「**該印面不存在**」
+          —— **不用 `NOT_FOUND`**，云函数 `REASONS` 表里没有它）；
+       ② 用既有 `buildDirectImageRow` 造行（内容寻址 `img-` ＋ sha256 前 16 位）＋ `seq` 必须走既有
+          单点 `nextImageSeqOf` / `imageSeqsOf`（**禁自算号**；同 `id` 已有行且属同印 ⇒ **沿用其 `seq`**）；
+       ③ `persist` 以 `kind:'set'` 落影像行（**幂等，不建第二行**）；
+       ④ 更新面行指向（`FACE` ⇒ `face_image_id`；`EDGE` ⇒ `edge_image_ids` 首位换成新 id）＝ 新 id；
+       ④′ 上一步失败 ⇒ **删 / 回退 ②③ 那一行**（**对象保留，不删字节**），回 `STORAGE_UNAVAILABLE`
+          ＋ **如实文案**（回滚成败一并如实说，不谎报「本次零寫入」以外的任何结论）；
+     · **幂等**：面行已指向该 `image_id` ⇒ **零写**、回包 `previous_image_id === image_id`；
+     · **旧图一律保留**（影像行与对象字节都不删；删图走既有 `deleteFaceImage`）；
+     · **零 `plan`**：全部判定与两处写入都在本函数内按确定序执行 ⇒ 没有内部落盘计划可供
+       `index.js` 外传（本 op **不产 `plan` 键**）；
+     · **回包**：成功**恰 3 键** `{ok:true, image_id, previous_image_id}`（原本无图 ⇒ `null`）；
+       失败恒**恰 3 键** `{ok:false, reason, message}`，`reason` 只用既有冻结值（**零新增**）。
+   --------------------------------------------------------------------------- */
+
+/** 印面圖替換载荷**封闭恰 7 键**（前六必有、`kind` 可缺省 ⇒ 缺省 `FACE`；未知键 / 身份类键 ⇒ `INVALID_FIELD`）。 */
+const FACE_IMAGE_REPLACE_ALLOWED_KEYS = Object.freeze([
+  'face_id',
+  'seal_id',
+  'sha256',
+  'bytes',
+  'mime',
+  'storage_key',
+  'kind'
+])
+
+/** 印面圖替換成功回包**读数键面**（恰 2 读数键；`index.js` 按 op 收窄透传的键面真源）。 */
+const FACE_IMAGE_REPLACE_READOUT_KEYS = Object.freeze(['image_id', 'previous_image_id'])
+
+/** 印面行检索窄读上限（`id` → `_id` 两形态依次；口径同 `deleteFaceImage` 的面行检索）。 */
+const FACE_IMAGE_REPLACE_FACE_SCAN_LIMIT = 8
+
+/** 影像行检索窄读上限（按 `id` / `_id` 取首行；判「该内容寻址槽位是否本轮之前已在」用）。 */
+const FACE_IMAGE_REPLACE_IMAGE_SCAN_LIMIT = 1
+
+/* ---------------------------------------------------------------------------
    **影像刪除面（本單新增 op｜`deleteFaceImage`｜管理員面）**
    ---------------------------------------------------------------------------
    场景：Kevin 2026-11-07 定案 —— 影像**不自动删**（采纳 AI 候選圖 / 换图一律保留旧图），
@@ -7489,6 +7541,212 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「重新上傳印面圖」（本單新增 op｜`replaceFaceImage`｜管理員面）**：云模式下
+   * 替换印面图的那一口 —— **服务端原子入册影像行 ＋ 改面行指向**（旧图一律保留）。
+   *
+   * 顺序（**全部判定早于任何写**；本 op **不产 `plan`** ⇒ 两处写入在本函数内按确定序执行，
+   * `index.js` 没有任何内部落盘计划可外传）：
+   *   ① 管理员门 `adminWhitelistDenial`（**任何读之前**；与 `registerFaceImage` 同一张门）；
+   *   ② 载荷封闭恰 7 键 `FACE_IMAGE_REPLACE_ALLOWED_KEYS`（未知键 / 身份类键 ⇒ `INVALID_FIELD`；
+   *      `kind` **可缺省 ⇒ 缺省 `FACE`**）；
+   *   ③ 必填六键：缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`（`bytes` 另判整数）；
+   *   ④ 值域门（**与 `registerFaceImage` 同一张表、同一条文案**）⇒ 任一不符 `INVALID_VALUE` ＋ 零写入；
+   *   ⑤ **读该面行**（`id` → `_id` 两形态；无行 ⇒ `INVALID_VALUE` ＋ 文案「**該印面不存在**」，
+   *      **不用 `NOT_FOUND`** —— `REASONS` 表里没有它）；
+   *   ⑥ **幂等**：面行已指向该内容寻址 `image_id` ⇒ **零写**、回包 `previous_image_id === image_id`；
+   *   ⑦ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用其 `seq`、不消耗号；否则经
+   *      `imageSeqsOf` ＋ `nextImageSeqOf`，**本 op 不自算号**；读抛错 ⇒ 按无既有行继续）；
+   *   ⑧ `persist` `kind:'set'` 落影像行（**幂等，不建第二行**；行体 ＝ `buildDirectImageRow`
+   *      字段面 ＋ `stamp_id` 回填 `seal_id`）；
+   *   ⑨ 更新面行指向（`kind:'FACE'` ⇒ `face_image_id`；`kind:'EDGE'` ⇒ `edge_image_ids` 首位换新；
+   *      `expectAtLeast:1`）；**失败 ⇒ 回滚 ⑧ 那一行**：本轮新建的槽位 ⇒ `deleteRow`；
+   *      槽位本轮之前已在 ⇒ `kind:'set'` 回退其原行内容 —— **对象字节一律不删**，回
+   *      `STORAGE_UNAVAILABLE` ＋ 如实文案（回滚成败一并如实说）；
+   *   ⑩ 成功**恰 3 键** `{ok:true, image_id, previous_image_id}`（原本无图 ⇒ `null`；
+   *      `index.js` 按 `FACE_IMAGE_REPLACE_READOUT_KEYS` 收窄透传）；失败**恰 3 键**
+   *      `{ok:false, reason, message}`，`reason` 只用既有冻结值（**零新增**）。
+   * @param {object} payload 载荷（封闭 7 键，见 `FACE_IMAGE_REPLACE_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, image_id:string, previous_image_id:string|null}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async replaceFaceImage(payload, identity, context) {
+    /* ① 管理员门（**任何读之前**；缺 env ⇒ 既有结构化拒抱 ＋ 零读零写）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷封闭恰 7 键（未知键 / 身份类键 ⇒ `INVALID_FIELD`，与其余 op 同一条文案）。 */
+    const payloadDenial = pointsPayloadDenial(payload, FACE_IMAGE_REPLACE_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    /* ③ 必填五串 ＋ 一体量整数（`kind` 可缺省 ⇒ 不在必填表内；与 `registerFaceImage` 同判）。 */
+    const requiredTextKeys = ['face_id', 'seal_id', 'sha256', 'mime', 'storage_key']
+    for (const key of requiredTextKeys) {
+      const value = payload[key]
+      if (value === undefined || value === null || text(value) === '') {
+        return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${key}）；本次零寫入。`)
+      }
+      if (typeof value !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串；本次零寫入。`)
+      }
+    }
+    const claimedBytes = payload.bytes
+    if (claimedBytes === undefined || claimedBytes === null) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（bytes）；本次零寫入。')
+    }
+    /* ④a 体量门（与 `registerFaceImage` 同值域、同文案族）。 */
+    if (!Number.isInteger(claimedBytes) || claimedBytes <= 0 || claimedBytes > ARTIFACT_MAX_BYTES) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `字節數（bytes）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+      )
+    }
+    const digest = text(payload.sha256).toLowerCase()
+    const storageKey = text(payload.storage_key)
+    /* ④b 对象键形态 ＋ 摘要形态 ＋ 两者一致（与 `registerFaceImage` 同一张形态表、同一条文案）。 */
+    const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(storageKey)
+    if (!matched) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff）；本次零寫入。'
+      )
+    }
+    if (!ARTIFACT_DIGEST_PATTERN.test(digest)) {
+      return deny(REASONS.INVALID_VALUE, '摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+    }
+    if (matched[2] !== digest || matched[1] !== digest.slice(0, 2)) {
+      return deny(REASONS.INVALID_VALUE, '影像對象鍵內含的摘要與聲稱的 sha256 不一致；本次零寫入。')
+    }
+    /* ④c 类别门（缺省 `FACE`；给出即必须 FACE / EDGE，**不静默归一**）。 */
+    let kind = 'FACE'
+    if (Object.prototype.hasOwnProperty.call(payload, 'kind') && payload.kind !== undefined && payload.kind !== null) {
+      if (typeof payload.kind !== 'string' || FACE_IMAGE_REGISTER_KINDS.indexOf(payload.kind) === -1) {
+        return deny(REASONS.INVALID_VALUE, '影像類別（kind）只能是 FACE 或 EDGE；本次零寫入。')
+      }
+      kind = payload.kind
+    }
+    const faceId = text(payload.face_id)
+    const sealId = text(payload.seal_id)
+    /* ⑤ 读该面行（`id` → `_id` 两形态；无行 ⇒ `INVALID_VALUE` ＋「該印面不存在」）。 */
+    let faceRow = null
+    let probeField = ''
+    for (const probe of ['id', '_id']) {
+      const rows = await readRows(COLLECTIONS.faces, { [probe]: faceId }, { limit: FACE_IMAGE_REPLACE_FACE_SCAN_LIMIT })
+      if (rows.length > 0) {
+        faceRow = rows[0]
+        probeField = probe
+        break
+      }
+    }
+    if (faceRow === null) {
+      return deny(REASONS.INVALID_VALUE, `該印面不存在（face_id：${faceId}）；本次零寫入。`)
+    }
+    const edgeIds = Array.isArray(faceRow.edge_image_ids)
+      ? faceRow.edge_image_ids.map((value) => text(value)).filter((value) => value !== '')
+      : []
+    /* **旧指向**（`FACE` ⇒ `face_image_id`；`EDGE` ⇒ `edge_image_ids` 首位；无图 ⇒ `null`）。 */
+    const previousImageId =
+      kind === 'EDGE'
+        ? edgeIds.length > 0
+          ? edgeIds[0]
+          : null
+        : text(faceRow.face_image_id) || null
+    const at = new Date().toISOString()
+    /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
+    const id = buildDirectImageRow(
+      { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
+      at
+    ).id
+    /* ⑥ **幂等**：面行已指向该 id ⇒ 零写、`previous_image_id === image_id`。 */
+    if (previousImageId === id) return { ok: true, image_id: id, previous_image_id: id }
+    /* ⑦ 既有同内容行（读抛错 ⇒ 按无既有行继续；与 `imageSeqsOf` 同一降级口径：如实 warn、不伪装「有行」）。 */
+    let existing = null
+    try {
+      for (const probe of ['id', '_id']) {
+        const hits = await readRows(COLLECTIONS.images, { [probe]: id }, { limit: FACE_IMAGE_REPLACE_IMAGE_SCAN_LIMIT })
+        if (Array.isArray(hits) && hits.length > 0) {
+          existing = hits[0]
+          break
+        }
+      }
+    } catch (error) {
+      console.warn(
+        '[xiai] replaceFaceImage 讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）：',
+        error && error.message ? error.message : error
+      )
+    }
+    /* ⑦′ **`seq` 单点取号**（同 `id` 已有行且属同印 ⇒ 沿用；**本 op 不自算号**）。 */
+    const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
+    const seq = sameSealExisting
+      ? Number(existing.seq)
+      : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
+    /* ⑧ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`。 */
+    const row = {
+      ...buildDirectImageRow(
+        { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
+        at,
+        seq
+      ),
+      stamp_id: sealId
+    }
+    try {
+      await persist({ writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }] })
+    } catch (error) {
+      /* 影像行没落成 ⇒ 面行一行未动、旧图与对象字节未动（**不谎报「本次零寫入」以外的结论**）。 */
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `影像行落盤失敗（image_id：${row.id}）；印面指向未改動、舊圖與對象字節一律保留，可重試。（診斷：${
+          (error && error.message) || 'unknown'
+        }）`
+      )
+    }
+    /* ⑨ 更新面行指向（`FACE` ⇒ `face_image_id`；`EDGE` ⇒ `edge_image_ids` 首位换新、其余保留）。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const doc = { updated_at: new Date(seconds * 1000).toISOString() }
+    if (kind === 'EDGE') doc.edge_image_ids = [id, ...edgeIds.slice(1)]
+    else doc.face_image_id = id
+    const match = text(faceRow._id) ? { _id: text(faceRow._id) } : { [probeField]: faceId }
+    try {
+      await persist({
+        writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc, expectAtLeast: 1 }]
+      })
+    } catch (error) {
+      /* ⑨′ **回滚**：槽位本轮之前已在 ⇒ 回退其原行内容；本轮新建 ⇒ 删那一行。
+         **对象字节一律不删**（旧图保留是硬口径；删图走 `deleteFaceImage`）。 */
+      const slotPreexisting = existing !== null && text(existing._id) === row.id
+      let rollbackText = ''
+      if (slotPreexisting) {
+        try {
+          await persist({ writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: existing }] })
+          rollbackText = '影像行已回退為替換前內容（回滾完成，對象字節未刪）。'
+        } catch (rollbackError) {
+          rollbackText =
+            `影像行回退失敗（image_id：${row.id}；該行仍為本次寫入內容、對象字節未刪，` +
+            `可由管理員經 deleteFaceImage 刪除）。（診斷：${(rollbackError && rollbackError.message) || 'unknown'}）`
+        }
+      } else {
+        try {
+          await deleteRow(COLLECTIONS.images, row.id)
+          rollbackText = '本輪新建的影像行已刪除（回滾完成，對象字節未刪）。'
+        } catch (rollbackError) {
+          rollbackText =
+            `本輪新建的影像行刪除失敗（image_id：${row.id}；該行仍在、對象字節未刪，` +
+            `可由管理員經 deleteFaceImage 刪除）。（診斷：${(rollbackError && rollbackError.message) || 'unknown'}）`
+        }
+      }
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `印面指向更新失敗（face_id：${faceId}）；${rollbackText}舊圖一律保留，可重試。（診斷：${
+          (error && error.message) || 'unknown'
+        }）`
+      )
+    }
+    /* ⑩ 成功恰 3 键（`previous_image_id` 原本无图 ⇒ `null`）。 */
+    return { ok: true, image_id: id, previous_image_id: previousImageId }
+  },
+
+  /**
    * **管理員「刪除印面影像」（本單新增 op｜`deleteFaceImage`｜管理員面）**：管理员在**影像卡片**
    * 上显式【刪除】本印面那一张影像（**旧图默认不自动删** ⇒ 删是显式动作，不是换图的副作用）。
    *
@@ -8519,6 +8777,10 @@ module.exports = {
      （供离线自检直接断言；`index.js` 的按 op 收窄透传以 `FACE_IMAGE_DELETE_READOUT_KEYS` 为键面真源）。 */
   FACE_IMAGE_DELETE_ALLOWED_KEYS,
   FACE_IMAGE_DELETE_READOUT_KEYS,
+  /* **印面圖替換面（本單 `replaceFaceImage`）**：封闭 7 键面 ＋ 成功回包读数键面
+     （供离线自检直接断言；`index.js` 的按 op 收窄透传以 `FACE_IMAGE_REPLACE_READOUT_KEYS` 为键面真源）。 */
+  FACE_IMAGE_REPLACE_ALLOWED_KEYS,
+  FACE_IMAGE_REPLACE_READOUT_KEYS,
   /* **普通用戶影像勘誤面（本單 `submitImageCorrection` ＋ `reviewCorrection` 的 IMAGE 分支）**：
      封闭六键面 ＋ `new_image` 封闭四键面 ＋ `action` 值域 ＋ 两侧成功回包读数键面真源
      （`index.js` 的按 op 收窄透传以 `IMAGE_CORRECTION_*_READOUT_KEYS` 为键面真源；
