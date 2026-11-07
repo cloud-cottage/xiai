@@ -566,6 +566,20 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
+  /* **历史「已采纳未落面」回填读数面（additive 透传｜**按 `op` 收窄**｜§3.79）**：
+     `dry_run`（回顯）＋ `scanned` / `eligible` / `written` / `skipped{out_of_domain, same}` /
+     `samples[]` **恰 6 鍵，僅當 `op === 'backfillAcceptedCorrections'` 且 `opResult` 確有該鍵時**
+     才逐字疊進回包；**其餘任何 op 一律不透傳這 6 個鍵**（即使 `opResult` 意外帶同名鍵 —— 例如
+     其它 op 的 `dry_run` / `scanned` / `samples` —— 亦一個都不外泄）⇒ 既有回包**逐字不變**
+     （序列化後亦不新增鍵）；**失敗回包（`ok:false`）走上面的早退分支、恒 3 鍵、零讀數鍵**。
+     **`plan` 是內部落盤計劃（內部面）、不在白名單內 ⇒ 絕不外傳**；既有字段一律不刪、不改。
+     鍵面真源 ＝ `lib/ops.js::BACKFILL_ALLOWED_KEYS` 同族（讀數六鍵名逐字見 §3.79.2 ③）。 */
+  if (op === 'backfillAcceptedCorrections') {
+    const BACKFILL_READOUT_KEYS = ['dry_run', 'scanned', 'eligible', 'written', 'skipped', 'samples']
+    for (const key of BACKFILL_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   /* **只读行面（additive 透传｜**按 `op` 收窄**）**：`rows` / `count` **僅當
      `op` ∈ 三只读取行 op（`pullImportRows` ＋ 本單新增的勘誤只讀面 `listMyCorrections` /
      `listPendingCorrectionsForAdmin`）且 `opResult` 確有該鍵時**才逐字疊進回包；**其餘任何 op 一律

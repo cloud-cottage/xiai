@@ -68,6 +68,11 @@ import { userWriteGate } from './userWrite.js'
    一律走**登录令牌写面门** `userWriteGate` —— 服务端在 `xiai-user-token` 上验签 ＋
    判「手机号 ∈ 管理员白名单（环境变量 `XIAI_ADMIN_PHONE`）」⇒ **零弹窗、不需要第二个码**。 */
 
+/* **简繁等价展示提示（§3.78）**：s2t 归一**只读比较** —— 沿 §3.17.1 单一真源复用
+   `src/utils/traditional.js` 的同步 s2t（逐字表）；**不新写字典、不移动工具位置、
+   不新增第二个转换入口**；其结果**只作用于渲染**、不进任何门的判定。 */
+import { toTraditionalText as s2t } from '../utils/traditional.js'
+
 /* ============================================================================
    **受控诊断串观测缓冲（`?diag=1` 才上屏；本文件只记、不渲染）**
    ----------------------------------------------------------------------------
@@ -648,6 +653,44 @@ export function submissionGroupsOfFace(face) {
     status: group.statuses.has(CORRECTION_STATUS.ACCEPTED) ? CORRECTION_STATUS.ACCEPTED : CORRECTION_STATUS.PENDING,
     submitterIds: [...group.submitterIds]
   }))
+}
+
+/* ============================================================================
+   **简繁等价展示提示（§3.78）**：纯函数比较面（只读、零副作用）
+   ---------------------------------------------------------------------------- 口径（§3.78.1 / §3.78.4）：**防重 / 存储 / 比较三面一律不改** —— 本函数只做
+   **只读比较**、结果只作用于渲染；`s2t` **不进入任何门**的判定（防重 / 值域 / 長度 /
+   必填 / 採信冪等），也**不写库、不写入任何行字段**。
+   归一 ＝ 仓内 `src/utils/traditional.js` 的同步 s2t（**不新写字典**）；「简繁等价」
+   在此只是一個比較關係，不是新值域、不是新歸一化（判重仍逐字三鍵）。
+   ============================================================================ */
+
+/**
+ * **纯函数**：返回与 `value` **字面不同、但 `s2t` 归一后相等**的候选值（去重、保持原序）。
+ *
+ * 判定（§3.78.2 ② / §3.78.3 ①）：候选 `c` 入选 ⇔ `c !== value` 且 `s2t(c) === s2t(value)`。
+ * 因此**字面相同**的值不入选（防重面本就把它判作同一段文字）；**标点 / 异体 / 空白**
+ * 差异在 s2t 下不折叠 ⇒ 自然不入选（`s2t` 不变 ⇒ 无提示，见 §3.78.2 ⑤ 不得反推）。
+ * 入参容忍：`values` 非数组 ⇒ 空数组；`value` / 元素为空 / 非文字 ⇒ 归一成 `''`
+ * （空串之间字面相等 ⇒ 恒返回 `[]`，即空值永不提示）。
+ * **不改入参、不改任何数据、不抛错**。
+ * @param {*} value 待比对的值（当前候选值 / 表单输入值）
+ * @param {Array<*>} [values] 同字段的其它候选值（或含当前展示值）
+ * @returns {Array<string>} 简繁等价且字面不同的候选值（去重、保持原序）
+ */
+export function cjkVariantPeersOf(value, values) {
+  const text = value === null || value === undefined ? '' : String(value)
+  const target = s2t(text)
+  const seen = new Set()
+  const peers = []
+  ;(Array.isArray(values) ? values : []).forEach((item) => {
+    const candidate = item === null || item === undefined ? '' : String(item)
+    if (candidate === text) return // 字面相同 ⇒ 不是「疑似同值」（防重面已按同一段文字处理）
+    if (s2t(candidate) !== target) return // s2t 归一后不等 ⇒ 不提示
+    if (seen.has(candidate)) return // 去重、保持原序
+    seen.add(candidate)
+    peers.push(candidate)
+  })
+  return peers
 }
 
 /**

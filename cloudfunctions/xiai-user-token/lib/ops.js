@@ -4824,6 +4824,48 @@ async function sealUploadReadoutsOf(sealRow) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   **历史「已采纳未落面」一次性回填面（§3.79｜本单新增 op `backfillAcceptedCorrections`）**
+   ---------------------------------------------------------------------------
+   · 載荷**封閉恰二鍵**：`dry_run`（**必有、布林**；缺 / 非布林 ⇒ `INVALID_VALUE`）＋ `limit`
+     （可選、**1〜200 整數**、缺省 200；越界 / 非整數 ⇒ `INVALID_VALUE`）。**身份類鍵與未知鍵
+     ⇒ `INVALID_FIELD`**（零讀取、零寫入）。`reason` **零新增**（只用既有凍結值）。
+   · `limit` 兩義（同時成立、互不放寬）：① **本輪最多處理的目標分組數**（超出部分留待下一輪，
+     **不報錯、不視為失敗**，§3.79.2 ②）；② **掃描護欄** ＝ 最多 `limit` 個批次 × 每批
+     `BACKFILL_SCAN_PAGE_SIZE` 行（另按 `BACKFILL_SCAN_MAX_PAGE_LIMIT` 封頂）⇒ 分頁掃描**防卡死**。
+   · 回包**新增恰 6 鍵**（`dry_run` 回顯 ＋ `scanned` / `eligible` / `written` /
+     `skipped{out_of_domain, same}` / `samples[]`）—— **僅本 op** 由 `index.js` 按 `op` 收窄透傳；
+     其餘各 op 回包鍵集逐字不變。**零新集合（審計落既有 `xiai_admin_audit`）、零新增 `reason`。**
+   --------------------------------------------------------------------------- */
+const BACKFILL_ALLOWED_KEYS = Object.freeze(['dry_run', 'limit'])
+/** `limit` 缺省值 ＝ 本輪最多處理的目標分組數（亦為掃描批數護欄上限）。 */
+const BACKFILL_DEFAULT_LIMIT = 200
+/** `limit` 上界（1〜200；沿 §3.79.2 ②，**不得放寬**）。 */
+const BACKFILL_MAX_LIMIT = 200
+/** 掃描分頁：單批行數（平台 `.limit()` 護欄；每頁遞增以便在無 `skip` 的讀點上真正翻頁）。 */
+const BACKFILL_SCAN_PAGE_SIZE = 100
+/** 單次查詢行數封頂（平台單查詢上限護欄；到頂且無新增行 ⇒ 結束掃描）。 */
+const BACKFILL_SCAN_MAX_PAGE_LIMIT = 1000
+/** `samples[]` 單次上限（§3.79.2 ④ 規定 ≤ 20；本單取 10，嚴格小於上界）。 */
+const BACKFILL_MAX_SAMPLES = 10
+
+/**
+ * **取位比較（純函數、零 I/O、絕不自抛）**：同 `(faceId 或 sealId, field)` 分組內挑「最新」的
+ * `ACCEPTED` 勘誤行 —— **`created_at` 最新者勝**（ISO8601 字面可直接字典序比較）；**並列（`created_at`
+ * 相同）⇒ 按行 `_id` 字典序取最大者**（§3.79.3 ① 凍結的並列次序 ⇒ 結果確定、可復跑一致）。
+ * 任一側取不到值 ⇒ 空串（＝ 最舊），**不拋錯**。
+ * @param {object} candidate 候選勘誤行
+ * @param {object} incumbent 當前佔位行
+ * @returns {boolean} `candidate` 是否勝出
+ */
+function newerCorrectionWins(candidate, incumbent) {
+  const atCandidate = text(candidate && candidate.created_at)
+  const atIncumbent = text(incumbent && incumbent.created_at)
+  if (atCandidate !== atIncumbent) return atCandidate > atIncumbent
+  const idOf = (row) => text(row && (row._id !== undefined && row._id !== null ? row._id : row.id))
+  return idOf(candidate) > idOf(incumbent)
+}
+
 const ADMIN_OPS = Object.freeze({
   /**
    * **管理員「弃候選圖」（`ai-enhance-discard`）** —— 薄委派：業務邏輯單點在
@@ -4868,6 +4910,241 @@ const ADMIN_OPS = Object.freeze({
     /* 延遲 require：與 `lib/aiUpstream.js` 同法（打破加載環；離線自檢不需要 SDK）。 */
     const { enhanceFace } = require('./aiEnhance.js')
     return enhanceFace(payload, identity, context)
+  },
+
+  /**
+   * **历史「已采纳未落面」一次性回填（`backfillAcceptedCorrections`｜§3.79｜本单新增）** ——
+   * 把 `xiai_corrections` 里**已采纳（`ACCEPTED`）却没落到目标行**的值，一次性补写到印面行 /
+   * 印章行的对应字段（**只改该字段 ＋ `updated_at`**；一次性数据修复，零自动化、零触发式回填）。
+   *
+   * 顺序（**全部判定早于任何写入**）：
+   *   ① **管理員門 `adminWhitelistDenial` 先於一切讀寫**（缺 `XIAI_ADMIN_PHONE` ⇒ 安全拒且
+   *      **零讀取**；非白名單 / 會話角色不足 ⇒ `FORBIDDEN` 且零讀取）；
+   *   ② **載荷封閉恰二鍵**：`dry_run`（**必有、布林**；缺 / 非布林 ⇒ `INVALID_VALUE`）＋ `limit`
+   *      （可選、**1〜200 整數**、缺省 200；越界 ⇒ `INVALID_VALUE`）；未知鍵 / 身份類鍵 ⇒
+   *      `INVALID_FIELD`（`pointsPayloadDenial` 同族文案）；**`reason` 零新增**；
+   *   ③ **只讀掃描** `status:'ACCEPTED'` 勘誤行（分頁：每頁遞增 ×100、批數 ≤ `limit`、單查詢
+   *      ≤ 1000 行 ⇒ 防卡死）；`scanned` ＝ 掃描到的 `ACCEPTED` 行數；
+   *   ④ **取位**：按 `(faceId 或 sealId, field)` 分組（有 `faceId` ⇒ 印面行；否則 `sealId` ⇒
+   *      印章行），只在 `ACCEPTED` 行中取 `created_at` 最新（**並列取 `_id` 字典序最大**）；
+   *      `PENDING` / `REJECTED` 一律不取位；分組按字典序處理、**最多 `limit` 組**（超出留待下一輪）；
+   *   ⑤ **寫條件與兩道門**：目標行現值**為空（空串 / 缺鍵）或 ≠ 取位值** ⇒ `eligible`；
+   *      現值已等於取位值 ⇒ `skipped.same`；**目標行不存在 ⇒ `skipped.same`（跳過、不建行）**；
+   *      寫前過 **現值域門（`VALUE_DOMAINS`，空串不參與、沿既有口徑）＋ 長度門（`MAX_TEXT_LENGTH`）**
+   *      ⇒ 越域 / 超長 ⇒ `skipped.out_of_domain`、**不寫、不拋、不中斷整批**；
+   *   ⑥ **落盤**：`dry_run === true` ⇒ **目標行零寫**；否則產出 `kind:'update'`（`match` 用 `_id`、
+   *      `doc` 只含該字段 ＋ `updated_at`、**不寫 `_id`**、`expectAtLeast:1`）；**一次 `persist`
+   *      承載整批**，**審計行排第一步** ⇒ 審計落不下時**目標行零寫入**（§3.79.4 ③）；
+   *   ⑦ **審計**：每輪（**含 `dry_run:true` 輪**）向既有審計面 `xiai_admin_audit` 寫一行
+   *      （`op` / `actor_uid` / `at` / `dry_run` ＋ 五讀數；**零 `phone` 鍵、零新集合**）；
+   *   ⑧ **回包新增恰 6 鍵**：`dry_run`（回顯）＋ `scanned` / `eligible` / `written` /
+   *      `skipped{out_of_domain, same}` / `samples[]`（≤ 10 條，形如
+   *      `{faceId|sealId, field, from, to}`）；**自洽式（硬）** ＝
+   *      `written + skipped.out_of_domain + skipped.same === eligible` 且 `eligible <= scanned`；
+   *      **失敗恒 3 鍵、零讀數鍵**。**六鍵僅本 op 由 `index.js` 按 `op` 收窄透傳。**
+   *   · **`written` 口徑（明文）** ＝ 本輪**產出的目標字段寫入數** —— `dry_run:true` 下**照常給
+   *     「將寫入數」**（與執行輪同值；§3.79.2 ⑤「回讀讀數照常給出」＋ 本文件 `migrate*` /
+   *     `repairImportAcceptance` 的 dry_run 讀數先例），**目標行實際零寫入**由 ⑥ 保證；
+   *     若 dry_run 下改記 0，將與上面的硬自洽式直接衝突（`eligible` 是數據屬性、不隨 `dry_run` 變）。
+   *   · **不改面**：`ACCEPTED` 勘誤行一律**只讀**（`_id` / `value` / `status` / `created_at` 全不動）、
+   *      不改審核口徑、不改 `reviewCorrection` / `submitCorrection`、**不建行、不刪行、不改 `_id`**、
+   *      **零新集合**（審計落既有 `xiai_admin_audit`）、**零新增 `reason`**。
+   * @param {object} [payload] `{dry_run:boolean, limit?:number}`（`dry_run` **必有**）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, op:string, dry_run:boolean, scanned:number, eligible:number,
+   *          written:number, skipped:{out_of_domain:number, same:number}, samples:Array<object>,
+   *          plan?:object}|{ok:false, reason:string, message:string}>}
+   */
+  async backfillAcceptedCorrections(payload, identity, context) {
+    /* ① 管理员门（**先于一切读写**；缺 env ⇒ 安全拒 ＋ 零读取；非白名单 ⇒ `FORBIDDEN` ＋ 零读取）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷封闭恰二键（形态 → 未知键 / 身份类键 → `dry_run` → `limit`）。 */
+    const input = payload === undefined || payload === null ? {} : payload
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const unknown = Object.keys(input).filter((key) => BACKFILL_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    /* `dry_run` **必有、布林**（缺 / 非布林 ⇒ `INVALID_VALUE`；入口默認 `true` 由視圖層給）。 */
+    if (!Object.prototype.hasOwnProperty.call(input, 'dry_run') || typeof input.dry_run !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+    }
+    const dryRun = input.dry_run
+    /* `limit` 可选、1〜200 整数、缺省 200（越界 / 非整数 ⇒ `INVALID_VALUE` ＋ 零写入）。 */
+    let limit = BACKFILL_DEFAULT_LIMIT
+    if (Object.prototype.hasOwnProperty.call(input, 'limit')) {
+      const rawLimit = input.limit
+      if (typeof rawLimit !== 'number' || !Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > BACKFILL_MAX_LIMIT) {
+        return deny(REASONS.INVALID_VALUE, `\`limit\` 必須是 1〜${BACKFILL_MAX_LIMIT} 的整數；本次零寫入。`)
+      }
+      limit = rawLimit
+    }
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const at = new Date(seconds * 1000).toISOString()
+    /* ③ 只读扫描 `ACCEPTED` 行（分页：每页 ×100 递增、批数 ≤ `limit`、单查询 ≤ 1000 行）。 */
+    const accepted = []
+    const seen = new Set()
+    for (let page = 1; page <= limit; page += 1) {
+      const pageLimit = Math.min(BACKFILL_SCAN_PAGE_SIZE * page, BACKFILL_SCAN_MAX_PAGE_LIMIT)
+      const rows = await readRows(COLLECTIONS.corrections, { status: CORRECTION_STATUS.ACCEPTED }, { limit: pageLimit })
+      const list = Array.isArray(rows) ? rows : []
+      let added = 0
+      for (const row of list) {
+        const rowKey =
+          text(row && (row._id !== undefined && row._id !== null ? row._id : row.id)) ||
+          `${text(row && row.faceId)}|${text(row && row.sealId)}|${text(row && row.field)}|${text(
+            row && row.created_at
+          )}|${text(row && row.value)}`
+        if (seen.has(rowKey)) continue
+        seen.add(rowKey)
+        accepted.push(row)
+        added += 1
+      }
+      /* 页满 ⇒ 可能还有下一页；页未满 / 无新增（读点无 `skip`，同一批重读）⇒ 已扫尽，收口。 */
+      if (list.length < pageLimit || added === 0) break
+    }
+    const scanned = accepted.length
+    /* ④ 分组取位：`(faceId 或 sealId, field)`；只认 `ACCEPTED`（读面已按 status 过滤，此处再复核）；
+       `created_at` 最新、并列取 `_id` 字典序最大。无目标键 / 无字段的行不取位（不计 `eligible`）。 */
+    const groups = new Map()
+    for (const row of accepted) {
+      if (text(row && row.status) !== CORRECTION_STATUS.ACCEPTED) continue
+      const field = text(row && row.field)
+      if (field === '') continue
+      const faceId = text(row && row.faceId)
+      const sealId = text(row && row.sealId) || text(row && row.stamp_id)
+      const kind = faceId !== '' ? 'face' : sealId !== '' ? 'seal' : ''
+      if (kind === '') continue
+      const ref = kind === 'face' ? faceId : sealId
+      const groupKey = `${kind}:${ref}:${field}`
+      const current = groups.get(groupKey)
+      if (!current || newerCorrectionWins(row, current.row)) {
+        groups.set(groupKey, { kind, ref, field, row })
+      }
+    }
+    /* 目标行检索（`id` → `_id` 印面 / `stamp_id` → `sid` → `id` → `_id` 印章；命中即停、按目标缓存）。
+       `match` 优先用行 `_id`（无 `_id` 时退回命中检索键）—— **不改 `_id`、不建行**。 */
+    const targetCache = new Map()
+    const resolveTarget = async (kind, ref) => {
+      const cacheKey = `${kind}:${ref}`
+      if (targetCache.has(cacheKey)) return targetCache.get(cacheKey)
+      const collection = kind === 'face' ? COLLECTIONS.faces : COLLECTIONS.seals
+      const probes = kind === 'face' ? ['id', '_id'] : ['stamp_id', 'sid', 'id', '_id']
+      let hit = null
+      for (const probe of probes) {
+        const rows = await readRows(collection, { [probe]: ref }, { limit: 1 })
+        if (Array.isArray(rows) && rows.length > 0) {
+          const row = rows[0]
+          hit = { row, match: text(row._id) ? { _id: text(row._id) } : { [probe]: ref } }
+          break
+        }
+      }
+      targetCache.set(cacheKey, hit)
+      return hit
+    }
+    /* ⑤ 逐组判定（最多 `limit` 组；超出留待下一轮、不报错）。 */
+    let eligible = 0
+    let written = 0
+    const skipped = { out_of_domain: 0, same: 0 }
+    const samples = []
+    const updateWrites = []
+    const pushSample = (group, from, to) => {
+      if (samples.length >= BACKFILL_MAX_SAMPLES) return
+      /* 行面剥一切键名含 `phone` 的键：样本只由这四个键显式构造 ⇒ 结构上零 `phone`。 */
+      samples.push(
+        group.kind === 'face'
+          ? { faceId: group.ref, field: group.field, from, to }
+          : { sealId: group.ref, field: group.field, from, to }
+      )
+    }
+    const groupKeys = Array.from(groups.keys()).sort()
+    let processed = 0
+    for (const groupKey of groupKeys) {
+      if (processed >= limit) break
+      processed += 1
+      const group = groups.get(groupKey)
+      const target = await resolveTarget(group.kind, group.ref)
+      const to = text(group.row.value)
+      if (!target) {
+        /* **目标行不存在 ⇒ 跳过**（计入 `skipped.same`；**不建行**，等式仍自洽）。 */
+        eligible += 1
+        skipped.same += 1
+        pushSample(group, '', to)
+        continue
+      }
+      const from = text(target.row[group.field])
+      eligible += 1
+      if (from === to) {
+        /* 现值已等于取位值 ⇒ 零写（幂等：第二轮全落这里）。 */
+        skipped.same += 1
+        pushSample(group, from, to)
+        continue
+      }
+      /* **写前两道门**（沿既有阈值、不得放宽）：现值域门（空串不参与）＋ 长度门。 */
+      const domain = Object.prototype.hasOwnProperty.call(VALUE_DOMAINS, group.field)
+        ? VALUE_DOMAINS[group.field]
+        : null
+      const outOfDomain = (domain && to !== '' && domain.indexOf(to) === -1) || to.length > MAX_TEXT_LENGTH
+      if (outOfDomain) {
+        /* 越域 / 超长 ⇒ 跳过并登记，**不写、不抛、不中断整批**。 */
+        skipped.out_of_domain += 1
+        pushSample(group, from, to)
+        continue
+      }
+      /* 可写：`written` 计数（dry_run 下照常给「将写入数」，见上方口径明文）。 */
+      written += 1
+      pushSample(group, from, to)
+      if (!dryRun) {
+        const doc = { [group.field]: to, updated_at: at }
+        updateWrites.push({
+          kind: 'update',
+          collection: group.kind === 'face' ? COLLECTIONS.faces : COLLECTIONS.seals,
+          match: target.match,
+          doc,
+          expectAtLeast: 1
+        })
+      }
+    }
+    /* ⑦ 审计行（每轮含 `dry_run:true` 轮；封闭键面、零 `phone` 键、不新增集合）。 */
+    const auditDoc = {
+      op: 'backfillAcceptedCorrections',
+      actor_uid: text(identity && identity.uid),
+      at,
+      dry_run: dryRun,
+      scanned,
+      eligible,
+      written,
+      skipped: { out_of_domain: skipped.out_of_domain, same: skipped.same },
+      samples
+    }
+    /* ⑥ 落盘计划：**审计行排第一步**（审计落不下 ⇒ 整批在第 1 步即断 ⇒ 目标行零写入），
+       其后才是本批目标字段更新（`dry_run` ⇒ 只有审计一步）。 */
+    const writes = [{ kind: 'add', collection: COLLECTIONS.adminAudit, doc: auditDoc }].concat(
+      dryRun ? [] : updateWrites
+    )
+    const result = {
+      ok: true,
+      op: 'backfillAcceptedCorrections',
+      dry_run: dryRun,
+      scanned,
+      eligible,
+      written,
+      skipped: { out_of_domain: skipped.out_of_domain, same: skipped.same },
+      samples
+    }
+    result.plan = { op: 'backfillAcceptedCorrections', writes }
+    return result
   },
 
   /**
@@ -8211,6 +8488,9 @@ module.exports = {
   DYNASTY_MIGRATION,
   /* 值域收斂面（本單 `migrateSealValueDomains`；供離線自檢直接斷言）。 */
   SEAL_VALUE_DOMAIN_TARGETS,
+  /* **歷史「已採納未落面」一次性回填面（§3.79｜本單 `backfillAcceptedCorrections`）**：
+     載荷封閉恰二鍵（`dry_run` 必有布林 ＋ `limit` 1〜200）—— 供離線自檢直接斷言。 */
+  BACKFILL_ALLOWED_KEYS,
   /* **本單 I-2 / I-3**：修復通道面與待審取行護欄（供離線自檢直接斷言）。 */
   IMPORT_REVIEW_PAGE_SIZE,
   IMPORT_REPAIR_SCAN_LIMIT,

@@ -833,6 +833,70 @@ function endorseFeedbackOf(face, entry) {
   return endorseFeedback[endorseFeedbackKey(face, entry)] || ''
 }
 
+/* ============================================================================
+   **简繁等价展示提示（§3.78）**：只做渲染提示 —— 不合并行、不改值、不置灰、不阻断提交
+   ---------------------------------------------------------------------------- 判定单点 ＝ `corrections.cjkVariantPeersOf`（纯函数：字面不同而 `s2t` 归一后相等）：
+     · **候選值列表**：某条与**同字段的其它候选**或**当前展示值**等价 ⇒ 该条**追加一行**提示；
+     · **提交表单**：输入值与**同字段的既有候选值**等价 ⇒ 表单旁提示（**仍可直接提交**）。
+   `s2t` 只出现在这两处比较里（**不进任何门**：防重 / 值域 / 長度 / 必填 / 採信冪等），
+   提示**只作用于渲染**、不落库、不参与展示值裁决与採信计数。
+   ============================================================================ */
+
+/* 標記文案（§3.78.2 ③：**規範凍結字面原文＝「疑似同值（简/繁）」**，原文含簡體「简」；
+   本處按硬約束「新文案一律繁體」取其繁體形上屏 ⇒ 過 `s2t(文案) === 文案`；
+   標記是**附加文案**：不替換原值、不置灰、不折疊）。 */
+const S2T_VARIANT_HINT = '疑似同值（簡/繁）'
+
+/** 某印面某字段的**既有候选值**（候選值列表 ∪ 本機 / 公開提交分組；只读，不改任何行）。 */
+function candidateValuesOf(face, field) {
+  if (!face) return []
+  const values = []
+  endorsementEntries(face).forEach((entry) => {
+    if (entry.field === field) values.push(entry.value)
+  })
+  corrections.submissionGroupsOfFace(face).forEach((group) => {
+    if (group.field === field) values.push(group.value)
+  })
+  return values
+}
+
+/** 当前展示值（与属性表**同一单点**：`markableOf` ＋ `detailDisplayOf`；无该字段 ⇒ 空串）。 */
+function markableDisplayValueOf(face, key) {
+  if (!face) return ''
+  const item = markableOf(face).find((row) => row.key === key)
+  return item ? String(detailDisplayOf(face, item) || '') : ''
+}
+
+/**
+ * 候選值行的提示文案（**只读渲染**）：命中 ⇒ `疑似同值（簡/繁）`，未命中 ⇒ 空串。
+ * 判定（§3.78.2 ②）＝ 与同字段其它候选 / 当前展示值「**字面不同**而 `s2t` 归一后相等」。
+ */
+function s2tVariantHintOf(face, entry) {
+  if (!face || !entry || !entry.value) return ''
+  const values = candidateValuesOf(face, entry.field)
+  const displayed = markableDisplayValueOf(face, entry.field)
+  const peers = corrections.cjkVariantPeersOf(entry.value, displayed ? [...values, displayed] : values)
+  return peers.length > 0 ? S2T_VARIANT_HINT : ''
+}
+
+/**
+ * 提交表单旁的提示（§3.78.3）：返回首个「与输入值简繁等价的既有候选值」；无 ⇒ 空串。
+ * **只提示**：不改输入值、不归一入参、**不禁用提交**（提交后仍走 §3.47 逐字判重）。
+ */
+function formS2tVariantPeer() {
+  const face = formFace.value
+  if (!face) return ''
+  const keys = corrections.MARKABLE_FIELDS.map((item) => item.key)
+  for (const key of keys) {
+    const raw = form[key]
+    const text = String(raw === undefined || raw === null ? '' : raw).trim()
+    if (!text) continue
+    const peers = corrections.cjkVariantPeersOf(text, candidateValuesOf(face, key))
+    if (peers.length > 0) return peers[0]
+  }
+  return ''
+}
+
 async function onEndorse(face, entry) {
   const key = endorseFeedbackKey(face, entry)
   endorseFeedback[key] = ''
@@ -2738,6 +2802,14 @@ onBeforeUnmount(() => {
               <span v-if="endorseFeedbackOf(face, entry)" class="detail__hint endorse__feedback" data-endorse-feedback>
                 {{ endorseFeedbackOf(face, entry) }}
               </span>
+              <!-- **简繁等价提示（§3.78）**：该条与同字段其它候选 / 当前展示值「字面不同而
+                   `s2t` 归一后相等」⇒ **追加一行**（独立 `data-s2t-variant-hint`）。
+                   只作用于渲染：**不合并行、不改值、不置灰、不阻断采信 / 提交**。 -->
+              <span
+                v-if="s2tVariantHintOf(face, entry)"
+                class="detail__hint endorse__s2t-hint"
+                data-s2t-variant-hint
+              >{{ s2tVariantHintOf(face, entry) }}</span>
             </li>
           </ul>
         </div>
@@ -3455,6 +3527,15 @@ onBeforeUnmount(() => {
           <TextTransformButtons v-model="form.basis" field-key="correction:basis" field-label="勘誤依據" />
         </div>
 
+        <!-- **简繁等价提示（§3.78.3）**：输入值与同字段既有候选值「字面不同而 `s2t` 归一后
+             相等」⇒ 表单旁提示（固定文案段带 `data-s2t-variant-hint`）。
+             **只提示**：不禁用提交、不要求二次确认、不改值、不归一入参、不拦截 ——
+             逐字不同 ⇒ 仍走 §3.47 既有判定、正常另计一条。 -->
+        <p v-if="formS2tVariantPeer()" class="correction-box__s2t-hint">
+          <span data-s2t-variant-hint>{{ S2T_VARIANT_HINT }}</span>
+          已有繁/簡近似值「{{ formS2tVariantPeer() }}」；仍可直接提交（逐字不同會另計一條）。
+        </p>
+
         <p v-if="formFeedback" class="correction-box__feedback">{{ formFeedback }}</p>
 
         <div class="correction-box__foot">
@@ -3781,6 +3862,21 @@ onBeforeUnmount(() => {
 /* 【重新提交】解释句（本单）：与反馈位同口径独占一行，不与读数挤在同一行。 */
 .endorse__resubmit-hint {
   flex-basis: 100%;
+}
+
+/* 简繁等价提示（§3.78）：**追加的一行**，不替换原值、不置灰、不折疊候选行。 */
+.endorse__s2t-hint {
+  flex-basis: 100%;
+}
+
+/* 同上（提交表单旁）：提示与反馈位同形，**不禁用提交、不改值**。 */
+.correction-box__s2t-hint {
+  margin-bottom: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-sunken);
+  border-radius: var(--r-md);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
 }
 
 .detail__value {

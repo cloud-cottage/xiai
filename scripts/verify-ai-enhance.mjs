@@ -479,7 +479,7 @@ section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 26 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 26, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 27 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 27, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
