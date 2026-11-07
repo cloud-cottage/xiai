@@ -451,7 +451,7 @@ console.log(JSON.stringify({ section: 'E', title: '号域：seal_no 推到 5,153
    F 段：注册面 ＋ 回包纪律 ＋ env 只登记名字
    =========================================================================== */
 console.log(JSON.stringify({ section: 'F', title: '注册面 / 回包纪律 / reason 零新增' }))
-check('F1', '`ADMIN_OPS` 恰含 27 项（原 12 ＋ 直写两 op ＋ AI 上游两 op ＋ §3.68 ai-enhance-face ＋ ai-enhance-discard 管理员弃候选图＋ 勘误待审只读面 listPendingCorrectionsForAdmin〔2026-11-02 v1.84：管理员白名单门、跨用户 PENDING、零写入〕；来源说明：2026-10-31 弃候选图单新增 —— 管理员可【弃】不满意的 AI 修復候选图，零计费、零新集合）', sorted([
+check('F1', '`ADMIN_OPS` 恰含 28 项（原 12 ＋ 直写两 op ＋ AI 上游两 op ＋ §3.68 ai-enhance-face ＋ ai-enhance-discard 管理员弃候选图＋ 勘误待审只读面 listPendingCorrectionsForAdmin〔2026-11-02 v1.84：管理员白名单门、跨用户 PENDING、零写入〕；来源说明：2026-10-31 弃候选图单新增 —— 管理员可【弃】不满意的 AI 修復候选图，零计费、零新集合）；2026-11-07 云模式印面圖替換增 replaceFaceImage（管理员原子入册影像行＋改面行指向，旧图与字节保留、零新 reason）', sorted([
   'ai-enhance-discard',
   'ai-enhance-face',
   'backfillAcceptedCorrections',
@@ -469,6 +469,7 @@ check('F1', '`ADMIN_OPS` 恰含 27 项（原 12 ＋ 直写两 op ＋ AI 上游�
   'querySealByFingerprint',
   'registerFaceImage',
   'repairImportAcceptance',
+  'replaceFaceImage',
   'reviewCorrection',
   'reviewItemImport',
   'reviewPersonImport',
