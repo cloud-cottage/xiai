@@ -411,6 +411,10 @@ const imageCorrectionFile = ref(null)
 const imageCorrectionFeedback = ref('')
 /** 页面级提示位（关弹窗后仍可见；重开弹窗时作废）。 */
 const imageCorrectionNotice = ref('')
+/* 提交成功文案（單點）：**明說「採納後才換圖」** —— 普通用戶提交後印面圖不會立刻變，
+   不說清楚會被當成「上传/更新失败」（人類 2026-11-07 反饋）。 */
+const IMAGE_CORRECTION_SUBMITTED_MESSAGE = '已提交影像勘誤（待審覈）；平臺審覈採納後才會更新印面圖片。'
+
 
 /** 二次确认后果文案（列明后果；选「替換」按 §3.77.5 明示指向与旧图处置）。 */
 const imageCorrectionConsequences = computed(() => {
@@ -562,8 +566,8 @@ async function confirmImageCorrection() {
        **同时在「可標記屬性」区顶部（用户操作处）落同一句** —— 弹窗一关，页面级底部提示
        常在视口之外（用户报「上传之后没有成功提示」的真因），故走既有单点
        `publishCorrectionNotice`，与勘误提交同一上屏位。 */
-    imageCorrectionNotice.value = '已提交影像勘誤（待審覈）'
-    publishCorrectionNotice('已提交影像勘誤（待審覈）', target.faceId)
+    imageCorrectionNotice.value = IMAGE_CORRECTION_SUBMITTED_MESSAGE
+    publishCorrectionNotice(IMAGE_CORRECTION_SUBMITTED_MESSAGE, target.faceId)
     imageCorrectionOpen.value = false
     imageCorrectionTarget.value = null
     imageCorrectionFile.value = null
