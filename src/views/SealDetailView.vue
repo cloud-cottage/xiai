@@ -558,8 +558,12 @@ async function confirmImageCorrection() {
       imageCorrectionFeedback.value = (result && result.message) || '提交影像勘誤失敗，本次零寫入。'
       return
     }
-    /* 成功 ⇒ 上屏固定文案 ＋ 关弹窗 ＋ 刷新待审读数（`dataVersion` 自增）。 */
+    /* 成功 ⇒ 上屏固定文案 ＋ 关弹窗 ＋ 刷新待审读数（`dataVersion` 自增）。
+       **同时在「可標記屬性」区顶部（用户操作处）落同一句** —— 弹窗一关，页面级底部提示
+       常在视口之外（用户报「上传之后没有成功提示」的真因），故走既有单点
+       `publishCorrectionNotice`，与勘误提交同一上屏位。 */
     imageCorrectionNotice.value = '已提交影像勘誤（待審覈）'
+    publishCorrectionNotice('已提交影像勘誤（待審覈）', target.faceId)
     imageCorrectionOpen.value = false
     imageCorrectionTarget.value = null
     imageCorrectionFile.value = null
@@ -3347,7 +3351,7 @@ onBeforeUnmount(() => {
           <!-- 剪贴板一键粘贴提示（繁體，可见）：与本框 `@paste` 同源。 -->
           <span class="field__hint" data-paste-hint="image-correction-file">{{ PASTE_HINT }}</span>
           <span v-if="imageCorrectionFileName" class="field__hint" data-image-correction-file-name>
-            已選：{{ imageCorrectionFileName }}
+            已選：{{ imageCorrectionFileName }}（圖片已就緒，可提交）
           </span>
           <span v-else class="field__hint">必須先選擇一張新圖（JPG / PNG / WebP，或直接粘貼剪貼板圖片），否則不能提交。</span>
         </div>
