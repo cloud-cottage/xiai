@@ -491,6 +491,17 @@ async function handleVerify(event, config, callContext) {
   if (op === 'registerFaceImage' && Object.prototype.hasOwnProperty.call(opResult, 'image_id')) {
     response.image_id = opResult.image_id
   }
+  /* **影像刪除讀數面（additive 透傳｜**按 op 收窄**｜本單 `deleteFaceImage`）**：`face_id` /
+     `image_id` / `removed`（＝ `{rows, objects}` 实际删数）**僅當 `op === 'deleteFaceImage'` 且
+     `opResult` 確有該鍵時**才逐字疊進回包（前端据此就地刷新印面指向并如实报删数）；
+     **其餘任何 op 一律不透傳這 3 個鍵** ⇒ 既有回包逐字不變（序列化後亦不新增鍵）。
+     既有字段一律不刪、不改。 */
+  if (op === 'deleteFaceImage') {
+    const FACE_IMAGE_DELETE_READOUT_KEYS = ['face_id', 'image_id', 'removed']
+    for (const key of FACE_IMAGE_DELETE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   /* **上傳印章即上雲（additive 透傳｜按 op 收窄｜本單）**：`stamp_id` / `face_ids` / `image_ids`
      **僅當 `op === 'createSealUpload'` 且 `opResult` 確有該鍵時**才逐字疊進回包（前端據此用
      **服務端下發的 id / 號**寫本機鏡像行 —— 本機不再發號）；其余键（`sid` / `seal_no` /

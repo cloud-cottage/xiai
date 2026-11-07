@@ -712,6 +712,108 @@ export async function deleteSeal(actor, sealId, reason) {
   return { ok: true, deleted, skipped, released }
 }
 
+/* ============================================================================ *
+   **刪除印面影像（管理員面｜影像卡片入口｜本單）
+   ----------------------------------------------------------------------------
+   · Kevin 2026-11-07 定案：**换图 / 採納 AI 候選圖一律不自动删旧图**（旧行与二进制保留），
+     只有管理员在**影像卡片**上显式点【刪除】才删 —— 本函数就是那一口的前端服务层。
+   · 能力判定 `canDeleteFaceImage`：与 `canDeleteSeal` / `canReplaceFaceImage` **同一套**口径
+     （`role === 'admin'`；缺省回落当前登录态）——**不另造第二把尺子**。
+   · 通道（唯一、不另造第二条）：`userWrite.js::userWriteGate` → `token.js::userGate`
+     → `data/cloudbaseFn.js::callCloudFunction('xiai-user-token', …)`，与勘误 / 删印 /
+     AI 弃候选图**同一条**用户令牌写面通道。
+   · **`local-dev` / 離線形態 ⇒ 结构化拒绝 `STORAGE_UNAVAILABLE`**（照 `deleteSeal` 先例：
+     门放行但**未经云端** ⇒ 不做本地假成功、不编造删数）。
+   · 服务端三步写入确定序（清引用 → 删行 → 删对象）与归属 / 共用 / 占位图判定**全由服务端裁决**；
+     本层零判定、零补编；成功回**恰 4 键** `{ok:true, face_id, image_id, removed:{rows, objects}}`。
+   · 成功即调 `invalidateImageDataUrl(imageId)` 作废该编号的 dataUrl 缓存（服务层唯一失效口）。
+   ============================================================================ */
+
+/** 雲端 op 名（与 `lib/ops.js` 注册面逐字一致）。 */
+const FACE_IMAGE_DELETE_OP = 'deleteFaceImage'
+
+/** 回包读数键面（与云函数 `index.js` 的按 op 收窄透传**逐字同集**；本文件零派生）。 */
+const FACE_IMAGE_DELETE_READOUT_KEYS = Object.freeze(['face_id', 'image_id', 'removed'])
+
+/** 当前（或指定）账号是否可**删除印面影像** —— 供详情页影像卡片决定入口是否渲染（管理员专属）。 */
+export function canDeleteFaceImage(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/**
+ * **删除本印面那一张影像**（仅管理员；服务端裁决；**不删其它印面共用的影像**）。
+ *
+ * 判定顺序（**全部在发出请求之前**，拒绝即零网络、零写入）：
+ * ① 管理员门（`canDeleteFaceImage`）→ ② 两编号形态（缺 ⇒ `INVALID_INPUT`）
+ * → ③ 过云端写面门（服务端再判白名单 / 键面 / 归属 / 共用 / 占位图）→ ④ `local-dev`
+ * 形态如实拒绝 → ⑤ 回包形状校验（缺 `removed` 读数 ⇒ 如实拒绝，**不编造**删数）。
+ *
+ * @param {string} faceId 印面编号（`face.id`）
+ * @param {string} imageId 影像编号（`face.face_image_id`）
+ * @returns {Promise<{ok:true, face_id:string, image_id:string, removed:{rows:number, objects:number}}|
+ *          |{ok:false, reason:string, message:string}>}
+ */
+export async function deleteFaceImage(faceId, imageId) {
+  if (!canDeleteFaceImage()) {
+    return {
+      ok: false,
+      reason: 'NOT_ADMIN',
+      message: '僅管理員可以刪除印面影像（前端前置；未發出任何請求、零寫入）。'
+    }
+  }
+  const face = String(faceId === undefined || faceId === null ? '' : faceId).trim()
+  const image = String(imageId === undefined || imageId === null ? '' : imageId).trim()
+  if (!face || !image) {
+    return {
+      ok: false,
+      reason: 'INVALID_INPUT',
+      message: '刪除印面影像需要印面編號（face_id）與影像編號（image_id），本次未發出任何請求。'
+    }
+  }
+  const gate = await userWriteGate(
+    FACE_IMAGE_DELETE_OP,
+    { face_id: face, image_id: image },
+    { readoutKeys: FACE_IMAGE_DELETE_READOUT_KEYS }
+  )
+  /* 傳輸層 / 補簽 / 服務端結構化拒絕 ⇒ **原樣透傳**（`reason` / `message` 一字不改寫）。 */
+  if (!gate || gate.ok !== true) {
+    if (gate && typeof gate === 'object') return gate
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '刪除印面影像服務暫時不可用，請稍後再試。'
+    }
+  }
+  if (gate.dev === true || gate.mode === 'local-dev') {
+    /* dev / 離線形態：門放行但**未經雲端** ⇒ 如實結構化拒絕（不編造已刪讀數）。 */
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: 'dev / 離線形態：未經雲端驗證，刪除印面影像不可用（非正式路徑；本次零寫入）。'
+    }
+  }
+  /* **回包形状校验**：`removed` 是「删了什么」的唯一凭据 ⇒ 缺位即如实拒绝（不补编 0）。 */
+  const removed = gate.removed && typeof gate.removed === 'object' ? gate.removed : null
+  if (!removed || typeof removed.rows !== 'number' || typeof removed.objects !== 'number') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '刪除印面影像回包形狀不可辨識（未附 removed 刪數讀數），請刷新後再試。'
+    }
+  }
+  const faceIdOut = typeof gate.face_id === 'string' ? gate.face_id : face
+  const imageIdOut = typeof gate.image_id === 'string' ? gate.image_id : image
+  /* 该编号的 dataUrl 缓存**立即作废**（服务层唯一失效口；缓存不再冒充现值）。 */
+  invalidateImageDataUrl(imageIdOut)
+  return {
+    ok: true,
+    face_id: faceIdOut,
+    image_id: imageIdOut,
+    removed: { rows: removed.rows, objects: removed.objects }
+  }
+}
+
 /* ============================================================================
    能力 6「上传印章（新增进藏品库）」（v1.3｜口径 B）
 
@@ -1313,11 +1415,62 @@ function findCloudImageRow(imageId) {
   return cloud.rows.find((row) => row && (row.id === id || row._id === id)) || null
 }
 
+/* ============================================================================
+   **影像 dataUrl 缓存失效（本單新增｜服务层**唯一失效口**）
+   ----------------------------------------------------------------------------
+   · 页面级**逐影像 dataUrl 缓存**（详情页 `imageUrls` / `imageVias` / `imageErrors` /
+     `imagePending`）由页面持有 —— 服务层不代管页面缓存，但提供**唯一失效口**：
+     页面在 setup 里用 `registerImageDataUrlCacheHolder(holder)` 登记自己的清理函数
+     （组件卸载时用返回的句柄注销）；此后**任何换图 / 採納 AI 候選圖 / 刪除影像**的写面
+     成功，只要调 `invalidateImageDataUrl(id)` ⇒ 该编号的 dataUrl 一律作废、下次必重取。
+   · 为什么必须单点：失效必须与写面同处收口 —— 散在各视图里必漏一处，漏一处就等于
+     **页面继续拿旧字节冒充现值**（「采纳后仍显示旧图」正是这么来的）。
+   · **旧影像本身不删**（Kevin 2026-11-07 定案：旧行与二进制保留、可回溯）；这里作废的
+     只是**缓存条目**，与「删图」是两件事。
+   ============================================================================ */
+
+/** 页面登记的缓存清理函数（**只在本文件被调用**；页面零第二套失效判据）。 */
+const imageDataUrlCacheHolders = new Set()
+
+/**
+ * 登记一个「逐影像 dataUrl 缓存」清理函数（页面在 setup 调用一次）。
+ * @param {(imageId:string)=>void} holder 收到影像编号即清掉该编号的缓存条目
+ * @returns {()=>void} 注销句柄（组件卸载时调用；重复调用幂等）
+ */
+export function registerImageDataUrlCacheHolder(holder) {
+  if (typeof holder !== 'function') return () => {}
+  imageDataUrlCacheHolders.add(holder)
+  return () => {
+    imageDataUrlCacheHolders.delete(holder)
+  }
+}
+
+/**
+ * **作废某编号的 dataUrl 缓存**（服务层唯一失效口；写面成功后调用）。
+ * 空编号 ⇒ 零动作回 `false`（不误伤）；某个 holder 抛错 ⇒ **不阻断**其余 holder
+ * （缓存清理失败只影响「下次是否重取」，绝不把已成功的写面改判成失败）。
+ * @param {string} imageId 影像编号
+ * @returns {boolean} 是否真按编号发起了一轮作废
+ */
+export function invalidateImageDataUrl(imageId) {
+  const id = String(imageId === undefined || imageId === null ? '' : imageId).trim()
+  if (id === '') return false
+  imageDataUrlCacheHolders.forEach((holder) => {
+    try {
+      holder(id)
+    } catch {
+      /* 单个 holder 失败静默：缓存作废是**卫生动作**，不改写写面结论。 */
+    }
+  })
+  return true
+}
+
 /**
  * **附加能力（非冻结项，UI 单可直接用）**：按影像编号取回二进制并转 dataURL（**仅运行时渲染**）。
  * 二进制只在 IndexedDB，页面要用 `<img>` 显示时必须走这里（不得直接读 IndexedDB，§3.2 收口注）。
  * @returns {Promise<{ok:boolean, dataUrl?:string, bytes?:Uint8Array, meta?:object, message:string}>}
  */
+
 /**
  * 取回某影像的**展示用** dataURL（页面显示的唯一入口；页面不得自行读写浏览器存储）。
  *

@@ -194,6 +194,24 @@ function retryDataSource() {
   void seals.retryDataSource()
 }
 
+/* ============================================================================ *
+   **逐影像 dataUrl 缓存的**作废口**（服务层唯一失效口登记）**
+   ----------------------------------------------------------------------------
+   · 本页持有的 dataUrl 缓存 = `imageUrls`（dataURL）＋ `imageVias`（分流读数）＋
+     `imageErrors` / `imagePending`（一次性读数）—— 一律**按影像编号**作废。
+   · 登记给 `seals.invalidateImageDataUrl(id)`：任何写面（**採納 AI 候選圖** / **刪除印面影像**）
+     成功后按编号调一次 ⇒ 旧编号缓存立即失效、下次必重取（**不刷整页**）。
+   · 组件卸载时注销（`onBeforeUnmount`），不给服务层留悬挂引用。
+   ============================================================================ */
+const unregisterImageDataUrlCache = seals.registerImageDataUrlCacheHolder((imageId) => {
+  const id = String(imageId || '')
+  if (!id) return
+  delete imageUrls[id]
+  delete imageVias[id]
+  delete imageErrors[id]
+  delete imagePending[id]
+})
+
 /* ---------------------- 实物照片：二进制只在 IndexedDB ---------------------- */
 /* 画廊**不再依赖行内的 dataURL**（AC-33：整张 dataURL 不得进 localStorage），
    一律按照片 id 经服务层取回二进制渲染。 */
@@ -291,6 +309,82 @@ async function confirmSealDelete() {
   }
   const nav = router.push({ name: 'square', query: { notice: 'seal-deleted' } })
   if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+}
+
+/* ============================================================================ *
+   **刪除印面影像（管理員面｜影像卡片入口｜本單）
+   ----------------------------------------------------------------------------
+   · Kevin 2026-11-07 定案：旧图**不自动删**；普通用户的【勘误】提交是下一轮，本单只做
+     **管理员在影像卡片直接【刪除】**（云 op `deleteFaceImage`）。
+   · 渲染条件＝服务层判定 `seals.canDeleteFaceImage`（普通用户 / 游客 ⇒ false ⇒ 不渲染，
+     DOM 零命中；**不得** CSS 隐藏 / `disabled` 冒充）；钩子只用 `data-action="image-delete"`
+     （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。
+   · 二次确认复用 `ConfirmDialog`（显式、可取消、默认不通过）：文案**必须列明**
+     「刪除後該印面將無影像、不可恢復、物件一並刪除」。
+   · 成功 ⇒ **就地刷新**（作废该编号 dataUrl 缓存 ＋ `dataVersion + 1` ＋ 云端快照重读
+     `retryDataSource()`），**不刷整页**；失败 ⇒ 本页上屏（服务端原话一字不改写）。
+   ============================================================================ */
+const canDeleteFaceImage = computed(() => seals.canDeleteFaceImage())
+const faceImageDeleteOpen = ref(false)
+const faceImageDeleteBusy = ref(false)
+const faceImageDeleteFeedback = ref('')
+/** 待删目标 `{faceId, imageId}`（关窗即清，避免残留指向）。 */
+const faceImageDeleteTarget = ref(null)
+
+/** 二次确认主文案（**必须列明**：刪除後該印面將無影像、不可恢復、物件一並刪除）。 */
+const faceImageDeleteMessage = computed(() => {
+  const target = faceImageDeleteTarget.value
+  if (!target) return '刪除本印面的影像。'
+  return (
+    `將刪除本印面（${target.faceId}）的影像編號 ${target.imageId}；` +
+    '刪除後該印面將無影像、不可恢復，影像物件一並刪除。' +
+    '（該影像若仍被其他印面引用，服務端會拒絕刪除並保持原狀。）'
+  )
+})
+
+/** 打开二次确认（每次打开重置旧反馈）。 */
+function openFaceImageDelete(face) {
+  const imageId = face && face.face_image_id ? String(face.face_image_id) : ''
+  if (!imageId) {
+    faceImageDeleteFeedback.value = '本印面沒有影像編號，無從刪除。'
+    return
+  }
+  faceImageDeleteFeedback.value = ''
+  faceImageDeleteTarget.value = { faceId: String(face.id), imageId }
+  faceImageDeleteOpen.value = true
+}
+
+/** 确认刪除：过服务层管理员写面门；成功 ⇒ 就地刷新，失败 ⇒ 本页上屏。 */
+async function confirmFaceImageDelete() {
+  if (faceImageDeleteBusy.value) return
+  const target = faceImageDeleteTarget.value
+  if (!target) {
+    faceImageDeleteOpen.value = false
+    return
+  }
+  faceImageDeleteBusy.value = true
+  let result = null
+  try {
+    result = await seals.deleteFaceImage(target.faceId, target.imageId)
+  } catch {
+    result = { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '刪除印面影像服務暫時不可用，請稍後再試。' }
+  }
+  faceImageDeleteBusy.value = false
+  faceImageDeleteOpen.value = false
+  faceImageDeleteTarget.value = null
+  if (!result || result.ok !== true) {
+    /* 失败：服务端 `message` **原文上屏**（不吞真因、不改写）。 */
+    faceImageDeleteFeedback.value = (result && result.message) || '刪除印面影像失敗，本次零寫入。'
+    return
+  }
+  faceImageDeleteFeedback.value =
+    `已刪除影像編號 ${result.image_id}（刪行 ${result.removed.rows} 件、刪對象 ${result.removed.objects} 件）；` +
+    '該印面已無影像，舊影像不再顯示。'
+  /* **就地刷新（不刷整页）**：作废该编号缓存（服务层单点）＋ 派生读数重算 ＋ 云端快照重读
+     （印面指向由服务端清空 ⇒ 必须重读云端才不再指向已删影像）。 */
+  seals.invalidateImageDataUrl(target.imageId)
+  dataVersion.value += 1
+  retryDataSource()
 }
 
 /* ============================================================================ *
@@ -1752,7 +1846,11 @@ async function discardAiEnhance() {
  * 【取】：把本印面 `face_image_id` 指向修復影像 —— **复用现有换图写面**
  * `seals.updateSealFixedAttributes(null, faceId, patch)`（与「編輯固定屬性」同一入口；
  * 与 replace-face-image 同语义：只改指向、**旧行不删**；**不新增写面 op**）。
- * 成功 ⇒ 顶部反馈「影像編號 旧 → 新」＋ `dataVersion + 1`（派生读数立即重算）。
+ * 成功 ⇒ 顶部反馈「影像編號 旧 → 新；舊影像與二進制保留（可回溯）」＋
+ * **① 作废旧编号 dataUrl 缓存**（服务层唯一失效口 `seals.invalidateImageDataUrl`）
+ * ＋ **② 云端快照重读**（`retryDataSource()`：清一次性读数 ＋ 重拉云端 —— 印面指向已在
+ * 服务端改写，只有重读云端 `faceImageIds` 才含新编号）＋ `dataVersion + 1`
+ * ⇒ **不刷整页也立即显示新图**（旧图行与二进制仍保留、可回溯）。
  */
 async function acceptAiEnhance() {
   const face = aiEnhanceFace.value
@@ -1767,10 +1865,15 @@ async function acceptAiEnhance() {
       aiEnhanceFeedback.value = `取用修復圖未生效：${(written && written.message) || '未知原因'}（印面指向未變）`
       return
     }
-    aiEnhanceFeedback.value =
-      `影像編號 ${previousId || '（原無）'} → ${nextId}；舊影像行與二進制保留未刪。`
-    /* 派生读数立即刷新（本页影像按新编号重取；无需刷新页面）。 */
+    aiEnhanceFeedback.value = `影像編號 ${previousId || '（原無）'} → ${nextId}；舊影像與二進制保留（可回溯）。`
+    /* **强制失效旧 id 的 dataUrl 缓存**（服务层唯一失效口；页面登记的清理函数按编号清）。
+       旧影像**本身不删** —— 作废的只是缓存条目，下次取它仍会照常读回。 */
+    if (previousId) seals.invalidateImageDataUrl(previousId)
+    /* **立即显示新图（不刷整页）**：派生读数重算 ＋ 清一次性读数（新编号若早先取字节失败，
+       错误缓存会永久挡住它）＋ **云端快照重读**（服务端指向已改，重读后 `faceImageIds`
+       才含新编号 ⇒ 才会去取新图）。 */
     dataVersion.value += 1
+    retryDataSource()
     closeAiEnhance()
   } finally {
     aiEnhanceAccepting.value = false
@@ -1779,6 +1882,8 @@ async function acceptAiEnhance() {
 
 onBeforeUnmount(() => {
   releaseReplaceSource()
+  /* 注销本页的逐影像 dataUrl 缓存持有者（不给服务层留悬挂引用）。 */
+  unregisterImageDataUrlCache()
   /* 在途的 AI 修復请求：作废界面态（回包仍被收取，见 `runAiEnhance`）。 */
   aiEnhanceRequestSeq += 1
 })
@@ -2035,8 +2140,25 @@ onBeforeUnmount(() => {
              本块不再呈现材质行；白名单现为 ['face_image_id','edge_image_ids']（R-135：上色面退场）。 -->
 
         <div class="face-block__media">
-          <figure v-if="face.face_image_id" class="face-block__figure">
+          <figure v-if="face.face_image_id" class="face-block__figure" data-face-image-card>
             <figcaption>印面影像 {{ face.face_image_id }}</figcaption>
+            <!-- 管理员专属【刪除】（普通用户 / 游客 ⇒ 不渲染，DOM 零命中；**不得** CSS 隐藏 /
+                 `disabled` 冒充）：影像卡片上的**独立钩子** `data-action="image-delete"`
+                 （**不新增 `data-admin-action` 取值**；与 `seal-delete` / `local-db-clear` 同族）。
+                 旧图**不自动删** ⇒ 删只能由管理员在此显式点按（二次确认另挂
+                 `image-delete-confirm` / `image-delete-cancel`）。 -->
+            <button
+              v-if="canDeleteFaceImage"
+              class="btn btn--ghost"
+              type="button"
+              data-action="image-delete"
+              :data-face-id="face.id"
+              :data-image-id="face.face_image_id"
+              :disabled="faceImageDeleteBusy"
+              @click="openFaceImageDelete(face)"
+            >
+              刪除
+            </button>
             <!-- R-87 / R-88：按元数据切分（印面族 4 块）→ 前端拼接展示（按原色，无上色）。 -->
             <SliceImage
               v-if="imageReadyOf(face.face_image_id)"
@@ -2775,6 +2897,27 @@ onBeforeUnmount(() => {
         ></textarea>
       </div>
     </ConfirmDialog>
+
+    <!-- **刪除印面影像的二次确认（本单新增）**：复用 `ConfirmDialog`（显式、可取消、默认不通过）。
+         文案**必须列明**「刪除後該印面將無影像、不可恢復、物件一並刪除」；
+         确认 / 取消钮只挂 `data-action`（`image-delete-confirm` / `image-delete-cancel`，
+         **不新增 `data-admin-action`**）。 -->
+    <ConfirmDialog
+      v-if="faceImageDeleteOpen"
+      title="刪除印面影像"
+      :message="faceImageDeleteMessage"
+      hint="刪除為不可恢復操作：該印面的影像與其物件會一併移除。"
+      confirm-text="確認刪除"
+      confirm-action="image-delete-confirm"
+      cancel-action="image-delete-cancel"
+      @confirm="confirmFaceImageDelete"
+      @cancel="faceImageDeleteOpen = false"
+    />
+
+    <!-- **刪除印面影像的可读反馈（本页；成功 / 失败都上屏）。** -->
+    <p v-if="faceImageDeleteFeedback" class="notice detail__notice" data-image-delete-feedback>
+      {{ faceImageDeleteFeedback }}
+    </p>
 
     <!-- 「清除本機資料」二次确认（**与广场页逐字同一份文案**；默认不通过）。
          确认走 `confirmClearLocal`：成功 ⇒ 强制从云端重载并回广场带一次性提示；

@@ -3944,6 +3944,65 @@ const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
 const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
 
 /* ---------------------------------------------------------------------------
+   **影像刪除面（本單新增 op｜`deleteFaceImage`｜管理員面）**
+   ---------------------------------------------------------------------------
+   场景：Kevin 2026-11-07 定案 —— 影像**不自动删**（采纳 AI 候選圖 / 换图一律保留旧图），
+   改由管理员在**影像卡片**上显式【刪除】。本 op 就是那一口。
+   硬口径（逐条）：
+     · **管理员门 `adminWhitelistDenial` 先于一切读写**（缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝
+       ＋ 零读取、零写入；非白名单 ⇒ `FORBIDDEN`）；
+     · **载荷封闭两键** `face_id` ＋ `image_id`（`FACE_IMAGE_DELETE_ALLOWED_KEYS`）：
+       未知键 / 身份类键 ⇒ `INVALID_FIELD`；缺 / 空 ⇒ `MISSING_REQUIRED`；非字符串 ⇒ `INVALID_VALUE`；
+     · **本印面归属校验**：读 `COLLECTIONS.faces` 该行（`id` → `_id` 两形态依次；无行 ⇒
+       `INVALID_VALUE`）；`image_id` 必须确属该印面（`face_image_id` 等值 **或** 在
+       `edge_image_ids[]` 中），否则 ⇒ `INVALID_VALUE` ＋ **零写入**；
+     · **共用保护**：再扫描**全部印面**，该影像仍被**其它印面**引用（`face_image_id` /
+       `edge_image_ids`）⇒ `INVALID_VALUE`（文案点名「該影像仍被其他印面引用」）＋ **零写入**；
+     · **写入确定序（先后即契约）**：① 先清该印面的引用（`face_image_id` 置 `''` ／ 从
+       `edge_image_ids` 移除；`persist` 的 `kind:'update'` ＋ `expectAtLeast:1`）→ ② 删
+       `xiai_images` 影像行（`deleteRow`）→ ③ **尽力**删对象（`deleteArtifactObject`；
+       **失败不阻断**、计数如实＝0）；**占位图行不得删**（`SEAL_PLACEHOLDER_IMAGE*` 命中 ⇒
+       只清引用、行与对象一律保留，`removed.rows` 如实为 0）；
+     · **对象删除受内容寻址去重保护**：同 `sha256` 尚有其它行 ⇒ 只删行、`removed.objects = 0`；
+     · **回包**：成功恰 **4 键** `{ok:true, face_id, image_id, removed:{rows, objects}}`
+       （`index.js` 仿 `registerFaceImage` 做**按 op 收窄透传**；`rows` / `objects` 为**实际删数**，
+       零补编）；失败恒 **3 键** `{ok, reason, message}`，`reason` 只用既有冻结值（**零新增**）；
+     · **零新集合**：读走 `readRows`、清引用走 `persist`、删行走 `deleteRow`、删对象走
+       `deleteArtifactObject`（实现全部在本文件，`require` 零新增）。
+   --------------------------------------------------------------------------- */
+
+/** 影像刪除载荷**封闭两键**（未知键 / 身份类键 ⇒ `INVALID_FIELD`；与其余 op 同一条文案）。 */
+const FACE_IMAGE_DELETE_ALLOWED_KEYS = Object.freeze(['face_id', 'image_id'])
+
+/** 影像刪除回包**读数键面**（成功恰 4 键；`index.js` 按 op 收窄透传的键面真源）。 */
+const FACE_IMAGE_DELETE_READOUT_KEYS = Object.freeze(['face_id', 'image_id', 'removed'])
+
+/** 印面行检索窄读上限（`id` → `_id` 两形态；形如「命中即取首行」）。 */
+const FACE_IMAGE_DELETE_FACE_SCAN_LIMIT = 8
+
+/** 引用面 / 全量印面扫描护栏（单次读取上限；口径同仓内既有 1000 行护栏）。 */
+const FACE_IMAGE_DELETE_SCAN_LIMIT = 1000
+
+/** 影像行检索窄读上限（按 `id` / `_id` 取首行）。 */
+const FACE_IMAGE_DELETE_IMAGE_SCAN_LIMIT = 1
+
+/** 同摘要去重扫描护栏（口径同候選圖弃除面）。 */
+const FACE_IMAGE_DIGEST_SCAN_LIMIT = 64
+
+/** 对象键形态（内容寻址 `xiai/images/<摘要前两位>/<摘要>.<扩展名>`）—— **非集合名**：
+ *  它是对象存储路径（校验行内 `storage_key` / 推导删对象键用）。含 `.tiff` 存储件与
+ *  `.png` / `.webp` / `.jpg` 展示件（行内 `storage_key` 两种都可能出现）。 */
+const FACE_IMAGE_OBJECT_KEY_PATTERN = /^xiai\/images\/[0-9a-f]{2}\/[0-9a-f]{64}\.(png|webp|jpg|jpeg|tiff)$/
+
+/** `mime` ⇒ 对象键扩展名（存储件 tiff；展示件 png / webp；`image/jpeg` 兜底）。 */
+const FACE_IMAGE_MIME_EXT = Object.freeze({
+  'image/tiff': 'tiff',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/jpeg': 'jpg'
+})
+
+/* ---------------------------------------------------------------------------
   **上傳印章即上雲（本單新增 op｜`createSealUpload`｜管理員面）**
   ---------------------------------------------------------------------------
   场景（线上实证真因）：「上傳印章」此前**只写本机**（`db.js::createSealWithFaceRows` 纯本地落盘，
@@ -6370,6 +6429,181 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「刪除印面影像」（本單新增 op｜`deleteFaceImage`｜管理員面）**：管理员在**影像卡片**
+   * 上显式【刪除】本印面那一张影像（**旧图默认不自动删** ⇒ 删是显式动作，不是换图的副作用）。
+   *
+   * 顺序（**判定全部早于任何写**；本 op 无 `plan` —— 三步写入都在本函数内按确定序执行）：
+   *   ① 管理员门 `adminWhitelistDenial`（**先于一切读写**；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝
+   *      ＋ 零读零写；非白名单 ⇒ `FORBIDDEN`）；
+   *   ② 载荷封闭两键 `face_id` ＋ `image_id`（未知键 / 身份类键 ⇒ `INVALID_FIELD`；缺 / 空 ⇒
+   *      `MISSING_REQUIRED`；非字符串 ⇒ `INVALID_VALUE`）；
+   *   ③ 印面行检索（`id` → `_id` 两形态依次；无行 ⇒ `INVALID_VALUE` ＋ 零写入）；
+   *   ④ **本印面归属校验**：`image_id` 必须确属该印面（`face_image_id` 等值 **或** 在
+   *      `edge_image_ids[]` 中），否则 ⇒ `INVALID_VALUE` ＋ **零写入**；
+   *   ⑤ **共用保护**：扫描**全部印面**（`readRows(faces, {})`，护栏在场），该影像仍被**其它**
+   *      印面引用 ⇒ `INVALID_VALUE`（文案点名「**該影像仍被其他印面引用**」）＋ **零写入**；
+   *   ⑥ **写入确定序（先后即契约）**：① 先清该印面引用（`face_image_id` 置 `''` ／ 从
+   *      `edge_image_ids` 移除；`persist` `kind:'update'` ＋ `expectAtLeast:1`）→ ② 删
+   *      `xiai_images` 行（`deleteRow`；**占位图行不删** ⇒ `removed.rows` 如实 0）→ ③ 尽力删
+   *      对象（内容寻址去重保护下 `deleteArtifactObject`；**失败不阻断**、计数如实 0）；
+   *   ⑦ **回包**：成功恰 **4 键** `{ok:true, face_id, image_id, removed:{rows, objects}}`
+   *      （`index.js` 按 op 收窄透传；**删数如实、零补编**）；失败恒 **恰 3 键**
+   *      （`ok, reason, message`；**零新增 `reason`**）。
+   * @param {object} payload 载荷（封闭两键 `face_id` / `image_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:string|number}} [context]
+   * @returns {Promise<{ok:true, face_id:string, image_id:string, removed:{rows:number, objects:number}}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async deleteFaceImage(payload, identity, context) {
+    /* ① 管理员门（**先于一切读写**；缺 env / 非白名单 ⇒ 结构化拒绝 ＋ 零读取、零写入）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷封闭键面（形态 ＋ 未知键 / 身份类键 ⇒ 与其余 op 同一条文案）。 */
+    const payloadDenial = pointsPayloadDenial(payload, FACE_IMAGE_DELETE_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    /* ③ 必填两键（缺 / 空 ⇒ `MISSING_REQUIRED`；非字符串 ⇒ `INVALID_VALUE`；零写入）。 */
+    for (const key of ['face_id', 'image_id']) {
+      const value = payload[key]
+      if (value === undefined || value === null || text(value) === '') {
+        return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${key}）；本次零寫入。`)
+      }
+      if (typeof value !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串；本次零寫入。`)
+      }
+    }
+    const faceId = text(payload.face_id)
+    const imageId = text(payload.image_id)
+    /* ④ 印面行检索（`id` → `_id` 两形态依次；无行 ⇒ `INVALID_VALUE` ＋ 零写入）。 */
+    let faceRow = null
+    let probeField = ''
+    for (const probe of ['id', '_id']) {
+      const rows = await readRows(COLLECTIONS.faces, { [probe]: faceId }, { limit: FACE_IMAGE_DELETE_FACE_SCAN_LIMIT })
+      if (rows.length > 0) {
+        faceRow = rows[0]
+        probeField = probe
+        break
+      }
+    }
+    if (faceRow === null) {
+      return deny(REASONS.INVALID_VALUE, `未找到該印面（face_id：${faceId}）；本次零寫入。`)
+    }
+    /* ⑤ **本印面归属校验**：`face_image_id` 等值 或 `edge_image_ids[]` 命中，否则零写入。 */
+    const edgeIds = Array.isArray(faceRow.edge_image_ids)
+      ? faceRow.edge_image_ids.map((id) => text(id)).filter((id) => id !== '')
+      : []
+    const ownedByFace = text(faceRow.face_image_id) === imageId
+    const ownedByEdge = edgeIds.indexOf(imageId) !== -1
+    if (!ownedByFace && !ownedByEdge) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `影像編號（${imageId}）不屬於該印面（本印面的 face_image_id / edge_image_ids 均未命中）；本次零寫入。`
+      )
+    }
+    /* ⑥ **共用保护**：全部印面里除本印面外仍有人引用该影像 ⇒ 拒（文案点名）＋ 零写入。
+       判据与 `lib/sealDelete.js` 的共用判定同形（`face_image_id` 等值 ／ `edge_image_ids` 数组含）。 */
+    const isTargetFace = (row) => text(row && row.id) === faceId || text(row && row._id) === faceId
+    const allFaces = await readRows(COLLECTIONS.faces, {}, { limit: FACE_IMAGE_DELETE_SCAN_LIMIT })
+    const sharedByOthers = allFaces.some(
+      (row) =>
+        !isTargetFace(row) &&
+        (text(row && row.face_image_id) === imageId ||
+          (Array.isArray(row && row.edge_image_ids) &&
+            row.edge_image_ids.some((edgeId) => text(edgeId) === imageId)))
+    )
+    if (sharedByOthers) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `該影像仍被其他印面引用（其它印面行的 face_image_id / edge_image_ids 命中 ${imageId}），不可刪除；本次零寫入。`
+      )
+    }
+    /* ⑦ 写入确定序 ①：**先清该印面的引用**（`face_image_id` 置 `''` ／ 从 `edge_image_ids` 移除）。 */
+    const seconds = Number.isFinite(Number(context && context.nowSeconds))
+      ? Math.floor(Number(context.nowSeconds))
+      : Math.floor(Date.now() / 1000)
+    const doc = { updated_at: new Date(seconds * 1000).toISOString() }
+    if (ownedByFace) doc.face_image_id = ''
+    if (ownedByEdge) doc.edge_image_ids = edgeIds.filter((id) => id !== imageId)
+    const match = text(faceRow._id) ? { _id: text(faceRow._id) } : { [probeField]: faceId }
+    try {
+      await persist({
+        writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc, expectAtLeast: 1 }]
+      })
+    } catch (error) {
+      /* 清引用未落定 ⇒ 尚未删任何行 / 对象（**不谎报零写入以外的成功**）。 */
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `印面引用清除失敗（face_id：${faceId}）；影像行與對象均未刪除，可重試。（診斷：${
+          (error && error.message) || 'unknown'
+        }）`
+      )
+    }
+    /* ⑧ 写入确定序 ②：删 `xiai_images` 行（`id` → `_id` 两形态；无行 ⇒ 如实 0，不编造）。
+       **占位图行不得删**（登记键 / 登记 id 命中 ⇒ 跳过删行，引用已在上一步清掉）。 */
+    let imageRow = null
+    for (const probe of ['id', '_id']) {
+      const rows = await readRows(COLLECTIONS.images, { [probe]: imageId }, { limit: FACE_IMAGE_DELETE_IMAGE_SCAN_LIMIT })
+      if (rows.length > 0) {
+        imageRow = rows[0]
+        break
+      }
+    }
+    const isPlaceholder =
+      imageRow !== null &&
+      (text(imageRow.storage_key) === SEAL_PLACEHOLDER_IMAGE_KEY ||
+        text(imageRow.id) === SEAL_PLACEHOLDER_IMAGE.id ||
+        text(imageRow._id) === SEAL_PLACEHOLDER_IMAGE.id)
+    let rows = 0
+    if (imageRow !== null && !isPlaceholder) {
+      const imageDocId = text(imageRow._id) || imageId
+      try {
+        await deleteRow(COLLECTIONS.images, imageDocId)
+        rows = 1
+      } catch (error) {
+        /* 引用已清、行未删 ⇒ **如实报告非零写入**（不得声称「本次零寫入」）。 */
+        return deny(
+          REASONS.STORAGE_UNAVAILABLE,
+          `印面引用已清除，但影像行刪除失敗（image_id：${imageId}）；對象未刪除、影像行仍在，可重試。（診斷：${
+            (error && error.message) || 'unknown'
+          }）`
+        )
+      }
+    }
+    /* ⑨ 写入确定序 ③：**尽力**删对象（去重保护：同 `sha256` 尚有其它行 ⇒ 只删行）。
+       删对象失败 ⇒ **不阻断**，`removed.objects` 如实 0（**不谎报已删**）。 */
+    let objects = 0
+    if (rows === 1) {
+      const rawDigest = text(imageRow.sha256)
+      const digest = rawDigest.toLowerCase()
+      const declaredKey = text(imageRow.storage_key)
+      const derivedKey = FACE_IMAGE_MIME_EXT[text(imageRow.mime)]
+        ? `xiai/images/${digest.slice(0, 2)}/${digest}.${FACE_IMAGE_MIME_EXT[text(imageRow.mime)]}`
+        : ''
+      const objectKey = FACE_IMAGE_OBJECT_KEY_PATTERN.test(declaredKey)
+        ? declaredKey
+        : FACE_IMAGE_OBJECT_KEY_PATTERN.test(derivedKey)
+          ? derivedKey
+          : ''
+      const imageDocId = text(imageRow._id) || imageId
+      let sharedByOtherRow = false
+      if (ARTIFACT_DIGEST_PATTERN.test(digest)) {
+        const peers = await readRows(COLLECTIONS.images, { sha256: rawDigest }, { limit: FACE_IMAGE_DIGEST_SCAN_LIMIT })
+        sharedByOtherRow = peers.some((row) => text(row && (row._id || row.id)) !== imageDocId)
+      }
+      if (objectKey && !sharedByOtherRow) {
+        try {
+          await deleteArtifactObject(objectKey)
+          objects = 1
+        } catch {
+          objects = 0
+        }
+      }
+    }
+    /* ⑩ 成功回包恰 4 键（`removed` 的删数一律取自实际执行结果，零补编）。 */
+    return { ok: true, face_id: faceId, image_id: imageId, removed: { rows, objects } }
+  },
+
+  /**
    * **上傳印章即上雲（本單新增 op｜`createSealUpload`｜管理員面）**：管理员在【上傳印章】弹窗
    * 提交一枚印章（1 印面 ＋ 可选边款）⇒ **服务端发号 ＋ 内容寻址影像行 ＋ `persist` 单点落盘**，
    * 客户端只落本机镜像（**本机不再发号** —— 本地号源只留给 `local-dev` 显式分支）。
@@ -7228,6 +7462,10 @@ module.exports = {
   countRemainingImportPending,
   OPS,
   ADMIN_OPS,
+  /* **印面影像刪除面（本單 `deleteFaceImage`）**：封闭两键面 ＋ 成功回包读数键面
+     （供离线自检直接断言；`index.js` 的按 op 收窄透传以 `FACE_IMAGE_DELETE_READOUT_KEYS` 为键面真源）。 */
+  FACE_IMAGE_DELETE_ALLOWED_KEYS,
+  FACE_IMAGE_DELETE_READOUT_KEYS,
   /* **识别编码（本单新增）**：号源发号单点 ＋ 号源集合名（供离线自检注入假体直接跑）。 */
   COUNTERS_COLLECTION,
   COUNTER_IDS,
