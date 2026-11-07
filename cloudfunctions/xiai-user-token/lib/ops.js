@@ -1088,7 +1088,10 @@ async function deleteArtifactObject(cloudPath) {
      单点」的既有三消费点恰 3 处计数 —— 本函数是第 4 个消费点，换名即不改判据、判据不为本单漂移。 */
   const handle = initClientFromEnv()
   const fileID = await resolveFileId(handle, cloudPath)
-  await handle.deleteFile({ fileID })
+  /* **SDK 参数形状**（2026-11-07 实测）：`deleteFile` 只认 `{ fileList: [...] }`；
+     传 `{ fileID }` 会抛 `fileList必须是非空的数组`（旧写法被 catch 吞成「0 件」⇒
+     行删了、对象永不删的存储泄漏）。 */
+  await handle.deleteFile({ fileList: [fileID] })
 }
 
 /**
