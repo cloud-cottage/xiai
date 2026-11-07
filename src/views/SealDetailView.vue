@@ -1,6 +1,6 @@
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
@@ -568,6 +568,12 @@ async function confirmImageCorrection() {
        `publishCorrectionNotice`，与勘误提交同一上屏位。 */
     imageCorrectionNotice.value = IMAGE_CORRECTION_SUBMITTED_MESSAGE
     publishCorrectionNotice(IMAGE_CORRECTION_SUBMITTED_MESSAGE, target.faceId)
+    /* 提示位可能在视口之外（用户在影像卡处操作、提示落在属性区）⇒ **滚到可见处**，
+       避免「提交了却什么都没看见」。 */
+    void nextTick(() => {
+      const node = document.querySelector('[data-correction-notice]') || document.querySelector('[data-image-correction-notice]')
+      if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    })
     imageCorrectionOpen.value = false
     imageCorrectionTarget.value = null
     imageCorrectionFile.value = null
