@@ -26,7 +26,8 @@
  *     （`ok, reason, message`）；`reason` **零新增**（只用 `lib/config.js::REASONS` 既有冻结值）。
  *  ⑧ **零新集合、零删照片行、零删勘误行**：照片 / 勘误**只读计数**（`photos_kept` /
  *     `corrections_kept`）；读走 `ops.readRows`、删行走 `ops.deleteRow`、
- *     删对象走 `ops.deleteArtifactObject`、落盘走 `ops.persist`。
+ *     删对象走 `ops.deleteImageObjectsOfRow`（**候选单点**：`storage_key` 优先 → `sha` 派生
+ *     后缀族逐个试 → 行内其它键、命中即停）、落盘走 `ops.persist`。
  *  ⑨ **審計載體 preflight（本單新增）**：**任何删行之前**先
  *     `await ops.ensureCollection(ops.COLLECTIONS.adminAudit)`（建集只在 `ops.js` 内做；
  *     **不新造集合名** —— 名称仍只活在 `ops.js::COLLECTIONS`，规范在册 §3.33.3 第 14 項 /
@@ -72,12 +73,10 @@ const IMAGE_REFERENCE_LIMIT = 64
 /** 摘要形态（64 位小写十六进制）。 */
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
 
-/** 对象键形态（内容寻址 `xiai/images/<摘要前两位>/<摘要>.<扩展名>`）—— **非集合名**：
- *  它是对象存储路径（校验行内 `storage_key` / 推导删对象键用）。 */
+/** 对象键形态（内容寻址 `xiai/images/<摘要前两位>/<摘要>.<扩展名>`）—— **非集合名**：它在本文件
+ *  只作**导出面**（`module.exports` 既有键，实现零改）；**删对象的候选展开单点在 `lib/ops.js**
+ *  `deleteImageObjectsOfRow`**（本文件零第二套键推导）。 */
 const IMAGE_OBJECT_KEY_PATTERN = /^xiai\/images\/[0-9a-f]{2}\/[0-9a-f]{64}\.(png|webp|jpg|jpeg)$/
-
-/** `mime` ⇒ 对象键扩展名（印面族产物 png / webp；`image/jpeg` 兜底）。 */
-const MIME_EXT = Object.freeze({ 'image/png': 'png', 'image/webp': 'webp', 'image/jpeg': 'jpg' })
 
 /* --------------------------------------------------------------------------- *
   小工具（纯函数；零 IO）
@@ -167,16 +166,6 @@ async function rowsReferencing(ops, collection, fields, keys, limit) {
     }
   }
   return Array.from(seen.values())
-}
-
-/** 对象键：行内 `storage_key` 合法则用之；否则按 `sha256` ＋ `mime` 推导；推不出 ⇒ `''`。 */
-function objectKeyOf(row, digest) {
-  const declared = text(row && row.storage_key)
-  if (IMAGE_OBJECT_KEY_PATTERN.test(declared)) return declared
-  const ext = MIME_EXT[text(row && row.mime)]
-  if (!ext) return ''
-  const derived = `xiai/images/${digest.slice(0, 2)}/${digest}.${ext}`
-  return IMAGE_OBJECT_KEY_PATTERN.test(derived) ? derived : ''
 }
 
 /* --------------------------------------------------------------------------- *
@@ -391,14 +380,14 @@ async function deleteSeal(payload, identity, context) {
         { limit: IMAGE_REFERENCE_LIMIT }
       )
       const stillShared = others.some((other) => rowKeyOf(other) !== docId)
-      const objectKey = objectKeyOf(row, digest)
-      if (!stillShared && objectKey) {
-        try {
-          await ops.deleteArtifactObject(objectKey)
-          deleted.objects += 1
-        } catch {
-          deleted.objects_failed += 1
-        }
+      if (!stillShared) {
+        /* 删对象一律走**候选单点** `ops.deleteImageObjectsOfRow`（行内 `storage_key` 优先 →
+           `sha` 派生后缀族逐个试 → 行内其它键、**命中一件即停**；失败不抛、不阻断）。
+           `deleted.objects` ＝ **实际删成功件数**；一件没删掉 ⇒ 计入 `objects_failed`
+           （如实计数，不谎报已删）。 */
+        const removedObjects = await ops.deleteImageObjectsOfRow(row)
+        deleted.objects += removedObjects
+        if (removedObjects === 0) deleted.objects_failed += 1
       }
     }
   }

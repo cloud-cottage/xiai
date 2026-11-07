@@ -3960,15 +3960,17 @@ const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
        `edge_image_ids`）⇒ `INVALID_VALUE`（文案点名「該影像仍被其他印面引用」）＋ **零写入**；
      · **写入确定序（先后即契约）**：① 先清该印面的引用（`face_image_id` 置 `''` ／ 从
        `edge_image_ids` 移除；`persist` 的 `kind:'update'` ＋ `expectAtLeast:1`）→ ② 删
-       `xiai_images` 影像行（`deleteRow`）→ ③ **尽力**删对象（`deleteArtifactObject`；
-       **失败不阻断**、计数如实＝0）；**占位图行不得删**（`SEAL_PLACEHOLDER_IMAGE*` 命中 ⇒
+       `xiai_images` 影像行（`deleteRow`）→ ③ **尽力**删对象（候选单点
+       `deleteImageObjectsOfRow`：`storage_key` 优先 → `sha` 派生后缀族逐个试 → 行内其它键、
+       **命中即停**；**失败不阻断**、计数如实＝0）；**占位图行不得删**（`SEAL_PLACEHOLDER_IMAGE*` 命中 ⇒
        只清引用、行与对象一律保留，`removed.rows` 如实为 0）；
      · **对象删除受内容寻址去重保护**：同 `sha256` 尚有其它行 ⇒ 只删行、`removed.objects = 0`；
      · **回包**：成功恰 **4 键** `{ok:true, face_id, image_id, removed:{rows, objects}}`
        （`index.js` 仿 `registerFaceImage` 做**按 op 收窄透传**；`rows` / `objects` 为**实际删数**，
        零补编）；失败恒 **3 键** `{ok, reason, message}`，`reason` 只用既有冻结值（**零新增**）；
      · **零新集合**：读走 `readRows`、清引用走 `persist`、删行走 `deleteRow`、删对象走
-       `deleteArtifactObject`（实现全部在本文件，`require` 零新增）。
+       `deleteImageObjectsOfRow`（候选单点；其底层原语仍是本文件 `deleteArtifactObject`，
+       实现全部在本文件，`require` 零新增）。
    --------------------------------------------------------------------------- */
 
 /** 影像刪除载荷**封闭两键**（未知键 / 身份类键 ⇒ `INVALID_FIELD`；与其余 op 同一条文案）。 */
@@ -4003,6 +4005,91 @@ const FACE_IMAGE_MIME_EXT = Object.freeze({
 })
 
 /* ---------------------------------------------------------------------------
+  **对象删除候选单点（本单 `deleteImageObjectsOfRow`）**
+  背景（线上实测真因）：管理员【刪除】回包「刪行 1 件、刪對象 0 件」⇒ 行删了、对象没删 ——
+  `deleteArtifactObject` 的旧调用点只按**单一**键（行内 `storage_key` 或按 `mime` 派生的
+  **一个**扩展名）试一次，猜错扩展名就回 0；而存储桶实测**只有展示件**（`.webp` / `.png` /
+  `.jpg`），`.tiff` 源件键基本不存在（迁移盘点结论）⇒ 必须按**候选族**逐个试、命中即停。
+  --------------------------------------------------------------------------- */
+
+/** 删对象**后缀候选**（**逐字序**＝本单契约）：展示件在前、源件 `.tiff` 殿后。 */
+const IMAGE_OBJECT_DELETE_SUFFIXES = Object.freeze(['.webp', '.png', '.jpg', '.jpeg', '.tiff'])
+
+/** 行内**无扩展名**的键形态（`xiai/images/<摘要前两位>/<摘要>`）⇒ 按后缀候选表展开。 */
+const IMAGE_OBJECT_KEY_PREFIX_PATTERN = /^xiai\/images\/[0-9a-f]{2}\/[0-9a-f]{64}$/
+
+/** 行内除 `storage_key` 外可能持有对象键的字段（`edge_keys` 是数组，其余是单值）。 */
+const IMAGE_OBJECT_DELETE_SINGLE_KEYS = Object.freeze(['display_key', 'image_storage_key'])
+
+/**
+ * **单个值 → 候选键族**（纯函数；**只认形态合法者**，不猜、不抛）：
+ *  · 合法完整键（`<sha前两位>/<sha>.<png|webp|jpg|jpeg|tiff>`）⇒ 原样 1 键；
+ *  · 裸摘要（64 位小写十六进制）⇒ `xiai/images/<前两位>/<摘要>` ＋ 后缀候选逐个展开；
+ *  · 无扩展名前缀键 ⇒ 同样按后缀候选展开；
+ *  · 其余（空 / 形态不合法）⇒ **零候选**。
+ * @param {string} value 行内键值
+ * @returns {string[]} 保序候选键（可能为空）
+ */
+function imageObjectKeyCandidatesOfValue(value) {
+  const raw = text(value)
+  if (raw === '') return []
+  const lower = raw.toLowerCase()
+  if (FACE_IMAGE_OBJECT_KEY_PATTERN.test(lower)) return [lower]
+  const expand = (base) => IMAGE_OBJECT_DELETE_SUFFIXES.map((suffix) => `${base}${suffix}`)
+  if (ARTIFACT_DIGEST_PATTERN.test(lower)) return expand(`xiai/images/${lower.slice(0, 2)}/${lower}`)
+  if (IMAGE_OBJECT_KEY_PREFIX_PATTERN.test(lower)) return expand(lower)
+  return []
+}
+
+/**
+ * **行 → 保序候选键族**（去重；顺序即契约）：
+ *  ① 行内 `storage_key`（非空且形态合法）→ ② `sha` 派生（`sha256` → `image_sha256` 回落）
+ *  ＋ 后缀候选逐个试 → ③ 行内其它键（`display_key` / `image_storage_key` / `edge_keys[]`）
+ *  按同样后缀候选展开。
+ * @param {object} row 影像行
+ * @returns {string[]} 保序候选键族
+ */
+function imageObjectKeyCandidatesOfRow(row) {
+  const seen = new Set()
+  const candidates = []
+  const push = (value) => {
+    for (const key of imageObjectKeyCandidatesOfValue(value)) {
+      if (seen.has(key)) continue
+      seen.add(key)
+      candidates.push(key)
+    }
+  }
+  push(text(row && row.storage_key)) /* ① 行内 `storage_key` 优先（命中即停 ⇒ 只试一次）。 */
+  const digest = text(row && (row.sha256 || row.image_sha256)).toLowerCase() /* ② 摘要派生。 */
+  if (ARTIFACT_DIGEST_PATTERN.test(digest)) push(digest)
+  for (const field of IMAGE_OBJECT_DELETE_SINGLE_KEYS) push(text(row && row[field])) /* ③ 其它键。 */
+  if (Array.isArray(row && row.edge_keys)) {
+    for (const item of row.edge_keys) push(text(item))
+  }
+  return candidates
+}
+
+/**
+ * **删影像对象（候选单点；`deleteFaceImage` / `deleteSeal` 共用的唯一实现）**：
+ * 按 `imageObjectKeyCandidatesOfRow` 的候选序**逐个试、命中一件即停**。
+ * **失败（对象不存在 / 删除报错）一律不抛、不计失败** —— 只返回**实际删成功的件数**（0 / 1）。
+ * @param {object} row 影像行（`storage_key` / `sha256` / 可选 `display_key`、`edge_keys[]`…）
+ * @returns {Promise<number>} 实际删除件数（0 或 1；**零谎报**）
+ */
+async function deleteImageObjectsOfRow(row) {
+  const candidates = imageObjectKeyCandidatesOfRow(row)
+  for (const key of candidates) {
+    try {
+      await deleteArtifactObject(key)
+      return 1 /* **命中即停**：一件已删 ⇒ 不再试后续候选。 */
+    } catch {
+      /* 对象不存在 / 删除报错 ⇒ **不抛、不计失败**，继续下一候选（末位失败 ⇒ 如实回 0）。 */
+    }
+  }
+  return 0
+}
+
+/* --------------------------------------------------------------------------- *
   **上傳印章即上雲（本單新增 op｜`createSealUpload`｜管理員面）**
   ---------------------------------------------------------------------------
   场景（线上实证真因）：「上傳印章」此前**只写本机**（`db.js::createSealWithFaceRows` 纯本地落盘，
@@ -4124,7 +4211,7 @@ const ADMIN_OPS = Object.freeze({
    *    另以**不可枚別** `value` 別名供 `index.js` 既有通用讀數位透傳，回包鍵面仍恰 4）、
    *    失敗回包**恰 3 鍵**（`ok, reason, message`，**零 `refunded`**）；⑦ `reason` **零新增**
    *    （只用既有凍結值）、**零新集合**（讀走 `readRows`、刪行走 `deleteRow` /
-   *    `deleteArtifactObject`、落盤走 `persist`；照片行 / 勘誤行只讀計數、零刪行）。
+   *    `deleteImageObjectsOfRow`（删对象候选单点）、落盤走 `persist`；照片行 / 勘誤行只讀計數、零刪行）。
    * @param {object} payload 載荷（封閉兩鍵 `seal_id` / `reason`）
    * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
    * @param {{adminPhone?:string, nowSeconds?:number}} [context]
@@ -6445,7 +6532,8 @@ const ADMIN_OPS = Object.freeze({
    *   ⑥ **写入确定序（先后即契约）**：① 先清该印面引用（`face_image_id` 置 `''` ／ 从
    *      `edge_image_ids` 移除；`persist` `kind:'update'` ＋ `expectAtLeast:1`）→ ② 删
    *      `xiai_images` 行（`deleteRow`；**占位图行不删** ⇒ `removed.rows` 如实 0）→ ③ 尽力删
-   *      对象（内容寻址去重保护下 `deleteArtifactObject`；**失败不阻断**、计数如实 0）；
+   *      对象（**候选单点** `deleteImageObjectsOfRow`：`storage_key` 优先 → `sha` 派生后缀族
+   *      逐个试 → 行内其它键、**命中即停**；**失败不阻断**、计数如实 0）；
    *   ⑦ **回包**：成功恰 **4 键** `{ok:true, face_id, image_id, removed:{rows, objects}}`
    *      （`index.js` 按 op 收窄透传；**删数如实、零补编**）；失败恒 **恰 3 键**
    *      （`ok, reason, message`；**零新增 `reason`**）。
@@ -6570,33 +6658,22 @@ const ADMIN_OPS = Object.freeze({
       }
     }
     /* ⑨ 写入确定序 ③：**尽力**删对象（去重保护：同 `sha256` 尚有其它行 ⇒ 只删行）。
-       删对象失败 ⇒ **不阻断**，`removed.objects` 如实 0（**不谎报已删**）。 */
+       删对象一律走**候选单点** `deleteImageObjectsOfRow`（① 行内 `storage_key` → ② `sha`
+       派生后缀族逐个试 → ③ 行内其它键；**命中一件即停**）—— 旧版只按单一键试一次、猜错
+       扩展名即回 0（线上「刪對象 0 件」泄漏真因）。失败（对象不存在 / 删除报错）**不阻断**、
+       **不计失败**，`removed.objects` 如实 0（**不谎报已删**）。 */
     let objects = 0
     if (rows === 1) {
       const rawDigest = text(imageRow.sha256)
       const digest = rawDigest.toLowerCase()
-      const declaredKey = text(imageRow.storage_key)
-      const derivedKey = FACE_IMAGE_MIME_EXT[text(imageRow.mime)]
-        ? `xiai/images/${digest.slice(0, 2)}/${digest}.${FACE_IMAGE_MIME_EXT[text(imageRow.mime)]}`
-        : ''
-      const objectKey = FACE_IMAGE_OBJECT_KEY_PATTERN.test(declaredKey)
-        ? declaredKey
-        : FACE_IMAGE_OBJECT_KEY_PATTERN.test(derivedKey)
-          ? derivedKey
-          : ''
       const imageDocId = text(imageRow._id) || imageId
       let sharedByOtherRow = false
       if (ARTIFACT_DIGEST_PATTERN.test(digest)) {
         const peers = await readRows(COLLECTIONS.images, { sha256: rawDigest }, { limit: FACE_IMAGE_DIGEST_SCAN_LIMIT })
         sharedByOtherRow = peers.some((row) => text(row && (row._id || row.id)) !== imageDocId)
       }
-      if (objectKey && !sharedByOtherRow) {
-        try {
-          await deleteArtifactObject(objectKey)
-          objects = 1
-        } catch {
-          objects = 0
-        }
+      if (!sharedByOtherRow) {
+        objects = await deleteImageObjectsOfRow(imageRow)
       }
     }
     /* ⑩ 成功回包恰 4 键（`removed` 的删数一律取自实际执行结果，零补编）。 */
@@ -7525,6 +7602,10 @@ module.exports = {
      （供离线自检直接断言；实现零第二套 —— 删对象单点在本文件 `deleteArtifactObject`）。 */
   deleteRow,
   deleteArtifactObject,
+  /* **对象删除候选单点（本单：修「刪對象 0 件」存储泄漏）**：`deleteFaceImage` 与
+     `lib/sealDelete.js::deleteSeal` 共用的**唯一实现**（候选序：行内 `storage_key` → `sha`
+     派生后缀族逐个试 → 行内其它键；**命中一件即停**、失败不抛不计失败、只回**实删件数**）。 */
+  deleteImageObjectsOfRow,
   setOpsStorageDeleteProvider,
   opsStorageDeleteInjected,
   artifactMimeOf,
