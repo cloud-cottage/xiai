@@ -870,7 +870,7 @@ const rowLabelMap = computed(() => {
   const value = new Map()
   const submitter = new Map()
   labeledRows.value.forEach((row) => {
-    face.set(row.id, seals.faceLabelOf(row.faceId, sealKeyOf(row)))
+    face.set(row.id, seals.faceLabelOf(faceIdOfRow(row), sealKeyOf(row)))
     value.set(row.id, computeValueLabel(row))
     submitter.set(row.id, corrections.submitterLabelOf(row.user_id || row.userId))
   })
@@ -885,13 +885,39 @@ function sealLabel(sealId) {
 }
 
 function sealKeyOf(row) {
-  return row.sealId || row.stamp_id
+  /* IMAGE 行（云端权威行）可能只带 `seal_id` ⇒ 一并兜底；字段型行行为逐字不变。 */
+  return row.sealId || row.stamp_id || row.seal_id || ''
+}
+
+/** 印面归属：字段型行 `faceId`；IMAGE 行（云端）可能为 `face_id`。 */
+function faceIdOfRow(row) {
+  return row.faceId || row.face_id || ''
 }
 
 /** 勘误挂在印面上：列出所属印面，旧数据（无 faceId）按主印面标注。 */
 function faceLabelOfRow(row) {
   const cached = rowLabelMap.value.face.get(row.id)
-  return cached !== undefined ? cached : seals.faceLabelOf(row.faceId, sealKeyOf(row))
+  return cached !== undefined ? cached : seals.faceLabelOf(faceIdOfRow(row), sealKeyOf(row))
+}
+
+/** 屬性列：IMAGE 行显示动作标签（「影像勘誤 · 刪除」／「影像勘誤 · 替換」），字段型行逐字不变。 */
+function attributeLabelOf(row) {
+  return corrections.isImageCorrectionRow(row) ? corrections.imageCorrectionLabelOf(row) : row.field_label || row.field
+}
+
+/** 提交值列是否为 IMAGE 行（模板据此改渲染目标影像编号 ＋ 备注）。 */
+function isImageCorrectionRow(row) {
+  return corrections.isImageCorrectionRow(row)
+}
+
+/** 目标影像读数（IMAGE 行专用；上屏读数单点在服务层）。 */
+function imageTargetOf(row) {
+  return corrections.imageCorrectionTargetOf(row)
+}
+
+/** 备注（IMAGE 行专用；空串 ⇒ 不渲染）。 */
+function imageNoteOf(row) {
+  return corrections.imageCorrectionNoteOf(row)
 }
 
 function statusClass(status) {
@@ -968,10 +994,15 @@ function formatReviewFeedback(tally) {
   return text
 }
 
-/** 跑一次审核；反馈按**三数实报**（见上），结果原样回传供调用方判断。 */
+/** 跑一次审核；反馈按**三数实报**（见上），结果原样回传供调用方判断。
+ *  **IMAGE 行（§3.77）**：显式声明走影像勘誤审核路径；采纳后把服务端 additive 回包
+ *  `image_action` 的读数接在三数实报之后上屏（无该键 ⇒ 不接、不编造）。 */
 async function runReview(row, decision) {
-  const result = await corrections.review(actor.value, row.id, decision)
-  feedback.value = formatReviewFeedback(reviewTallyOf(result, decision))
+  const result = await corrections.review(actor.value, row.id, decision, '', {
+    image: corrections.isImageCorrectionRow(row)
+  })
+  const readout = corrections.imageCorrectionReadoutOf(result && result.image_action)
+  feedback.value = formatReviewFeedback(reviewTallyOf(result, decision)) + (readout ? `；${readout}` : '')
   dataVersion.value += 1
   return result
 }
@@ -1020,6 +1051,14 @@ function cancelRevoke() {
 const revokeDialogMessage = computed(() => {
   const row = revokeDialog.value && revokeDialog.value.row
   if (!row) return ''
+  /* IMAGE 行（§3.77.4 撤销面）：只改状态与 `revoked` 审计标记，不回滚影像面。 */
+  if (corrections.isImageCorrectionRow(row)) {
+    return (
+      `這將把該條「${corrections.imageCorrectionLabelOf(row)}」（${corrections.imageCorrectionTargetOf(row)}）` +
+      '的已採納狀態撤銷為「駁回」；不重建影像行、不恢復物件、不回退印面指向。' +
+      `已發放的 ${reward} 金獎勵不扣回。`
+    )
+  }
   const label = row.field_label || row.field || '該屬性'
   const faceLabel = faceLabelOfRow(row)
   return (
@@ -1171,8 +1210,16 @@ async function confirmRevoke() {
                     <span class="list-table__meta">{{ sealKeyOf(row) }}</span>
                   </td>
                   <td>{{ faceLabelOfRow(row) }}</td>
-                  <td>{{ row.field_label || row.field }}</td>
-                  <td>{{ valueLabelOf(row) }}</td>
+                  <td>{{ attributeLabelOf(row) }}</td>
+                  <td>
+                    <template v-if="isImageCorrectionRow(row)">
+                      <span data-image-correction-target>{{ imageTargetOf(row) }}</span>
+                      <span v-if="imageNoteOf(row)" class="review__note" data-image-correction-note>
+                        備註：{{ imageNoteOf(row) }}
+                      </span>
+                    </template>
+                    <template v-else>{{ valueLabelOf(row) }}</template>
+                  </td>
                   <td>{{ submitterOf(row) }}</td>
                   <td>{{ formatDateTime(row.created_at) }}</td>
                   <td class="review__ops">
@@ -1783,8 +1830,16 @@ async function confirmRevoke() {
                 <span class="list-table__meta">{{ sealKeyOf(row) }}</span>
               </td>
               <td>{{ faceLabelOfRow(row) }}</td>
-              <td>{{ row.field_label || row.field }}</td>
-              <td>{{ valueLabelOf(row) }}</td>
+              <td>{{ attributeLabelOf(row) }}</td>
+              <td>
+                <template v-if="isImageCorrectionRow(row)">
+                  <span data-image-correction-target>{{ imageTargetOf(row) }}</span>
+                  <span v-if="imageNoteOf(row)" class="review__note" data-image-correction-note>
+                    備註：{{ imageNoteOf(row) }}
+                  </span>
+                </template>
+                <template v-else>{{ valueLabelOf(row) }}</template>
+              </td>
               <td>{{ row.basis || '—' }}</td>
               <td>
                 <span class="chip" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span>

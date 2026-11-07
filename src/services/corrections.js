@@ -54,7 +54,11 @@ import { uidShortOf } from '../data/uid.js'
 /* **不可逆摘要（同步、跨环境）**：值级公开摘要行 `_id` 的 `value` 摘要 —— 与云函数 `hash16`
    （sha256 前 16 位）同构（`crypto.subtle` 非安全上下文不可用 ⇒ 复用自带同步实现）。 */
 import { sha256Hex } from '../data/assetmeta.js'
-import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND } from './seals.js'
+import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND, FACE_IMAGE_REGISTER_OP } from './seals.js'
+/* **影像勘誤（§3.77）的替換新圖通道**：字节先交**现有** `storeArtifactBytes`（内容寻址、幂等）
+   拿 `sha256` / `bytes` / `storage_key`，再调**现有** `registerFaceImage` 入册拿 `image_id`。
+   ——本文件只**调用**既有单点，不改其口径。 */
+import { storeArtifactBytes, artifactObjectKeyOf } from './imageAuthority.js'
 /* **写面 Phase A（用户写面切片）**：勘误提交经云函数 `xiai-user-token` 的 `action:'verify'`
    服务端验签后才落盘（落盘在**云端**，`xiai_corrections` 的 ACL 是 `PRIVATE` ⇒ 只能由云函数
    以管理端凭据写）；**创建者身份由服务端记录**（`uid = u-<手机号>` 从令牌声明派生），
@@ -1055,6 +1059,14 @@ function isPermissionError(err) {
 export const REVIEW_OP = 'reviewCorrection'
 
 /**
+ * 采纳写面的**回包读数声明**（additive 透传；经 `userWriteGate` 第三参逐字上抛）。
+ * `image_action` ＝ 云端对 **IMAGE 行**（§3.77 影像勘誤）采纳后的执行读数
+ * `{action, removed:{rows,objects}, shared_kept}`；**字段型行回包不含该键**
+ * ⇒ 声明它不改变既有任何回包（未声明的键永远不进回包）。
+ */
+export const REVIEW_READOUT_KEYS = Object.freeze(['image_action'])
+
+/**
  * 采纳写面载荷的**封闭键面**（**须与云函数 `lib/ops.js::ALLOWED_KEYS` 逐字同值**）。
  *
  * 为什么必须逐字：云函数侧 `ALLOWED_KEYS` 是**服务端封闭面** —— 载荷里出现未登记键
@@ -1262,7 +1274,7 @@ function reconcileLocalMirrorFromAuthority(correctionId, authorityRow, projectio
  * @returns {Promise<{ok:boolean, status?:string, accepted?:boolean, reward?:object, row?:object,
  *   reason?:string, message:string}>}
  */
-export async function review(actor, correctionId, decision, note = '') {
+export async function review(actor, correctionId, decision, note = '', options = {}) {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈勘誤' }
@@ -1271,13 +1283,25 @@ export async function review(actor, correctionId, decision, note = '') {
      经 `userWriteGate` ⇒ 无令牌且有会话时**先静默补签**（刷新后令牌即丢的自愈），再过云端门。
      载荷键面**逐字**取服务端封闭面（云函数 `xiai-user-token/lib/ops.js::REVIEW_ALLOWED_KEYS`
      ＝ `REVIEW_PAYLOAD_KEYS`）：`correction_id` / `decision` / `note`；
-     键名不符（曾误用 `id`）会被服务端判 `INVALID_FIELD` ＋ 零写入。 */
-  const gate = await userWriteGate(REVIEW_OP, {
-    correction_id: String(correctionId === null || correctionId === undefined ? '' : correctionId),
-    decision: String(decision === null || decision === undefined ? '' : decision),
-    note: String(note === null || note === undefined ? '' : note)
-  })
+     键名不符（曾误用 `id`）会被服务端判 `INVALID_FIELD` ＋ 零写入。
+     **additive 读数面（§3.77 影像勘誤）**：声明 `image_action`（云端只在 IMAGE 行回包里给，
+     字段型行**不出现该键** ⇒ 既有回包逐字不变）。 */
+  const gate = await userWriteGate(
+    REVIEW_OP,
+    {
+      correction_id: String(correctionId === null || correctionId === undefined ? '' : correctionId),
+      decision: String(decision === null || decision === undefined ? '' : decision),
+      note: String(note === null || note === undefined ? '' : note)
+    },
+    { readoutKeys: REVIEW_READOUT_KEYS }
+  )
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* **影像勘誤行（§3.77.4）**：云端权威行已执行完毕 ⇒ **本机零写入**
+     （云模式不写本机库；IMAGE 行本来也不做本机镜像），不发奖、不同步公开投影 / 值级摘要，
+     只把服务端回包的 `image_action` 读数原样交回调用方上屏。 */
+  if (isImageCorrectionReviewTarget(correctionId, gate, options)) {
+    return reviewImageCorrection(decision, gate)
+  }
   /* ② 本機鏡像（dev / 離線 = 本地權威；雲端 = 服務端權威後的本機鏡像）。 */
   let decided
   try {
@@ -1470,6 +1494,19 @@ export async function revokeAcceptance(actor, correctionId, note = '') {
   /* ② 登录令牌写面门（必要时静默补签；dev / 離線形态放行到下面的本地判定）。 */
   const gate = await userWriteGate(REVOKE_OP, { correction_id: id, note: noteText })
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
+  /* **影像勘誤行（§3.77.4 撤销面）**：服务端只改状态与 `revoked` 审计标记 ⇒ 本机**零写入**
+     （云模式不写本机库；IMAGE 行无本机镜像、不重建、不回滚影像面）。 */
+  if (gate.row && typeof gate.row === 'object' && gate.row.kind === 'IMAGE') {
+    const status = typeof gate.row.status === 'string' && gate.row.status ? normalizeCorrectionStatus(gate.row.status) : CORRECTION_STATUS.REJECTED
+    return {
+      ok: true,
+      status,
+      accepted: false,
+      revoked: true,
+      row: gate.row,
+      message: `已撤銷採納該影像勘誤（狀態改判為駁回，印面與影像不再按該條執行）；已發放的 ${CORRECTION_REWARD} 金獎勵不扣回。`
+    }
+  }
   /* ③ 权威行：云端形态取服务端回包行；dev / 離線（或回包缺行）⇒ 本地按同一状态机判定后派生。 */
   let authority = gate.row && typeof gate.row === 'object' ? gate.row : null
   if (!authority) {
@@ -1767,4 +1804,408 @@ export async function reviewBatch(actor, ids, decision, note = '') {
       (failed.length ? `；${failed.length} 條未處理。` : '。')
     : `批量審覈未處理任何勘誤（失敗 ${failed.length} 條）。`
   return { ok, decided, failed, message }
+}
+
+/* ============================================================================
+   普通用戶影像勘誤（§3.77｜本單）：提交入口 ＋ 替換新圖入册 ＋ 審核回包讀數
+   ---------------------------------------------------------------------------- 本段**只改前端**：云端 op（`submitImageCorrection`；`reviewCorrection` 对 IMAGE 行的
+   additive `image_action` 回包）由云函数侧注册，本文件按**冻结契约**先接：
+     · 载荷封闭恰六键 `seal_id` ＋ `face_id` ＋ `image_id` ＋ `action`（恰二值
+       `'delete'`｜`'replace'`）＋ `note`（≤ 200 字、缺省空串）＋ `new_image`（仅 replace：
+       `sha256`／`bytes`／`mime`／`storage_key`）；**零未知键、零身份类键**；
+     · **云模式零本机落盘**（IMAGE 行不做本机镜像；读面走既有 `listMyCorrections` /
+       `listPendingCorrectionsForAdmin` 的「云行 ∪ 本机镜像」）；`local-dev` **如实拒绝**
+       （本形态没有云端写面 ⇒ 不假装提交成功）；
+     · 失败恒**恰 3 键** `{ok:false, reason, message}`（`reason` ⊆ 既有冻结 13 值）；
+     · 替換必先入册：`storeArtifactBytes` → `registerFaceImage` → 才 `submitImageCorrection`；
+       **任一步失败即硬报错、不编造 `image_id`、零提交、可重试**。
+   ============================================================================ */
+
+/** 影像勘誤提交的**云端门 op 名**（须与云函数侧注册面逐字一致）。 */
+export const IMAGE_CORRECTION_OP = 'submitImageCorrection'
+
+/** 提交回包的**additive 读数声明**（`skipped` ＝ 重复未驳回行按既有「重複跳過」语义不建行）。 */
+export const IMAGE_CORRECTION_READOUT_KEYS = Object.freeze(['skipped'])
+
+/** `action` 封闭二值（规范冻结）。 */
+export const IMAGE_CORRECTION_ACTIONS = Object.freeze(['delete', 'replace'])
+
+/** 提交载荷的**封闭六键面**（与冻结契约逐字一致）。 */
+export const IMAGE_CORRECTION_PAYLOAD_KEYS = Object.freeze([
+  'seal_id',
+  'face_id',
+  'image_id',
+  'action',
+  'note',
+  'new_image'
+])
+
+/** `new_image` 封闭四键面（与冻结契约逐字一致）。 */
+export const IMAGE_NEW_IMAGE_KEYS = Object.freeze(['sha256', 'bytes', 'mime', 'storage_key'])
+
+/** 备注上限（与视图 `maxlength` / 提示文案**同值**）。 */
+export const MAX_IMAGE_CORRECTION_NOTE_LENGTH = 200
+
+/** `registerFaceImage` 的回包读数声明（与 `seals.js` 同键面；本文件零第二套口径）。 */
+const IMAGE_REGISTER_READOUT_KEYS = Object.freeze(['image_id'])
+/** 登录面影像入册 op（**非管理员门**）：影像勘误「替换」提交前用它把新图登记成内容寻址行。 */
+const IMAGE_CORRECTION_REGISTER_OP = 'registerCorrectionImage'
+
+/** 结构化拒绝（失败恒恰 3 键）。 */
+function imageCorrectionDenial(reason, message) {
+  return { ok: false, reason, message }
+}
+
+/**
+ * 提交前的**本地封闭键面门**（判定在**任何请求 / 写入之前** ⇒ 拒绝即零写入）。
+ * 服务端仍是唯一判据；本门只把「载荷形态必然被拒」的形挡在发包之前。
+ * @returns {null|{ok:false, reason:string, message:string}} `null` ＝ 放行
+ */
+function imageCorrectionPayloadDenial(who, payload) {
+  if (!who) {
+    return imageCorrectionDenial('FORBIDDEN', '請先登錄後再提交影像勘誤；本次零寫入。')
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return imageCorrectionDenial('INVALID_FIELD', '影像勘誤載荷必須是物件；本次零寫入。')
+  }
+  /* 未知键 / 身份类键（`phone` / `actor` / `uid` / `role` …）⇒ 同一条 `INVALID_FIELD`。 */
+  const unknown = Object.keys(payload).find((key) => IMAGE_CORRECTION_PAYLOAD_KEYS.indexOf(key) === -1)
+  if (unknown) {
+    return imageCorrectionDenial('INVALID_FIELD', `影像勘誤載荷含未知鍵（${unknown}）；本次零寫入。`)
+  }
+  for (const key of ['seal_id', 'face_id', 'image_id']) {
+    const value = payload[key]
+    if (value === undefined || value === null || value === '') {
+      return imageCorrectionDenial('MISSING_REQUIRED', `缺少必要欄位（${key}）；本次零寫入。`)
+    }
+    if (typeof value !== 'string') {
+      return imageCorrectionDenial('INVALID_VALUE', `欄位（${key}）必須是字符串；本次零寫入。`)
+    }
+  }
+  const action = payload.action
+  if (typeof action !== 'string' || IMAGE_CORRECTION_ACTIONS.indexOf(action) === -1) {
+    return imageCorrectionDenial('INVALID_VALUE', "勘誤動作（action）只能是 'delete' 或 'replace'；本次零寫入。")
+  }
+  const noteRaw = payload.note === undefined || payload.note === null ? '' : payload.note
+  if (typeof noteRaw !== 'string') {
+    return imageCorrectionDenial('INVALID_VALUE', '備註（note）必須是字符串；本次零寫入。')
+  }
+  if (noteRaw.length > MAX_IMAGE_CORRECTION_NOTE_LENGTH) {
+    return imageCorrectionDenial(
+      'INVALID_VALUE',
+      `備註不得超過 ${MAX_IMAGE_CORRECTION_NOTE_LENGTH} 字（當前 ${noteRaw.length} 字）；本次零寫入。`
+    )
+  }
+  if (action === 'delete') {
+    if (Object.prototype.hasOwnProperty.call(payload, 'new_image')) {
+      return imageCorrectionDenial('INVALID_FIELD', '「刪除」動作不得附 new_image；本次零寫入。')
+    }
+    return null
+  }
+  const newImage = payload.new_image
+  if (newImage === undefined || newImage === null || typeof newImage !== 'object' || Array.isArray(newImage)) {
+    return imageCorrectionDenial('MISSING_REQUIRED', '「替換」動作必須附 new_image（sha256 / bytes / mime / storage_key）；本次零寫入。')
+  }
+  const unknownNew = Object.keys(newImage).find((key) => IMAGE_NEW_IMAGE_KEYS.indexOf(key) === -1)
+  if (unknownNew) {
+    return imageCorrectionDenial('INVALID_FIELD', `new_image 含未知鍵（${unknownNew}）；本次零寫入。`)
+  }
+  for (const key of IMAGE_NEW_IMAGE_KEYS) {
+    const value = newImage[key]
+    if (value === undefined || value === null || value === '') {
+      return imageCorrectionDenial('MISSING_REQUIRED', `缺少必要欄位（new_image.${key}）；本次零寫入。`)
+    }
+  }
+  if (typeof newImage.sha256 !== 'string' || typeof newImage.mime !== 'string' || typeof newImage.storage_key !== 'string') {
+    return imageCorrectionDenial('INVALID_VALUE', 'new_image 的 sha256 / mime / storage_key 必須是字符串；本次零寫入。')
+  }
+  if (!/^[0-9a-f]{64}$/.test(newImage.sha256.toLowerCase())) {
+    return imageCorrectionDenial('INVALID_VALUE', 'new_image.sha256 必須是 64 位十六進制摘要；本次零寫入。')
+  }
+  if (!Number.isInteger(newImage.bytes) || newImage.bytes <= 0) {
+    return imageCorrectionDenial('INVALID_VALUE', 'new_image.bytes 必須是正整數；本次零寫入。')
+  }
+  return null
+}
+
+/** 按封闭键面**逐字重建**提交载荷（键序即契约序；`note` 缺省空串；delete 不带 `new_image`）。 */
+function buildImageCorrectionPayload(payload) {
+  const body = {
+    seal_id: String(payload.seal_id),
+    face_id: String(payload.face_id),
+    image_id: String(payload.image_id),
+    action: String(payload.action),
+    note: payload.note === undefined || payload.note === null ? '' : String(payload.note)
+  }
+  if (body.action === 'replace') {
+    body.new_image = {
+      sha256: String(payload.new_image.sha256),
+      bytes: Number(payload.new_image.bytes),
+      mime: String(payload.new_image.mime),
+      storage_key: String(payload.new_image.storage_key)
+    }
+  }
+  return body
+}
+
+/**
+ * **提交影像勘誤**（冻结契约 `submitImageCorrection`）。
+ *
+ * @param {object|null} actor 操作者（缺省回落当前登录态；**身份不由载荷给**）
+ * @param {{seal_id:string, face_id:string, image_id:string, action:'delete'|'replace',
+ *   note?:string, new_image?:{sha256:string, bytes:number, mime:string, storage_key:string}}} payload
+ * @returns {Promise<{ok:true, row:object|null, skipped?:boolean}
+ *   |{ok:false, reason:string, message:string}>}
+ *   **云模式零本机落盘**；`local-dev` 如实拒绝；失败恒恰 3 键。
+ */
+export async function submitImageCorrection(actor, payload = {}) {
+  const who = actor || currentUser()
+  diagGateMode = ''
+  const denial = imageCorrectionPayloadDenial(who, payload)
+  if (denial) {
+    diagNote(`submitImageCorrection 拒絕{reason:${denial.reason}}`)
+    return denial
+  }
+  const body = buildImageCorrectionPayload(payload)
+  diagNote(
+    `submitImageCorrection 入參{seal_id:${body.seal_id}, face_id:${body.face_id}, image_id:${body.image_id}, ` +
+      `action:${body.action}, note:${diagValueOf(body.note)}, new_image:${body.new_image ? 'given' : '無'}}`
+  )
+  const gate = await userWriteGate(IMAGE_CORRECTION_OP, body, { readoutKeys: IMAGE_CORRECTION_READOUT_KEYS })
+  diagMarkGate(gate)
+  if (gate && gate.mode === 'local-dev') {
+    diagNote('submitImageCorrection 回包{ok:false, reason:STORAGE_UNAVAILABLE, mode:local-dev}')
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '本機為 dev / 離線形態（沒有雲端寫面）⇒ 影像勘誤只能在雲端形態提交；本次零寫入。'
+    )
+  }
+  if (!gate || gate.ok !== true) {
+    const reason = (gate && gate.reason) || 'STORAGE_UNAVAILABLE'
+    const message = (gate && gate.message) || '影像勘誤提交服務暫時不可用，請稍後再試。'
+    diagNote(`submitImageCorrection 回包{ok:false, reason:${reason}}`)
+    return imageCorrectionDenial(reason, message)
+  }
+  const skipped = typeof gate.skipped === 'boolean' ? gate.skipped : undefined
+  const row = gate.row && typeof gate.row === 'object' ? gate.row : null
+  if (!row) {
+    /* 「重複跳過」⇒ 不建新行 ⇒ 服务端可不回行（不计失败、不上屏为失败）；其余一律如实拒绝。 */
+    if (skipped === true) {
+      diagNote('submitImageCorrection 回包{ok:true, skipped:true, row:無（按「重複跳過」不建行）}')
+      return { ok: true, row: null, skipped: true }
+    }
+    diagNote('submitImageCorrection 回包{ok:false, reason:STORAGE_UNAVAILABLE, row:缺}')
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '雲端回傳缺少權威行，無法確認影像勘誤的寫入內容；本次零鏡像（雲端是否已寫入未知）。'
+    )
+  }
+  const out = { ok: true, row }
+  if (skipped !== undefined) out.skipped = skipped
+  diagNote(`submitImageCorrection 回包{ok:true, row:${row.id || '—'}, skipped:${skipped === undefined ? '—' : skipped}}`)
+  return out
+}
+
+/**
+ * **替换用新图：先入册、再提交**（两步硬序的前一步）。
+ *
+ * ① 走**现有** `storeArtifactBytes` 拿 `sha256` / `bytes` / `storage_key`（内容寻址、幂等）；
+ * ② 走**现有** `registerFaceImage` 入册拿 `image_id`。
+ * 任一步失败 ⇒ **硬报错、不编造 `image_id`、零提交、可重试**（调用方据此不发 `submitImageCorrection`）。
+ *
+ * @param {{sealId?:string, faceId?:string, kind?:string,
+ *   bytes?:Uint8Array|ArrayBuffer|null, mime?:string}} input
+ * @returns {Promise<{ok:true, imageId:string, new_image:{sha256:string, bytes:number, mime:string, storage_key:string}}
+ *   |{ok:false, reason:string, message:string}>}
+ */
+export async function prepareImageCorrectionReplacement({ sealId = '', faceId = '', kind = FACE_KIND.FACE, bytes = null, mime = '' } = {}) {
+  const sealIdText = String(sealId === null || sealId === undefined ? '' : sealId).trim()
+  const faceIdText = String(faceId === null || faceId === undefined ? '' : faceId).trim()
+  if (!sealIdText || !faceIdText) {
+    return imageCorrectionDenial('MISSING_REQUIRED', '入册新圖需要印面與所屬印章編號；本次零提交。')
+  }
+  const body = bytes instanceof Uint8Array ? bytes : bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : null
+  if (!body || body.length === 0) {
+    return imageCorrectionDenial('EMPTY_CONTENT', '新圖內容為空，請重新選擇圖片文件；本次零提交。')
+  }
+  const claimedMime = String(mime === null || mime === undefined ? '' : mime).trim().toLowerCase()
+  if (claimedMime && !claimedMime.startsWith('image/')) {
+    return imageCorrectionDenial('NOT_IMAGE', `所選文件不是圖片（${claimedMime}）；本次零提交，請改選 JPG / PNG / WebP 圖片。`)
+  }
+  /* ① 现有上传通道（内容寻址、幂等；失败原样透传）。 */
+  const stored = await storeArtifactBytes(body)
+  if (!stored || stored.ok !== true) {
+    return imageCorrectionDenial(
+      (stored && stored.reason) || 'STORAGE_UNAVAILABLE',
+      (stored && stored.message) || '新圖上傳失敗；本次零提交，請稍後重試。'
+    )
+  }
+  const sha256 = String(stored.sha256 || '').toLowerCase()
+  const storageKey = String(stored.storageKey || stored.storage_key || '')
+  const storedBytes = Number(stored.bytesLength)
+  if (!sha256 || !storageKey || !Number.isInteger(storedBytes) || storedBytes <= 0) {
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '新圖上傳回包缺少內容尋址讀數（sha256 / bytes / storage_key）；本次零入册、零提交，請重試。'
+    )
+  }
+  if (storageKey !== artifactObjectKeyOf(sha256)) {
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '新圖未產生雲端內容尋址對象鍵；本次零入册、零提交，請重試。'
+    )
+  }
+  const imageMime = String(stored.mime || claimedMime || 'application/octet-stream')
+  /* ② 入册通道（拿 `image_id`；失败原样透传 ⇒ 调用方不发提交）。
+     **用 `registerCorrectionImage`（登录面）而非 `registerFaceImage`（管理员面）** ——
+     影面勘误是普通用户能力，管理员门会恒拒（FORBIDDEN）把替换功能锁死。 */
+  const gate = await userWriteGate(
+    IMAGE_CORRECTION_REGISTER_OP,
+    {
+      seal_id: sealIdText,
+      sha256,
+      bytes: storedBytes,
+      mime: imageMime,
+      storage_key: storageKey
+    },
+    { readoutKeys: IMAGE_REGISTER_READOUT_KEYS }
+  )
+  if (gate && gate.mode === 'local-dev') {
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '本機為 dev / 離線形態（沒有雲端入册面）⇒ 替換用新圖無法入册；本次零提交。'
+    )
+  }
+  if (!gate || gate.ok !== true) {
+    return imageCorrectionDenial(
+      (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      (gate && gate.message) || '新圖入册失敗；本次零提交，請稍後重試。'
+    )
+  }
+  const fromReadout = typeof gate.image_id === 'string' ? gate.image_id.trim() : ''
+  const fromDocId = typeof gate.docId === 'string' ? gate.docId.trim() : ''
+  const imageId = fromReadout || fromDocId
+  if (!imageId.startsWith('img-')) {
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '雲端入冊回包形狀不可辨識（未附影像編號 image_id）；未編造編號，本次零提交，請重試。'
+    )
+  }
+  return {
+    ok: true,
+    imageId,
+    new_image: { sha256, bytes: storedBytes, mime: imageMime, storage_key: storageKey }
+  }
+}
+
+/* ---------------------------------------------------------------------------- 审核面（IMAGE 行）：**云端权威、本机零写入** ＋ `image_action` 读数上抛
+   -------------------------------------------------------------------------- */
+
+/**
+ * 是否为**影像勘誤行**（三处判据取或：调用方显式声明 / 云端权威行 / 本机镜像行）。
+ * 只用于**决定走哪条审核路径**，不改变任何门禁与白名单。
+ */
+function isImageCorrectionReviewTarget(correctionId, gate, options) {
+  if (options && options.image === true) return true
+  const authority = gate && gate.row && typeof gate.row === 'object' ? gate.row : null
+  if (authority && authority.kind === 'IMAGE') return true
+  const id = String(correctionId === null || correctionId === undefined ? '' : correctionId)
+  if (!id) return false
+  const local = listCorrectionRows().find((row) => row && String(row.id) === id)
+  return !!(local && local.kind === 'IMAGE')
+}
+
+/** IMAGE 行的审核执行回包（**零本机写**：不镜像、不发奖、不同步公开投影 / 值级摘要）。 */
+function reviewImageCorrection(decision, gate) {
+  if (gate && gate.mode === 'local-dev') {
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '本機為 dev / 離線形態（沒有雲端審核面）⇒ 影像勘誤只能在雲端形態審覈；本次零寫入。'
+    )
+  }
+  const authority = gate && gate.row && typeof gate.row === 'object' ? gate.row : null
+  if (!authority) {
+    return imageCorrectionDenial(
+      'STORAGE_UNAVAILABLE',
+      '雲端回傳缺少權威行，無法確認影像勘誤的審核結果；本次零寫入。'
+    )
+  }
+  const fromRow = typeof authority.status === 'string' && authority.status ? normalizeCorrectionStatus(authority.status) : ''
+  const status =
+    fromRow === CORRECTION_STATUS.ACCEPTED || fromRow === CORRECTION_STATUS.REJECTED
+      ? fromRow
+      : normalizeCorrectionStatus(decision)
+  const settled = status === CORRECTION_STATUS.ACCEPTED || status === CORRECTION_STATUS.REJECTED
+  const accepted = status === CORRECTION_STATUS.ACCEPTED
+  const action = String(authority.action || '') === 'replace' ? 'replace' : 'delete'
+  const label = action === 'replace' ? '替換' : '刪除'
+  const out = {
+    ok: true,
+    status,
+    accepted,
+    /* 奖励面**不在本版冻结范围**（§3.77.4）⇒ 如实不发奖，不谎称已发。 */
+    reward: { ok: true, awarded: false, message: '影像勘誤行的獎勵口徑尚未凍結，本次不發獎。' },
+    row: authority,
+    message: !settled
+      ? '雲端回包狀態仍為待審覈（PENDING）；影像面未執行，本次零寫入，請稍後重試。'
+      : accepted
+        ? `已採納影像勘誤（${label}影像）；影像面由服務端執行。`
+        : `已駁回影像勘誤（${label}影像）；只改狀態，影像面零寫入。`
+  }
+  const imageAction = gate && gate.image_action && typeof gate.image_action === 'object' ? gate.image_action : null
+  if (imageAction) out.image_action = imageAction
+  diagNote(`review(IMAGE) 回包{ok:true, status:${status}, action:${action}, image_action:${imageAction ? 'given' : '無'}}`)
+  return out
+}
+
+/* ---------------------------------------------------------------------------- 上屏读数单点（视图层不得另写第二套文案）
+   -------------------------------------------------------------------------- */
+
+/** 是否为**影像勘誤行**（`kind: 'IMAGE'`；字段型行一律 `false` ⇒ 既有展示一字不变）。 */
+export function isImageCorrectionRow(row) {
+  return !!row && typeof row === 'object' && row.kind === 'IMAGE'
+}
+
+/** 动作标签：「影像勘誤 · 刪除」／「影像勘誤 · 替換」（上屏文案，**非钩子取值**）。 */
+export function imageCorrectionLabelOf(row) {
+  if (!isImageCorrectionRow(row)) return ''
+  const action = String((row && row.action) || '')
+  if (action === 'replace') return '影像勘誤 · 替換'
+  if (action === 'delete') return '影像勘誤 · 刪除'
+  return '影像勘誤'
+}
+
+/** 目标影像读数：「目標影像 img-…」（replace 另列「新影像 img-…」）。 */
+export function imageCorrectionTargetOf(row) {
+  if (!isImageCorrectionRow(row)) return ''
+  const imageId = String((row && row.image_id) || '').trim()
+  const base = `目標影像 ${imageId || '（缺）'}`
+  if (String((row && row.action) || '') !== 'replace') return base
+  const newImageId = String((row && row.new_image_id) || '').trim()
+  return newImageId ? `${base} · 新影像 ${newImageId}` : base
+}
+
+/** 备注（无 ⇒ 空串，由调用方决定是否渲染）。 */
+export function imageCorrectionNoteOf(row) {
+  if (!isImageCorrectionRow(row)) return ''
+  const note = row && row.note
+  return typeof note === 'string' ? note : ''
+}
+
+/**
+ * 采纳后 `image_action` 读数的**上屏文案**（繁體；无该键 ⇒ 空串，**不编造读数**）。
+ * @param {null|object} imageAction `{action, removed:{rows,objects}, shared_kept}`
+ * @returns {string}
+ */
+export function imageCorrectionReadoutOf(imageAction) {
+  if (!imageAction || typeof imageAction !== 'object') return ''
+  if (imageAction.shared_kept === true) return '舊影像仍被其他印面引用，未刪'
+  const removed = imageAction.removed
+  if (!removed || typeof removed !== 'object') return ''
+  const rows = Number(removed.rows)
+  const objects = Number(removed.objects)
+  if (!Number.isFinite(rows) && !Number.isFinite(objects)) return ''
+  const rowCount = Number.isFinite(rows) ? rows : 0
+  const objectCount = Number.isFinite(objects) ? objects : 0
+  return `已刪除舊影像行 ${rowCount}、對象 ${objectCount}`
 }

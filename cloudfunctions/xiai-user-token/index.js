@@ -491,6 +491,13 @@ async function handleVerify(event, config, callContext) {
   if (op === 'registerFaceImage' && Object.prototype.hasOwnProperty.call(opResult, 'image_id')) {
     response.image_id = opResult.image_id
   }
+  /* **勘誤替換新圖入册讀數面（additive 透传｜**按 op 收窄**｜本單 `registerCorrectionImage`）**：
+     `image_id` **僅當 `op === 'registerCorrectionImage'` 且 `opResult` 確有該鍵時**才逐字疊進回包
+     （前端据此把本机新图 id 换成云端内容寻址编号，再去 `submitImageCorrection` 提 `replace`）；
+     **其餘任何 op 一律不透傳這一路**（含 `registerFaceImage` 走它自己那一支）⇒ 既有回包逐字不变。 */
+  if (op === 'registerCorrectionImage' && Object.prototype.hasOwnProperty.call(opResult, 'image_id')) {
+    response.image_id = opResult.image_id
+  }
   /* **影像刪除讀數面（additive 透傳｜**按 op 收窄**｜本單 `deleteFaceImage`）**：`face_id` /
      `image_id` / `removed`（＝ `{rows, objects}` 实际删数）**僅當 `op === 'deleteFaceImage'` 且
      `opResult` 確有該鍵時**才逐字疊進回包（前端据此就地刷新印面指向并如实报删数）；
@@ -499,6 +506,28 @@ async function handleVerify(event, config, callContext) {
   if (op === 'deleteFaceImage') {
     const FACE_IMAGE_DELETE_READOUT_KEYS = ['face_id', 'image_id', 'removed']
     for (const key of FACE_IMAGE_DELETE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **普通用戶影像勘誤讀數面（additive 透傳｜**按 op 收窄**｜§3.77）**：
+     · `skipped` **僅當 `op === 'submitImageCorrection'`** 且 `opResult` 確有該鍵時逐字疊進回包
+       （重复提交跳过：不建行、不计失败、不上屏为失败；键名真源 ＝ `lib/ops.js` 的
+       `IMAGE_CORRECTION_SUBMIT_READOUT_KEYS`）；
+     · `image_action` **僅當 `op === 'reviewCorrection'`** 且 `opResult` 確有該鍵時逐字疊進回包
+       （`kind:'IMAGE'` 行采纳成功读数 `{action, removed:{rows,objects}, shared_kept}`；
+       键名真源 ＝ `IMAGE_CORRECTION_REVIEW_READOUT_KEYS`）。
+     **其餘任何 op 一律不透傳這 2 個鍵** ⇒ 既有回包逐字不變（序列化後亦不新增鍵）；
+     `skipped` 与 `reviewPersonImport` 系的 `skipped` **同字但按 op 隔離**、互不影響。
+     既有字段一律不刪、不改。 */
+  if (op === 'submitImageCorrection') {
+    const IMAGE_CORRECTION_SUBMIT_READOUT_KEYS = ['skipped']
+    for (const key of IMAGE_CORRECTION_SUBMIT_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  if (op === 'reviewCorrection') {
+    const IMAGE_CORRECTION_REVIEW_READOUT_KEYS = ['image_action']
+    for (const key of IMAGE_CORRECTION_REVIEW_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }

@@ -2290,7 +2290,395 @@ async function readCorrectionRowsSorted(match, limit) {
    op 注册面（每个 op 只**产出落盘计划**，落库在 `persist()`）
    --------------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------------
+   **普通用戶影像勘誤（§3.77｜v1.94）**：提交 op `submitImageCorrection`（`OPS` 登录面）
+   ---------------------------------------------------------------------------
+   硬口径（逐条；与 §3.77.2 / §3.77.3 逐字对应）：
+     · **登录门**：身份唯一来源 ＝ 已验签令牌 / 平台会话（`identityUsable`）；无身份 ⇒
+       与 `submitCorrection` 同一条既有文案 ＋ 既有冻结 `FORBIDDEN`（**零新增 `reason`**）；
+     · **载荷封闭恰六键** `seal_id` ＋ `face_id` ＋ `image_id` ＋ `action`（恰二值 `'delete'` /
+       `'replace'`）＋ `note`（可选 ≤ 200 字、缺省空串）＋ `new_image`（`replace` 必有、
+       `delete` 不得给）；未知键 / 身份类键 ⇒ `INVALID_FIELD`；缺 / 空 ⇒ 沿既有缺键值
+       （`MISSING_REQUIRED`）；值态违形 ⇒ `INVALID_VALUE`；
+     · **落点零新建**：只写既有 `xiai_corrections` 一行（`kind:'IMAGE'` ＋ `action` ＋ `image_id`
+       ＋ replace 时 `new_image_id` ＋ `note` ＋ `status:'PENDING'` ＋ `submitted_by` ＋ 时间）；
+       **初始恒 `PENDING`、影像面零写入**（生效只经 `reviewCorrection` 采纳）；
+     · **重复跳过**：同 `(faceId, image_id, action)` 已有 `PENDING` / `ACCEPTED` 行 ⇒ 不建行、
+       回 `{ok:true, row:<既有行>, skipped:true}`（additive 键，`index.js` 按 op 收窄透传）；
+     · **回包**：成功 `{ok:true, row}`（＋内部落盘计划 `plan`，`index.js` 绝不外传）；
+       失败恒恰 3 键、`reason` 只用既有冻结值（**零新增**）。
+   --------------------------------------------------------------------------- */
+
+/** 影像勘误载荷**封闭恰六鍵**（身份類鍵一律不在面內 ⇒ `INVALID_FIELD`；与其余 op 同一条文案）。 */
+const IMAGE_CORRECTION_ALLOWED_KEYS = Object.freeze([
+  'seal_id',
+  'face_id',
+  'image_id',
+  'action',
+  'note',
+  'new_image'
+])
+
+/** `new_image` **封闭恰四鍵**（`action:'replace'` 時必有；`action:'delete'` 不得给）。 */
+const IMAGE_CORRECTION_NEW_IMAGE_KEYS = Object.freeze(['sha256', 'bytes', 'mime', 'storage_key'])
+
+/** `action` **值域恰二值**（域外 / 非字串 ⇒ `INVALID_VALUE`）。 */
+const IMAGE_CORRECTION_ACTIONS = Object.freeze(['delete', 'replace'])
+
+/** `note` 上限（＝ `MAX_NOTE_LENGTH` 200 字；超限 ⇒ `INVALID_VALUE`）。 */
+const IMAGE_CORRECTION_NOTE_MAX_LENGTH = MAX_NOTE_LENGTH
+
+/**
+ * `registerCorrectionImage`（**勘誤替換用新圖入册**｜`OPS` 登录面）载荷**封闭键面**：
+ * 四必填 ＝ `IMAGE_CORRECTION_NEW_IMAGE_KEYS`（**零第二套口径** —— 与 `submitImageCorrection`
+ * ⑥ 步 `new_image` 的封闭四键同一真源）＋ 可选 `seal_id`（把行挂到该印；缺省空串）。
+ * 未知键 / 身份类键 ⇒ `INVALID_FIELD`（与其余 op 同一条文案）。
+ */
+const CORRECTION_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([...IMAGE_CORRECTION_NEW_IMAGE_KEYS, 'seal_id'])
+
+/** `submitImageCorrection` 成功回包**读数键面**（`index.js` 按 op 收窄透传的键面真源）。 */
+const IMAGE_CORRECTION_SUBMIT_READOUT_KEYS = Object.freeze(['skipped'])
+
+/** `reviewCorrection` 影像行采纳回包**读数键面**（`index.js` 按 op 收窄透传的键面真源）。 */
+const IMAGE_CORRECTION_REVIEW_READOUT_KEYS = Object.freeze(['image_action'])
+
 const OPS = Object.freeze({
+  /**
+   * **普通用戶【勘誤】影像（本單新增 op｜`submitImageCorrection`｜`OPS` 登录面｜§3.77）**：
+   * 登录用户在 `/seal/<sid>` 影像卡片对其当前展示的影像提交「刪除此影像 / 重新上傳新圖替換」
+   * ＋可填备注；**只落 `xiai_corrections` 一行、初始恒 `PENDING`**（影像面零写入，
+   * 生效只由管理员 `reviewCorrection` 采纳后执行 —— 与管理员直接 `deleteFaceImage` 两路互不替代）。
+   *
+   * 顺序（**全部判定早于任何写**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 唯一写点执行）：
+   *   ① 登录门 `identityUsable`（身份由令牌派生；无身份 ⇒ 既有 `FORBIDDEN` ＋ 零读写）；
+   *   ② 载荷形态 ＋ 封闭恰六键（`IMAGE_CORRECTION_ALLOWED_KEYS`；未知键 / 身份类键 ⇒
+   *      `INVALID_FIELD`，与其余 op 同一条文案）；
+   *   ③ 必填四串 `seal_id` / `face_id` / `image_id` / `action`（缺 / 空 ⇒ `MISSING_REQUIRED`、
+   *      非字串 ⇒ `INVALID_VALUE`）；`note`（可选）非字串 / 超 200 字 ⇒ `INVALID_VALUE`；
+   *      `delete` 附带 `new_image` ⇒ `INVALID_FIELD`（`delete` 不得给）；
+   *   ④ `action` 值域恰二值（域外 ⇒ `INVALID_VALUE`）；
+   *   ⑤ 解析与一致性：印章行（`stamp_id` → `sid` → `id` → `_id`）、印面行（`id` → `_id`）、
+   *      影像行（`id` → `_id`）**均须存在**、印面须属该印（行内 `sealId` / `stamp_id`，
+   *      缺键时退回 `fc-<sid>-…` 编号约定）⇒ 任一不中 `INVALID_VALUE`；**本印面归属校验**
+   *      （`face_image_id` 等值 **或** `edge_image_ids[]` 命中，同 `deleteFaceImage` 口径）
+   *      ⇒ 不属 `INVALID_VALUE` ＋ 零写入；
+   *   ⑥ `replace` 新图四道形态门（① 摘要 64 位小写十六进制 ② 对象键形态 ＋ 键内摘要 ≡ 摘要
+   *      ③ `bytes` 整数 ④ `bytes` ∈ 1〜`ARTIFACT_MAX_BYTES`）＋ **`sha256` 对应影像行必须已
+   *      入册**（前端先走 `registerFaceImage`）；缺键 ⇒ `MISSING_REQUIRED`、违形 / 未入册 /
+   *      新图与原图同一份内容 ⇒ `INVALID_VALUE`；
+   *   ⑦ **重复跳过（§3.47 语义）**：同 `(faceId, image_id, action)` 已有 `PENDING` / `ACCEPTED`
+   *      行 ⇒ **不建行**，回 `{ok:true, row:<既有行>, skipped:true}`（additive 键、`index.js`
+   *      按 op 收窄透传；零新增行、不计入失败、不上屏为失败；`REJECTED` 行不参与防重）；
+   *   ⑧ 成功 ＝ 行体落 `xiai_corrections`，回 `{ok:true, row}`（＋内部落盘计划 `plan`）；
+   *      失败恒 **恰 3 键** `{ok, reason, message}`、`reason` 只用既有冻结值（**零新增**）。
+   * @param {object} payload 载荷（封闭六键，见 `IMAGE_CORRECTION_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity **服务端派生**的身份（唯一来源）
+   * @returns {Promise<{ok:true, row:object, plan:object}|{ok:true, row:object, skipped:true}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async submitImageCorrection(payload, identity) {
+    /* ① 登录门（**身份唯一来源 ＝ 令牌 / 会话**；与 `submitCorrection` 同一条既有文案、零新增 reason）。 */
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
+    }
+    /* ② 载荷形态 ＋ 封闭六键（未知键 / 身份类键 ⇒ `INVALID_FIELD`，与其余 op 同一条文案）。 */
+    const keyDenial = pointsPayloadDenial(payload, IMAGE_CORRECTION_ALLOWED_KEYS)
+    if (keyDenial) return keyDenial
+    /* ③ 必填四串（缺 / 空 ⇒ `MISSING_REQUIRED`；非字串 ⇒ `INVALID_VALUE`；零写入）。 */
+    for (const key of ['seal_id', 'face_id', 'image_id', 'action']) {
+      const value = payload[key]
+      if (value === undefined || value === null || text(value) === '') {
+        return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${key}）；本次零寫入。`)
+      }
+      if (typeof value !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串；本次零寫入。`)
+      }
+    }
+    const sealId = text(payload.seal_id)
+    const faceId = text(payload.face_id)
+    const imageId = text(payload.image_id)
+    const action = text(payload.action)
+    /* `delete` **不得附带** `new_image`（键面收窄 ⇒ `INVALID_FIELD`；`replace` 的新图见⑥）。 */
+    if (action === 'delete' && Object.prototype.hasOwnProperty.call(payload, 'new_image')) {
+      return deny(REASONS.INVALID_FIELD, '動作「刪除此影像」不得附帶新圖（new_image）⇒ 拒絕提交；本次零寫入。')
+    }
+    /* `note` 可选（缺省空串）：非字串 / 超 200 字 ⇒ `INVALID_VALUE`（零写入）。 */
+    const rawNote = payload.note === undefined || payload.note === null ? '' : payload.note
+    if (typeof rawNote !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '備註（note）必須是文字 ⇒ 拒絕提交；本次零寫入。')
+    }
+    const note = rawNote.trim()
+    if (note.length > IMAGE_CORRECTION_NOTE_MAX_LENGTH) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `備註超出上限（${IMAGE_CORRECTION_NOTE_MAX_LENGTH} 字）⇒ 拒絕提交；本次零寫入。`
+      )
+    }
+    /* ④ `action` 值域恰二值（域外 ⇒ `INVALID_VALUE`；零写入）。 */
+    if (IMAGE_CORRECTION_ACTIONS.indexOf(action) === -1) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `勘誤動作「${action || '（空）'}」不在二值之內（刪除此影像 / 重新上傳新圖替換）⇒ 拒絕提交；本次零寫入。`
+      )
+    }
+    /* ⑤ 解析与一致性（印章 / 印面 / 影像三行均须存在、印面须属该印；任一不中 ⇒ `INVALID_VALUE`）。 */
+    const sealRow = await readSealRowByAnyId(sealId)
+    if (sealRow === null) {
+      return deny(REASONS.INVALID_VALUE, `未找到該印章（seal_id：${sealId}）；本次零寫入。`)
+    }
+    const faceRow = await readRowByAnyId(COLLECTIONS.faces, faceId, FACE_IMAGE_DELETE_FACE_SCAN_LIMIT)
+    if (faceRow === null) {
+      return deny(REASONS.INVALID_VALUE, `未找到該印面（face_id：${faceId}）；本次零寫入。`)
+    }
+    if (!faceBelongsToSeal(faceRow, sealId, sealRow)) {
+      return deny(REASONS.INVALID_VALUE, `印面（${faceId}）與印章（${sealId}）不一致 ⇒ 拒絕提交；本次零寫入。`)
+    }
+    const imageRow = await readRowByAnyId(COLLECTIONS.images, imageId, FACE_IMAGE_DELETE_IMAGE_SCAN_LIMIT)
+    if (imageRow === null) {
+      return deny(REASONS.INVALID_VALUE, `未找到該影像（image_id：${imageId}）；本次零寫入。`)
+    }
+    /* **本印面归属校验**（与 `deleteFaceImage` 同口径：`face_image_id` 等值 或 `edge_image_ids[]` 命中）。 */
+    const ownership = faceImageOwnershipOf(faceRow, imageId)
+    if (!ownership.ownedByFace && !ownership.ownedByEdge) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `影像編號（${imageId}）不屬於該印面（本印面的 face_image_id / edge_image_ids 均未命中）；本次零寫入。`
+      )
+    }
+    /* ⑥ `replace` 新图：四道形态门 ＋ 必须已在 `xiai_images` 有行（`delete` 早已在③挡掉附带新图）。 */
+    let newImageId = null
+    if (action === 'replace') {
+      const rawNew = payload.new_image
+      if (rawNew === undefined || rawNew === null) {
+        return deny(REASONS.MISSING_REQUIRED, '「重新上傳新圖替換」必附新圖（new_image）；本次零寫入。')
+      }
+      if (typeof rawNew !== 'object' || Array.isArray(rawNew)) {
+        return deny(REASONS.INVALID_VALUE, '新圖（new_image）必須是對象；本次零寫入。')
+      }
+      const unknownNew = Object.keys(rawNew).filter((key) => IMAGE_CORRECTION_NEW_IMAGE_KEYS.indexOf(key) === -1)
+      if (unknownNew.length > 0) {
+        return deny(
+          REASONS.INVALID_FIELD,
+          `新圖含未知欄位：${unknownNew.join('、')}（如實報回，不靜默丟鍵）；本次零寫入。`
+        )
+      }
+      for (const key of IMAGE_CORRECTION_NEW_IMAGE_KEYS) {
+        const value = rawNew[key]
+        if (value === undefined || value === null || text(value) === '') {
+          return deny(REASONS.MISSING_REQUIRED, `新圖缺少必要欄位（${key}）；本次零寫入。`)
+        }
+      }
+      for (const key of ['sha256', 'mime', 'storage_key']) {
+        if (typeof rawNew[key] !== 'string') {
+          return deny(REASONS.INVALID_VALUE, `新圖欄位（${key}）必須是字符串；本次零寫入。`)
+        }
+      }
+      /* 四道形态门（与 `registerFaceImage` 同一张表、同一条文案）。 */
+      const digest = text(rawNew.sha256)
+      if (!ARTIFACT_DIGEST_PATTERN.test(digest)) {
+        return deny(REASONS.INVALID_VALUE, '摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+      }
+      const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(text(rawNew.storage_key))
+      if (!matched) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff）；本次零寫入。'
+        )
+      }
+      if (matched[1] !== digest.slice(0, 2) || matched[2] !== digest) {
+        return deny(REASONS.INVALID_VALUE, '影像對象鍵內含的摘要與聲稱的 sha256 不一致；本次零寫入。')
+      }
+      const claimedBytes = rawNew.bytes
+      if (!Number.isInteger(claimedBytes)) {
+        return deny(REASONS.INVALID_VALUE, '字節數（bytes）必須是整數；本次零寫入。')
+      }
+      if (claimedBytes <= 0 || claimedBytes > ARTIFACT_MAX_BYTES) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `字節數（bytes）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+        )
+      }
+      /* **必须已入册**：`sha256` 对应的 `xiai_images` 行必须已存在（前端先走 `registerFaceImage`）。 */
+      const registered = await readRegisteredImageByDigest(digest)
+      if (registered === null) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `替換用新圖尚未入册（sha256：${digest.slice(0, 12)}…；請先經 registerFaceImage 入册）⇒ 拒絕提交；本次零寫入。`
+        )
+      }
+      newImageId = text(registered.id) || text(registered._id)
+      if (newImageId === '') {
+        return deny(REASONS.INVALID_VALUE, '替換用新圖的影像行缺影像編號（id）⇒ 拒絕提交；本次零寫入。')
+      }
+      if (newImageId === imageId) {
+        return deny(REASONS.INVALID_VALUE, '替換用新圖與原圖為同一份內容（同一影像編號）⇒ 無從替換；本次零寫入。')
+      }
+    }
+    /* ⑦ **重复跳过**（§3.47 语义：只认未驳回行；`REJECTED` 行不参与防重）。
+       命中 ⇒ **零新增行、不计入失败、不上屏为失败**：回 `{ok:true, row, skipped:true}`、无 `plan`。 */
+    const duplicates = await readRows(
+      COLLECTIONS.corrections,
+      { faceId, image_id: imageId, action },
+      { limit: 32 }
+    )
+    const duplicate = duplicates.find(
+      (item) =>
+        text(item && item.kind) === 'IMAGE' &&
+        (text(item && item.status) === CORRECTION_STATUS.PENDING ||
+          text(item && item.status) === CORRECTION_STATUS.ACCEPTED)
+    )
+    if (duplicate) {
+      return { ok: true, row: duplicate, skipped: true }
+    }
+    /* ⑧ 行体（封闭；IMAGE 類標記面四鍵 ＋ `xiai_corrections` 通用欄）＋ 单集合落盘计划。 */
+    const at = new Date().toISOString()
+    const row = {
+      id: makeId(),
+      sealId,
+      faceId,
+      field: 'image',
+      kind: 'IMAGE',
+      action,
+      image_id: imageId,
+      /* `delete` ⇒ `null`（行面仍带该键，逐字按冻结契约）。 */
+      new_image_id: newImageId,
+      note,
+      status: CORRECTION_PENDING,
+      /* 提交人 uid：**服务端从令牌派生**，不由载荷自称。 */
+      submitted_by: identity.uid,
+      created_at: at,
+      updated_at: at
+    }
+    return {
+      ok: true,
+      row,
+      plan: {
+        writes: [{ kind: 'add', collection: COLLECTIONS.corrections, doc: row }]
+      }
+    }
+  },
+
+  /**
+   * **勘誤【重新上傳新圖替換】用新圖入册（本單新增 op｜`registerCorrectionImage`｜`OPS` 登录面）**：
+   * 普通用户在影像卡片提交 `replace` 之前，先把「已交权威存储的新图」登记进云端 `xiai_images`
+   * 拿到 `image_id`（`submitImageCorrection` ⑥ 步硬要求该 `sha256` **必须已入册**）。本 op 就是那一口
+   * —— **与 `registerFaceImage` 的唯一实质差别 ＝ 门不同**：本 op 走**登录门** `identityUsable`
+   * （普通用户可用、**不做管理员门**）；四道形态门 / 行体 / `seq` 单点 / 同 id 幂等 / 回包形状逐字同口径。
+   *
+   * 顺序（**全部判定在落盘之前**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 的唯一写点执行）：
+   *   ① 登录门 `identityUsable`（与 `submitImageCorrection` 同一条既有文案、既有冻结 `FORBIDDEN`；
+   *      **零新增 `reason`**、**不做管理员门**）；
+   *   ② 载荷封闭键面 `CORRECTION_IMAGE_REGISTER_ALLOWED_KEYS`（四必填 ＋ 可选 `seal_id`；
+   *      未知键 / 身份类键 ⇒ `INVALID_FIELD`，与其余 op 同一条文案）；
+   *   ③ 必填三串 `sha256` / `mime` / `storage_key`（缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒
+   *      `INVALID_VALUE`）＋ `bytes` 必填（缺 ⇒ `MISSING_REQUIRED`；非整数归④判）；
+   *   ④ 四道形态门（与 `registerFaceImage` **同一张表、同一条文案**）：摘要 64 位小写十六进制
+   *      → 对象键形态 `xiai/images/<摘要前两位>/<摘要>.tiff` → 键内摘要 ≡ `sha256` → `bytes` ∈
+   *      1〜`ARTIFACT_MAX_BYTES` 整数 → `mime` ＝ 服务端存储容器常量 `ARTIFACT_MIME`
+   *      ⇒ 任一不符 `INVALID_VALUE` ＋ **零写入**（判定全部早于落盘）；
+   *   ⑤ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用、不耗号；否则经 `imageSeqsOf` /
+   *      `nextImageSeqOf`，**本 op 不自算号**）；
+   *   ⑥ 行体 ＝ `buildDirectImageRow` 字段面（`id` ＝ `img-<sha16>` **内容寻址**；`stamp_id` 回填
+   *      `seal_id`，缺省空串）＋ `kind:'set'` 覆写计划 ⇒ **同 `id` 重放不建第二行、不耗号**；
+   *   ⑦ 成功回包**恰 2 键** `{ok:true, image_id}`（＋ `plan` 内部面，`index.js` 绝不外传）；
+   *      失败恒**恰 3 键** `{ok, reason, message}`，`reason` 只用既有冻结值（**零新增**）。
+   * **安全边界**：本 op **只登记 `xiai_images` 影像行** —— 不改任何印面 / 印章行、不删任何东西、
+   * 零对象存储读写（字节已由 `registerArtifact` 回读覆核过）。
+   * @param {object} payload 载荷（封闭五键，见 `CORRECTION_IMAGE_REGISTER_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity **服务端派生**的身份（唯一来源）
+   * @returns {Promise<{ok:true, image_id:string, plan:object}|{ok:false, reason:string, message:string}>}
+   */
+  async registerCorrectionImage(payload, identity) {
+    /* ① 登录门（**身份唯一来源 ＝ 令牌 / 会话**；与 `submitImageCorrection` 同一条既有文案、零新增 reason）。 */
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
+    }
+    /* ② 载荷封闭键面（未知键 / 身份类键 ⇒ `INVALID_FIELD`，与其余 op 同一条文案）。 */
+    const payloadDenial = pointsPayloadDenial(payload, CORRECTION_IMAGE_REGISTER_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    /* ③ 必填三串（缺 / 空 ⇒ `MISSING_REQUIRED`；非字符串 ⇒ `INVALID_VALUE`；零写入）。 */
+    for (const key of ['sha256', 'mime', 'storage_key']) {
+      const value = payload[key]
+      if (value === undefined || value === null || text(value) === '') {
+        return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${key}）；本次零寫入。`)
+      }
+      if (typeof value !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串；本次零寫入。`)
+      }
+    }
+    const claimedBytes = payload.bytes
+    if (claimedBytes === undefined || claimedBytes === null) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（bytes）；本次零寫入。')
+    }
+    /* ④ 四道形态门（与 `registerFaceImage` 同一张表、同一条文案；任一不符 ⇒ 零写入）。 */
+    const digest = text(payload.sha256)
+    if (!ARTIFACT_DIGEST_PATTERN.test(digest)) {
+      return deny(REASONS.INVALID_VALUE, '摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+    }
+    const storageKey = text(payload.storage_key)
+    const matched = ARTIFACT_OBJECT_KEY_PATTERN.exec(storageKey)
+    if (!matched) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '影像對象鍵形態不符（期望 xiai/images/<摘要前兩位>/<摘要>.tiff）；本次零寫入。'
+      )
+    }
+    if (matched[2] !== digest || matched[1] !== digest.slice(0, 2)) {
+      return deny(REASONS.INVALID_VALUE, '影像對象鍵內含的摘要與聲稱的 sha256 不一致；本次零寫入。')
+    }
+    if (!Number.isInteger(claimedBytes) || claimedBytes <= 0 || claimedBytes > ARTIFACT_MAX_BYTES) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `字節數（bytes）必須是 1 〜 ${ARTIFACT_MAX_BYTES} 之間的整數；本次零寫入。`
+      )
+    }
+    if (text(payload.mime) !== ARTIFACT_MIME) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `源件容器（mime）必須是服務端存儲容器常量（${ARTIFACT_MIME}）；本次零寫入。`
+      )
+    }
+    const sealId = text(payload.seal_id)
+    const kind = 'FACE'
+    const at = new Date().toISOString()
+    /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
+    const id = buildDirectImageRow({ image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind }, at).id
+    /* ⑤ `seq` 单点取号：同 `id` 已有行且属同印 ⇒ 沿用（幂等、不消耗号）；否则经单点分配器。
+       读抛错 ⇒ 按「无既有行」继续（与 `imageSeqsOf` 同一降级口径：如实 `console.warn`）；
+       真故障若最终撞唯一键，由 `index.js` 如实报 `STORAGE_UNAVAILABLE`。 */
+    let existing = null
+    try {
+      const hits = await readRows(COLLECTIONS.images, { id }, { limit: 1 })
+      existing = Array.isArray(hits) && hits.length > 0 ? hits[0] : null
+    } catch (error) {
+      console.warn(
+        '[xiai] registerCorrectionImage 讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）：',
+        error && error.message ? error.message : error
+      )
+    }
+    const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
+    const seq = sameSealExisting
+      ? Number(existing.seq)
+      : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
+    /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`。 */
+    const row = {
+      ...buildDirectImageRow(
+        { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
+        at,
+        seq
+      ),
+      stamp_id: sealId
+    }
+    /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
+    return {
+      ok: true,
+      image_id: row.id,
+      plan: {
+        writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }]
+      }
+    }
+  },
+
   /**
    * 提交勘误（**用户写路径**；单集合插入）。
    * **本单追加防重门**：在任何写入之前，若同 `(faceId, field, value)` 已有行 ⇒ `DUPLICATE_VALUE`
@@ -4092,6 +4480,290 @@ async function deleteImageObjectsOfRow(row) {
   return 0
 }
 
+/* ---------------------------------------------------------------------------
+   **普通用戶影像勘誤 · 执行侧原语（§3.77.3 / §3.77.4）**
+   ---------------------------------------------------------------------------
+   供 `submitImageCorrection`（提交期解析 / 一致性）与 `reviewCorrection` 的 `kind:'IMAGE'`
+   采纳分支（执行期）共用；**不改** `deleteFaceImage` / `registerFaceImage` 的任何实现，
+   判据与写入序逐条照搬其口径（本文件内只新增、零改既有行）。
+   --------------------------------------------------------------------------- */
+
+/** 按 `id` → `_id` 两形态依次读一行（命中即取首行；无行 ⇒ `null`）。 */
+async function readRowByAnyId(collection, ref, limit) {
+  for (const probe of ['id', '_id']) {
+    const rows = await readRows(collection, { [probe]: ref }, { limit })
+    if (rows.length > 0) return rows[0]
+  }
+  return null
+}
+
+/** 读印章行（`stamp_id` → `sid` → `id` → `_id` 四形态依次；无行 ⇒ `null`）。 */
+async function readSealRowByAnyId(sealId) {
+  for (const probe of ['stamp_id', 'sid', 'id', '_id']) {
+    const rows = await readRows(COLLECTIONS.seals, { [probe]: sealId }, { limit: 8 })
+    if (rows.length > 0) return rows[0]
+  }
+  return null
+}
+
+/** 按 `sha256` 读**已入册**影像行（内容寻址 id 优先命中，否则取首行；无行 ⇒ `null`）。 */
+async function readRegisteredImageByDigest(digest) {
+  const rows = await readRows(COLLECTIONS.images, { sha256: digest }, { limit: 8 })
+  if (rows.length === 0) return null
+  const wanted = `${DIRECT_IMAGE_ID_PREFIX}${digest.slice(0, DIRECT_IMAGE_ID_HEX_LENGTH)}`
+  return rows.find((row) => text(row && row.id) === wanted || text(row && row._id) === wanted) || rows[0]
+}
+
+/**
+ * 印面 ↔ 印章一致性：印面行内 `sealId` / `stamp_id` 命中（`seal_id` 本身 ＋ 印章行
+ * `id` / `_id` / `sid` / `stamp_id` 任一）即认；行上**无**印章键 ⇒ 退回编号约定
+ * `fc-<sid>-…`（`face id` 内嵌 sid，见 `nextFaceIdOf`）判归属。
+ */
+function faceBelongsToSeal(faceRow, sealId, sealRow) {
+  const declared = text(faceRow && (faceRow.sealId || faceRow.stamp_id))
+  const candidates = [sealId]
+  if (sealRow) {
+    for (const value of [sealRow.id, sealRow._id, sealRow.sid, sealRow.stamp_id]) {
+      const item = text(value)
+      if (item !== '') candidates.push(item)
+    }
+  }
+  if (declared !== '') return candidates.indexOf(declared) !== -1
+  const faceId = text(faceRow && (faceRow.id || faceRow._id))
+  return sealId !== '' && faceId.indexOf(`fc-${sealId}`) === 0
+}
+
+/**
+ * 本印面归属（**与 `deleteFaceImage` 同口径**）：`face_image_id` 等值 **或** 在
+ * `edge_image_ids[]` 中（元素统一 `text()` 归一、滤空）。
+ * @returns {{edgeIds:string[], ownedByFace:boolean, ownedByEdge:boolean}}
+ */
+function faceImageOwnershipOf(faceRow, imageId) {
+  const edgeIds = Array.isArray(faceRow && faceRow.edge_image_ids)
+    ? faceRow.edge_image_ids.map((id) => text(id)).filter((id) => id !== '')
+    : []
+  const ownedByFace = text(faceRow && faceRow.face_image_id) === imageId
+  const ownedByEdge = edgeIds.indexOf(imageId) !== -1
+  return { edgeIds, ownedByFace, ownedByEdge }
+}
+
+/**
+ * **共用保护**（**与 `deleteFaceImage` 逐字同判据**）：扫描全部印面，除本印面外仍有
+ * 任何印面的 `face_image_id` / `edge_image_ids[]` 命中该影像 ⇒ `true`。
+ */
+async function imageSharedByOtherFaces(faceId, imageId) {
+  const isTargetFace = (row) => text(row && row.id) === faceId || text(row && row._id) === faceId
+  const allFaces = await readRows(COLLECTIONS.faces, {}, { limit: FACE_IMAGE_DELETE_SCAN_LIMIT })
+  return allFaces.some(
+    (row) =>
+      !isTargetFace(row) &&
+      (text(row && row.face_image_id) === imageId ||
+        (Array.isArray(row && row.edge_image_ids) &&
+          row.edge_image_ids.some((edgeId) => text(edgeId) === imageId)))
+  )
+}
+
+/** **占位图行判据**（与 `deleteFaceImage` 同口径：占位图行不删、只清引用）。 */
+function isPlaceholderImageRow(imageRow) {
+  return (
+    imageRow !== null &&
+    (text(imageRow.storage_key) === SEAL_PLACEHOLDER_IMAGE_KEY ||
+      text(imageRow.id) === SEAL_PLACEHOLDER_IMAGE.id ||
+      text(imageRow._id) === SEAL_PLACEHOLDER_IMAGE.id)
+  )
+}
+
+/**
+ * **删影像行后的对象删除**（**与 `deleteFaceImage` 同口径**）：同 `sha256` 尚有其它行
+ * ⇒ 只删行、对象不动；否则走候选单点 `deleteImageObjectsOfRow`（命中即停、失败不抛）。
+ * @returns {Promise<number>} 实际删对象件数（0 / 1；**零谎报**）
+ */
+async function deleteObjectsOfImageRowIfUnshared(imageRow, imageId) {
+  const rawDigest = text(imageRow && imageRow.sha256)
+  const digest = rawDigest.toLowerCase()
+  const imageDocId = text(imageRow && imageRow._id) || imageId
+  let sharedByOtherRow = false
+  if (ARTIFACT_DIGEST_PATTERN.test(digest)) {
+    const peers = await readRows(COLLECTIONS.images, { sha256: rawDigest }, { limit: FACE_IMAGE_DIGEST_SCAN_LIMIT })
+    sharedByOtherRow = peers.some((row) => text(row && (row._id || row.id)) !== imageDocId)
+  }
+  if (sharedByOtherRow) return 0
+  return deleteImageObjectsOfRow(imageRow)
+}
+
+/**
+ * **采纳 `kind:'IMAGE'` 勘误的影像面执行**（§3.77.4；只由 `reviewCorrection` 的采纳路调用，
+ * **属性（`field`）型行一律不走本函数**）。
+ *
+ * · `action:'delete'` ＝ **逐条照搬 `deleteFaceImage` 的写入序**：归属校验 → 共用保护（仍被
+ *   其它印面引用 ⇒ 拒绝并**保持 `PENDING`**、文案含「已被印面引用」）→ 清本印面引用 → 删影像行
+ *   （**占位图行不删**）→ `deleteImageObjectsOfRow` 删对象（同 `sha256` 去重保护、尽力删、计数如实）；
+ * · `action:'replace'` ＝ 三步硬序：① **先校验新图已入册**（`new_image_id` 有 `xiai_images` 行）
+ *   → ② 印面指向新图 → ③ 旧影像行与对象一并删除（**共用保护**：旧图仍被其它印面引用 ⇒
+ *   不删旧图、只改指向、`shared_kept:true`）；第 ③ 步失败 ⇒ **尽力把指向回滚到旧图**，
+ *   杜绝「指向已改而舊圖未刪」的含混态；
+ * · **执行成功才由调用方写 `ACCEPTED`**；任何拒绝 / 执行失败 ⇒ 直接回结构化拒绝、
+ *   **状态仍 `PENDING`**（本拒绝不迁 `REJECTED`）＋ 如实文案（**零新增 `reason`**）。
+ * @param {object} row `xiai_corrections` 的 `kind:'IMAGE'` 行
+ * @param {string} at 服务端时间（ISO；与本次审核的 `reviewed_at` 同源）
+ * @returns {Promise<{ok:true, image_action:{action:string, removed:{rows:number, objects:number},
+ *           shared_kept:boolean}}|{ok:false, reason:string, message:string}>}
+ */
+async function applyImageCorrectionAcceptance(row, at) {
+  const action = text(row.action)
+  const faceId = text(row.faceId)
+  const imageId = text(row.image_id)
+  /* ① 印面行检索（`id` → `_id` 两形态；无行 ⇒ `INVALID_VALUE` ＋ 狀態維持 `PENDING`）。 */
+  let faceRow = null
+  let probeField = ''
+  for (const probe of ['id', '_id']) {
+    const rows = await readRows(COLLECTIONS.faces, { [probe]: faceId }, { limit: FACE_IMAGE_DELETE_FACE_SCAN_LIMIT })
+    if (rows.length > 0) {
+      faceRow = rows[0]
+      probeField = probe
+      break
+    }
+  }
+  if (faceRow === null) {
+    return deny(REASONS.INVALID_VALUE, `未找到該印面（face_id：${faceId}）⇒ 無法執行；狀態維持 PENDING、本次零寫入。`)
+  }
+  /* ② 本印面归属校验（同 `deleteFaceImage`）。 */
+  const ownership = faceImageOwnershipOf(faceRow, imageId)
+  if (!ownership.ownedByFace && !ownership.ownedByEdge) {
+    return deny(
+      REASONS.INVALID_VALUE,
+      `影像編號（${imageId}）不屬於該印面（本印面的 face_image_id / edge_image_ids 均未命中）⇒ 無法執行；狀態維持 PENDING、本次零寫入。`
+    )
+  }
+  const match = text(faceRow._id) ? { _id: text(faceRow._id) } : { [probeField]: faceId }
+
+  if (action === 'delete') {
+    /* ③ **共用保护**：其它印面仍引用 ⇒ 拒绝（文案含「已被印面引用」）＋ 零写入 ＋ 状态仍 `PENDING`。 */
+    if (await imageSharedByOtherFaces(faceId, imageId)) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `該影像已被印面引用（其它印面行的 face_image_id / edge_image_ids 命中 ${imageId}），共用保護下不可刪除；` +
+          '狀態維持 PENDING（本拒絕不遷 REJECTED）、本次零寫入。'
+      )
+    }
+    /* ④ 写入确定序 ①：**先清本印面引用**（`face_image_id` 置 `''` ／ 从 `edge_image_ids` 移除）。 */
+    const faceDoc = { updated_at: at }
+    if (ownership.ownedByFace) faceDoc.face_image_id = ''
+    if (ownership.ownedByEdge) faceDoc.edge_image_ids = ownership.edgeIds.filter((id) => id !== imageId)
+    try {
+      await persist({ writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc: faceDoc, expectAtLeast: 1 }] })
+    } catch (error) {
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `印面引用清除失敗（face_id：${faceId}）；影像行與對象均未刪除、狀態維持 PENDING，可重試。（診斷：${
+          (error && error.message) || 'unknown'
+        }）`
+      )
+    }
+    /* ⑤ 写入确定序 ②：删 `xiai_images` 行（**占位图行不删**；无行 ⇒ 如实 0、不编造）。 */
+    const imageRow = await readRowByAnyId(COLLECTIONS.images, imageId, FACE_IMAGE_DELETE_IMAGE_SCAN_LIMIT)
+    let rows = 0
+    if (imageRow !== null && !isPlaceholderImageRow(imageRow)) {
+      try {
+        await deleteRow(COLLECTIONS.images, text(imageRow._id) || imageId)
+        rows = 1
+      } catch (error) {
+        return deny(
+          REASONS.STORAGE_UNAVAILABLE,
+          `印面引用已清除，但影像行刪除失敗（image_id：${imageId}）；對象未刪除、影像行仍在、狀態維持 PENDING，可重試。（診斷：${
+            (error && error.message) || 'unknown'
+          }）`
+        )
+      }
+    }
+    /* ⑥ 写入确定序 ③：**尽力**删对象（同 `sha256` 去重保护；失败不阻断、计数如实 0）。 */
+    const objects = rows === 1 ? await deleteObjectsOfImageRowIfUnshared(imageRow, imageId) : 0
+    return { ok: true, image_action: { action: 'delete', removed: { rows, objects }, shared_kept: false } }
+  }
+
+  if (action === 'replace') {
+    /* ① 先校验新图已入册（`new_image_id` 对应 `xiai_images` 行存在；否则拒绝 ＋ 零写入 ＋ 状态仍 PENDING）。 */
+    const newImageId = text(row.new_image_id)
+    if (newImageId === '') {
+      return deny(
+        REASONS.INVALID_VALUE,
+        '該勘誤行缺少新圖影像編號（new_image_id）⇒ 無法執行替換；狀態維持 PENDING、本次零寫入。'
+      )
+    }
+    const newImageRow = await readRowByAnyId(COLLECTIONS.images, newImageId, FACE_IMAGE_DELETE_IMAGE_SCAN_LIMIT)
+    if (newImageRow === null) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `替換用新圖尚未入册（new_image_id：${newImageId}）⇒ 拒絕執行；狀態維持 PENDING、本次零寫入。`
+      )
+    }
+    /* 共用保护（**先判、后写**）：旧图仍被其它印面引用 ⇒ 不删旧图、只改指向。 */
+    const sharedByOthers = await imageSharedByOtherFaces(faceId, imageId)
+    /* ② 印面指向新图（既有 `face_image_id` ／ `edge_image_ids[]` 写面语义）。 */
+    const faceDoc = { updated_at: at }
+    if (ownership.ownedByFace) faceDoc.face_image_id = newImageId
+    if (ownership.ownedByEdge) {
+      faceDoc.edge_image_ids = ownership.edgeIds.map((id) => (id === imageId ? newImageId : id))
+    }
+    try {
+      await persist({ writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc: faceDoc, expectAtLeast: 1 }] })
+    } catch (error) {
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `印面指向更新失敗（face_id：${faceId}）；指向未改、舊圖未刪、狀態維持 PENDING，可重試。（診斷：${
+          (error && error.message) || 'unknown'
+        }）`
+      )
+    }
+    /* 共用保护：**零删行、零删对象、零清其它印面引用**（只改指向）。 */
+    if (sharedByOthers) {
+      return { ok: true, image_action: { action: 'replace', removed: { rows: 0, objects: 0 }, shared_kept: true } }
+    }
+    /* 防御：新图与原图同一影像编号（提交期已挡，行面异常时兜底）⇒ 指向即原指向，旧行不得删。 */
+    if (newImageId === imageId) {
+      return { ok: true, image_action: { action: 'replace', removed: { rows: 0, objects: 0 }, shared_kept: false } }
+    }
+    /* ③ 旧影像行与对象一并删除（占位图行不删；**失败 ⇒ 回滚指向、不留含混态**）。 */
+    const oldRow = await readRowByAnyId(COLLECTIONS.images, imageId, FACE_IMAGE_DELETE_IMAGE_SCAN_LIMIT)
+    let rows = 0
+    if (oldRow !== null && !isPlaceholderImageRow(oldRow)) {
+      try {
+        await deleteRow(COLLECTIONS.images, text(oldRow._id) || imageId)
+        rows = 1
+      } catch (error) {
+        const diagnosis = (error && error.message) || 'unknown'
+        const rollbackDoc = { updated_at: at }
+        if (ownership.ownedByFace) rollbackDoc.face_image_id = imageId
+        if (ownership.ownedByEdge) rollbackDoc.edge_image_ids = ownership.edgeIds
+        try {
+          await persist({
+            writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc: rollbackDoc, expectAtLeast: 1 }]
+          })
+          return deny(
+            REASONS.STORAGE_UNAVAILABLE,
+            `舊影像行刪除失敗（image_id：${imageId}）⇒ 已把印面指向回滾到原影像、整筆回到未執行態；狀態維持 PENDING，可重試。（診斷：${diagnosis}）`
+          )
+        } catch (rollbackError) {
+          return deny(
+            REASONS.STORAGE_UNAVAILABLE,
+            `舊影像行刪除失敗（image_id：${imageId}），且回滾印面指向未成功 ⇒ 印面已指向新圖而舊圖仍在（狀態維持 PENDING）；請重放本次審核以自愈。（診斷：${
+              (rollbackError && rollbackError.message) || diagnosis
+            }）`
+          )
+        }
+      }
+    }
+    const objects = rows === 1 ? await deleteObjectsOfImageRowIfUnshared(oldRow, imageId) : 0
+    return { ok: true, image_action: { action: 'replace', removed: { rows, objects }, shared_kept: false } }
+  }
+
+  /* 值域外动作（提交期门已保证；防御性兜底 ⇒ 状态仍 `PENDING`、零写入）。 */
+  return deny(
+    REASONS.INVALID_VALUE,
+    `勘誤動作「${action || '（空）'}」不在可執行的 2 類之內（刪除此影像 / 重新上傳新圖替換）；狀態維持 PENDING、本次零寫入。`
+  )
+}
+
 /* --------------------------------------------------------------------------- *
   **上傳印章即上雲（本單新增 op｜`createSealUpload`｜管理員面）**
   ---------------------------------------------------------------------------
@@ -4773,7 +5445,19 @@ const ADMIN_OPS = Object.freeze({
     /* **僅駁回且有理由**才落 `review_note`（采納 / 空理由不出现该键）。 */
     if (!accepted && noteText !== '') privatePatch.review_note = noteText
     const decidedRow = Object.assign({}, row, privatePatch)
-    return {
+    /* **影像勘誤（§3.77.4｜本單）**：`kind:'IMAGE'` 行被**采纳**时，先执行影像面
+       （`applyImageCorrectionAcceptance`：delete ＝ 照搬 `deleteFaceImage` 写入序 / replace ＝
+       三步硬序），**执行成功才由上面的 plan 写 `ACCEPTED`**；执行失败 ⇒ 直接回结构化拒绝、
+       **状态仍 `PENDING`**（本拒绝不迁 `REJECTED`、零状态写入）。
+       **属性（`field`）型行与驳回路一律不走本分支 ⇒ 行为一字未改**（`text(row.kind)`
+       对旧恒非 `IMAGE` ⇒ 条件恒假、零额外读写）。 */
+    let imageAction = null
+    if (text(row.kind) === 'IMAGE' && accepted) {
+      const executed = await applyImageCorrectionAcceptance(row, at)
+      if (!executed.ok) return executed
+      imageAction = executed.image_action
+    }
+    const reply = {
       ok: true,
       op: 'reviewCorrection',
       row: decidedRow,
@@ -4805,6 +5489,10 @@ const ADMIN_OPS = Object.freeze({
         ]
       }
     }
+    /* **影像面读数（additive｜`index.js` 按 op 收窄透传）**：仅 `kind:'IMAGE'` 行的采纳成功路
+       带此键；属性（`field`）型行与驳回路**零新增键** ⇒ 既有回包逐字不变。 */
+    if (imageAction) reply.image_action = imageAction
+    return reply
   },
 
   /**
@@ -7546,6 +8234,18 @@ module.exports = {
      （供离线自检直接断言；`index.js` 的按 op 收窄透传以 `FACE_IMAGE_DELETE_READOUT_KEYS` 为键面真源）。 */
   FACE_IMAGE_DELETE_ALLOWED_KEYS,
   FACE_IMAGE_DELETE_READOUT_KEYS,
+  /* **普通用戶影像勘誤面（本單 `submitImageCorrection` ＋ `reviewCorrection` 的 IMAGE 分支）**：
+     封闭六键面 ＋ `new_image` 封闭四键面 ＋ `action` 值域 ＋ 两侧成功回包读数键面真源
+     （`index.js` 的按 op 收窄透传以 `IMAGE_CORRECTION_*_READOUT_KEYS` 为键面真源；
+     供离线自检直接断言）。 */
+  IMAGE_CORRECTION_ALLOWED_KEYS,
+  IMAGE_CORRECTION_NEW_IMAGE_KEYS,
+  /* **勘誤替換新圖入册（本單 `registerCorrectionImage`｜`OPS` 登录面）**：封闭键面
+     （四必填 ＋ 可选 `seal_id`；供离线自检直接断言）。 */
+  CORRECTION_IMAGE_REGISTER_ALLOWED_KEYS,
+  IMAGE_CORRECTION_ACTIONS,
+  IMAGE_CORRECTION_SUBMIT_READOUT_KEYS,
+  IMAGE_CORRECTION_REVIEW_READOUT_KEYS,
   /* **识别编码（本单新增）**：号源发号单点 ＋ 号源集合名（供离线自检注入假体直接跑）。 */
   COUNTERS_COLLECTION,
   COUNTER_IDS,

@@ -388,6 +388,179 @@ async function confirmFaceImageDelete() {
 }
 
 /* ============================================================================ *
+   **普通用戶影像勘誤（§3.77｜本單）：影像卡【勘誤】入口 ＋ 彈窗
+   ---------------------------------------------------------------------------- · 渲染条件＝**登录态**（服务层 `seals.canSubmitCorrection()` ⇒ `canSubmit`；游客 ⇒ false
+     ⇒ 不渲染，DOM 零命中；**不得** CSS 隐藏 / `disabled` 冒充）。管理员同样渲染
+     （§3.77.1：普通用户【勘誤】与管理员【刪除】两条路径互不替代）。
+   · 钩子只用 `data-action="image-correction"`（**不新增 `data-admin-action` 取值**；
+     弹窗内提交 / 取消钮按 §3.12.1 派生 `image-correction-submit` / `image-correction-cancel`）。
+   · 弹窗＝二选一（刪除此影像 / 重新上傳新圖替換）＋ 备注（≤200 字，超限禁用提交并提示）；
+     选「替換」必选图：先 `storeArtifactBytes` → `registerFaceImage` 入册拿 `image_id`
+     → 才提交勘误；**任一步失败 ⇒ 硬报错、不编造 id、零提交、可重试**。
+   · 成功 ⇒ 上屏「已提交影像勘誤（待審覈）」＋ 关弹窗 ＋ `dataVersion + 1`（刷新待审读数）；
+     确认前零写入、取消零写入。
+   ============================================================================ */
+const imageCorrectionOpen = ref(false)
+const imageCorrectionBusy = ref(false)
+/** 待勘誤目标 `{faceId, sealId, imageId, kind, label}`（关窗即清，避免残留指向）。 */
+const imageCorrectionTarget = ref(null)
+const imageCorrectionAction = ref('delete')
+const imageCorrectionNote = ref('')
+const imageCorrectionFile = ref(null)
+/** 弹窗内失败文案（关窗即清；**失败优先、原样上屏**，不被成功文案覆盖）。 */
+const imageCorrectionFeedback = ref('')
+/** 页面级提示位（关弹窗后仍可见；重开弹窗时作废）。 */
+const imageCorrectionNotice = ref('')
+
+/** 二次确认后果文案（列明后果；选「替換」按 §3.77.5 明示指向与旧图处置）。 */
+const imageCorrectionConsequences = computed(() => {
+  if (imageCorrectionAction.value === 'replace') {
+    return (
+      '審核通過後印面改指新圖、舊圖將被刪除（舊圖仍被其它印面引用時只改指向、不刪舊圖）；' +
+      '審核通過前印面指向不改、影像不動。新圖必須先入册（取得影像編號）才能提交。'
+    )
+  }
+  return (
+    '審核通過後刪除該影像：該印面將無影像、影像行與物件一併刪除（不可恢復）；' +
+    '審核通過前影像不動、印面指向不改。若該影像仍被其它印面引用，服務端會拒絕刪除並保持原狀。'
+  )
+})
+
+/** 备注字数（去首尾空白后计；与提交载荷同口径）。 */
+const imageCorrectionNoteLength = computed(() => imageCorrectionNote.value.trim().length)
+/** 备注超限 ⇒ 禁用提交并提示（**不**用 `maxlength` 硬截断，否则「超限」永不可现）。 */
+const imageCorrectionNoteOver = computed(() => imageCorrectionNoteLength.value > corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH)
+/** 已选文件名（未选 ⇒ 空串）。 */
+const imageCorrectionFileName = computed(() => (imageCorrectionFile.value ? String(imageCorrectionFile.value.name || '') : ''))
+/** 提交禁用：在飞 / 备注超限 / 选「替換」却未选图。 */
+const imageCorrectionSubmitDisabled = computed(
+  () =>
+    imageCorrectionBusy.value ||
+    imageCorrectionNoteOver.value ||
+    (imageCorrectionAction.value === 'replace' && !imageCorrectionFile.value)
+)
+/** 弹窗导语（目标读数；关窗时安全返回空串）。 */
+const imageCorrectionLede = computed(() => {
+  const target = imageCorrectionTarget.value
+  if (!target) return ''
+  return (
+    `勘誤對象：${target.label}（影像編號 ${target.imageId}）。` +
+    '提交後為「待審覈」，管理員審覈通過後才會生效；審核前影像與印面指向都不變。'
+  )
+})
+
+/** 打开弹窗（每次打开重置动作 / 备注 / 选图 / 旧反馈与旧提示）。 */
+function openImageCorrection(face, imageId, kind) {
+  const id = imageId ? String(imageId) : ''
+  if (!id) {
+    imageCorrectionNotice.value = '本印面沒有影像編號，無從提交影像勘誤。'
+    return
+  }
+  if (!canSubmit.value) {
+    /* 游客不渲染入口（真条件）；此处兜底只作登录引导，不静默失败。 */
+    goLogin()
+    return
+  }
+  const sealId = face && face.sealId ? String(face.sealId) : seal.value ? String(seal.value.stamp_id || '') : ''
+  imageCorrectionTarget.value = {
+    faceId: String(face && face.id ? face.id : ''),
+    sealId,
+    imageId: id,
+    kind: kind === seals.FACE_KIND.EDGE ? seals.FACE_KIND.EDGE : seals.FACE_KIND.FACE,
+    label: face ? faceLabel(face) : ''
+  }
+  imageCorrectionAction.value = 'delete'
+  imageCorrectionNote.value = ''
+  imageCorrectionFile.value = null
+  imageCorrectionFeedback.value = ''
+  imageCorrectionNotice.value = ''
+  imageCorrectionOpen.value = true
+}
+
+/** 关闭弹窗（成功 / 取消共用；**零写入**）。 */
+function closeImageCorrection() {
+  if (imageCorrectionBusy.value) return
+  imageCorrectionOpen.value = false
+  imageCorrectionTarget.value = null
+  imageCorrectionFeedback.value = ''
+  imageCorrectionFile.value = null
+}
+
+/** 选图（本机文件；只登记，**零上传、零写入**）。 */
+function onImageCorrectionFileChange(event) {
+  const input = event && event.target
+  const file = input && input.files && input.files.length ? input.files[0] : null
+  imageCorrectionFile.value = file
+  imageCorrectionFeedback.value = ''
+}
+
+/** 提交：delete 直接提交；replace 先入册新图（失败 ⇒ 硬报错、**不发提交**）。 */
+async function confirmImageCorrection() {
+  if (imageCorrectionBusy.value || imageCorrectionSubmitDisabled.value) return
+  const target = imageCorrectionTarget.value
+  if (!target) return
+  const action = imageCorrectionAction.value === 'replace' ? 'replace' : 'delete'
+  const note = imageCorrectionNote.value.trim()
+  if (note.length > corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH) {
+    imageCorrectionFeedback.value =
+      `備註超過 ${corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH} 字（當前 ${note.length} 字），請刪減後再提交；本次零寫入。`
+    return
+  }
+  if (action === 'replace' && !imageCorrectionFile.value) {
+    imageCorrectionFeedback.value = '請先選擇要替換的新圖；本次零寫入。'
+    return
+  }
+  imageCorrectionBusy.value = true
+  imageCorrectionFeedback.value = ''
+  try {
+    let newImage = null
+    if (action === 'replace') {
+      const file = imageCorrectionFile.value
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const prepared = await corrections.prepareImageCorrectionReplacement({
+        sealId: target.sealId,
+        faceId: target.faceId,
+        kind: target.kind,
+        bytes,
+        mime: file.type || ''
+      })
+      /* **入册失败 ⇒ 硬报错、不编造 id、不发提交**（原样上屏服务端 / 上传通道文案）。 */
+      if (!prepared || prepared.ok !== true) {
+        imageCorrectionFeedback.value =
+          (prepared && prepared.message) || '新圖上傳入册失敗，本次零提交，請稍後重試。'
+        return
+      }
+      newImage = prepared.new_image
+    }
+    const payload = {
+      seal_id: target.sealId,
+      face_id: target.faceId,
+      image_id: target.imageId,
+      action,
+      note
+    }
+    if (newImage) payload.new_image = newImage
+    const result = await corrections.submitImageCorrection(null, payload)
+    if (!result || result.ok !== true) {
+      imageCorrectionFeedback.value = (result && result.message) || '提交影像勘誤失敗，本次零寫入。'
+      return
+    }
+    /* 成功 ⇒ 上屏固定文案 ＋ 关弹窗 ＋ 刷新待审读数（`dataVersion` 自增）。 */
+    imageCorrectionNotice.value = '已提交影像勘誤（待審覈）'
+    imageCorrectionOpen.value = false
+    imageCorrectionTarget.value = null
+    imageCorrectionFile.value = null
+    imageCorrectionNote.value = ''
+    dataVersion.value += 1
+  } catch (error) {
+    /* 传输层未预期异常 ⇒ 如实上屏 `STORAGE_UNAVAILABLE`，不伪装成别的 reason。 */
+    imageCorrectionFeedback.value = `提交影像勘誤失敗（STORAGE_UNAVAILABLE）：${(error && error.message) || '未知錯誤'}`
+  } finally {
+    imageCorrectionBusy.value = false
+  }
+}
+
+/* ============================================================================ *
    **清除本機資料（管理員面）＋ 孤兒印章行提示（Kevin 2026-11-06）**
    ----------------------------------------------------------------------------
    · 与广场页**同一入口**（钩子逐字 `data-action="local-db-clear"`；**不新增
@@ -635,7 +808,9 @@ function detailDisplayOf(face, item) {
    口径（人类冻结，逐条）：
      · 【採信】**只作佐证 / 可信度计数**（展示为「M 人採信」）；**生效仍由管理员采纳决定**
        —— 因此**已 `ACCEPTED` 的条目不再接受采信**（按钮隐藏，登记 `data-endorse-accepted`）。
-     · **已 `REJECTED`** ⇒ 同样不出按钮（登记 `data-endorse-rejected`）。
+     · **已 `REJECTED`** ⇒ 同样不出【採信】按钮（登记 `data-endorse-rejected`）；但**另给
+       【重新提交】入口**（`data-action="correction-resubmit"`，本单）——服务层防重已排除
+       `REJECTED` 行 ⇒ 重新提交本就被放行，只缺 UI 入口（详见下方 `onResubmitRejected`）。
      · **未登錄** ⇒ 按钮照渲染，点击走**登录引导**（`goLogin`）。
      · **自己的提交** ⇒ 不出按钮（登记 `data-endorse-self`）。
      · 数据经**云端公开只读集合** `xiai_correction_summaries`（**值级公开脱敏摘要面**：
@@ -676,6 +851,52 @@ async function onEndorse(face, entry) {
   endorseFeedback[key] = result.message
   /* 成功 ⇒ +1 让「N 人採信」与列表立即重算（服务层读的是已落盘数据）。 */
   if (result.ok) dataVersion.value += 1
+}
+
+/* ============================================================================
+   **重新提交**（本单）：已 `REJECTED` 的候選值**不再阻塞**重新提交。
+   ----------------------------------------------------------------------------
+   口径（逐条）：
+     · 服务层防重**已排除 `REJECTED` 行** ⇒ 服务端本就放行；本处只补 **UI 入口**
+       （此前已駁回的行只渲染一行「已駁回」文字，用户无从下手 ⇒ 觀感上像被卡死）。
+     · 点击 ⇒ 把该 `(field, value)` **回填到既有勘误表单**（`form[item.key]`，与手工填写
+       同一张表单），随后**直接走现有提交流程** `submitCorrection()` ⇒
+       `corrections.submitCorrection` —— **零新增写口**、零新增服务层调用（与手工提交
+       **同一路径**；只提交这一项，其余项随表单一并清空）。
+     · 结果按现有口径上屏（**同一份文案落三处**：该候選值自身的 `data-endorse-feedback`
+       ＋ 页面级 `data-correction-notice` ＋ 表单 `formFeedback`）：
+         成功 ⇒「已重新提交（待審覈）」；服务端仍回 `DUPLICATE_VALUE` ⇒ 既有「跳过」文案；
+         其它失败 ⇒ 服务端原话逐字上屏。
+     · 未登錄 ⇒ 走既有登录引导（与【採信】同口径，不静默、不提交）。
+     · 已採納（`ACCEPTED`）与自己的提交（`SELF`）**不加**本入口（渲染逻辑不动）。
+   ============================================================================ */
+const CORRECTION_RESUBMIT_OK_MESSAGE = '已重新提交（待審覈）'
+
+async function onResubmitRejected(face, entry) {
+  const key = endorseFeedbackKey(face, entry)
+  endorseFeedback[key] = ''
+  /* 未登錄 ⇒ 走既有登录引导（不回填、不提交）。 */
+  if (!canSubmit.value) {
+    goLogin()
+    return
+  }
+  /* 回填既有勘误表单：其余项一并清空 ⇒ 本单只提交这一项（与 `openCorrection` 同一套清场）。 */
+  corrections.MARKABLE_FIELDS.forEach((item) => {
+    form[item.key] = ''
+  })
+  form.basis = ''
+  formFaceId.value = face.id
+  form[entry.field] = entry.value
+  /* 走现有提交流程（与手工提交同一路径）；回包三态由 `submitCorrection` 如实回报。 */
+  const outcome = (await submitCorrection()) || { accepted: 0, skipped: 0, message: '' }
+  const message =
+    outcome.accepted > 0 ? CORRECTION_RESUBMIT_OK_MESSAGE : outcome.message || CORRECTION_SKIP_ALL_MESSAGE
+  /* 三处上屏同一份文案（表单 / 页面级提示位 / 该候選值自身反馈位）。 */
+  formFeedback.value = message
+  endorseFeedback[key] = message
+  publishCorrectionNotice(message, face.id)
+  /* 成功 ⇒ +1 让「N 人提交 / 待審覈」读数立即重算（服务层读的是已落盘数据）。 */
+  if (outcome.accepted > 0) dataVersion.value += 1
 }
 
 /* ============================================================================
@@ -1146,15 +1367,19 @@ function correctionFieldIsFreeText(key) {
   return key !== 'dynasty' && key !== FACE_CONTENT_KEY && key !== FACE_STYLE_KEY && key !== SEAL_CLASS_KEY && key !== 'author'
 }
 
+/* 提交回包的**结构化回报**（本单）：`submitCorrection` 由「无返回值」改为如实回报四态
+   （`accepted` / `skipped` / `firstError` / `message`）——**循环体与上屏文案一字未动**
+   （`verify-correction-duplicate-skip` C 段仍逐字命中三个锚），只把已经算出来的结果交还给
+   调用方（【重新提交】入口要按三态选文案）。 */
 async function submitCorrection() {
-  if (!seal.value || !formFaceId.value) return
+  if (!seal.value || !formFaceId.value) return { accepted: 0, skipped: 0, firstError: '', message: '' }
   const filled = corrections.MARKABLE_FIELDS.filter(
     (item) => correctionFieldVisible(item) && String(form[item.key] || '').trim() !== ''
   )
   if (filled.length === 0) {
     formFeedback.value = '請至少填寫一項需要勘誤的屬性'
     publishCorrectionNotice(formFeedback.value, formFaceId.value)
-    return
+    return { accepted: 0, skipped: 0, firstError: '', message: formFeedback.value }
   }
   let accepted = 0
   /* 冻结口径（2026-11-02）：重复字段按**跳过**处理（不新增行、不报错），不计入失败。 */
@@ -1181,7 +1406,7 @@ async function submitCorrection() {
   if (accepted === 0 && firstError) {
     formFeedback.value = firstError || '提交失敗，請稍後重試'
     publishCorrectionNotice(formFeedback.value, formFaceId.value)
-    return
+    return { accepted, skipped, firstError, message: formFeedback.value }
   }
   formFeedback.value =
     accepted === 0
@@ -1191,6 +1416,7 @@ async function submitCorrection() {
   publishCorrectionNotice(formFeedback.value, formFaceId.value)
   /* 口径 5：接受数 ＋ 跳过数 === 本次填写项数 ⇒ 整单完成（关闭弹窗）。 */
   if (accepted + skipped === filled.length) formOpen.value = false
+  return { accepted, skipped, firstError, message: formFeedback.value }
 }
 
 /** 选图 / 粘贴**共用处理体**：把一个 File 走完「登录门 → 解码 → 上限校验 → 上传管线 → 入库」。 */
@@ -2159,6 +2385,21 @@ onBeforeUnmount(() => {
             >
               刪除
             </button>
+            <!-- 普通用戶【勘誤】（§3.77｜本單）：**登录态真条件渲染**（`canSubmit`；游客 ⇒ 不渲染、
+                 DOM 零命中，**不得** CSS 隐藏 / `disabled` 冒充）；管理员同样渲染（两条路径互不替代）。
+                 钩子只用 `data-action="image-correction"`（**不新增 `data-admin-action` 取值**）。 -->
+            <button
+              v-if="canSubmit"
+              class="btn btn--ghost"
+              type="button"
+              data-action="image-correction"
+              :data-face-id="face.id"
+              :data-image-id="face.face_image_id"
+              :disabled="imageCorrectionBusy"
+              @click="openImageCorrection(face, face.face_image_id, seals.FACE_KIND.FACE)"
+            >
+              勘誤
+            </button>
             <!-- R-87 / R-88：按元数据切分（印面族 4 块）→ 前端拼接展示（按原色，无上色）。 -->
             <SliceImage
               v-if="imageReadyOf(face.face_image_id)"
@@ -2183,6 +2424,19 @@ onBeforeUnmount(() => {
           <template v-if="face.isEdge">
             <div v-for="image in face.edgeImages" :key="image.id" class="face-block__figure">
               <p class="face-block__figure-title">邊款影像 {{ image.id }}</p>
+              <!-- 普通用戶【勘誤】（邊款影像卡同一入口；判定与钩子同上，**不新增 `data-admin-action`**）。 -->
+              <button
+                v-if="canSubmit"
+                class="btn btn--ghost"
+                type="button"
+                data-action="image-correction"
+                :data-face-id="face.id"
+                :data-image-id="image.id"
+                :disabled="imageCorrectionBusy"
+                @click="openImageCorrection(face, image.id, seals.FACE_KIND.EDGE)"
+              >
+                勘誤
+              </button>
               <SliceImage
                 v-if="imageReadyOf(image.id)"
                 class="face-block__img"
@@ -2428,8 +2682,11 @@ onBeforeUnmount(() => {
              （`xiai_correction_summaries` ⇒ 跨浏览器可见）。
              · 按钮一律用 `data-action`（**不得**用 `data-admin-action`，否则管理员钩子取值集合被撑破）；
              · 未登錄 ⇒ 按钮照渲染，点击走登录引导（`actionable:false`）；
-             · 自己的提交 / 已 `ACCEPTED` / 已 `REJECTED` ⇒ 不出按钮
-               （分别登记 `data-endorse-self` / `data-endorse-accepted` / `data-endorse-rejected`）。 -->
+             · 自己的提交 / 已 `ACCEPTED` / 已 `REJECTED` ⇒ 不出【採信】按钮
+               （分别登记 `data-endorse-self` / `data-endorse-accepted` / `data-endorse-rejected`）；
+             · **已 `REJECTED` 另给【重新提交】入口**（`data-action="correction-resubmit"`，
+               **不得**用 `data-admin-action`）：回填该候选值到既有勘误表单后走现有提交路径
+               （`onResubmitRejected` ⇒ `submitCorrection`，零新增写口），并附一句解释。 -->
         <div
           v-if="endorsementEntries(face).length"
           class="endorse"
@@ -2460,7 +2717,24 @@ onBeforeUnmount(() => {
               </button>
               <span v-else-if="entry.reason === 'SELF'" class="detail__hint" data-endorse-self>你自己的提交</span>
               <span v-else-if="entry.reason === 'ACCEPTED'" class="detail__hint" data-endorse-accepted>已採納</span>
-              <span v-else-if="entry.reason === 'REJECTED'" class="detail__hint" data-endorse-rejected>已駁回</span>
+              <!-- **重新提交（本单）**：已 `REJECTED` 的候選值不再只有一行死文字 —— 除「已駁回」
+                   外再给一个【重新提交】钩子（`data-action`，**不得**用 `data-admin-action`）；
+                   点击 ⇒ 回填该候选值到既有勘误表单并走**与手工提交同一路径**（`onResubmitRejected`）。
+                   解释句（繁體、过 `s2t` 恒等）常驻本行，说明「已駁回」不再阻塞重提。 -->
+              <template v-else-if="entry.reason === 'REJECTED'">
+                <span class="detail__hint" data-endorse-rejected>已駁回</span>
+                <button
+                  class="btn btn--ghost endorse__btn"
+                  type="button"
+                  data-action="correction-resubmit"
+                  @click="onResubmitRejected(face, entry)"
+                >
+                  重新提交
+                </button>
+                <span class="detail__hint endorse__resubmit-hint" data-endorse-resubmit-hint>
+                  已駁回的行不再阻塞重新提交，管理員會重新審覈。
+                </span>
+              </template>
               <span v-if="endorseFeedbackOf(face, entry)" class="detail__hint endorse__feedback" data-endorse-feedback>
                 {{ endorseFeedbackOf(face, entry) }}
               </span>
@@ -2918,6 +3192,116 @@ onBeforeUnmount(() => {
     <p v-if="faceImageDeleteFeedback" class="notice detail__notice" data-image-delete-feedback>
       {{ faceImageDeleteFeedback }}
     </p>
+
+    <!-- **普通用戶影像勘誤（§3.77｜本單）的页面级提示位**：提交成功后弹窗即关 ⇒ 同一份
+         文案（繁體一字不改）落在这里，重开弹窗 / 切换印面时作废。 -->
+    <p v-if="imageCorrectionNotice" class="notice detail__notice" data-image-correction-notice>
+      {{ imageCorrectionNotice }}
+    </p>
+
+    <!-- **影像卡【勘誤】弹窗**（§3.77.5）：二选一（刪除此影像 / 重新上傳新圖替換）＋ 备注
+         （≤200 字，超限禁用提交并提示）＋ 选「替換」时必选新图；二次确认文案列明后果
+         （选「替換」明示「審核通過後印面改指新圖、舊圖將被刪除（舊圖仍被其它印面引用時
+         只改指向、不刪舊圖）」）；确认前零写入、取消零写入；弹窗内按钮**只用 `data-action`
+         （**不新增 `[data-admin-action]` 取值**）。 -->
+    <div
+      v-if="imageCorrectionOpen"
+      class="correction-mask"
+      role="dialog"
+      aria-modal="true"
+      aria-label="影像勘誤"
+      data-image-correction-dialog
+    >
+      <div class="correction-box">
+        <h3 class="correction-box__title">影像勘誤</h3>
+        <p class="correction-box__lede">{{ imageCorrectionLede }}</p>
+
+        <fieldset class="imgcorr">
+          <legend class="imgcorr__legend">選擇勘誤方式（二選一）</legend>
+          <label class="imgcorr__option" data-image-correction-option="delete">
+            <input
+              v-model="imageCorrectionAction"
+              type="radio"
+              name="image-correction-action"
+              value="delete"
+              data-image-correction-action="delete"
+            />
+            刪除此影像
+          </label>
+          <label class="imgcorr__option" data-image-correction-option="replace">
+            <input
+              v-model="imageCorrectionAction"
+              type="radio"
+              name="image-correction-action"
+              value="replace"
+              data-image-correction-action="replace"
+            />
+            重新上傳新圖替換
+          </label>
+        </fieldset>
+
+        <p class="imgcorr__consequences" data-image-correction-consequences>{{ imageCorrectionConsequences }}</p>
+
+        <!-- 选「替換」⇒ 必须选图（未选 ⇒ 提交禁用 ＋ 提示；上传与入册都在提交时才发生）。 -->
+        <div v-if="imageCorrectionAction === 'replace'" class="field">
+          <label for="image-correction-file">新圖（必選）</label>
+          <input
+            id="image-correction-file"
+            type="file"
+            accept="image/*"
+            data-image-correction-file
+            @change="onImageCorrectionFileChange"
+          />
+          <span v-if="imageCorrectionFileName" class="field__hint" data-image-correction-file-name>
+            已選：{{ imageCorrectionFileName }}
+          </span>
+          <span v-else class="field__hint">必須先選擇一張新圖（JPG / PNG / WebP），否則不能提交。</span>
+        </div>
+
+        <div class="field">
+          <label for="image-correction-note">備註（選填，最多 {{ corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH }} 字）</label>
+          <textarea
+            id="image-correction-note"
+            v-model="imageCorrectionNote"
+            rows="3"
+            data-image-correction-note
+          ></textarea>
+          <span
+            class="field__hint"
+            :class="{ 'imgcorr__over': imageCorrectionNoteOver }"
+            data-image-correction-note-count
+          >
+            {{ imageCorrectionNoteLength }} / {{ corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH }} 字
+            <template v-if="imageCorrectionNoteOver">（超出上限，請刪減後再提交，否則不能提交）</template>
+          </span>
+        </div>
+
+        <!-- 失败文案优先、结构化失败原样上屏（**不被成功文案覆盖**）。 -->
+        <p v-if="imageCorrectionFeedback" class="correction-box__feedback" data-image-correction-feedback>
+          {{ imageCorrectionFeedback }}
+        </p>
+
+        <div class="correction-box__foot">
+          <button
+            class="btn btn--ghost"
+            type="button"
+            data-action="image-correction-cancel"
+            @click="closeImageCorrection"
+          >
+            取消
+          </button>
+          <button
+            class="btn btn--primary"
+            type="button"
+            data-action="image-correction-submit"
+            :disabled="imageCorrectionSubmitDisabled"
+            @click="confirmImageCorrection"
+          >
+            {{ imageCorrectionBusy ? '提交中…' : '提交勘誤' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 「清除本機資料」二次确认（**与广场页逐字同一份文案**；默认不通过）。
          确认走 `confirmClearLocal`：成功 ⇒ 强制从云端重载并回广场带一次性提示；
@@ -3394,6 +3778,11 @@ onBeforeUnmount(() => {
   flex-basis: 100%;
 }
 
+/* 【重新提交】解释句（本单）：与反馈位同口径独占一行，不与读数挤在同一行。 */
+.endorse__resubmit-hint {
+  flex-basis: 100%;
+}
+
 .detail__value {
   display: block;
   color: var(--c-text);
@@ -3520,6 +3909,42 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
+}
+
+/* ------------------ 影像勘誤弹窗（§3.77）：二选一 ＋ 后果文案 ＋ 超限提示 ------------------ */
+
+.imgcorr {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-md);
+}
+
+.imgcorr__legend {
+  padding: 0 var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--c-text);
+}
+
+.imgcorr__option {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  font-size: var(--t-sm);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.imgcorr__consequences {
+  margin: var(--s-3) 0;
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  color: var(--c-text-muted);
+}
+
+.imgcorr__over {
+  color: var(--c-danger);
 }
 
 /* ------------------ 重新上传印面图：弹窗与取景框（与「上传印章」同口径） ------------------ */
