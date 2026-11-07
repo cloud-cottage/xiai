@@ -494,6 +494,19 @@ function onImageCorrectionFileChange(event) {
   imageCorrectionFeedback.value = ''
 }
 
+/**
+ * 一键粘贴（剪贴板图片）：与本机选图**共用同一处理体**（同上）。
+ * `handleClipboardPaste` 文本优先不劫持：剪贴板含非空文字时放行默认粘贴。
+ */
+function onPasteImageCorrectionFile(event) {
+  const decision = handleClipboardPaste(event, (file) => {
+    imageCorrectionFile.value = file
+    imageCorrectionFeedback.value = ''
+  })
+  if (decision.handled) event.preventDefault()
+  else if (decision.reason !== 'TEXT_PRIORITY') imageCorrectionFeedback.value = decision.message
+}
+
 /** 提交：delete 直接提交；replace 先入册新图（失败 ⇒ 硬报错、**不发提交**）。 */
 async function confirmImageCorrection() {
   if (imageCorrectionBusy.value || imageCorrectionSubmitDisabled.value) return
@@ -3314,8 +3327,15 @@ onBeforeUnmount(() => {
 
         <p class="imgcorr__consequences" data-image-correction-consequences>{{ imageCorrectionConsequences }}</p>
 
-        <!-- 选「替換」⇒ 必须选图（未选 ⇒ 提交禁用 ＋ 提示；上传与入册都在提交时才发生）。 -->
-        <div v-if="imageCorrectionAction === 'replace'" class="field">
+        <!-- 选「替換」⇒ 必须选图（未选 ⇒ 提交禁用 ＋ 提示；上传与入册都在提交时才发生）。
+             **两条取图路径同框并列**：① 選擇本機文件（`type=file`）；② 粘貼剪貼板圖片（本区 `@paste`）。 -->
+        <div
+          v-if="imageCorrectionAction === 'replace'"
+          class="field"
+          tabindex="0"
+          data-paste-zone="image-correction-file"
+          @paste="onPasteImageCorrectionFile"
+        >
           <label for="image-correction-file">新圖（必選）</label>
           <input
             id="image-correction-file"
@@ -3324,10 +3344,12 @@ onBeforeUnmount(() => {
             data-image-correction-file
             @change="onImageCorrectionFileChange"
           />
+          <!-- 剪贴板一键粘贴提示（繁體，可见）：与本框 `@paste` 同源。 -->
+          <span class="field__hint" data-paste-hint="image-correction-file">{{ PASTE_HINT }}</span>
           <span v-if="imageCorrectionFileName" class="field__hint" data-image-correction-file-name>
             已選：{{ imageCorrectionFileName }}
           </span>
-          <span v-else class="field__hint">必須先選擇一張新圖（JPG / PNG / WebP），否則不能提交。</span>
+          <span v-else class="field__hint">必須先選擇一張新圖（JPG / PNG / WebP，或直接粘貼剪貼板圖片），否則不能提交。</span>
         </div>
 
         <div class="field">
