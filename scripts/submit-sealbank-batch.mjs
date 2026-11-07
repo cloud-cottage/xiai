@@ -31,7 +31,7 @@
  *     （逐条回读核验 `source` ＋ `source_seal_id` ＋ `status`，非 `PENDING` 一律跳过不删）。
  *
  * **用法**：
- *   set -a; . ~/.config/bistro/cloudbase-liwu.env; set +a
+ *   set -a; . ~/.config/tencent-cloudbase/liwu.env; set +a
  *   export XIAI_OPERATOR_PHONE=<操作者手机号>
  *   node scripts/submit-sealbank-batch.mjs --limit 5 --dry-run          # 只读＋假写
  *   node scripts/submit-sealbank-batch.mjs --limit 1                    # 金丝雀
@@ -75,7 +75,7 @@ const ENV_ID = process.env.TCB_ENV || process.env.CLOUDBASE_ENV_ID || ''
 const SECRET_ID = process.env.TENCENTCLOUD_SECRETID || ''
 const SECRET_KEY = process.env.TENCENTCLOUD_SECRETKEY || ''
 if (!ENV_ID || !SECRET_ID || !SECRET_KEY) {
-  console.error(JSON.stringify({ fatal: '缺少云端凭据：请先 source ~/.config/bistro/cloudbase-liwu.env（需要 TCB_ENV / TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY）' }))
+  console.error(JSON.stringify({ fatal: '缺少云端凭据：请先 source ~/.config/tencent-cloudbase/liwu.env（需要 TCB_ENV / TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY）' }))
   process.exit(2)
 }
 const PHONE = process.env.XIAI_OPERATOR_PHONE || ''

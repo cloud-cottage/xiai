@@ -3,7 +3,7 @@
 - 日期：2026-10-19（CST）
 - 执行单：四角色「Kong」（实现）；父单：feicui/sealbank ⇒ xiai 印章试水导入
 - 产物：`scripts/submit-sealbank-batch.mjs`（本仓）＋ `scripts/out/submit_batch_report.json` / `submit_batch_ids.json` / `submit_batch_report.dry-run.json`
-- 生产环境：`liwu-d8gek6jjdab1d087c`（凭据统一文件 `~/.config/bistro/cloudbase-liwu.env`，**值不入库不入日志**）
+- 生产环境：`liwu-d8gek6jjdab1d087c`（凭据统一文件 `~/.config/tencent-cloudbase/liwu.env`，**值不入库不入日志**）
 
 ## 1. `submitSealImport` 的身份要求（代码证据）
 
@@ -36,7 +36,7 @@
 
 ```bash
 # 凭据（值不进命令行、不进日志）
-set -a; . ~/.config/bistro/cloudbase-liwu.env; set +a
+set -a; . ~/.config/tencent-cloudbase/liwu.env; set +a
 export XIAI_OPERATOR_PHONE=<操作者手机号>
 
 node scripts/submit-sealbank-batch.mjs --limit 5 --dry-run      # 只读＋假体截留写（零落盘）
