@@ -5022,6 +5022,11 @@ const ADMIN_OPS = Object.freeze({
       if (text(row && row.status) !== CORRECTION_STATUS.ACCEPTED) continue
       const field = text(row && row.field)
       if (field === '') continue
+      /* **影像勘误（`kind:'IMAGE'`）与任何非可标记字段一律不参与回填** ——
+         它们的目标是影像行/显式动作，不是印面/印章的文本字段（否则会把
+         `field:'image'` 当文本字段去写，产生无意义写入）。 */
+      if (text(row && row.kind) === 'IMAGE') continue
+      if (!Object.prototype.hasOwnProperty.call(MARKABLE_FIELDS, field)) continue
       const faceId = text(row && row.faceId)
       const sealId = text(row && row.sealId) || text(row && row.stamp_id)
       const kind = faceId !== '' ? 'face' : sealId !== '' ? 'seal' : ''
