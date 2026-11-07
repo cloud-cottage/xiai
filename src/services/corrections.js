@@ -55,10 +55,21 @@ import { uidShortOf } from '../data/uid.js'
    （sha256 前 16 位）同构（`crypto.subtle` 非安全上下文不可用 ⇒ 复用自带同步实现）。 */
 import { sha256Hex } from '../data/assetmeta.js'
 import { getFaceById, primaryFaceOf, faceLabelOf, FACE_KIND, FACE_IMAGE_REGISTER_OP } from './seals.js'
-/* **影像勘誤（§3.77）的替換新圖通道**：字节先交**现有** `storeArtifactBytes`（内容寻址、幂等）
-   拿 `sha256` / `bytes` / `storage_key`，再调**现有** `registerFaceImage` 入册拿 `image_id`。
+/* **影像勘誤（§3.77）的替換新圖通道**：原始文件先经**既有单点**转成存储容器（单页 8bit
+   Deflate TIFF）⇒ 字节再交**现有** `storeArtifactBytes`（内容寻址、幂等）拿
+   `sha256` / `bytes` / `storage_key`，再调**现有** `registerCorrectionImage`（登录面）入册拿 `image_id`。
    ——本文件只**调用**既有单点，不改其口径。 */
 import { storeArtifactBytes, artifactObjectKeyOf } from './imageAuthority.js'
+/* **替换新圖的存儲容器（本單修）**：全站存儲容器恒为**单页 8bit Deflate TIFF**（`STORAGE_MIME`），
+   而用户给的是**原始文件**（JPG / PNG / WebP…）⇒ 必须先经**既有单点**转成容器再入库：
+   - 输入门：`utils/image.js::loadImageFile`（1 MB / 类型 / 解码；§3.12.10(c) 冻结 reason 与文案）；
+   - 输入门抬升：`services/photos.js::inputDenialOf`（**与实物照片同一道输入门与文案**，本文件不另写第二套）；
+   - 产物编码：`components/uploadPipeline.js::runUploadPipeline`（**与实物照片同一入口**，
+     `kind: 'photo'` ⇒ `preparePhotoSource` 出 TIFF）—— **本文件不新写编码器、不另建管线**。
+   本文件只**调用**既有单点，不改其口径。 */
+import { IMAGE_LIMITS, STORAGE_MIME, loadImageFile } from '../utils/image.js'
+import { inputDenialOf } from './photos.js'
+import { runUploadPipeline } from '../components/uploadPipeline.js'
 /* **写面 Phase A（用户写面切片）**：勘误提交经云函数 `xiai-user-token` 的 `action:'verify'`
    服务端验签后才落盘（落盘在**云端**，`xiai_corrections` 的 ACL 是 `PRIVATE` ⇒ 只能由云函数
    以管理端凭据写）；**创建者身份由服务端记录**（`uid = u-<手机号>` 从令牌声明派生），
@@ -2052,31 +2063,85 @@ export async function submitImageCorrection(actor, payload = {}) {
 /**
  * **替换用新图：先入册、再提交**（两步硬序的前一步）。
  *
- * ① 走**现有** `storeArtifactBytes` 拿 `sha256` / `bytes` / `storage_key`（内容寻址、幂等）；
- * ② 走**现有** `registerFaceImage` 入册拿 `image_id`。
+ * 【容器口径（本單修）】全站存儲容器恒为**单页 8bit Deflate TIFF**（`STORAGE_MIME`）。
+ * 线上恒失败的真因＝旧实现把**原始文件字节**（JPG / PNG / WebP）直接交 `storeArtifactBytes`
+ * ⇒ 入册面按容器口径恒拒（`INVALID_VALUE`）。故本函数先经**既有单点**把输入转成容器：
+ *   ① 输入门 `loadImageFile` → `inputDenialOf`（**与实物照片同一道输入门与文案**；拒绝即返，
+ *      **零上传、零入册、零提交**）；
+ *   ② 产物编码 `runUploadPipeline({ kind: 'photo', … })`（**与实物照片同一入口**，不新写编码器）
+ *      → 失败 / 产物不是 `STORAGE_MIME` ⇒ 结构化拒「新圖處理失敗：…」（零上传）；
+ *   ③ **兼容直通**：旧签名给的 `bytes` 且 `mime === 'image/tiff'` ＝已是容器字节 ⇒ 不重解、不重编。
+ * 再走**现有** `storeArtifactBytes` 拿 `sha256` / `bytes` / `storage_key`（内容寻址、幂等），
+ * 最后走**现有** `registerCorrectionImage`（**登录面**，非管理员面 `registerFaceImage`）入册拿 `image_id`。
  * 任一步失败 ⇒ **硬报错、不编造 `image_id`、零提交、可重试**（调用方据此不发 `submitImageCorrection`）。
  *
- * @param {{sealId?:string, faceId?:string, kind?:string,
+ * @param {{sealId?:string, faceId?:string, kind?:string, file?:File|Blob|null,
  *   bytes?:Uint8Array|ArrayBuffer|null, mime?:string}} input
+ *   `file` ＝ 新口径（`File` / `Blob`）；`bytes` ＋ `mime` ＝ 旧签名兼容。
  * @returns {Promise<{ok:true, imageId:string, new_image:{sha256:string, bytes:number, mime:string, storage_key:string}}
  *   |{ok:false, reason:string, message:string}>}
  */
-export async function prepareImageCorrectionReplacement({ sealId = '', faceId = '', kind = FACE_KIND.FACE, bytes = null, mime = '' } = {}) {
+export async function prepareImageCorrectionReplacement({ sealId = '', faceId = '', kind = FACE_KIND.FACE, file = null, bytes = null, mime = '' } = {}) {
   const sealIdText = String(sealId === null || sealId === undefined ? '' : sealId).trim()
   const faceIdText = String(faceId === null || faceId === undefined ? '' : faceId).trim()
   if (!sealIdText || !faceIdText) {
     return imageCorrectionDenial('MISSING_REQUIRED', '入册新圖需要印面與所屬印章編號；本次零提交。')
   }
+  const sourceFile = file && typeof file === 'object' ? file : null
   const body = bytes instanceof Uint8Array ? bytes : bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : null
-  if (!body || body.length === 0) {
-    return imageCorrectionDenial('EMPTY_CONTENT', '新圖內容為空，請重新選擇圖片文件；本次零提交。')
-  }
   const claimedMime = String(mime === null || mime === undefined ? '' : mime).trim().toLowerCase()
-  if (claimedMime && !claimedMime.startsWith('image/')) {
-    return imageCorrectionDenial('NOT_IMAGE', `所選文件不是圖片（${claimedMime}）；本次零提交，請改選 JPG / PNG / WebP 圖片。`)
+  /* ① 容器直通（旧签名兼容）：已是存储容器字节 ⇒ 原字节入库，不重解、不重编。 */
+  const containerPassthrough = !sourceFile && !!body && body.length > 0 && claimedMime === STORAGE_MIME
+  let artifactBytes = null
+  let artifactMime = ''
+  if (containerPassthrough) {
+    artifactBytes = body
+    artifactMime = STORAGE_MIME
+  } else {
+    /* 非容器字节（含旧签名给的 JPG / PNG / WebP / 文本）⇒ 包成 `Blob` 走**同一道**输入门，
+       判据与文案一律取自 `loadImageFile`（本文件不另写第二套输入判据）。 */
+    let source = sourceFile
+    if (!source && body && body.length > 0) {
+      source = typeof Blob === 'function' ? new Blob([body], { type: claimedMime }) : null
+    }
+    if (!source) {
+      if (!body || body.length === 0) {
+        return imageCorrectionDenial('EMPTY_CONTENT', '新圖內容為空，請重新選擇圖片文件；本次零提交。')
+      }
+      return imageCorrectionDenial('NOT_IMAGE', `所選文件不是圖片（${claimedMime || '類型未知'}）；本次零提交，請改選 JPG / PNG / WebP 圖片。`)
+    }
+    const loaded = await loadImageFile(source)
+    /* 输入侧拒绝（超限 / 非图片 / 解码失败）⇒ 原样透传 reason 与文案；**零上传、零入册、零提交**。 */
+    const denied = inputDenialOf(loaded)
+    if (denied) {
+      return imageCorrectionDenial(denied.reason || 'NOT_IMAGE', denied.message || '圖片不可用，請重新選擇文件')
+    }
+    /* 产物编码：**与实物照片同一入口**（`kind: 'photo'` ⇒ 单页 8bit Deflate TIFF）；
+       不新写编码器、不另建第二套管线。 */
+    const exported = await runUploadPipeline({
+      kind: 'photo',
+      bitmap: loaded.bitmap,
+      options: { maxSide: IMAGE_LIMITS.maxSide, quality: IMAGE_LIMITS.quality }
+    })
+    if (!exported || exported.ok !== true) {
+      return imageCorrectionDenial(
+        'ENCODE_FAILED',
+        `新圖處理失敗：${(exported && exported.message) || '本機未能編出存儲件'}（本次零上傳、零入册、零提交）`
+      )
+    }
+    artifactBytes = exported.bytes
+    artifactMime = String(exported.mime || '').trim().toLowerCase()
+    /* 产物容器自检：必须等于 `STORAGE_MIME`（单页 8bit Deflate TIFF）；不符**如实拒**，绝不冒充。 */
+    if (!artifactBytes || artifactBytes.length === 0 || artifactMime !== STORAGE_MIME) {
+      return imageCorrectionDenial(
+        'ENCODE_FAILED',
+        `新圖處理失敗：產物不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${artifactMime || '認不出'}），已拒絕入册` +
+          '（本次零上傳、零入册、零提交）。'
+      )
+    }
   }
   /* ① 现有上传通道（内容寻址、幂等；失败原样透传）。 */
-  const stored = await storeArtifactBytes(body)
+  const stored = await storeArtifactBytes(artifactBytes)
   if (!stored || stored.ok !== true) {
     return imageCorrectionDenial(
       (stored && stored.reason) || 'STORAGE_UNAVAILABLE',
@@ -2098,7 +2163,17 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
       '新圖未產生雲端內容尋址對象鍵；本次零入册、零提交，請重試。'
     )
   }
-  const imageMime = String(stored.mime || claimedMime || 'application/octet-stream')
+  /* 存储回包的**容器自检**：入册声明的 mime 必须恒等于 `STORAGE_MIME`（单页 8bit Deflate TIFF）；
+     回包按字节魔数报了别的容器 ⇒ **如实拒**，绝不把非容器冒充成容器（零入册、零提交）。 */
+  const storedMime = String(stored.mime || '').trim().toLowerCase()
+  if (storedMime && storedMime !== STORAGE_MIME) {
+    return imageCorrectionDenial(
+      'ENCODE_FAILED',
+      `新圖處理失敗：入庫對象不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${storedMime}），已拒絕入册` +
+        '（本次零入册、零提交）。'
+    )
+  }
+  const imageMime = STORAGE_MIME
   /* ② 入册通道（拿 `image_id`；失败原样透传 ⇒ 调用方不发提交）。
      **用 `registerCorrectionImage`（登录面）而非 `registerFaceImage`（管理员面）** ——
      影面勘误是普通用户能力，管理员门会恒拒（FORBIDDEN）把替换功能锁死。 */

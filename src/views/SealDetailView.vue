@@ -529,13 +529,13 @@ async function confirmImageCorrection() {
     let newImage = null
     if (action === 'replace') {
       const file = imageCorrectionFile.value
-      const bytes = new Uint8Array(await file.arrayBuffer())
+      /* **本机只交 `File`**：解码 → 输入门 → 既有上传管线转「单页 8bit Deflate TIFF」容器
+         全在 `prepareImageCorrectionReplacement` 内完成（与实物照片同一入口），视图不再自读字节。 */
       const prepared = await corrections.prepareImageCorrectionReplacement({
         sealId: target.sealId,
         faceId: target.faceId,
         kind: target.kind,
-        bytes,
-        mime: file.type || ''
+        file
       })
       /* **入册失败 ⇒ 硬报错、不编造 id、不发提交**（原样上屏服务端 / 上传通道文案）。 */
       if (!prepared || prepared.ok !== true) {
