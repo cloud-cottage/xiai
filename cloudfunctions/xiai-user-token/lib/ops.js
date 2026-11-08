@@ -4965,6 +4965,79 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「人工智能修復 · 候選清單」（`ai-enhance-list`｜只讀）** —— 薄委派：業務邏輯單點在
+   * `lib/aiEnhanceTasks.js::listEnhanceTasks`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；零讀零寫地拒；拒絕面轉本 op 的
+   * 失敗形狀 **恰 3 鍵** `ok / reason / message`）；② 載荷**封閉恰一鍵** `face_id`；③ 回該印面下
+   * **所有未採納的候選任務**（`READY` 且產物影像已被任一印面行 `face_image_id` /
+   * `edge_image_ids` 引用者＝已採納、不回）；④ 成功回包**恰 2 鍵**（`ok / rows`），每行**恰 6 鍵**
+   * `task_id / status / image_id / source_image_id / created_at / error_message`（無值一律空串）、
+   * 按 `created_at` 倒序、最多 20 行；⑤ **只讀**（零扣費、零寫入）、`reason` **零新增**、
+   * **零新集合**（任務行落 `xiai_ai_enhance_tasks`，「集合不存在」按既有判據降級為空集）。
+   * @param {object} payload 載荷（封閉一鍵 `face_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  'ai-enhance-list': async function aiEnhanceListDelegate(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return { ok: false, reason: identityDenial.reason, message: identityDenial.message }
+    /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { listEnhanceTasks } = require('./aiEnhanceTasks.js')
+    return listEnhanceTasks(payload, identity, context)
+  },
+
+  /**
+   * **管理員「人工智能修復 · 狀態推進」（`ai-enhance-status`）** —— 薄委派：業務邏輯單點在
+   * `lib/aiEnhanceTasks.js::statusEnhanceTask`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；零讀零寫地拒；拒絕面轉本 op 的
+   * 失敗形狀 **恰 5 鍵** `ok / reason / message / refunded / status`）；② 載荷**封閉恰一鍵**
+   * `task_id`（不存在 ⇒ `INVALID_VALUE`、文案「該修復任務不存在」）；③ 終態（`READY` / `FAILED`）
+   * **直接回放、零上游零扣費**；④ 單輪推進：單查 20 秒 → `pending` / `processing` ⇒ 置 `RUNNING`
+   * 回 **恰 4 鍵**；`completed` ⇒ 下載 25 秒 ＋ 入册段 45 秒 ⇒ 置 `READY` 回 **恰 6 鍵**
+   * （`preview{mime,sha256}` ＋ `charge{amount,balance}`）；`failed` / `violation` ／ 過
+   * `deadline_at` ／ 整輪超 55 秒 ⇒ **退款（行上 `refunded` 為護欄）並置 `FAILED`**；
+   * ⑤ **零扣費**（扣費只在 submit）、`reason` **零新增**、**零新集合**。
+   * @param {object} payload 載荷（封閉一鍵 `task_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  'ai-enhance-status': async function aiEnhanceStatusDelegate(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return { ok: false, reason: identityDenial.reason, message: identityDenial.message, refunded: false, status: 'FAILED' }
+    /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { statusEnhanceTask } = require('./aiEnhanceTasks.js')
+    return statusEnhanceTask(payload, identity, context)
+  },
+
+  /**
+   * **管理員「人工智能修復 · 提交」（`ai-enhance-submit`）** —— 薄委派：業務邏輯單點在
+   * `lib/aiEnhanceTasks.js::submitEnhanceTask`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；零讀零寫地拒；拒絕面轉本 op 的
+   * 失敗形狀 **恰 4 鍵** `ok / reason / message / refunded`）；② 載荷**封閉恰四鍵**
+   * `image_id / seal_id / face_id / request_id`（多一鍵 / 少一鍵都拒；`request_id` 須 8〜64 位
+   * 字母數字或底線橫線，否則 `INVALID_VALUE`）；③ 幂等預查（同 uid 同 `request_id` 已有行 ⇒
+   * **回放該行、零扣費零上游**）→ 圖源與上游配置拒绝面（零扣費）→ 預扣 10 金（`idem_key` ＝
+   * `ai-enhance-<image_id>-<request_id>`，與同步面逐字同形）→ 上游入隊**牆鐘預算 25 秒**
+   * （超時退款並置 `FAILED`）→ 落任務行 `SUBMITTED`、`deadline_at` ＝ 當前 ＋ 20 分鐘；
+   * ④ 成功回包**恰 5 鍵**（`ok / task_id / status / source_image_id / charge{amount,balance}`；
+   * **不帶 `image_id`**）、失敗回包**恰 4 鍵**；⑤ **零新集合**（任務行落 `xiai_ai_enhance_tasks`、
+   * 經既有 `persist`）、`reason` **零新增**（只用既有凍結值）、**回包零 `plan` 等內部字段**。
+   * @param {object} payload 載荷（封閉四鍵 `image_id` / `seal_id` / `face_id` / `request_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number, requestId?:string}} [context]
+   */
+  'ai-enhance-submit': async function aiEnhanceSubmitDelegate(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return { ok: false, reason: identityDenial.reason, message: identityDenial.message, refunded: false }
+    /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { submitEnhanceTask } = require('./aiEnhanceTasks.js')
+    return submitEnhanceTask(payload, identity, context)
+  },
+
+  /**
    * **历史「已采纳未落面」一次性回填（`backfillAcceptedCorrections`｜§3.79｜本单新增）** ——
    * 把 `xiai_corrections` 里**已采纳（`ACCEPTED`）却没落到目标行**的值，一次性补写到印面行 /
    * 印章行的对应字段（**只改该字段 ＋ `updated_at`**；一次性数据修复，零自动化、零触发式回填）。

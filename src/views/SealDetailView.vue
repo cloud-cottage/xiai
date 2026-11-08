@@ -1925,16 +1925,27 @@ async function submitReplaceFaceImage() {
    ----------------------------------------------------------------------------
    - 入口：印面块管理员动作区按钮（`data-admin-action="ai-enhance-face"`，仅管理员渲染；
      仅**印面（FACE）且已有影像编号**可修 —— 无源图无从修）。
-   - 通道：`services/aiEnhance.js`（op `ai-enhance-face`；载荷封闭三键 image_id / seal_id /
-     face_id）—— 与勘误 / 采纳同一用户令牌通道（含补签自愈）。**服务端是唯一判据**。
+   - 通道：`services/aiEnhance.js` 的**异步三件套**（op `ai-enhance-submit` 提交载荷封闭
+     **四键** image_id / seal_id / face_id / **request_id** ⇒ 立即回任务号；`ai-enhance-status`
+     每 4 秒轮询；`ai-enhance-list` 列本印面任务）—— 与勘误 / 采纳同一用户令牌通道（含补签
+     自愈）。**服务端是唯一判据**；legacy `ai-enhance-face`（同步长调用、网关约 60 秒必掐）
+     **前端已不再调用**（常量保留）。
+   - **开窗先续接（本单）**：`openAiEnhance` 立即调 `listCandidates(face.id)`（探测期间
+     【開始修復】**禁点** ⇒ 不会在既有任务之上重复提交、重复扣金）：
+     · 有 `SUBMITTED` / `RUNNING` ⇒ 进「進行中」并**续轮询同一个 task_id**；
+     · 有 `READY` 且**尚未被本印面采纳** ⇒ 续接后落「已完成」（右格按 image_id 取图、
+       【取】/【棄】可用）；
+     · 读不到 / 只有 `FAILED` ⇒ 维持「待確認」（由用户按【開始修復】）。
+     任务号按印面记在 `aiEnhanceTaskByFace`（**只在内存**：关窗再开窗能续接）。
    - 弹窗：左格「原圖」＝当前影像、右格「修復圖」＝回包候选影像（两者都走
      `seals.imageDisplaySourceOf`，不自写第二套取图路径）。
    - **先確認再扣金**（Kevin 亲定）：点入口按钮**只开窗、不调 op** —— 弹窗以「待確認」态打开
      （右格「尚未開始」＋ 成本一行明示）；点【開始修復】才真正发请求（**此时才扣金**）。
    - 计费明示：**每张 10 金**（`aiEnhance.AI_ENHANCE_COST`；调用前弹窗内一行小字；
      实际扣费以回包 `charge.amount` 爲准）。
-   - 取消：只停止等待，**不撤回服务端请求**（前端无该能力）⇒ 在途回包仍由 `runAiEnhance`
-     收取（序号不符 ⇒ 只落 `aiEnhanceLateReply` 机械读数），**不在前端丢下未收的回包**。
+   - 取消 / 关窗：**只停止等待**（`shouldCancel` 当场停掉轮询循环；`enhanceFaceImage` 回 `null`），
+     **不撤回服务端任务** —— 任务号仍被记住，重开本窗可续接；在途那一发若已拿到终局回包
+     仍被收取（序号不符 ⇒ 落 `aiEnhanceLateReply` 机械读数），**不在前端丢下已到手的回包**。
    - 【取】：**复用现有换图写面** `seals.updateSealFixedAttributes(null, faceId,
      { face_image_id })`（与「編輯固定屬性」同一入口 ⇒ 与 replace-face-image 同语义：
      只改印面指向、**旧行不删**）；**不新增写面 op、不新增影像行**。
@@ -1977,6 +1988,15 @@ const aiCandidatePane = ref(null)
 let aiEnhanceRequestSeq = 0
 /** 取消 / 关窗后仍在后台收到的回包（**机械读数**：证明回包未被前端丢下）。 */
 const aiEnhanceLateReply = ref(null)
+/** 开窗探测（`listCandidates`）在途：【開始修復】**禁点** —— 不在既有任务之上重复提交、重复扣金。 */
+const aiEnhanceProbing = ref(false)
+/**
+ * 本组件记住的「印面編號 → 雲端任務號」（**只在内存**，非渲染态 ⇒ 不进响应式）：
+ * 关窗 / 取消后重开同一印面仍能续接同一个 `task_id`；采纳（【取】）或弃置（【棄】）成功后清除
+ * （下次【開始修復】才是新任务）。**零 localStorage**（与令牌同一「不落浏览器存储」口径）。
+ * @type {Map<string, string>}
+ */
+const aiEnhanceTaskByFace = new Map()
 
 /** 成本小字（调用前明示；实际扣费以回包 charge 爲准）。 */
 const aiEnhanceCost = aiEnhance.AI_ENHANCE_COST
@@ -2013,6 +2033,16 @@ const aiEnhanceChargeText = computed(() => {
   return `本次扣費 ${amount} · 扣後餘額 ${balance}`
 })
 
+/**
+ * **传输层失败**的上屏判定：文案逐字 ＝ `aiEnhance.AI_ENHANCE_TRANSPORT_MESSAGE`
+ * （服务层在传输层 / 形状失败时**换上的那句**，即全站共用传输文案的替代句）。
+ * 命中 ⇒ 失败格**整句照抄该文案**（不加「修復失敗：」前缀、不接退款尾句）；
+ * 未命中 ⇒ 一律「修復失敗：＋ 服务端 message」（退款尾句只在 `refunded` 为真时接）。
+ */
+const aiEnhanceTransport = computed(
+  () => aiEnhanceStatus.value === 'failed' && aiEnhanceError.value === aiEnhance.AI_ENHANCE_TRANSPORT_MESSAGE
+)
+
 /** 取消后仍在后台收到的回包（**可见落点**：如实写「已收取」＋成败；证明未丢回包、未改指向）。 */
 const aiEnhanceLateReplyTag = computed(() => {
   const reply = aiEnhanceLateReply.value
@@ -2042,8 +2072,41 @@ async function aiPaneOf(imageId) {
   }
 }
 
-/** 发起一次修復调用（**只由【開始修復】触发**；此时才扣金；弹窗内另有可取消入口）。 */
-async function runAiEnhance(face) {
+/**
+ * 右格取候选图（**只走 `seals.imageDisplaySourceOf`**，不自写第二套取图路径）。
+ *
+ * 为什么要补一轮快照重拉：候选行**刚在服务端落库**（或本页水合在它之前）⇒ 云端快照里还没有
+ * 该行 ⇒ 第一次取图会回「找不到」；这不是「没有这张图」⇒ `seals.retryDataSource()` 重拉一輪
+ * 快照再取一次。仍取不到 ⇒ **如实交失败读数**（不假报成功、不编造 dataURL）。
+ * @param {string} imageId 候选影像编号
+ * @param {number} seq 发起时的在途序号（序号已变 ⇒ 不再改写界面）
+ */
+async function loadAiCandidatePane(imageId, seq) {
+  const id = String(imageId || '')
+  if (seq === aiEnhanceRequestSeq) {
+    aiCandidatePane.value = { state: 'loading', id, dataUrl: '', row: null, message: '' }
+  }
+  let pane = await aiPaneOf(id)
+  if (pane.state === 'error') {
+    try {
+      await seals.retryDataSource()
+    } catch {
+      /* 快照重拉失败 ⇒ 交原失败读数（**不改判、不编造**）。 */
+    }
+    pane = await aiPaneOf(id)
+  }
+  if (seq === aiEnhanceRequestSeq) aiCandidatePane.value = pane
+}
+
+/**
+ * 发起 / **续接**一次修復（**只由【開始修復】或开窗续接触发**；新任务此时才扣金；
+ * 弹窗内另有可取消入口 —— 取消只停止等待、**不撤回服务端任务**）。
+ *
+ * @param {object} face 印面
+ * @param {{taskId?:string, sourceImageId?:string}} [resume] 续接既有任务（开窗探测命中 ⇒ 不再 submit）
+ */
+async function runAiEnhance(face, resume) {
+  const held = resume || {}
   const seq = (aiEnhanceRequestSeq += 1)
   aiEnhanceStatus.value = 'running'
   aiEnhanceResult.value = null
@@ -2054,33 +2117,51 @@ async function runAiEnhance(face) {
   aiEnhanceDiscardError.value = ''
   aiEnhanceDiscarded.value = false
   const sealId = seal.value ? seal.value.stamp_id : face.sealId || face.stamp_id || ''
-  const reply = await aiEnhance.enhanceFaceImage({
-    image_id: face.face_image_id,
-    seal_id: sealId,
-    face_id: face.id
-  })
+  const reply = await aiEnhance.enhanceFaceImage(
+    {
+      image_id: face.face_image_id,
+      seal_id: sealId,
+      face_id: face.id
+    },
+    {
+      taskId: held.taskId || '',
+      sourceImageId: held.sourceImageId || '',
+      /* 任务号一到手就记住（关窗 / 取消后重开仍可续接；本组件零存储）。 */
+      onTask: (taskId) => {
+        if (seq === aiEnhanceRequestSeq) aiEnhanceTaskByFace.set(face.id, String(taskId || ''))
+      },
+      /* 取消 / 关窗 / 卸载 ⇒ **只停止等待**（服务端任务不撤回）。 */
+      shouldCancel: () => seq !== aiEnhanceRequestSeq
+    }
+  )
   /* 回包**一定被收取**（本 await 即收取动作，promise 终点有明确去处）——序号不符
-     （已取消 / 已关窗）⇒ 只落机械读数，不改界面、不写任何状态。 */
+     （已取消 / 已关窗）⇒ 只落机械读数（`null` ＝ 等待已被主动停止），不改界面。 */
   if (seq !== aiEnhanceRequestSeq) {
-    aiEnhanceLateReply.value = reply
+    aiEnhanceLateReply.value = reply || null
     return
   }
+  /* `null` ＝ 用户主动停止等待（序号必已变，理论到不了这里；留一道防呆不碰任何状态）。 */
+  if (!reply) return
   if (!reply.ok) {
     aiEnhanceStatus.value = 'failed'
     aiEnhanceError.value = reply.message
     aiEnhanceRefunded.value = reply.refunded === true
+    /* 服务端已判死该任务（或提交根本没成）⇒ 清掉记住的任务号（下次【開始修復】才是新任务）；
+       **传输层 / 逾时失败不清** —— 任务可能仍在云端跑，留着才能续接。 */
+    if (reply.reason !== 'STORAGE_UNAVAILABLE') aiEnhanceTaskByFace.delete(face.id)
     return
   }
   aiEnhanceResult.value = reply
   aiEnhanceStatus.value = 'done'
   /* 右格按**新影像编号**取回展示源（同样走 `imageDisplaySourceOf`）。 */
-  aiCandidatePane.value = { state: 'loading', id: reply.imageId, dataUrl: '', row: null, message: '' }
-  aiCandidatePane.value = await aiPaneOf(reply.imageId)
+  await loadAiCandidatePane(reply.imageId, seq)
 }
 
 /**
- * 开窗：**只开窗、不调 op、零扣金** —— 弹窗以「待確認」态打开（右格「尚未開始」，
- * 左格原圖照常取图）。真正发请求由【開始修復】（`startAiEnhance`）触发。
+ * 开窗：**只开窗、不扣金** —— 弹窗以「待確認」态打开（右格「尚未開始」，
+ * 左格原圖照常取图）。开窗同时**先探一次云端未完成任务**（`listCandidates`，见
+ * `probeAiEnhance`）：命中 ⇒ 自动续接（**不再 submit、不再扣金**）；没命中 ⇒ 真正发请求仍由
+ * 【開始修復】（`startAiEnhance`）触发。
  */
 function openAiEnhance(face) {
   aiEnhanceFeedback.value = ''
@@ -2092,6 +2173,7 @@ function openAiEnhance(face) {
   aiEnhanceDiscardError.value = ''
   aiEnhanceDiscarded.value = false
   aiEnhanceStatus.value = 'confirm'
+  aiEnhanceProbing.value = true
   aiEnhanceFaceId.value = face.id
   /* 左格：当前影像（原圖，开窗即取）；右格：待確認态不取图（尚未發出任何請求）。 */
   aiSourcePane.value = { state: 'loading', id: String(face.face_image_id || ''), dataUrl: '', row: null, message: '' }
@@ -2099,25 +2181,85 @@ function openAiEnhance(face) {
   void aiPaneOf(face.face_image_id).then((pane) => {
     if (aiEnhanceFaceId.value === face.id) aiSourcePane.value = pane
   })
+  void probeAiEnhance(face)
 }
 
-/** 【開始修復】：确认成本后才真正发起修復调用（**此时才扣金**；只在待確認态可点）。 */
+/** 列表行的时间戳读数（`created_at` 可能是秒 / 毫秒 / ISO 串 ⇒ 统一成可比大小的数字；取不到 ⇒ 0）。 */
+function aiTaskStamp(row) {
+  const raw = row ? row.created_at : null
+  const numeric = Number(raw)
+  if (Number.isFinite(numeric) && raw !== null && raw !== undefined && raw !== '') return numeric
+  const parsed = Date.parse(String(raw === undefined || raw === null ? '' : raw))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+/**
+ * **开窗先探云端任务**（op `ai-enhance-list`）以**续接**未完成的修復 —— 只在「待確認」态发起，
+ * 且**只由 `openAiEnhance` 触发**（绝不在 render 期发请求、不写响应式状态）。
+ *
+ * 分流（服务端行面为准）：
+ *  · `SUBMITTED` / `RUNNING` ⇒ 进「進行中」并**续轮询同一个 `task_id`**（在途任务优先，
+ *    否则会把跑着的任务晾在一边）；
+ *  · `READY` 且 `image_id` **尚未被本印面采纳** ⇒ 续接后落「已完成」（右格按 image_id 取图、
+ *    【取】/【棄】可用）—— 已采纳的候选**不接**（否则【棄】会指向当前印面图）；
+ *  · 列表读不到（传输 / 形状失败）⇒ **退回本组件记住的任务号**（关窗前那次提交的）；
+ *  · 列表读到但无可用行 ⇒ 维持「待確認」（由用户按【開始修復】）。
+ */
+async function probeAiEnhance(face) {
+  const remembered = String(aiEnhanceTaskByFace.get(face.id) || '')
+  try {
+    const listed = await aiEnhance.listCandidates(face.id)
+    /* 开窗态已变（关窗 / 已开始 / 换面）⇒ 不再改写任何界面状态。 */
+    if (aiEnhanceFaceId.value !== face.id || aiEnhanceStatus.value !== 'confirm') return
+    if (!listed || listed.ok !== true || !Array.isArray(listed.rows)) {
+      /* 列表读不到 ⇒ 退回记住的任务号（服务端任务可能仍在跑；读不到 ≠ 没有任务）。 */
+      if (remembered) runAiEnhance(face, { taskId: remembered })
+      return
+    }
+    const adoptedId = face.face_image_id ? String(face.face_image_id) : ''
+    const rows = listed.rows.filter((row) => row && typeof row === 'object')
+    const idOf = (row) => (typeof row.task_id === 'string' ? row.task_id.trim() : '')
+    const newest = (list) => list.slice().sort((a, b) => aiTaskStamp(b) - aiTaskStamp(a))[0] || null
+    const pending = rows.filter(
+      (row) => idOf(row) && (row.status === 'SUBMITTED' || row.status === 'RUNNING')
+    )
+    const ready = rows.filter(
+      (row) => idOf(row) && row.status === 'READY' && String(row.image_id || '') !== adoptedId
+    )
+    const target = newest(pending) || newest(ready)
+    const taskId = target ? idOf(target) : ''
+    if (!taskId) return
+    aiEnhanceTaskByFace.set(face.id, taskId)
+    runAiEnhance(face, { taskId, sourceImageId: String(target.source_image_id || '') })
+  } finally {
+    /* 探测无论成败都放行【開始修復】（只在仍是本面的「待確認」态时改，避免覆盖续接后的状态）。 */
+    if (aiEnhanceFaceId.value === face.id && aiEnhanceStatus.value === 'confirm') {
+      aiEnhanceProbing.value = false
+    }
+  }
+}
+
+/** 【開始修復】：确认成本后才真正发起修復调用（**此时才扣金**；只在待確認态可点）。
+ *  探测（`listCandidates`）在途 ⇒ **禁点**：不在既有任务之上重复提交、重复扣金。 */
 function startAiEnhance() {
   const face = aiEnhanceFace.value
-  if (!face || aiEnhanceStatus.value !== 'confirm') return
+  if (!face || aiEnhanceStatus.value !== 'confirm' || aiEnhanceProbing.value) return
   aiCandidatePane.value = { state: 'loading', id: '', dataUrl: '', row: null, message: '' }
   runAiEnhance(face)
 }
 
-/** 取消：只停止等待（**服务端请求不撤回**）；在途回包仍被收取 ⇒ 不丢未收的回包。 */
+/** 取消：只停止等待（**服务端任务不撤回**）；在途那一发若已拿到终局回包仍被收取 ⇒ 不丢已到手的回包。 */
 function cancelAiEnhanceRun() {
   aiEnhanceRequestSeq += 1
   aiEnhanceStatus.value = 'cancelled'
 }
 
 function closeAiEnhance() {
-  /* 关窗同样只作废界面态：在途回包仍由 `runAiEnhance` 收取（序号不符 ⇒ 落机械读数）。 */
+  /* 关窗同样只作废界面态：**停止等待**（轮询循环按 `shouldCancel` 当场停、服务端任务不撤回，
+     任务号仍被记住 ⇒ 重开本窗可续接）；在途那一发若已拿到终局回包仍由 `runAiEnhance` 收取
+     （序号不符 ⇒ 落机械读数）。 */
   aiEnhanceRequestSeq += 1
+  aiEnhanceProbing.value = false
   aiEnhanceFaceId.value = ''
   aiSourcePane.value = null
   aiCandidatePane.value = null
@@ -2151,12 +2293,27 @@ async function discardAiEnhance() {
     aiEnhanceFeedback.value = reply.deletedObjects
       ? `候選圖已棄置（影像編號 ${reply.imageId}）；影像物件亦已清除。印面指向未變。`
       : `候選圖已棄置（影像編號 ${reply.imageId}）。印面指向未變。`
+    /* 候选件已弃置 ⇒ 清掉记住的任务号（下次【開始修復】才是新任务；重开本窗不再接它）。 */
+    aiEnhanceTaskByFace.delete(aiEnhanceFaceId.value)
     /* 派生读数立即刷新（候选件已移除，右格不再渲染它）。 */
     dataVersion.value += 1
     closeAiEnhance()
   } finally {
     aiEnhanceDiscarding.value = false
   }
+}
+
+/**
+ * 「全站共用传输 / 形状文案」**不得**出现在 AI 修復场景的失败上屏（本单硬口径）：【取】走的是
+ * 全站共用写面（其传输文案 `cloudbaseFn.js::TRANSPORT_MESSAGES.*` 前缀「雲端校驗…」），而照抄它
+ * 在此处是**假话**（修復任务可能已提交、扣金已预扣；指向写入也可能只差回读）⇒ 命中即换成本句。
+ * **只换展示文案、不改判成败**（`ok` 仍由服务层说了算）。
+ * @param {string} message 服务层原话
+ * @returns {string}
+ */
+function aiWriteMessageOf(message) {
+  const text = String(message === undefined || message === null ? '' : message)
+  return text.includes('雲端校驗') ? '雲端連線失敗；印面指向未變，可稍後重試。' : text
 }
 
 /**
@@ -2179,10 +2336,12 @@ async function acceptAiEnhance() {
   try {
     const written = await seals.updateSealFixedAttributes(null, face.id, { face_image_id: nextId })
     if (!written || written.ok !== true) {
-      aiEnhanceFeedback.value = `取用修復圖未生效：${(written && written.message) || '未知原因'}（印面指向未變）`
+      aiEnhanceFeedback.value = `取用修復圖未生效：${aiWriteMessageOf((written && written.message) || '未知原因')}（印面指向未變）`
       return
     }
     aiEnhanceFeedback.value = `影像編號 ${previousId || '（原無）'} → ${nextId}；舊影像與二進制保留（可回溯）。`
+    /* 该任务已被采纳 ⇒ 清掉记住的任务号（下次【開始修復】才是新任务；重开本窗也不再把它当候选）。 */
+    aiEnhanceTaskByFace.delete(face.id)
     /* **强制失效旧 id 的 dataUrl 缓存**（服务层唯一失效口；页面登记的清理函数按编号清）。
        旧影像**本身不删** —— 作废的只是缓存条目，下次取它仍会照常读回。 */
     if (previousId) seals.invalidateImageDataUrl(previousId)
@@ -3117,25 +3276,25 @@ onBeforeUnmount(() => {
             </p>
             <!-- 调用中：骨架 ＋ 可取消入口（取消只停止等待，**不撤回服务端请求**；回包仍被收取）。 -->
             <div v-else-if="aiEnhanceStatus === 'running'" class="ai-face-pane__skeleton" data-ai-enhance-state="running">
-              <p class="ai-face-pane__state">正在修復，約需 20–60 秒…</p>
+              <p class="ai-face-pane__state">修復進行中（已預扣 10 金，成功才落賬）；可先關窗，稍後重開本窗仍可續接結果。</p>
               <button class="btn btn--ghost" type="button" data-action="ai-enhance-cancel" @click="cancelAiEnhanceRun">
                 取消
               </button>
             </div>
             <p v-else-if="aiEnhanceStatus === 'cancelled'" class="ai-face-pane__state" data-ai-enhance-state="cancelled">
-              已取消等待：服務端請求未撤回，回包到達後仍會被收取（本次不採用、印面指向不變）。
+              已停止等待（雲端任務仍在進行）；稍後重開本窗可續接結果。
               <span v-if="aiEnhanceLateReplyTag" class="ai-face-pane__meta" data-ai-enhance-late-reply>
                 {{ aiEnhanceLateReplyTag }}
               </span>
             </p>
-            <!-- 失败：可读繁体文案（**含服务端 message 原文**）；refunded === true ⇒ 明示未消耗金。 -->
+            <!-- 失败：**传输层**整句照抄 `aiEnhance.AI_ENHANCE_TRANSPORT_MESSAGE`；
+                 **服务端失败**＝「修復失敗：」＋服务端 message 原文，`refunded` 为真才接退款尾句。 -->
             <p
               v-else-if="aiEnhanceStatus === 'failed'"
               class="ai-face-pane__state ai-face-pane__state--error"
               data-ai-enhance-state="failed"
             >
-              修復失敗：{{ aiEnhanceError }}
-              <span v-if="aiEnhanceRefunded" data-ai-enhance-refunded>（本次未消耗金）</span>
+              <template v-if="aiEnhanceTransport">{{ aiEnhanceError }}</template><template v-else>修復失敗：{{ aiEnhanceError }}<span v-if="aiEnhanceRefunded" data-ai-enhance-refunded>；已全額退回 {{ aiEnhanceCost }} 金。</span></template>
             </p>
             <template v-else-if="aiEnhanceStatus === 'done'">
               <img
@@ -3188,12 +3347,19 @@ onBeforeUnmount(() => {
         </p>
 
         <div class="ai-face-box__foot">
-          <!-- 待確認态：【開始修復】（确认成本后才扣金发请求）＋【關閉】（零请求退出）。 -->
+          <!-- 待確認态：【開始修復】（确认成本后才扣金发请求）＋【關閉】（零请求退出）。
+               探测（`listCandidates`）在途 ⇒ 【開始修復】禁点（不在既有任务之上重复扣金）。 -->
           <template v-if="aiEnhanceStatus === 'confirm'">
             <button class="btn btn--ghost" type="button" data-action="ai-enhance-close" @click="closeAiEnhance()">
               關閉
             </button>
-            <button class="btn btn--primary" type="button" data-action="ai-enhance-start" @click="startAiEnhance">
+            <button
+              class="btn btn--primary"
+              type="button"
+              data-action="ai-enhance-start"
+              :disabled="aiEnhanceProbing"
+              @click="startAiEnhance"
+            >
               開始修復
             </button>
           </template>

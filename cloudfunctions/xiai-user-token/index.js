@@ -693,6 +693,23 @@ async function handleVerify(event, config, callContext) {
   if (aiEnhanceReadouts) {
     for (const key of Object.keys(aiEnhanceReadouts)) response[key] = aiEnhanceReadouts[key]
   }
+  /* **AI 修復異步兩段式讀數面（additive 透传｜按 op 收窄）**：
+     · `ai-enhance-submit` / `ai-enhance-status` → `task_id` / `status` / `source_image_id` /
+       `image_id` / `preview` / `charge`（六鍵中**僅疊 `opResult` 真有的**，存在性驱动）；
+     · `ai-enhance-list` → `rows`（逐行已由 `lib/aiEnhanceTasks.js` 投影為恰 6 鍵）。
+     **其餘任何 op 一律不透傳這 6 個鍵與 `rows`** ⇒ 既有回包逐字不變（序列化後亦不新增鍵）；
+     **失敗回包（`ok:false`）走上面的早退分支、原樣回吐**；`plan` 是內部落盤計劃（內部面）
+     **不在白名單內 ⇒ 絕不外傳**；既有字段一律不刪、不改。鍵名真源
+     ＝ `lib/aiEnhanceTasks.js` 的 `SUBMIT_SUCCESS_KEYS` / `STATUS_*_KEYS` / `LIST_SUCCESS_KEYS`。 */
+  if (op === 'ai-enhance-submit' || op === 'ai-enhance-status') {
+    const AI_ENHANCE_TASK_READOUT_KEYS = ['task_id', 'status', 'source_image_id', 'image_id', 'preview', 'charge']
+    for (const key of AI_ENHANCE_TASK_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  if (op === 'ai-enhance-list') {
+    if (Object.prototype.hasOwnProperty.call(opResult, 'rows')) response.rows = opResult.rows
+  }
   return response
 }
 
