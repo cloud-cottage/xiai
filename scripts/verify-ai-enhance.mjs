@@ -479,7 +479,7 @@ section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 28 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 28, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 31 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 31, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
@@ -1723,6 +1723,502 @@ let jDupReply = null
     badValueKeys,
     coreKeysAllPresent: !!row && coreKeys.every((key) => Object.prototype.hasOwnProperty.call(row, key)),
     replyRowMatchesStored: !!row && !!reply.row && JSON.stringify(reply.row) === JSON.stringify(row)
+  })
+}
+
+/* ===========================================================================
+   K 段：异步两段式三 op 契约（v1.97 §3.80 ／ AC-694〜AC-700；本单新增）
+   —— 注入式假体（假 DB ／ 假账本 ／ 假对象存储 ／ 假上游 fetch 缝）；零网络、零生产数据
+   =========================================================================== */
+section('K', '异步两段式三 op：注册面 / 载荷封闭键面 / 回包恰几键与键名 / 四态字面值 / reason 零新增 / list 零写入')
+
+const tasks = require(path.join(FN_DIR, 'lib/aiEnhanceTasks.js'))
+const TASK_COLLECTION = 'xiai_ai_enhance_tasks'
+const taskRows = () => [...fakeDb.bucketOf(TASK_COLLECTION).values()]
+const taskSetCalls = () => fakeDb.hooks.setCalls.filter((call) => call.collection === TASK_COLLECTION).length
+const taskReads = () => fakeDb.hooks.queries.filter((query) => query.collection === TASK_COLLECTION).length
+const sortedKeys = (list) => list.slice().sort()
+/** 既有 `reason` 冻结面（13 值；与 `verify-ai-enhance-discard` G2 同一张表）。 */
+const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE', 'ALREADY_ENDORSED', 'DUPLICATE_VALUE', 'INSUFFICIENT_POINTS', 'KEY_INVALID', 'CONFIG_MISSING', 'LIMIT_DAY', 'LIMIT_MINUTE', 'UPSTREAM_ERROR']
+
+/* K 段读数登记（失败 `reason` 与回包 `status` 字面值全程收集 ⇒ 末检「零新增 / 四态封闭」）。 */
+const kReasons = new Set()
+const kStatuses = new Set()
+const note = (reply) => {
+  if (reply && typeof reply.reason === 'string') kReasons.add(reply.reason)
+  if (reply && typeof reply.status === 'string') kStatuses.add(reply.status)
+  return reply
+}
+const K_OTHER_IDENTITY = { uid: 'u-not-admin-ai-enhance-k', phone: '13900000001' }
+const kCtx = (requestId) => CONTEXT(requestId)
+const submitOp = async (payload, identity, requestId) =>
+  note(await ops.ADMIN_OPS['ai-enhance-submit'](payload, identity || ADMIN_IDENTITY, kCtx(requestId || 'rid-k-default')))
+const statusOp = async (payload, identity) =>
+  note(await ops.ADMIN_OPS['ai-enhance-status'](payload, identity || ADMIN_IDENTITY, kCtx('rid-k-status')))
+const listOp = async (payload, identity) =>
+  note(await ops.ADMIN_OPS['ai-enhance-list'](payload, identity || ADMIN_IDENTITY, kCtx('rid-k-list')))
+
+/* --------------------------------------------------------------------------- *
+  K 段假上游（`aiEnhanceTasks` 自己的 fetch 缝；生产不注入 ⇒ 全局 fetch）
+  —— POST /images/edits ＝ 异步入队回执；GET /tasks/<id> ＝ 按 plan 出牌
+ * --------------------------------------------------------------------------- */
+const kTaskFetchCalls = []
+const K_ENQUEUE_TASK_ID = 'up-k-async-0001'
+let kQueryState = 'pending'
+tasks.setTaskFetchProvider(async (url, init) => {
+  const method = (init && init.method) || 'GET'
+  kTaskFetchCalls.push({ url, method })
+  if (method === 'POST') {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ created: 1, data: [{ task_id: K_ENQUEUE_TASK_ID, status: 'pending', display_status: 'pending' }], usage: {} })
+    }
+  }
+  return { ok: true, status: 200, json: async () => ({ status: kQueryState }) }
+})
+
+/* 假账本余额护栏（**夹具**：只在余额不足 100 时把假余额行抬到 1000 —— 生产零接触）。 */
+{
+  const uid = ADMIN_IDENTITY.uid
+  const row = balanceMapOf(uid)
+  if (!row) fakeDb.bucketOf('xiai_balances').set(`bl-${uid}`, { _id: `bl-${uid}`, uid, points: 1000 })
+  else if (!(Number(row.points) >= 100)) row.points = 1000
+}
+
+/* ---------------- K1：注册面（三 op 在册且为函数、字典序落位、legacy 仍在册） ---------------- */
+{
+  const keys = Object.keys(ops.ADMIN_OPS)
+  const at = (name) => keys.indexOf(name)
+  check('K1', '注册面：`ai-enhance-submit` / `ai-enhance-status` / `ai-enhance-list` 三 op 均在 `ADMIN_OPS` 且为**函数**，字典序位在 `ai-enhance-face` 之后、`backfillAcceptedCorrections` 之前；legacy `ai-enhance-face` / `ai-enhance-discard` 仍在册（函数）', {
+    submit: 'function',
+    status: 'function',
+    list: 'function',
+    face: 'function',
+    discard: 'function',
+    ordered: true
+  }, {
+    submit: typeof ops.ADMIN_OPS['ai-enhance-submit'],
+    status: typeof ops.ADMIN_OPS['ai-enhance-status'],
+    list: typeof ops.ADMIN_OPS['ai-enhance-list'],
+    face: typeof ops.ADMIN_OPS['ai-enhance-face'],
+    discard: typeof ops.ADMIN_OPS['ai-enhance-discard'],
+    ordered:
+      at('ai-enhance-face') !== -1 &&
+      at('ai-enhance-face') < at('ai-enhance-list') &&
+      at('ai-enhance-list') < at('ai-enhance-status') &&
+      at('ai-enhance-status') < at('ai-enhance-submit') &&
+      at('ai-enhance-submit') < at('backfillAcceptedCorrections')
+  })
+}
+
+/* ---------------- K2：载荷 / 回包键面常量逐字封闭 ＋ 任务集合名逐字 ---------------- */
+{
+  check('K2', '键面常量逐字封闭：submit 载荷恰 4 键、status 恰 1 键、list 恰 1 键；回包常量 submit 成功 5 / 失败 4、status 4 / 6 / 5、list 成功 2 / 失败 3、`rows` 行恰 6 键；状态字面值恰四态；集合名逐字 `xiai_ai_enhance_tasks`', {
+    submitPayload: ['face_id', 'image_id', 'request_id', 'seal_id'],
+    statusPayload: ['task_id'],
+    listPayload: ['face_id'],
+    submitSuccess: ['charge', 'ok', 'source_image_id', 'status', 'task_id'],
+    submitFailure: ['message', 'ok', 'reason', 'refunded'],
+    statusRunning: ['ok', 'status', 'task_id', 'upstream_status'],
+    statusReady: ['charge', 'image_id', 'ok', 'preview', 'status', 'task_id'],
+    statusFailed: ['message', 'ok', 'reason', 'refunded', 'status'],
+    listSuccess: ['ok', 'rows'],
+    listFailure: ['message', 'ok', 'reason'],
+    listRow: ['created_at', 'error_message', 'image_id', 'source_image_id', 'status', 'task_id'],
+    statuses: ['FAILED', 'READY', 'RUNNING', 'SUBMITTED'],
+    collection: TASK_COLLECTION
+  }, {
+    submitPayload: sortedKeys(tasks.SUBMIT_ALLOWED_KEYS),
+    statusPayload: sortedKeys(tasks.STATUS_ALLOWED_KEYS),
+    listPayload: sortedKeys(tasks.LIST_ALLOWED_KEYS),
+    submitSuccess: sortedKeys(tasks.SUBMIT_SUCCESS_KEYS),
+    submitFailure: sortedKeys(tasks.SUBMIT_FAILURE_KEYS),
+    statusRunning: sortedKeys(tasks.STATUS_RUNNING_KEYS),
+    statusReady: sortedKeys(tasks.STATUS_READY_KEYS),
+    statusFailed: sortedKeys(tasks.STATUS_FAILED_KEYS),
+    listSuccess: sortedKeys(tasks.LIST_SUCCESS_KEYS),
+    listFailure: sortedKeys(tasks.LIST_FAILURE_KEYS),
+    listRow: sortedKeys(tasks.LIST_ROW_KEYS),
+    statuses: Object.values(tasks.TASK_STATUS).sort(),
+    collection: tasks.AI_ENHANCE_TASKS_COLLECTION
+  })
+}
+
+/* ---------------- K3：载荷封闭键面（行为面）＋ 管理员门（零读零写零扣费零上游） ---------------- */
+{
+  const chargesBefore = chargeSpy.calls
+  const taskRowsBefore = taskRows().length
+  const taskWritesBefore = taskSetCalls()
+  const taskReadsBefore = taskReads()
+  const upstreamBefore = kTaskFetchCalls.length
+  const extra = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1', request_id: 'rid-k-extra-0001', amount: 10 })
+  const missing = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1' })
+  const badRid = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1', request_id: 'x' })
+  const nonString = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1', request_id: 12345678 })
+  const statusExtra = await statusOp({ task_id: 'aiet-0000000000000000', extra: 1 })
+  const statusMissing = await statusOp({})
+  const listExtra = await listOp({ face_id: 'f-1', limit: 5 })
+  const listMissing = await listOp({})
+  const gateSubmit = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1', request_id: 'rid-k-gate-0001' }, K_OTHER_IDENTITY)
+  const gateStatus = await statusOp({ task_id: 'aiet-0000000000000000' }, K_OTHER_IDENTITY)
+  const gateList = await listOp({ face_id: 'f-1' }, K_OTHER_IDENTITY)
+  check('K3', '载荷封闭键面（行为）：submit 多键 ⇒ `INVALID_FIELD`、缺键 ⇒ `MISSING_REQUIRED`、请求号形态 / 非字符串 ⇒ `INVALID_VALUE`（四发均**恰 4 键**、`refunded:false`）；status 多键 ⇒ `INVALID_FIELD`、缺键 ⇒ `MISSING_REQUIRED`（均**恰 5 键** 且 `status=FAILED`）；list 多键 ⇒ `INVALID_FIELD`、缺键 ⇒ `MISSING_REQUIRED`（均**恰 3 键**、**零 `refunded`**）；三 op 非白名单身份 ⇒ `FORBIDDEN`（键面 4 / 5 / 3）；全程**零扣费、零任务行、零写入、零上游、零任务行读取**（管理员门与载荷门先于一切读写）', {
+    submitKeys: ['message,ok,reason,refunded', 'message,ok,reason,refunded', 'message,ok,reason,refunded', 'message,ok,reason,refunded'].join('|'),
+    submitReasons: ['INVALID_FIELD', 'MISSING_REQUIRED', 'INVALID_VALUE', 'INVALID_VALUE'],
+    submitRefundedAll: false,
+    statusKeys: ['message,ok,reason,refunded,status', 'message,ok,reason,refunded,status'].join('|'),
+    statusReasons: ['INVALID_FIELD', 'MISSING_REQUIRED'],
+    statusAllFailed: true,
+    listKeys: ['message,ok,reason', 'message,ok,reason'].join('|'),
+    listReasons: ['INVALID_FIELD', 'MISSING_REQUIRED'],
+    listHasRefunded: false,
+    gateReasons: ['FORBIDDEN', 'FORBIDDEN', 'FORBIDDEN'],
+    gateKeys: ['message,ok,reason,refunded', 'message,ok,reason,refunded,status', 'message,ok,reason'],
+    zeroCharge: true,
+    zeroTaskRows: true,
+    zeroTaskWrites: true,
+    zeroTaskReads: true,
+    zeroUpstream: true
+  }, {
+    submitKeys: [extra, missing, badRid, nonString].map(shapeOf).join('|'),
+    submitReasons: [extra, missing, badRid, nonString].map((reply) => reply.reason),
+    submitRefundedAll: [extra, missing, badRid, nonString].some((reply) => reply.refunded !== false),
+    statusKeys: [statusExtra, statusMissing].map(shapeOf).join('|'),
+    statusReasons: [statusExtra, statusMissing].map((reply) => reply.reason),
+    statusAllFailed: [statusExtra, statusMissing].every((reply) => reply.status === 'FAILED'),
+    listKeys: [listExtra, listMissing].map(shapeOf).join('|'),
+    listReasons: [listExtra, listMissing].map((reply) => reply.reason),
+    listHasRefunded: [listExtra, listMissing].some((reply) => Object.prototype.hasOwnProperty.call(reply, 'refunded')),
+    gateReasons: [gateSubmit, gateStatus, gateList].map((reply) => reply.reason),
+    gateKeys: [gateSubmit, gateStatus, gateList].map(shapeOf),
+    zeroCharge: chargeSpy.calls === chargesBefore,
+    zeroTaskRows: taskRows().length === taskRowsBefore,
+    zeroTaskWrites: taskSetCalls() === taskWritesBefore,
+    zeroTaskReads: taskReads() === taskReadsBefore,
+    zeroUpstream: kTaskFetchCalls.length === upstreamBefore
+  })
+}
+
+/* ---------------- K4：submit 成功（异步入队）＝ 恰 5 键 ＋ 预扣 10 ＋ 任务行 18 字段 ---------------- */
+const K_RID = 'rid-k-submit-0001'
+let kSubmitReply = null
+{
+  const chargesBefore = chargeSpy.calls
+  const taskWritesBefore = taskSetCalls()
+  const upstreamBefore = kTaskFetchCalls.length
+  const reply = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1', request_id: K_RID }, undefined, K_RID)
+  kSubmitReply = reply
+  const rows = taskRows()
+  const row = rows.length === 1 ? rows[0] : null
+  const chargeRows = flowRowsOf(ADMIN_IDENTITY.uid).filter((entry) => entry.kind === 'CHARGE' && entry.idem_key === `ai-enhance-${SRC_OK}-${K_RID}`)
+  check('K4', 'submit 成功（异步入队）：回包**恰 5 键** `ok / task_id / status / source_image_id / charge`、`status` 逐字 `SUBMITTED`、`task_id` 形态 `aiet-`＋16 位十六进制、`charge` 恰 `amount / balance` 两键且 `amount` 恰 10；**提交即预扣恰 1 次**（`CHARGE` 行 `delta = -10`、`ref_type = AI_IMAGE`、`idem_key` 三段封闭）；任务行落 `xiai_ai_enhance_tasks` 且**字段面恰 18 项**（含 `_id`）、`status = SUBMITTED`、`upstream_task_id` 逐字 ＝ 上游回执号、`deadline_at` 晚于 `created_at` 20 分钟', {
+    keys: 'charge,ok,source_image_id,status,task_id',
+    ok: true,
+    status: 'SUBMITTED',
+    taskIdShape: true,
+    chargeKeys: ['amount', 'balance'],
+    chargeAmount: 10,
+    chargeRows: 1,
+    delta: -10,
+    refType: 'AI_IMAGE',
+    idemKey: `ai-enhance-${SRC_OK}-${K_RID}`,
+    taskRowCount: 1,
+    taskRowKeys: 18,
+    taskRowStatus: 'SUBMITTED',
+    upstreamTaskId: K_ENQUEUE_TASK_ID,
+    deadlineAhead: true,
+    upstreamCalls: 1,
+    taskWrites: 1,
+    chargeDelta: 1
+  }, {
+    keys: shapeOf(reply),
+    ok: reply.ok,
+    status: reply.status,
+    taskIdShape: /^aiet-[0-9a-f]{16}$/.test(String(reply.task_id)),
+    chargeKeys: reply.charge && typeof reply.charge === 'object' ? Object.keys(reply.charge).sort() : null,
+    chargeAmount: reply.charge && reply.charge.amount,
+    chargeRows: chargeRows.length,
+    delta: chargeRows[0] && chargeRows[0].delta,
+    refType: chargeRows[0] && chargeRows[0].ref_type,
+    idemKey: chargeRows[0] && chargeRows[0].idem_key,
+    taskRowCount: rows.length,
+    taskRowKeys: row ? Object.keys(row).length : -1,
+    taskRowStatus: row && row.status,
+    upstreamTaskId: row && row.upstream_task_id,
+    deadlineAhead: !!row && Date.parse(row.deadline_at) - Date.parse(row.created_at) === tasks.TASK_DEADLINE_MS,
+    upstreamCalls: kTaskFetchCalls.length - upstreamBefore,
+    taskWrites: taskSetCalls() - taskWritesBefore,
+    chargeDelta: chargeSpy.calls - chargesBefore
+  })
+}
+
+/* ---------------- K5：submit 同请求号幂等回放（零扣费、零上游、零新任务行） ---------------- */
+{
+  const chargesBefore = chargeSpy.calls
+  const taskWritesBefore = taskSetCalls()
+  const taskRowsBefore = taskRows().length
+  const upstreamBefore = kTaskFetchCalls.length
+  const reply = await submitOp({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1', request_id: K_RID }, undefined, K_RID)
+  check('K5', 'submit 同 `request_id` 重放：回同一 `task_id`、回包仍**恰 5 键**、**零新增扣费**（`chargeSpy` 不动）、**零上游调用**、**零新任务行 / 零任务行写入**（幂等回放既有行）', {
+    keys: 'charge,ok,source_image_id,status,task_id',
+    sameTaskId: true,
+    status: kSubmitReply.status,
+    zeroCharge: true,
+    zeroUpstream: true,
+    zeroNewTaskRows: true,
+    zeroTaskWrites: true
+  }, {
+    keys: shapeOf(reply),
+    sameTaskId: reply.task_id === kSubmitReply.task_id,
+    status: reply.status,
+    zeroCharge: chargeSpy.calls === chargesBefore,
+    zeroUpstream: kTaskFetchCalls.length === upstreamBefore,
+    zeroNewTaskRows: taskRows().length === taskRowsBefore,
+    zeroTaskWrites: taskSetCalls() === taskWritesBefore
+  })
+}
+
+/* ---------------- K6：status 三态键面（RUNNING 4 / READY 6 / FAILED 5）＋ 终态零上游 ---------------- */
+{
+  const chargesBefore = chargeSpy.calls
+  const taskWritesBefore = taskSetCalls()
+  const upstreamBefore = kTaskFetchCalls.length
+  const running = await statusOp({ task_id: kSubmitReply.task_id })
+  const runningRow = fakeDb.bucketOf(TASK_COLLECTION).get(kSubmitReply.task_id)
+
+  /* READY 终态（种子行；产物影像行 ＝ 既有 `SRC_OK` 行）。 */
+  const readyId = 'aiet-k-ready-00000001'
+  fakeDb.bucketOf(TASK_COLLECTION).set(readyId, {
+    _id: readyId,
+    uid: ADMIN_IDENTITY.uid,
+    request_id: 'rid-k-ready-0001',
+    source_image_id: SRC_OK,
+    seal_id: 's-1',
+    face_id: 'f-k-status',
+    status: 'READY',
+    upstream_task_id: '',
+    upstream_status: 200,
+    product_image_id: SRC_OK,
+    charge_amount: 10,
+    charge_balance_after: 40,
+    error_reason: '',
+    error_message: '',
+    refunded: false,
+    created_at: '2026-11-08T00:00:00.000Z',
+    updated_at: '2026-11-08T00:00:00.000Z',
+    deadline_at: '2026-11-08T00:20:00.000Z'
+  })
+  const ready = await statusOp({ task_id: readyId })
+
+  /* FAILED 终态（种子行）。 */
+  const failedId = 'aiet-k-failed-000001'
+  fakeDb.bucketOf(TASK_COLLECTION).set(failedId, {
+    _id: failedId,
+    uid: ADMIN_IDENTITY.uid,
+    request_id: 'rid-k-failed-0001',
+    source_image_id: SRC_OK,
+    seal_id: 's-1',
+    face_id: 'f-k-status',
+    status: 'FAILED',
+    upstream_task_id: '',
+    upstream_status: 500,
+    product_image_id: '',
+    charge_amount: 10,
+    charge_balance_after: 50,
+    error_reason: 'UPSTREAM_ERROR',
+    error_message: '上游修復任務失敗（狀態＝failed）',
+    refunded: true,
+    created_at: '2026-11-08T00:00:00.000Z',
+    updated_at: '2026-11-08T00:00:00.000Z',
+    deadline_at: '2026-11-08T00:20:00.000Z'
+  })
+  const failed = await statusOp({ task_id: failedId })
+  const absent = await statusOp({ task_id: 'aiet-k-no-such-task' })
+
+  const terminalUpstream = kTaskFetchCalls.length - upstreamBefore - 1 /* RUNNING 那一发单查 */ 
+  check('K6', 'status 按状态收窄：`RUNNING` **恰 4 键** `ok/task_id/status/upstream_status`（行被置 RUNNING）；`READY` **恰 6 键** `ok/task_id/status/image_id/preview/charge`（`preview` 恰 `mime/sha256`、`charge` 恰 `amount/balance`）；`FAILED` **恰 5 键** `ok/reason/message/refunded/status`；任务不存在 ⇒ `INVALID_VALUE` 且仍恰 5 键；**READY / FAILED / 不存在三发零上游、全程零扣费**（终态只回放）', {
+    runningKeys: 'ok,status,task_id,upstream_status',
+    runningStatus: 'RUNNING',
+    runningRowStatus: 'RUNNING',
+    readyKeys: 'charge,image_id,ok,preview,status,task_id',
+    readyStatus: 'READY',
+    readyPreviewKeys: ['mime', 'sha256'],
+    readyChargeKeys: ['amount', 'balance'],
+    readyImageId: SRC_OK,
+    failedKeys: 'message,ok,reason,refunded,status',
+    failedStatus: 'FAILED',
+    failedReason: 'UPSTREAM_ERROR',
+    failedRefunded: true,
+    absentKeys: 'message,ok,reason,refunded,status',
+    absentReason: 'INVALID_VALUE',
+    terminalUpstreamCalls: 0,
+    zeroCharge: true
+  }, {
+    runningKeys: shapeOf(running),
+    runningStatus: running.status,
+    runningRowStatus: runningRow && runningRow.status,
+    readyKeys: shapeOf(ready),
+    readyStatus: ready.status,
+    readyPreviewKeys: ready.preview && typeof ready.preview === 'object' ? Object.keys(ready.preview).sort() : null,
+    readyChargeKeys: ready.charge && typeof ready.charge === 'object' ? Object.keys(ready.charge).sort() : null,
+    readyImageId: ready.image_id,
+    failedKeys: shapeOf(failed),
+    failedStatus: failed.status,
+    failedReason: failed.reason,
+    failedRefunded: failed.refunded,
+    absentKeys: shapeOf(absent),
+    absentReason: absent.reason,
+    terminalUpstreamCalls: terminalUpstream,
+    zeroCharge: chargeSpy.calls === chargesBefore
+  })
+}
+
+/* ---------------- K7：list 只读（恰 2 键 / 每行恰 6 键 / 采纳过滤 / 零写入零扣费） ---------------- */
+{
+  const K_FACE = 'f-k-list-0001'
+  const baseTask = {
+    uid: ADMIN_IDENTITY.uid,
+    seal_id: 's-1',
+    face_id: K_FACE,
+    upstream_task_id: '',
+    upstream_status: 200,
+    charge_amount: 10,
+    charge_balance_after: 40,
+    refunded: false,
+    deadline_at: '2026-11-08T00:20:00.000Z'
+  }
+  const put = (id, patch) => fakeDb.bucketOf(TASK_COLLECTION).set(id, Object.assign({ _id: id }, baseTask, patch))
+  put('aiet-k-l-submitted', {
+    request_id: 'rid-k-l-1',
+    source_image_id: SRC_OK,
+    status: 'SUBMITTED',
+    upstream_task_id: 'up-k-1',
+    product_image_id: '',
+    error_reason: '',
+    error_message: '',
+    created_at: '2026-11-08T01:00:00.000Z',
+    updated_at: '2026-11-08T01:00:00.000Z'
+  })
+  put('aiet-k-l-ready', {
+    request_id: 'rid-k-l-2',
+    source_image_id: SRC_OK,
+    status: 'READY',
+    product_image_id: '',
+    error_reason: '',
+    error_message: '',
+    created_at: '2026-11-08T02:00:00.000Z',
+    updated_at: '2026-11-08T02:00:00.000Z'
+  })
+  put('aiet-k-l-failed', {
+    request_id: 'rid-k-l-3',
+    source_image_id: SRC_OK,
+    status: 'FAILED',
+    product_image_id: '',
+    error_reason: 'UPSTREAM_ERROR',
+    error_message: '上游修復任務失敗',
+    created_at: '2026-11-08T03:00:00.000Z',
+    updated_at: '2026-11-08T03:00:00.000Z'
+  })
+  put('aiet-k-l-adopted', {
+    request_id: 'rid-k-l-4',
+    source_image_id: SRC_OK,
+    status: 'READY',
+    product_image_id: 'img-k-adopted-0001',
+    error_reason: '',
+    error_message: '',
+    created_at: '2026-11-08T04:00:00.000Z',
+    updated_at: '2026-11-08T04:00:00.000Z'
+  })
+  fakeDb.bucketOf('xiai_faces').set('f-k-adopted-ref', { _id: 'f-k-adopted-ref', kind: 'FACE', face_image_id: 'img-k-adopted-0001' })
+
+  const chargesBefore = chargeSpy.calls
+  const taskWritesBefore = taskSetCalls()
+  const allWritesBefore = fakeDb.hooks.setCalls.length
+  const upstreamBefore = kTaskFetchCalls.length
+  const reply = await listOp({ face_id: K_FACE })
+  const rows = Array.isArray(reply.rows) ? reply.rows : []
+  const rowShapes = [...new Set(rows.map(shapeOf))].sort()
+  const statuses = [...new Set(rows.map((row) => row.status))].sort()
+  const ordered = rows.map((row) => row.created_at)
+  check('K7', 'list 只读：回包**恰 2 键** `ok / rows`；`rows` **每行恰 6 键** `task_id/status/image_id/source_image_id/created_at/error_message`（零内部字段、零 `plan` / `refunded`）；`READY` 且产物已被印面引用者**被采纳过滤不回**（4 行种入 ⇒ 回 3 行）、按 `created_at` 倒序；状态取值 ⊆ 四态；**零写入、零扣费、零上游**', {
+    keys: 'ok,rows',
+    rowCount: 3,
+    rowShapes: ['created_at,error_message,image_id,source_image_id,status,task_id'],
+    statuses: ['FAILED', 'READY', 'SUBMITTED'],
+    orderedDesc: true,
+    adoptedFiltered: true,
+    zeroWrites: true,
+    zeroCharge: true,
+    zeroUpstream: true
+  }, {
+    keys: shapeOf(reply),
+    rowCount: rows.length,
+    rowShapes,
+    statuses,
+    orderedDesc: ordered.every((value, index) => index === 0 || ordered[index - 1] >= value),
+    adoptedFiltered: rows.every((row) => row.image_id !== 'img-k-adopted-0001') && rows.length === 3,
+    zeroWrites: fakeDb.hooks.setCalls.length === allWritesBefore && taskSetCalls() === taskWritesBefore,
+    zeroCharge: chargeSpy.calls === chargesBefore,
+    zeroUpstream: kTaskFetchCalls.length === upstreamBefore
+  })
+}
+
+/* ---------------- K8：`reason` 零新增 ＋ 状态四态封闭 ---------------- */
+{
+  const seen = [...kReasons].sort()
+  const statuses = [...kStatuses].sort()
+  check('K8', 'K 段读数：失败 `reason` **零新增**（全部 ⊆ 既有冻结 13 值）；回包 `status` 只在四态字面值内（`SUBMITTED` / `RUNNING` / `READY` / `FAILED`）', {
+    reasonSubset: true,
+    reasonCountOk: true,
+    statusSubset: true
+  }, {
+    reasonSubset: seen.every((reason) => FROZEN_REASONS.indexOf(reason) !== -1),
+    reasonCountOk: Object.keys(userConfig.REASONS).length === 13,
+    statusSubset: statuses.every((status) => Object.values(tasks.TASK_STATUS).indexOf(status) !== -1) && statuses.length > 0
+  })
+  console.log(JSON.stringify({ id: 'K8.readout', kReasons: seen, kStatuses: statuses }))
+}
+
+/* ---------------- K9：任务集合服务端专属（不进客户端读面真源） ---------------- */
+{
+  const { readFileSync } = require('node:fs')
+  const occurrences = (text, needle) => String(text).split(needle).length - 1
+  const dbSource = readFileSync(path.join(ROOT, 'src/data/db.js'), 'utf8')
+  const taskSource = readFileSync(path.join(FN_DIR, 'lib/aiEnhanceTasks.js'), 'utf8')
+  check('K9', '任务集合 `xiai_ai_enhance_tasks`：实现点集合名逐字恰 1 处；客户端读面真源 `src/data/db.js` **零出现**（服务端专属、不进 `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`）', {
+    implLiterals: 1,
+    clientReadFace: 0
+  }, {
+    implLiterals: occurrences(taskSource, "'xiai_ai_enhance_tasks'"),
+    clientReadFace: occurrences(dbSource, 'xiai_ai_enhance_tasks') + occurrences(dbSource, 'ai_enhance_tasks')
+  })
+}
+
+/* ---------------- K10：单次预算全部显著低于网关 60 秒上限 ---------------- */
+{
+  check('K10', '超时预算：提交 25 秒 / 单查 20 秒 / 下载 25 秒 / 入册 45 秒 / 整轮 45 秒，**任一 ≥ 60 秒即判负**；任务期限恰 20 分钟（`deadline_at` − `created_at`）', {
+    submit: 25000,
+    query: 20000,
+    download: 25000,
+    ingest: 45000,
+    round: 45000,
+    deadline: 1200000,
+    allBelowGateway: true
+  }, {
+    submit: tasks.SUBMIT_POST_BUDGET_MS,
+    query: tasks.STATUS_QUERY_BUDGET_MS,
+    download: tasks.STATUS_DOWNLOAD_BUDGET_MS,
+    ingest: tasks.STATUS_INGEST_BUDGET_MS,
+    round: tasks.STATUS_ROUND_BUDGET_MS,
+    deadline: tasks.TASK_DEADLINE_MS,
+    allBelowGateway: [
+      tasks.SUBMIT_POST_BUDGET_MS,
+      tasks.STATUS_QUERY_BUDGET_MS,
+      tasks.STATUS_DOWNLOAD_BUDGET_MS,
+      tasks.STATUS_INGEST_BUDGET_MS,
+      tasks.STATUS_ROUND_BUDGET_MS
+    ].every((budget) => budget > 0 && budget < 60000)
   })
 }
 

@@ -4996,7 +4996,7 @@ const ADMIN_OPS = Object.freeze({
    * **直接回放、零上游零扣費**；④ 單輪推進：單查 20 秒 → `pending` / `processing` ⇒ 置 `RUNNING`
    * 回 **恰 4 鍵**；`completed` ⇒ 下載 25 秒 ＋ 入册段 45 秒 ⇒ 置 `READY` 回 **恰 6 鍵**
    * （`preview{mime,sha256}` ＋ `charge{amount,balance}`）；`failed` / `violation` ／ 過
-   * `deadline_at` ／ 整輪超 55 秒 ⇒ **退款（行上 `refunded` 為護欄）並置 `FAILED`**；
+   * `deadline_at` ／ 整輪超 45 秒 ⇒ **退款（行上 `refunded` 為護欄）並置 `FAILED`**；
    * ⑤ **零扣費**（扣費只在 submit）、`reason` **零新增**、**零新集合**。
    * @param {object} payload 載荷（封閉一鍵 `task_id`）
    * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份

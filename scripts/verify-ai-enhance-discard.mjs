@@ -19,7 +19,7 @@
  *   E. 载荷面（五）：未知键 ⇒ `INVALID_FIELD`；缺 / 空 `image_id` ⇒ `MISSING_REQUIRED`；
  *      非字符串 ⇒ `INVALID_VALUE`；**零删**（行、对象原封）。
  *   F. 管理员门（六）：非管理员 ⇒ `FORBIDDEN` 且**零删**；缺白名单 env ⇒ fail-closed 拒绝。
- *   G. 静态门（七）：`ADMIN_OPS` **恰 19 项**且含 `ai-enhance-discard`（排序位在
+ *   G. 静态门（七）：`ADMIN_OPS` **恰 31 项**且含 `ai-enhance-discard`（排序位在
  *      `ai-enhance-face` 之前）；`REASONS` **仍 13 值**（零新增）；`aiEnhanceDiscard.js`
  *      **零集合名字面**（`xiai_` 字面 0、`collection(` 0、`.doc(` 0 —— 读走 `ops.readRows`、
  *      删行走 `ops.deleteRow` / `ops.deleteArtifactObject`）；薄委派恰一处。
@@ -510,17 +510,17 @@ const replyNoEnv = await discard({ image_id: ID_ADMIN }, ADMIN_IDENTITY, { nowSe
 }
 
 /* ===========================================================================
-  G 段：静态门（七）—— ADMIN_OPS 恰 19 项 / REASONS 仍 13 值 / 实现点零集合名字面
+  G 段：静态门（七）—— ADMIN_OPS 恰 31 项 / REASONS 仍 13 值 / 实现点零集合名字面
   =========================================================================== */
-section('G', '静态门：ADMIN_OPS 恰 19 项且含 ai-enhance-discard（排序位在 ai-enhance-face 之前）/ REASONS 仍 13 / 零集合名字面')
+section('G', '静态门：ADMIN_OPS 恰 31 项且含 ai-enhance-discard（排序位在 ai-enhance-face 之前）/ REASONS 仍 13 / 零集合名字面')
 
 {
   const { readFileSync } = require('node:fs')
   const opsSource = readFileSync(path.join(FN_DIR, 'lib/ops.js'), 'utf8')
   const implSource = readFileSync(path.join(FN_DIR, 'lib/aiEnhanceDiscard.js'), 'utf8')
   const adminKeys = Object.keys(ops.ADMIN_OPS)
-  check('G1', '⑦ `ADMIN_OPS` **恰 28 项**、含 `ai-enhance-discard`（函数；薄委派）、排序位在 `ai-enhance-face` 之前', {
-    count: 28,
+  check('G1', '⑦ `ADMIN_OPS` **恰 31 项**、含 `ai-enhance-discard`（函数；薄委派）、排序位在 `ai-enhance-face` 之前', {
+    count: 31,
     type: 'function',
     beforeEnhanceFace: true
   }, {

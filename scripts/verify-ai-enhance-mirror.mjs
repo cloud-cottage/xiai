@@ -1,24 +1,30 @@
 /**
- * 玺爱 · **自检：AI 候選行本地鏡像**（`scripts/verify-ai-enhance-mirror.mjs`，本单新增）
+ * 玺爱 · **自检：AI 候選行本地鏡像**（`scripts/verify-ai-enhance-mirror.mjs`）
  * ============================================================================ *
  * **本地、离线**（注入假云函数传输 ＋ 注入假镜像存储；零网络、零云端连接、零生产数据）。
- * 被测件：`src/services/aiEnhance.js::enhanceFaceImage` 的成功路镜像步 ＋ 注入缝
- * `setAiEnhanceMirrorStore`。
+ * 被测件：`src/services/aiEnhance.js::enhanceFaceImage` 的两段异步路（submit → status）
+ * ＋ 注入缝 `setAiEnhanceMirrorStore`。
  *
- * 背景（本单根因）：服务端已建影像行（`storage=server`、`storage_key` 自洽），但**客户端本地
- * 镜像里没有这一行** ⇒ `seals.js::loadImageDataUrl` 的云端分支不成立 ⇒ 回落本地 blobstore ⇒
- * 右格报「影像二進制不在本地存儲中」。修法＝服务端成功回包带 `row`、客户端按仓内既有范式
- * （`db.js::insertImageRow`：先读现有行再 append、`saveImageRows` 落盘）把它镜像回本机。
+ * 背景（**本单裁定，冻结语义**）：`ai-enhance-status` 的 `READY` 回包是**冻结契约恰六键**
+ * `ok / task_id / status / image_id / preview / charge` —— **不含 `row`**。因此客户端镜像步
+ * （`mirrorCandidateRow(gate.row)`）在异步路恒得 `mirror: false` 是**设计结果、不是缺陷**：
+ * 界面靠**云端快照**取图（详情页另有 `retryDataSource` 回落）。本套据此断言**新语义**，
+ * 不再要求镜像成功。
  *
- * 断言面（本套 **5** 条 —— 覆盖派单方点名的 ①〜④ ＋ 一条静态门）：
- *   M1 ① 成功且回包 `row` 在场 ⇒ 镜像里**多出该行**（行数 1 → 2）且该行与回包 `row`
- *      **字段逐字**（整行 JSON 相等）；既有行原样保留；`ok: true`、`mirror: true`、
- *      `imageId` 逐字 ＝ `row._id`。
- *   M2 ② **幂等**：同一 `row` 再追一次 ⇒ 行数**不变**（仍 2、零重复），`mirror: true`。
- *   M3 ③ 回包 `row` **缺席** ⇒ 不崩、**零追加**（镜像逐字不变）、返回仍 `ok: true`、
- *      `imageId` 照常回；`mirror: false`（本机没镜像到 ⇒ UI 可据此提示刷新）。
- *   M4 ④ 镜像**写入抛错** ⇒ 整体仍 `ok: true`（仍回 `image_id`）、`mirror: false`、
- *      镜像内容**一字未动**（失败只降级，绝不把成功改判成失败）。
+ * 假传输按 `action` / `op` **分派**（`issue` 出令牌；`ai-enhance-submit` 回恰五键；
+ * `ai-enhance-status` 回恰六键 `READY`；未知 op 结构化拒绝）—— 旧「一切非 issue 动作都回
+ * 同步旧形状」的假传输正是上一版 M1〜M4 全红的真因。
+ *
+ * 断言面（本套 **5** 条 —— M1〜M4 按裁定重写 ＋ 一条静态门）：
+ *   M1 异步第一段：`ai-enhance-submit` 回包**恰五键** `ok/task_id/status/source_image_id/charge`
+ *      且**无 `row`** ⇒ 客户端不崩、镜像零追加、仍 `ok: true`；`imageId` 取自后续
+ *      `ai-enhance-status` 的 `READY.image_id`；`mirror: false`（两段各恰 1 发）。
+ *   M2 **同 `request_id` 重放**（钉住 id 生成两发同一号）⇒ 服务端**只扣一次**、回同一
+ *      `task_id`、第二次回包 `charge.balance` 与第一次逐字相同；镜像步零追加。
+ *   M3 `READY` **恰六键且无 `row`**（冻结契约）⇒ 零抛错、镜像一字未动（零读零写）、
+ *      `ok: true`、`mirror: false`、`imageId` 逐字 ＝ `READY.image_id`。
+ *   M4 镜像存储配置为「读 / 写即抛」⇒ `READY` 分支回包与 M3 **逐字相同**、`ok: true`、
+ *      `mirror: false`、镜像一字未动（抛错只降级、零触发，**绝不把成功改判成失败**）。
  *   M5 静态门：客户端源文本里镜像调用点恰 1 处、`setAiEnhanceMirrorStore` 导出恰 1 处、
  *      `mirrorCandidateRow` 定义恰 1 处（不第二处硬编码、不直连 `localStorage`）。
  *
@@ -58,6 +64,8 @@ function check(id, title, expected, actual) {
 
 const countIn = (text, needle) => String(text).split(needle).length - 1
 const deepEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
+const hasKey = (value, key) => Boolean(value) && Object.prototype.hasOwnProperty.call(value, key)
 
 /* --------------------------------------------------------------------------- *
   浏览端全局假体（`storage.js` / `session.js` 只认 `window.localStorage`）
@@ -101,52 +109,16 @@ session.setUser({ id: 'u-mirror-selfcheck-0001', phone: '13800000000', role: 'ad
 userTokenSvc.clearUserToken()
 
 /* --------------------------------------------------------------------------- *
-  服务端回包夹具（与 `lib/aiEnhance.js` 新成功回包同形：原 8 键 ＋ `row`）
+  夹具读数（异步两段契约；**回包里恒无 `row`** —— 冻结语义）
  * --------------------------------------------------------------------------- */
 const SHA = 'ab'.padEnd(64, '0')
-const baseReply = () => ({
-  ok: true,
-  image_id: servedRow._id,
-  source_image_id: 'img-src000001',
-  preview: { mime: 'image/png', sha256: SHA },
-  charge: { amount: 10, balance: 40 },
-  upstream_status: 200,
-  elapsed_ms: 1234,
-  idempotent: false
-})
+const SOURCE_IMAGE_ID = 'img-src000001'
+const TASK_ID = 'aiet-0f24ace91b3d5701' /* `aiet-` ＋ 16 位十六进制（与服务端形态逐字同形）。 */
+const READY_IMAGE_ID = 'img-ready00000001'
+const CHARGE_AMOUNT = 10
+const START_BALANCE = 50
 
-/** 服务端「已落库的那一行本身」（键面 ＝ persist 的那一行 ＋ SDK 补的 `_id`）。 */
-const ROW = {
-  _id: 'img-mirror001',
-  id: 'img-mirror001',
-  stamp_id: 's-1',
-  sealId: 's-1',
-  kind: 'FACE',
-  storage: 'server',
-  storage_key: `xiai/images/${SHA.slice(0, 2)}/${SHA}.png`,
-  sha256: SHA,
-  bytes: 1024,
-  bytesLength: 1024,
-  mime: 'image/png',
-  width: null,
-  height: null,
-  source: 'ai_enhance',
-  displayOnly: true,
-  source_image_id: 'img-src000001',
-  charge_balance_after: 40,
-  upstream_status: 200,
-  elapsed_ms: 1234,
-  created_at: '2026-11-02T00:00:00.000Z'
-}
-/** M4 用的另一枚候選行（不同 id ⇒ 必须真去写 ⇒ 撞上抛错的写入）。 */
-const SHA2 = 'cd'.padEnd(64, '2')
-const ROW_OTHER = Object.assign({}, ROW, {
-  _id: 'img-mirror002',
-  id: 'img-mirror002',
-  sha256: SHA2,
-  storage_key: `xiai/images/${SHA2.slice(0, 2)}/${SHA2}.png`
-})
-/** 镜像里**已有**的既有行（证明「先读现有行再 append」不覆盖旧数据）。 */
+/** 镜像里**已有**的既有行（证明镜像步即便发生也不会覆盖旧数据；新语义下它恒原样）。 */
 const PREEXIST = {
   id: 'img-pre000001',
   kind: 'FACE',
@@ -158,12 +130,27 @@ const PREEXIST = {
 }
 
 /* --------------------------------------------------------------------------- *
-  注入缝 ①：假云函数传输（`issue` 给令牌、`verify` 给成功回包；`row` 可开关）
+  注入缝 ①：假云函数传输 —— **按 `action` / `op` 分派**的异步回包
+  （`issue` 出令牌；`ai-enhance-submit` 恰五键；`ai-enhance-status` 恰六键 READY；
+   未知 op ⇒ 结构化拒绝；**任何 op 都不回 `row`**）
  * --------------------------------------------------------------------------- */
-let withRow = true
-let servedRow = ROW
 const TRANSPORT_TOKEN = 'offline-selfcheck-token-not-a-secret'
 let transportCalls = []
+
+/* 服务端假账本（幂等判据：同 `request_id` 只扣一次、只回原回包）。 */
+let serverBalance = START_BALANCE
+const submitLedger = new Map()
+const submits = [] /* `{request_id, task_id, balance}` —— 逐发登记。 */
+const statusReplies = []
+let statusCalls = 0
+
+function resetServerState() {
+  serverBalance = START_BALANCE
+  submitLedger.clear()
+  submits.length = 0
+  statusReplies.length = 0
+  statusCalls = 0
+}
 
 cloudbaseFn.setCloudFunctionTransport(async (name, data) => {
   transportCalls.push({ name, action: data && data.action, op: data && data.op })
@@ -185,19 +172,66 @@ cloudbaseFn.setCloudFunctionTransport(async (name, data) => {
       }
     }
   }
-  const result = Object.assign(baseReply(), { identity: { uid: 'u-mirror-selfcheck-0001' }, serverNow: 0 })
-  if (withRow) result.row = servedRow
-  return { result }
+  const op = data && typeof data.op === 'string' ? data.op : ''
+  const payload = (data && data.payload) || {}
+
+  if (op === 'ai-enhance-submit') {
+    /* 恰五键 `ok / task_id / status / source_image_id / charge`（**无 `row`**）；
+       同 `request_id` ⇒ 幂等回放（原回包原样回吐，零新增扣费）。 */
+    const requestId = String(payload.request_id === undefined || payload.request_id === null ? '' : payload.request_id)
+    let entry = submitLedger.get(requestId)
+    if (!entry) {
+      serverBalance -= CHARGE_AMOUNT
+      entry = {
+        task_id: TASK_ID,
+        balance: serverBalance,
+        reply: {
+          ok: true,
+          task_id: TASK_ID,
+          status: 'SUBMITTED',
+          source_image_id: String(payload.image_id === undefined || payload.image_id === null ? '' : payload.image_id),
+          charge: { amount: CHARGE_AMOUNT, balance: serverBalance }
+        }
+      }
+      submitLedger.set(requestId, entry)
+    }
+    submits.push({ request_id: requestId, task_id: entry.task_id, balance: entry.balance, reply: entry.reply })
+    return { result: Object.assign({}, entry.reply) }
+  }
+
+  if (op === 'ai-enhance-status') {
+    /* 恰六键 `ok / task_id / status / image_id / preview / charge`（**无 `row`** —— 冻结契约）。 */
+    statusCalls += 1
+    const reply = {
+      ok: true,
+      task_id: String(payload.task_id === undefined || payload.task_id === null ? '' : payload.task_id),
+      status: 'READY',
+      image_id: READY_IMAGE_ID,
+      preview: { mime: 'image/png', sha256: SHA },
+      charge: { amount: CHARGE_AMOUNT, balance: serverBalance }
+    }
+    statusReplies.push(reply)
+    return { result: reply }
+  }
+
+  /* 未知 op（含 `issue` 之外的一切）⇒ 结构化拒绝（不拿旧同步形状糊弄过去）。 */
+  return { result: { ok: false, reason: 'INVALID_VALUE', message: `離線自檢：未知 op（${op || '（空）'}）`, refunded: false } }
 })
 
 /* --------------------------------------------------------------------------- *
-  注入缝 ②：假镜像存储（`list` / `save`；`saveThrows` 模拟写入抛错）
+  注入缝 ②：假镜像存储（`list` / `save`；`listThrows` / `saveThrows` 模拟读 / 写抛错）
  * --------------------------------------------------------------------------- */
 let mirrorRows = []
 let saveThrows = false
+let listThrows = false
 let saveCalls = 0
+let listCalls = 0
 aiEnhance.setAiEnhanceMirrorStore({
-  list: () => mirrorRows.slice(),
+  list: () => {
+    listCalls += 1
+    if (listThrows) throw new Error('MIRROR_READ_FAILED')
+    return mirrorRows.slice()
+  },
   save: (rows) => {
     saveCalls += 1
     if (saveThrows) throw new Error('MIRROR_WRITE_FAILED')
@@ -207,61 +241,132 @@ aiEnhance.setAiEnhanceMirrorStore({
 })
 
 const enhance = () =>
-  aiEnhance.enhanceFaceImage({ image_id: 'img-src000001', seal_id: 's-1', face_id: 'f-1' })
+  aiEnhance.enhanceFaceImage({ image_id: SOURCE_IMAGE_ID, seal_id: 's-1', face_id: 'f-1' })
+
+/**
+ * **钉住 `request_id` 生成**（`makeRequestId()` 只吃 `Date.now` / `Math.random`）：
+ * 两次调用各包一次、常量逐字相同 ⇒ 产出**同一个 `request_id`**（服务端据此幂等）。
+ * 只在本次调用期间生效，`finally` 立即还原 —— **不留全局态**。
+ * @returns {Promise<object>}
+ */
+async function stableEnhance() {
+  const originalRandom = Math.random
+  const originalNow = Date.now
+  const FIXED_NOW = 1793000000000
+  Math.random = () => 0.987654321
+  Date.now = () => FIXED_NOW
+  try {
+    return await enhance()
+  } finally {
+    Math.random = originalRandom
+    Date.now = originalNow
+  }
+}
 
 /* =========================================================================== *
-   M 段：成功回包 `row` ⇒ 本地镜像（① 追加逐字 ② 幂等 ③ 缺席 ④ 写抛错）
+   M 段：异步两段（submit → status READY）下的镜像语义
  * =========================================================================== */
-section('M', 'AI 候選行本地鏡像：成功且 row 在场 ⇒ 追加逐字 / 幂等不重复 / 缺席不追加 / 写抛错只降级')
+section('M', 'AI 候選行本地鏡像：异步两段（submit 恰五键无 row → status READY 恰六键无 row）⇒ 镜像零追加、mirror 恒 false 是设计结果')
 
-/* M1 ① 成功且回包 `row` 在场 ⇒ 镜像多出该行且字段逐字。 */
+/* M1 ① submit 恰五键、无 row ⇒ 客户端不崩、镜像零追加、imageId 取自 READY。 */
 {
+  resetServerState()
   mirrorRows = [PREEXIST]
-  const before = mirrorRows.length
-  const reply = await enhance()
-  const appended = mirrorRows.length === before + 1 ? mirrorRows[mirrorRows.length - 1] : null
-  check('M1', '① 成功且回包 `row` 在场 ⇒ 镜像**多出该行**（1 → 2）、该行与回包 `row` **字段逐字**（整行 JSON 相等）、既有行原样保留；返回仍 `ok: true` 且 `mirror: true`、`imageId` 逐字 ＝ `row._id`', {
+  const savesBefore = saveCalls
+  const listsBefore = listCalls
+  let reply = null
+  let threw = false
+  try {
+    reply = await stableEnhance()
+  } catch {
+    threw = true
+  }
+  const submit = submits[0] || null
+  const ready = statusReplies[0] || null
+  check('M1', '① 异步第一段 `ai-enhance-submit` 回包**恰五键** `ok/task_id/status/source_image_id/charge` 且**无 `row`** ⇒ 客户端不崩（零抛错）、镜像零追加；两段各恰 1 发；返回仍 `ok: true`、`mirror: false`，`imageId` **取自后续** `ai-enhance-status` 的 `READY.image_id`', {
+    submitKeys: 'charge,ok,source_image_id,status,task_id',
+    submitHasRow: false,
+    readyKeys: 'charge,image_id,ok,preview,status,task_id',
+    readyHasRow: false,
+    submitCalls: 1,
+    statusCalls: 1,
+    threw: false,
     ok: true,
-    mirror: true,
-    countBefore: 1,
-    countAfter: 2,
-    appendedVerbatim: true,
-    preexistingKept: true,
-    imageId: ROW._id
+    mirror: false,
+    imageId: READY_IMAGE_ID,
+    mirrorCount: 1,
+    mirrorWrites: 0,
+    mirrorReads: 0
   }, {
-    ok: reply.ok,
-    mirror: reply.mirror,
-    countBefore: before,
-    countAfter: mirrorRows.length,
-    appendedVerbatim: !!appended && deepEqual(appended, ROW),
-    preexistingKept: mirrorRows.length > 0 && deepEqual(mirrorRows[0], PREEXIST),
-    imageId: reply.imageId
+    submitKeys: submit ? shapeOf(submit.reply) : '(no submit)',
+    submitHasRow: submit ? hasKey(submit.reply, 'row') : null,
+    readyKeys: ready ? shapeOf(ready) : '(no status)',
+    readyHasRow: ready ? hasKey(ready, 'row') : null,
+    submitCalls: submits.length,
+    statusCalls,
+    threw,
+    ok: reply && reply.ok,
+    mirror: reply && reply.mirror,
+    imageId: reply && reply.imageId,
+    mirrorCount: mirrorRows.length,
+    mirrorWrites: saveCalls - savesBefore,
+    mirrorReads: listCalls - listsBefore
   })
 }
 
-/* M2 ② 幂等：同一 `row` 再追一次 ⇒ 行数不变。 */
+/* M2 ② 同 `request_id` 重放 ⇒ 服务端只扣一次、回同一 task_id；镜像步零追加。 */
 {
-  const before = mirrorRows.length
+  const mirrorBefore = mirrorRows.length
   const snapshot = JSON.stringify(mirrorRows)
-  const reply = await enhance()
-  check('M2', '② **幂等**：同一 `row` 再追一次 ⇒ 行数**不变**（仍 2、零重复行）、镜像逐字不变；返回仍 `ok: true`、`mirror: true`', {
+  const savesBefore = saveCalls
+  const first = submits[0] || null
+  let reply = null
+  let threw = false
+  try {
+    reply = await stableEnhance()
+  } catch {
+    threw = true
+  }
+  const second = submits[1] || null
+  check('M2', '② **同 `request_id` 重放**（两段异步各再走一遍）：两次 submit 载荷的 `request_id` **逐字相同**且形态合服务端封闭面（8〜64 位字母数字 / 下划线）⇒ 服务端**只扣一次**、回同一 `task_id`，第二次回包 `charge.balance` 与第一次**逐字相同**（零重复扣费）；客户端仍 `ok: true`、`mirror: false`，镜像步**零追加**（行数与内容逐字不变）', {
+    submitCalls: 2,
+    requestIdsSame: true,
+    requestIdShape: true,
+    chargedOnce: true,
+    sameTaskId: true,
+    balanceUnchanged: true,
+    threw: false,
     ok: true,
-    mirror: true,
-    countUnchanged: 2,
-    verbatimUnchanged: true
+    mirror: false,
+    imageId: READY_IMAGE_ID,
+    mirrorCount: 1,
+    mirrorUnchanged: true,
+    mirrorWrites: 0
   }, {
-    ok: reply.ok,
-    mirror: reply.mirror,
-    countUnchanged: mirrorRows.length === before ? mirrorRows.length : -1,
-    verbatimUnchanged: JSON.stringify(mirrorRows) === snapshot
+    submitCalls: submits.length,
+    requestIdsSame: Boolean(first && second && first.request_id !== '' && first.request_id === second.request_id),
+    requestIdShape: Boolean(first && second) && [first.request_id, second.request_id].every((id) => /^[A-Za-z0-9_]{8,64}$/.test(id)),
+    chargedOnce: submitLedger.size === 1,
+    sameTaskId: Boolean(first && second && first.task_id === second.task_id),
+    balanceUnchanged: Boolean(first && second && first.balance === second.balance),
+    threw,
+    ok: reply && reply.ok,
+    mirror: reply && reply.mirror,
+    imageId: reply && reply.imageId,
+    mirrorCount: mirrorRows.length,
+    mirrorUnchanged: mirrorRows.length === mirrorBefore && JSON.stringify(mirrorRows) === snapshot,
+    mirrorWrites: saveCalls - savesBefore
   })
 }
 
-/* M3 ③ 回包 `row` 缺席 ⇒ 不崩、不追加、返回仍 ok。 */
+/* M3 ③ READY 恰六键且无 row（冻结契约）⇒ 零抛错、镜像一字未动、ok:true、mirror:false。 */
+let m3Reply = null
 {
-  withRow = false
-  const before = mirrorRows.length
+  resetServerState()
+  const mirrorBefore = mirrorRows.length
   const snapshot = JSON.stringify(mirrorRows)
+  const savesBefore = saveCalls
+  const listsBefore = listCalls
   let reply = null
   let threw = false
   try {
@@ -269,31 +374,42 @@ section('M', 'AI 候選行本地鏡像：成功且 row 在场 ⇒ 追加逐字 /
   } catch {
     threw = true
   }
-  withRow = true
-  check('M3', '③ 回包 `row` **缺席** ⇒ 不崩（零抛错）、**零追加**（镜像逐字不变）、返回仍 `ok: true` 且照常回 `imageId`；`mirror: false`（本机没镜像到 ⇒ UI 可提示刷新）', {
+  m3Reply = reply
+  const ready = statusReplies[0] || null
+  check('M3', '③ `ai-enhance-status::READY` **恰六键** `ok/task_id/status/image_id/preview/charge` 且**无 `row`**（冻结契约 ⇒ 界面靠云端快照取图）⇒ 零抛错、镜像**一字未动**（零读零写）、返回仍 `ok: true`、`mirror: false`，`imageId` 逐字 ＝ `READY.image_id`', {
+    readyKeys: 'charge,image_id,ok,preview,status,task_id',
+    readyHasRow: false,
     threw: false,
     ok: true,
     mirror: false,
-    countUnchanged: 2,
-    verbatimUnchanged: true,
-    imageId: ROW._id
+    imageId: READY_IMAGE_ID,
+    mirrorCount: 1,
+    mirrorUnchanged: true,
+    mirrorWrites: 0,
+    mirrorReads: 0
   }, {
+    readyKeys: ready ? shapeOf(ready) : '(no status)',
+    readyHasRow: ready ? hasKey(ready, 'row') : null,
     threw,
     ok: reply && reply.ok,
     mirror: reply && reply.mirror,
-    countUnchanged: reply && mirrorRows.length === before ? mirrorRows.length : -1,
-    verbatimUnchanged: reply && JSON.stringify(mirrorRows) === snapshot,
-    imageId: reply && reply.imageId
+    imageId: reply && reply.imageId,
+    mirrorCount: mirrorRows.length,
+    mirrorUnchanged: mirrorRows.length === mirrorBefore && JSON.stringify(mirrorRows) === snapshot,
+    mirrorWrites: saveCalls - savesBefore,
+    mirrorReads: listCalls - listsBefore
   })
 }
 
-/* M4 ④ 镜像写入抛错 ⇒ 整体仍 ok 且 mirror:false。 */
+/* M4 ④ 镜像存储读 / 写即抛 ⇒ READY 分支回包与 M3 逐字相同、仍成功、镜像一字未动。 */
 {
-  servedRow = ROW_OTHER
+  resetServerState()
   saveThrows = true
-  const before = mirrorRows.length
+  listThrows = true
+  const mirrorBefore = mirrorRows.length
   const snapshot = JSON.stringify(mirrorRows)
   const savesBefore = saveCalls
+  const listsBefore = listCalls
   let reply = null
   let threw = false
   try {
@@ -302,23 +418,25 @@ section('M', 'AI 候選行本地鏡像：成功且 row 在场 ⇒ 追加逐字 /
     threw = true
   }
   saveThrows = false
-  servedRow = ROW
-  check('M4', '④ 镜像**写入抛错** ⇒ 整体仍 `ok: true`（仍回 `image_id`）、`mirror: false`、镜像内容**一字未动**（失败只降级，绝不把成功改判成失败）', {
+  listThrows = false
+  check('M4', '④ 镜像存储配置为「读 / 写即抛」：`READY` 分支（回包无 `row` ⇒ 镜像步零读零写、抛错**零触发**）回包与 M3 **逐字相同** ⇒ 仍 `ok: true`、`mirror: false`、`imageId` 照常回、镜像**一字未动** —— 失败只降级，**绝不把成功改判成失败**', {
     threw: false,
     ok: true,
     mirror: false,
-    imageId: ROW_OTHER._id,
-    writeAttempted: true,
-    countUnchanged: 2,
-    verbatimUnchanged: true
+    imageId: READY_IMAGE_ID,
+    replySameAsM3: true,
+    storeTouched: false,
+    mirrorCount: 1,
+    mirrorUnchanged: true
   }, {
     threw,
     ok: reply && reply.ok,
     mirror: reply && reply.mirror,
     imageId: reply && reply.imageId,
-    writeAttempted: saveCalls > savesBefore,
-    countUnchanged: reply && mirrorRows.length === before ? mirrorRows.length : -1,
-    verbatimUnchanged: reply && JSON.stringify(mirrorRows) === snapshot
+    replySameAsM3: deepEqual(reply, m3Reply),
+    storeTouched: saveCalls > savesBefore || listCalls > listsBefore,
+    mirrorCount: mirrorRows.length,
+    mirrorUnchanged: mirrorRows.length === mirrorBefore && JSON.stringify(mirrorRows) === snapshot
   })
 }
 
@@ -352,7 +470,7 @@ console.log(
     summary: { total, passed, failed: total - passed },
     sections: sectionStats,
     failed_ids: failedIds,
-    note: '离线自检：注入 setCloudFunctionTransport（假云函数回包）＋ setAiEnhanceMirrorStore（假镜像存储）；零网络、零云端、零生产数据；不打印任何令牌原文。'
+    note: '离线自检：注入 setCloudFunctionTransport（按 action/op 分派的异步回包，零 row）＋ setAiEnhanceMirrorStore（假镜像存储）；零网络、零云端、零生产数据；不打印任何令牌原文。'
   })
 )
 process.exit(total === passed ? 0 : 1)
