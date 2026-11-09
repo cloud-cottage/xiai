@@ -5,7 +5,7 @@
 不经云函数，绕开 6MB 请求体与 60s 网关。
 
 - 入口：`transcode.mjs`（Node 18+，无第三方依赖；只用本机 `magick` 与 `@cloudbase/node-sdk`）
-- 写集：仅本目录（`transcode.mjs` / `README.md` / `progress.jsonl`）
+- 写集：仅本目录（`transcode.mjs` / `README.md` / `progress-<envId>.jsonl`；旧档 `progress.jsonl` 只读作默认环境基线，**永不写**）
 - 不碰 `src/**`、`cloudfunctions/**`、`docs/**`、`scripts/**`、`package.json`，不 git add/commit/push，
   **不写任何数据库集合**（只写 COS 对象 + 本地进度文件）
 - TIFF 与中间产物一律落在 `$TMPDIR`，跑完自动清理，**不写进仓库**
@@ -33,6 +33,7 @@ xiai/thumb/<sha 前两位>/<sha>.webp       缩略图（长边 ≤256）
 ```
 
 目标环境默认 `liwu-d8gek6jjdab1d087c`（生产在用），`--env` 可切。
+**换环境必须用独立进度文件** —— 默认进度文件名带环境后缀 `progress-<envId>.jsonl`，随 `--env` 自动切换（详见「续跑语义」）。
 
 ## 用法
 
@@ -46,6 +47,12 @@ node tools/display-artifacts/transcode.mjs --limit 20
 # 全量（6,347 张；断点续跑，随时可 Ctrl-C，重跑接着来）
 node tools/display-artifacts/transcode.mjs
 
+# 换环境跑：进度自动切到 progress-<envId>.jsonl（换环境必须用独立进度文件）
+node tools/display-artifacts/transcode.mjs --env liwu-cny1313-d1gb2fukyb7cb19bb --limit 20
+
+# 新环境覆盖迁移：同键不同字节 ⇒ 直接覆盖（不删先）；不传 --overwrite 则维持 conflict 不覆盖
+node tools/display-artifacts/transcode.mjs --env liwu-cny1313-d1gb2fukyb7cb19bb --limit 20 --overwrite
+
 # 只处理 manifest 外的 10 张孤儿 TIFF（默认是跳过并列 sha）
 node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-run
 ```
@@ -54,16 +61,17 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 | --- | --- | --- |
 | `--manifest <path>` | `/Users/kevin/bistro/feicui/exports/seal_import_seal_20261010_01/images_manifest.jsonl` | 入口清单 |
 | `--originals <dir>` | `data/originals` | 内容寻址 TIFF 根目录 |
-| `--progress <path>` | `tools/display-artifacts/progress.jsonl` | 进度 JSONL（本目录） |
-| `--env <envId>` | `liwu-d8gek6jjdab1d087c` | 目标 CloudBase 环境 |
+| `--progress <path>` | `tools/display-artifacts/progress-<envId>.jsonl` | 进度 JSONL，**按环境隔离**；显式指定则照旧用该路径（向后兼容） |
+| `--env <envId>` | `liwu-d8gek6jjdab1d087c` | 目标 CloudBase 环境（进度文件随它切换） |
 | `--limit <n>` | 0（全部） | 只处理前 n 张（按 manifest 顺序；`--include-orphans` 时孤儿排在后面） |
 | `--batch <n>` | 500 | 单批张数：转码 → 探测 → 上传 → 落进度（每批落盘一次） |
 | `--concurrency <n>` | 4 | `magick` 子进程并发 |
 | `--probe-chunk <n>` | 50 | `getFileInfo` / `getTempFileURL` 单次条目数（**硬上限 50**：传更大也只按 50 分批，只能调小） |
+| `--overwrite` | off | 同键已存在但字节数不同 ⇒ **不删先、直接覆盖上传**（进度行 `status=ok` 且 `overwrote:true`，对象级 `overwrote`；覆盖后重探复核）；不传 ⇒ 维持 `conflict`（不覆盖、退出码 2） |
 | `--dry-run` | off | 只解码算尺寸：不探测、不上传、**不写进度文件** |
 | `--include-orphans` | off | 连 manifest 外孤儿 TIFF 一并处理 |
 
-退出码：`0` 全部成功；`1` 有 `failed` 或回读断言失败；`2` 有 `conflict`（同键不同字节，未覆盖）。
+退出码：`0` 全部成功；`1` 有 `failed`、回读断言失败或覆盖收尾复核字节不等；`2` 有 `conflict`（同键不同字节，未覆盖；`--overwrite` 时不产生 conflict）。
 
 ## 凭据
 
@@ -90,9 +98,12 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 | 不存在 | 上传 | `uploaded` |
 | 存在且字节数 == 本地 | 不动 | `skipped`（对象级 `exists`） |
 | 存在但字节数不同 | **不覆盖** | `conflict` |
+| 存在但字节数不同 ＋ `--overwrite` | **不删先、直接覆盖上传** | `overwrote`（图片级 `ok`，进度行记 `overwrote:true`） |
 
 - 图片级状态：任一对象 `error` ⇒ `failed`；否则任一 `conflict` ⇒ `conflict`；
-  否则任一 `uploaded` ⇒ `ok`；两族都已存在同字节 ⇒ `skipped`。
+  否则任一 `uploaded` / `overwrote` ⇒ `ok`（含 `overwrote` 的行记 `overwrote:true`）；两族都已存在同字节 ⇒ `skipped`。
+- 字节数相同的键在 `--overwrite` 下也**不重复上传**（先判 `exists`，再判是否覆盖）。
+- 覆盖后的重探复核见下方「覆盖后的元数据收敛延迟」一节。
 - 转码失败与上传失败各重试 **2 次**（共 3 次尝试）。
 - 编码是确定性的：同一源 + 同参数 ⇒ 同字节，所以「已存在同字节」是可靠的复跑判据
   （实测：手工先传过 1 个展示件，正式跑时它被识别为同字节 `exists`，只补传了缩略图）。
@@ -100,11 +111,23 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 ## 续跑语义
 
 - 进度文件 JSONL 逐行追加（每批落盘一次），**中途被掐不丢已完成进度**。
+- **换环境必须用独立进度文件**：默认文件名带环境后缀 `progress-<envId>.jsonl`
+  （如 `progress-liwu-cny1313-d1gb2fukyb7cb19bb.jsonl`），随 `--env` 自动切换。
+  进度以 sha 为键、不带环境维度，若跨环境共用单文件，旧环境已 `ok` 的 6,347 行会让新环境整批被误跳过。
+- 向后兼容：显式 `--progress <path>` 时**照旧**读写指定路径（不加后缀、不分环境，换环境请自行分文件）。
+- 读取规则（以「对应本环境的那个文件」为准）：
+  - 本环境文件 `progress-<envId>.jsonl`（或显式 `--progress` 指定的路径）始终为准；
+  - 旧单文件 `progress.jsonl` **只属于默认环境** `liwu-d8gek6jjdab1d087c`：仅在「跑默认环境 且 未显式 `--progress`」时
+    作**只读基线**合入（保住历史 6,347 行断点），同 sha 行随后被本环境文件覆盖；
+  - 跑其它环境**一律不读**旧单文件，本脚本也**永不写**旧单文件 ——
+    **不得把另一环境的 `ok` 当成本环境已完成**。
+- 每行进度带 `envId` 字段；读回时 `envId` 与本环境不符的行一律忽略（历史行无 `envId` 字段，照旧接受）。
 - 启动时读回：`status ∈ {ok, skipped}` 的 sha 直接跳过（不转码、不探测、不上传）；
   `failed` / `conflict` 会被重新检查（失败可自愈，冲突持续暴露给派单方裁定）。
 - `dry-run` 不写进度，不会污染后续真跑的幂等判断。
-- 字段：`sha / at / status / native_w / native_h / thumb_w / thumb_h / display_bytes / thumb_bytes / ms / objects / error? / orphan? / manifest_mismatch?`
-  （`native_*` = 展示件原生宽高 == 源 TIFF 宽高，**无缩放语义**；`thumb_*` = 缩略图宽高。）
+- 字段：`envId / sha / at / status / native_w / native_h / thumb_w / thumb_h / display_bytes / thumb_bytes / ms / objects / overwrote? / error? / orphan? / manifest_mismatch?`
+  （`native_*` = 展示件原生宽高 == 源 TIFF 宽高，**无缩放语义**；`thumb_*` = 缩略图宽高；
+  `overwrote:true` = 本行有对象被 `--overwrite` 覆盖。）
 
 ## 对账三读数（每次跑完必打）
 
@@ -114,7 +137,8 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 [读数3] 两族对象应到数 = 读数2 × 2（display N + thumb N）
 ```
 
-外加 `[本 run 处理明细]`（幂等复跑时 `幂等跳过=… 新处理=0`）、`[统计]`（对象级新上传/已存在/conflict）、
+外加 `[本 run 处理明细]`（幂等复跑时 `幂等跳过=… 新处理=0`，`--overwrite` 跑时带 `overwrote=…`）、
+`[统计]`（对象级已存在/新上传/覆盖上传/conflict）、
 `[孤儿]`（manifest 外 10 张 sha 全列，不静默丢；`--include-orphans` 时打
 `本批纳入 N 张【单独计数】（解码/成功 n/N）`）、`[conflict]` / `[failed]` 明细。
 
@@ -127,6 +151,24 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 - 缩略图长边 == `min(源长边, 256)`。
 
 打印 `[回读 n/12] … PASS/FAIL` 与汇总；有 FAIL ⇒ 退出码 1。
+下载带 **3 次重试（间隔 5s / 15s）**：刚覆盖的对象数据面尚未收敛时会被对端掐断（undici 报 `terminated`），
+重试避免把收敛延迟误判成 FAIL。
+
+## 覆盖后的元数据收敛延迟（实测坑，`--overwrite` 专属）
+
+`uploadFile` 成功**不等于** `getFileInfo` 立刻返回新字节数：实测同键覆盖后，`size` 在数秒~2 分钟内
+仍返回**旧值**（例：缩略图覆盖后即时重探仍 `remote=11134 local=6680`；2 分钟后独立探针 40/40 全部相等）。
+`getTempFileURL` 下载刚覆盖的对象也可能被对端掐断（`terminated`）。因此 `--overwrite` 的复核分两段：
+
+1. **每批覆盖后即时重探一次**：探到「字节相等」的键当场确认；探到「不等」的键**不就地判失败**，
+   记入待收敛清单，打 `[覆盖复核] 本批已覆盖 N 键：即时远端字节==本地=… 待收敛=…`。
+2. **回读之前做收尾总复核**：对清单退避重探（10/20/30/40/50s，最多 6 轮、累计 ≤150s，收敛即提前返回），
+   打 `[覆盖收尾复核] 待收敛 N 键 → 最终远端字节==本地新产物=… 不等=…`；
+   **最终仍不等 ⇒ `overwriteMismatch` ⇒ 退出码 1**（不静默放过）；探测异常同样判不可核实、退出码 1。
+
+收尾复核先于回读执行：等元数据收敛的窗口同时也给数据面收敛时间，回读才不会撞上对象半衰期。
+若一次 `--overwrite` 跑报退出码 1，先分清是 `覆盖收尾复核 不等>0`（真问题，必须查）还是回读 FAIL
+（幂等重跑一次即可，重跑时字节已同、全 `skipped`）。
 
 ## manifest 外的 10 张 TIFF
 
@@ -152,7 +194,30 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
    `新处理=0（ok=0 对象已存在=0 conflict=0 failed=0 decoded=0）`、解码 0 张、新上传 0 个、
    进度文件仍 6,527 行、回读 `12/12 PASS`，退出码 0。
 
-全量（6,347 张 × 2 族）由派单方另跑。
+### 新环境覆盖小量验证（2026-11-09 晚，`--env liwu-cny1313-d1gb2fukyb7cb19bb`；旧环境零触碰）
+
+1. 不传 `--overwrite`（`--limit 20`）：`[plan] 待处理=20`，图片级 `conflict=20`、
+   对象级 `已存在同字节=0 新上传=4 覆盖上传=0 conflict=36`（4 个是新环境**漏传**的对象被补传），
+   `[conflict] 20 个 sha 同键但字节数不同，未覆盖`，**退出码 2** —— 默认行为未变。
+2. `--limit 20 --overwrite`：对象级 `已存在同字节=4 覆盖上传=36 conflict=0`，20 行进度全 `status=ok`、
+   行上 `overwrote:true`、控制台逐行 `overwrote=true`。（当时复核是即时单探、撞上元数据收敛 ⇒ 退出码 1；
+   随后独立探针 40/40 键 `remote size == local bytes`，证明覆盖已生效，复核机制据此改为「即时探 + 收尾总复核」。）
+3. 同参数重跑：`[plan] 续跑跳过=20 待处理=0`、`新处理=0`、`新上传=0 覆盖上传=0`、回读 `12/12 PASS`、退出码 0。
+4. 同参数 + 全新 `--progress`（强制重探）：`读数2 = 20（ok=0 skipped=20）`、
+   对象级 `已存在同字节=40 新上传=0 覆盖上传=0 conflict=0`、回读 `12/12 PASS`、退出码 0
+   ⇒ **字节已同 ⇒ 全部 `skipped`、零上传**。
+5. `--limit 40 --overwrite` / `--limit 60 --overwrite`（续跑前段，各真覆盖新一批 20 张）：
+   `覆盖上传=35/40`、`[覆盖复核] 本批已覆盖 40 键：即时远端字节==本地=6 待收敛=34`、
+   `[覆盖收尾复核] 待收敛 34 键 → 最终远端字节==本地新产物=34 不等=0`（复核链路全绿）。
+   其时回读 9/12，3 个 `terminated` 全是**刚覆盖**对象的数据面半衰 —— 数分钟后同一组 URL 全部 200 下载成功
+   ⇒ 据此加了「回读下载 3 次重试」与「收尾复核前置到回读之前」。
+6. `--limit 80 --overwrite`（终版代码）：`续跑跳过=80 待处理=0`、回读 `12/12 PASS`、退出码 0。
+7. **进度隔离终验**：旧档 `progress.jsonl` 跑前跑后均 **12,683 行**、sha256 逐字相同
+   （`577aa74bfbaba00d09aea9e194d861178727aad50dd9b41d50f1e37717f1f586`）、
+   含 `envId` 的行 = 0、含新环境 id 的行 = 0、mtime 未变；
+   `progress-liwu-cny1313-d1gb2fukyb7cb19bb.jsonl` 全部行 `envId == liwu-cny1313-d1gb2fukyb7cb19bb`（`foreign_rows=0`）。
+
+全量（6,347 张 × 2 族）由派单方另跑（已见其以 `--env 新环境 --overwrite` 起跑，写入同一环境隔离进度文件）。
 
 ## upload-originals.mjs — 原图 TIFF 直传 COS（同目录新增）
 

@@ -19,9 +19,12 @@
  *   缩略图  xiai/thumb/<sha 前两位>/<sha>.webp
  *
  * 幂等：上传前先探同键对象（getFileInfo → HEAD 拿 content-length）；
- *   已存在且字节数一致 ⇒ skipped；已存在但字节数不同 ⇒ conflict（不覆盖）。
- * 续跑：进度 JSONL 逐行追加（sha / status / native_w,h / thumb_w,h / 字节 / 耗时 / 错误摘要），
+ *   已存在且字节数一致 ⇒ skipped（不重复上传）；已存在但字节数不同 ⇒ 默认 conflict（不覆盖），
+ *   加 --overwrite ⇒ 直接覆盖上传（status=ok，行上记 overwrote:true，覆盖后再重探字节复核）。
+ * 续跑：进度 JSONL 逐行追加（envId / sha / status / native_w,h / thumb_w,h / 字节 / 耗时 / 错误摘要），
+ *   默认文件 progress-<envId>.jsonl 按环境隔离 —— 换环境必须用独立进度文件；
  *   启动时读回，status ∈ {ok, skipped} 的 sha 直接跳过；failed / conflict 会被重新检查。
+ *   旧单文件 progress.jsonl 只属于默认环境，仅作其基线只读合入；其它环境一律不读、本脚本永不写它。
  *
  * 用法见同目录 README.md。
  */
@@ -42,7 +45,8 @@ const require = createRequire(path.join(REPO_ROOT, 'package.json'));
 
 const DEFAULT_MANIFEST = '/Users/kevin/bistro/feicui/exports/seal_import_seal_20261010_01/images_manifest.jsonl';
 const DEFAULT_ORIGINALS = path.join(REPO_ROOT, 'data', 'originals');
-const DEFAULT_PROGRESS = path.join(SCRIPT_DIR, 'progress.jsonl');
+// 旧单文件进度（历史产物）：只属于默认环境 DEFAULT_ENV —— 只作基线读入，本脚本永不写它
+const LEGACY_PROGRESS = path.join(SCRIPT_DIR, 'progress.jsonl');
 const DEFAULT_ENV = 'liwu-d8gek6jjdab1d087c';
 const DEFAULT_BATCH = 500;
 const DEFAULT_CONCURRENCY = 4;
@@ -58,21 +62,31 @@ const MAGICK_TIMEOUT_MS = 180_000;
 const CRED_MARGIN_MS = 10 * 60 * 1000;   // 临时密钥剩余不足 10 分钟就先刷新
 const THUMB_MAX = 256;          // 缩略图长边上限（展示件无上限、零重采样）
 
+/** 默认进度文件路径：按环境隔离 —— progress-<envId>.jsonl（换环境必须用独立进度文件） */
+function progressFileFor(envId) {
+  const safe = String(envId).replace(/[^A-Za-z0-9._-]+/g, '_');
+  return path.join(SCRIPT_DIR, `progress-${safe}.jsonl`);
+}
+
 const HELP = `用法: node tools/display-artifacts/transcode.mjs [选项]
 
   --manifest <path>     images_manifest.jsonl（默认 ${DEFAULT_MANIFEST}）
   --originals <dir>     内容寻址 TIFF 根目录（默认 data/originals）
-  --progress <path>     进度 JSONL（默认 tools/display-artifacts/progress.jsonl）
+  --progress <path>     进度 JSONL（默认按环境隔离：tools/display-artifacts/progress-<envId>.jsonl；
+                        显式指定则照旧用该路径。换环境必须用独立进度文件）
   --env <envId>         目标 CloudBase 环境（默认 ${DEFAULT_ENV}）
   --limit <n>           只处理前 n 张（小量试跑用）
   --batch <n>           单批张数（默认 ${DEFAULT_BATCH}：转码 → 探测 → 上传 → 落进度）
   --concurrency <n>     子进程并发（默认 ${DEFAULT_CONCURRENCY}）
   --probe-chunk <n>     探测/取临时 URL 的单次条目数（默认 ${DEFAULT_PROBE_CHUNK}；硬上限 ${PROBE_CHUNK_MAX}，传更大只会被压回 ${PROBE_CHUNK_MAX}）
+  --overwrite           同键已存在但字节数不同 ⇒ 直接覆盖上传（status=ok，行上记 overwrote:true，
+                        覆盖后重探字节复核）；默认不传 ⇒ 维持 conflict（不覆盖、退出码 2）
   --dry-run             只解码与算尺寸，不探测、不上传、不写进度
   --include-orphans     连 manifest 外的孤儿 TIFF 一并处理（默认跳过并在报告里列出）
   -h, --help            本帮助
 
-退出码：0 全部成功；1 有 failed 或回读断言失败；2 有 conflict（同键不同字节，未覆盖）。`;
+退出码：0 全部成功；1 有 failed、回读断言失败或覆盖后重探字节不等；
+        2 有 conflict（同键不同字节，未覆盖；--overwrite 时不产生 conflict）。`;
 
 function die(msg) {
   console.error(`[error] ${msg}`);
@@ -83,12 +97,14 @@ function parseArgs(argv) {
   const o = {
     manifest: DEFAULT_MANIFEST,
     originals: DEFAULT_ORIGINALS,
-    progress: DEFAULT_PROGRESS,
+    progress: null,            // null ⇒ 用按环境隔离的默认路径 progressFileFor(env)
+    progressExplicit: false,   // 显式 --progress ⇒ 照旧读写指定路径（向后兼容）
     env: DEFAULT_ENV,
     limit: 0,
     batch: DEFAULT_BATCH,
     concurrency: DEFAULT_CONCURRENCY,
     probeChunk: DEFAULT_PROBE_CHUNK,
+    overwrite: false,
     dryRun: false,
     includeOrphans: false,
     help: false,
@@ -103,12 +119,13 @@ function parseArgs(argv) {
     switch (a) {
       case '--manifest': o.manifest = take(); break;
       case '--originals': o.originals = take(); break;
-      case '--progress': o.progress = take(); break;
+      case '--progress': o.progress = take(); o.progressExplicit = true; break;
       case '--env': o.env = take(); break;
       case '--limit': o.limit = Number(take()); break;
       case '--batch': o.batch = Number(take()); break;
       case '--concurrency': o.concurrency = Number(take()); break;
       case '--probe-chunk': o.probeChunk = Number(take()); break;
+      case '--overwrite': o.overwrite = true; break;
       case '--dry-run': o.dryRun = true; break;
       case '--include-orphans': o.includeOrphans = true; break;
       case '--help': case '-h': o.help = true; break;
@@ -344,18 +361,49 @@ function scanOriginals(dir) {
   return map;
 }
 
-function loadProgress(file) {
+function loadProgress(file, envId = null) {
   const map = new Map();
-  if (!fs.existsSync(file)) return { map, lines: 0, broken: 0 };
+  if (!fs.existsSync(file)) return { map, lines: 0, broken: 0, foreign: 0 };
   let broken = 0;
+  let foreign = 0;
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(l => l.trim().length > 0);
   for (const line of lines) {
     try {
       const j = JSON.parse(line);
-      if (j && j.sha) map.set(j.sha, j);
+      if (!j || !j.sha) { broken++; continue; }
+      // 环境隔离：带 envId 且与本环境不符的行一律不算本环境进度
+      // （老行无 envId 字段 ⇒ 历史产物，照旧接受；新行都带 envId）
+      if (envId && j.envId && j.envId !== envId) { foreign++; continue; }
+      map.set(j.sha, j);
     } catch { broken++; }
   }
-  return { map, lines: lines.length, broken };
+  return { map, lines: lines.length, broken, foreign };
+}
+
+/**
+ * 合并读取本环境进度：
+ *   - 以本环境文件（progress-<envId>.jsonl，或显式 --progress 指定的路径）为准；
+ *   - 旧单文件 LEGACY_PROGRESS 只属于默认环境：仅在「跑默认环境 且 未显式 --progress」时
+ *     作基线只读合入（保住历史断点），随后被本环境文件的同 sha 行覆盖；
+ *   - 跑其它环境一律不读旧单文件 —— 不得把另一环境的 ok 当成本环境已完成。
+ */
+function loadMergedProgress(file, envId, legacyFile, useLegacyBaseline) {
+  const map = new Map();
+  let broken = 0;
+  let foreign = 0;
+  let legacyLines = 0;
+  if (useLegacyBaseline) {
+    const st = loadProgress(legacyFile, envId);
+    for (const [k, v] of st.map) map.set(k, v);
+    legacyLines = st.lines;
+    broken += st.broken;
+    foreign += st.foreign;
+  }
+  const st = loadProgress(file, envId);
+  for (const [k, v] of st.map) map.set(k, v);
+  broken += st.broken;
+  foreign += st.foreign;
+  return { map, lines: st.lines, broken, foreign, legacyLines };
 }
 
 /* ------------------------------------------------------------ 转码（一遍出两个对象） */
@@ -458,9 +506,19 @@ async function readbackSample(cloud, shas, originalsMap, tmpRoot) {
           item.notes.push(`${label} 回读失败 code=${info ? info.code : 'NO_ITEM'}`);
           continue;
         }
-        const resp = await fetch(info.url);
-        if (!resp.ok) { item.pass = false; item.notes.push(`${label} HTTP ${resp.status}`); continue; }
-        const buf = Buffer.from(await resp.arrayBuffer());
+        // 刚覆盖的对象数据面收敛未完成时 fetch 会被对端掐断（实测 undici 报 "terminated"），
+        // 重试 3 次（间隔 5s / 15s）；仍拿不到字节才判 FAIL。
+        let buf = null;
+        let dlErr = null;
+        for (let attempt = 1; attempt <= 3 && !buf; attempt++) {
+          if (attempt > 1) await new Promise(r => setTimeout(r, attempt === 2 ? 5000 : 15000));
+          try {
+            const resp = await fetch(info.url);
+            if (!resp.ok) { dlErr = `HTTP ${resp.status}`; continue; }
+            buf = Buffer.from(await resp.arrayBuffer());
+          } catch (e) { dlErr = e.message; }
+        }
+        if (!buf) { item.pass = false; item.notes.push(`${label} 下载失败: ${dlErr}`); continue; }
         const f = path.join(dir, `${label}.webp`);
         fs.writeFileSync(f, buf);
         const idOut = await pExecFile(MAGICK_BIN, ['identify', '-format', '%m %w %h', f],
@@ -496,7 +554,10 @@ async function main() {
 
   const manifest = loadManifest(path.resolve(opts.manifest));
   const originalsMap = scanOriginals(path.resolve(opts.originals));
-  const progressFile = path.resolve(opts.progress);
+  // 进度文件：默认按环境隔离 progress-<envId>.jsonl；显式 --progress 照旧用指定路径（向后兼容）
+  const progressFile = opts.progressExplicit ? path.resolve(opts.progress) : progressFileFor(opts.env);
+  // 旧单文件 progress.jsonl 只属于默认环境：仅「跑默认环境 且 未显式 --progress」时作基线只读合入
+  const useLegacyBaseline = !opts.progressExplicit && opts.env === DEFAULT_ENV && fs.existsSync(LEGACY_PROGRESS);
 
   const manifestShas = new Set(manifest.rows.map(r => r.sha));
   const orphanShas = [...originalsMap.keys()].filter(s => !manifestShas.has(s)).sort();
@@ -508,12 +569,14 @@ async function main() {
   const totalBeforeLimit = list.length;
   if (opts.limit > 0) list = list.slice(0, opts.limit);
 
-  const progressState = loadProgress(progressFile);
+  const progressState = loadMergedProgress(progressFile, opts.env, LEGACY_PROGRESS, useLegacyBaseline);
   const progressMap = progressState.map;
   const TERMINAL = new Set(['ok', 'skipped']); // 续跑只跳过成功态；failed/conflict 重新检查
 
-  console.log(`[config] env=${opts.env} dryRun=${opts.dryRun} includeOrphans=${opts.includeOrphans} limit=${opts.limit || 'ALL'} batch=${opts.batch} concurrency=${opts.concurrency}`);
-  console.log(`[config] manifest=${path.resolve(opts.manifest)} originals=${path.resolve(opts.originals)} progress=${progressFile}`);
+  console.log(`[config] env=${opts.env} overwrite=${opts.overwrite} dryRun=${opts.dryRun} includeOrphans=${opts.includeOrphans} limit=${opts.limit || 'ALL'} batch=${opts.batch} concurrency=${opts.concurrency}`);
+  console.log(`[config] manifest=${path.resolve(opts.manifest)} originals=${path.resolve(opts.originals)} progress=${progressFile}（按环境隔离${useLegacyBaseline ? `；另以旧档 ${LEGACY_PROGRESS} ${progressState.legacyLines} 行作基线（只属默认环境，只读）` : '；不读旧档 progress.jsonl'}）`);
+  if (progressState.foreign > 0) console.log(`[progress] 忽略异环境行=${progressState.foreign}（envId≠${opts.env}，不计入本环境续跑）`);
+  if (progressState.broken > 0) console.log(`[progress] 解析失败行=${progressState.broken}`);
   console.log(`[scan] manifest 行数=${manifest.lineCount} 唯一 sha=${manifest.rows.length} 重复=${manifest.dup} 非法行=${manifest.bad}`);
   console.log(`[scan] 磁盘 TIFF=${originalsMap.size} manifest 外孤儿=${orphanShas.length}`);
   if (!opts.includeOrphans && orphanShas.length > 0) {
@@ -532,7 +595,7 @@ async function main() {
   // 缺源文件：记 failed（dry-run 只报告不落盘）
   for (const row of missing) {
     const rec = {
-      sha: row.sha, at: new Date().toISOString(), status: 'failed',
+      sha: row.sha, envId: opts.env, at: new Date().toISOString(), status: 'failed',
       native_w: null, native_h: null, thumb_w: null, thumb_h: null,
       display_bytes: null, thumb_bytes: null, ms: 0, error: 'source TIFF missing on disk',
       orphan: !!row.orphan,
@@ -541,7 +604,9 @@ async function main() {
   }
 
   const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'xiai-da-'));
-  const stats = { decoded: 0, uploaded: 0, exists: 0, conflict: 0, failed: 0, decodeFail: 0 };
+  const stats = { decoded: 0, uploaded: 0, overwrote: 0, exists: 0, conflict: 0, failed: 0, decodeFail: 0 };
+  let overwriteMismatch = 0;   // 收尾总复核后仍 != 本地新产物的键数（>0 ⇒ 退出码 1）
+  const pendingVerify = [];    // --overwrite 即时探到「元数据未收敛」的键，跑完后统一收尾复核
   const failureNotes = [];
   const conflictShas = [];
   const doneThisRun = new Set();
@@ -587,7 +652,7 @@ async function main() {
         stats.failed++; stats.decodeFail++;
         failureNotes.push(`${short(res.row.sha)} 转码失败: ${res.error}`);
         const rec = {
-          sha: res.row.sha, at: new Date().toISOString(), status: 'failed',
+          sha: res.row.sha, envId: opts.env, at: new Date().toISOString(), status: 'failed',
           native_w: null, native_h: null, thumb_w: null, thumb_h: null,
           display_bytes: null, thumb_bytes: null, ms: res.ms, error: res.error,
           orphan: !!res.row.orphan,
@@ -611,7 +676,7 @@ async function main() {
           stats.failed++;
           failureNotes.push(`${short(x.row.sha)} 探测失败: ${e.message}`);
           const rec = {
-            sha: x.row.sha, at: new Date().toISOString(), status: 'failed',
+            sha: x.row.sha, envId: opts.env, at: new Date().toISOString(), status: 'failed',
             native_w: x.r.nativeW, native_h: x.r.nativeH, thumb_w: x.r.thumbW, thumb_h: x.r.thumbH,
             display_bytes: x.r.dispBytes, thumb_bytes: x.r.thumbBytes, ms: x.ms, error: `probe: ${e.message}`,
             orphan: !!x.row.orphan,
@@ -635,6 +700,19 @@ async function main() {
           if (!info) { objects[label] = 'error'; err = err || `${label}: 探测无返回`; return; }
           if (info.code === 'SUCCESS') {
             if (info.size === localBytes) { objects[label] = 'exists'; stats.exists++; return; }
+            // 同键不同字节：--overwrite ⇒ 不删先、直接覆盖上传；默认 ⇒ conflict（不覆盖、退出码 2）
+            if (opts.overwrite) {
+              try {
+                const buf = fs.readFileSync(label === 'display' ? x.r.dispPath : x.r.thumbPath);
+                await cloud.upload(key, buf);
+                objects[label] = 'overwrote';
+                stats.overwrote++;
+              } catch (e) {
+                objects[label] = 'error';
+                err = err || `${label} 覆盖上传失败: ${e.message}`;
+              }
+              return;
+            }
             objects[label] = 'conflict';
             stats.conflict++;
             return;
@@ -661,20 +739,21 @@ async function main() {
         const states = Object.values(objects);
         if (states.includes('error')) status = 'failed';
         else if (states.includes('conflict')) status = 'conflict';
-        else if (states.includes('uploaded')) status = 'ok';
+        else if (states.includes('uploaded') || states.includes('overwrote')) status = 'ok';
         else status = 'skipped';
 
         if (status === 'failed') stats.failed++;
         if (status === 'conflict') conflictShas.push(sha);
 
         const rec = {
-          sha, at: new Date().toISOString(), status,
+          sha, envId: opts.env, at: new Date().toISOString(), status,
           native_w: x.r.nativeW, native_h: x.r.nativeH,
           thumb_w: x.r.thumbW, thumb_h: x.r.thumbH,
           display_bytes: x.r.dispBytes, thumb_bytes: x.r.thumbBytes,
           ms: x.ms, objects,
           orphan: !!x.row.orphan,
         };
+        if (states.includes('overwrote')) rec.overwrote = true;
         if (err) rec.error = err;
         if (x.r.manifestMismatch) rec.manifest_mismatch = true;
         appendProgress(progressFile, rec);
@@ -682,11 +761,36 @@ async function main() {
         doneThisRun.add(sha);
 
         if (verbose) {
-          console.log(`  [${++printed}/${work.length}] ${short(sha)} ${status} native=${rec.native_w}x${rec.native_h} thumb=${rec.thumb_w}x${rec.thumb_h} disp=${rec.display_bytes}B thumb=${rec.thumb_bytes}B ${rec.ms}ms${err ? ' err=' + err : ''}`);
+          console.log(`  [${++printed}/${work.length}] ${short(sha)} ${status} native=${rec.native_w}x${rec.native_h} thumb=${rec.thumb_w}x${rec.thumb_h} disp=${rec.display_bytes}B thumb=${rec.thumb_bytes}B ${rec.ms}ms${rec.overwrote ? ' overwrote=true' : ''}${err ? ' err=' + err : ''}`);
         }
         return rec;
       });
-      void settled;
+
+      // --overwrite 覆盖后即时重探：已覆盖键应 == 本地新产物字节。
+      // 实测 CloudBase getFileInfo 的 size 在覆盖后有元数据收敛延迟（单键数秒~2 分钟内仍返回旧字节数），
+      // 故即时探到不等的键不就地判失败，先并入 pendingVerify，回读之后做收尾总复核再定退出码。
+      const owCheck = [];
+      for (const rec of settled) {
+        if (!rec || !rec.overwrote) continue;
+        const s = rec.sha;
+        if (rec.objects.display === 'overwrote') owCheck.push({ key: `xiai/display/${s.slice(0, 2)}/${s}.webp`, bytes: rec.display_bytes });
+        if (rec.objects.thumb === 'overwrote') owCheck.push({ key: `xiai/thumb/${s.slice(0, 2)}/${s}.webp`, bytes: rec.thumb_bytes });
+      }
+      if (owCheck.length > 0) {
+        try {
+          const m = await cloud.probe(owCheck.map(c => c.key));
+          let same = 0;
+          for (const c of owCheck) {
+            const info = m.get(c.key);
+            if (info && info.code === 'SUCCESS' && info.size === c.bytes) same++;
+            else pendingVerify.push(c);
+          }
+          console.log(`[覆盖复核] 本批已覆盖 ${owCheck.length} 键：即时远端字节==本地=${same} 待收敛=${owCheck.length - same}（并入收尾总复核）`);
+        } catch (e) {
+          console.log(`[覆盖复核] 即时重探失败（${owCheck.length} 键并入收尾总复核）: ${e.message}`);
+          pendingVerify.push(...owCheck);
+        }
+      }
     }
 
     if (opts.dryRun) {
@@ -716,7 +820,7 @@ async function main() {
 
   /* ---------------- 对账三读数 ---------------- */
   // 重新读回进度，保证统计口径来自磁盘
-  const finalProgress = loadProgress(progressFile).map;
+  const finalProgress = loadMergedProgress(progressFile, opts.env, LEGACY_PROGRESS, useLegacyBaseline).map;
   const counts = { ok: 0, skipped: 0, conflict: 0, failed: 0, none: 0 };
   const successShas = [];
   for (const row of list) {
@@ -730,12 +834,14 @@ async function main() {
 
   // 本 run 处理明细（幂等复跑的证据：全部命中进度、0 转码 0 上传）
   const resumeSkipSet = new Set(resumeSkip.map(r => r.sha));
-  const disp = { resumeSkip: 0, ok: 0, skipped: 0, conflict: 0, failed: 0, decoded: 0, none: 0 };
+  const disp = { resumeSkip: 0, ok: 0, skipped: 0, conflict: 0, failed: 0, decoded: 0, overwrote: 0, none: 0 };
   for (const row of list) {
     if (resumeSkipSet.has(row.sha)) { disp.resumeSkip++; continue; }
     if (doneThisRun.has(row.sha)) {
-      const st = (progressMap.get(row.sha) || {}).status || 'decoded';
+      const rec = progressMap.get(row.sha) || {};
+      const st = rec.status || 'decoded';
       disp[st] = (disp[st] || 0) + 1;
+      if (rec.overwrote) disp.overwrote++;
     } else {
       disp.none++;
     }
@@ -753,9 +859,9 @@ async function main() {
     console.log(`[读数3] 两族对象应到数 = ${s * 2}（display ${s} + thumb ${s}）`);
   }
   console.log('-------------------------------------------');
-  console.log(`[本 run 处理明细] 幂等跳过=${disp.resumeSkip}（命中进度，未转码/未探测/未上传） 新处理=${(disp.ok || 0) + (disp.skipped || 0) + (disp.conflict || 0) + (disp.failed || 0) + (disp.decoded || 0)}（ok=${disp.ok || 0} 对象已存在=${disp.skipped || 0} conflict=${disp.conflict || 0} failed=${disp.failed || 0} decoded=${disp.decoded || 0}） 未处理=${disp.none || 0}`);
-  console.log(`[统计] 解码成功=${stats.decoded} 张；对象级：已存在同字节=${stats.exists} 新上传=${stats.uploaded} conflict=${stats.conflict}；图片级 failed=${stats.failed}（含缺源文件 ${missing.length}）`);
-  console.log(`[统计] 本 run 处理唯一 sha=${doneThisRun.size}；进度文件=${progressFile}（累计 ${loadProgress(progressFile).lines} 行）`);
+  console.log(`[本 run 处理明细] 幂等跳过=${disp.resumeSkip}（命中进度，未转码/未探测/未上传） 新处理=${(disp.ok || 0) + (disp.skipped || 0) + (disp.conflict || 0) + (disp.failed || 0) + (disp.decoded || 0)}（ok=${disp.ok || 0} 对象已存在=${disp.skipped || 0} conflict=${disp.conflict || 0} failed=${disp.failed || 0} decoded=${disp.decoded || 0} overwrote=${disp.overwrote || 0}） 未处理=${disp.none || 0}`);
+  console.log(`[统计] 解码成功=${stats.decoded} 张；对象级：已存在同字节=${stats.exists} 新上传=${stats.uploaded} 覆盖上传=${stats.overwrote} conflict=${stats.conflict}；图片级 failed=${stats.failed}（含缺源文件 ${missing.length}）`);
+  console.log(`[统计] 本 run 处理唯一 sha=${doneThisRun.size}；进度文件=${progressFile}（本环境累计 ${loadProgress(progressFile, opts.env).lines} 行${useLegacyBaseline ? ` ＋ 旧档基线只读 ${LEGACY_PROGRESS}` : ''}）`);
   if (orphanShas.length > 0) {
     const orphanInBatch = list.filter(r => r.orphan);
     if (opts.includeOrphans) {
@@ -776,6 +882,41 @@ async function main() {
     console.log(`[failed] ${failureNotes.length} 条：`);
     for (const n of failureNotes.slice(0, 50)) console.log(`  - ${n}`);
     if (failureNotes.length > 50) console.log(`  … 另 ${failureNotes.length - 50} 条见进度文件`);
+  }
+
+  /* ---------------- --overwrite 收尾总复核（先于回读：等元数据收敛，回读才不撞数据面半衰） ---------------- */
+  // 覆盖后 getFileInfo 的 size 有元数据收敛延迟（实测单键数秒~2 分钟内仍返回旧字节数）：
+  // 各批次即时探到「不等」的键在这里统一退避重探，最多 6 轮（10/20/30/40/50s，累计 ≤150s，收敛即提前返回）；
+  // 窗口结束仍不等 ⇒ overwriteMismatch++（退出码 1），不静默放过。
+  if (pendingVerify.length > 0) {
+    const MAX_ROUNDS = 6;
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    try {
+      let pending = pendingVerify;
+      let m = new Map();
+      for (let round = 1; round <= MAX_ROUNDS && pending.length > 0; round++) {
+        if (round > 1) await wait(10000 * (round - 1));
+        m = await cloud.probe(pending.map(c => c.key));
+        const still = pending.filter(c => {
+          const info = m.get(c.key);
+          return !(info && info.code === 'SUCCESS' && info.size === c.bytes);
+        });
+        if (round > 1) console.log(`[覆盖收尾复核] 第 ${round} 轮重探 ${pending.length} 键：仍不等 ${still.length}`);
+        pending = still;
+      }
+      const same = pendingVerify.length - pending.length;
+      console.log(`[覆盖收尾复核] 待收敛 ${pendingVerify.length} 键 → 最终远端字节==本地新产物=${same} 不等=${pending.length}（最多 ${MAX_ROUNDS} 轮 / 累计 ≤150s）`);
+      for (const c of pending) {
+        const info = m.get(c.key);
+        overwriteMismatch++;
+        console.log(`  - 不等: ${c.key} remote=${info ? `${info.size}(${info.code})` : 'NO_ITEM'} local=${c.bytes}`);
+      }
+    } catch (e) {
+      overwriteMismatch += pendingVerify.length;
+      console.log(`[覆盖收尾复核] 探测失败（${pendingVerify.length} 键不可核实）: ${e.message}`);
+    }
+  } else if (opts.overwrite && stats.overwrote > 0) {
+    console.log('[覆盖收尾复核] 无待收敛键（覆盖键即时重探全部相等）');
   }
 
   /* ---------------- 抽 12 张回读 ---------------- */
@@ -802,6 +943,7 @@ async function main() {
 
   if (readbackFail > 0) return 1;
   if ((counts.failed || 0) > 0) return 1;
+  if (overwriteMismatch > 0) return 1;   // --overwrite 覆盖后重探：远端字节 != 本地新产物
   if ((counts.conflict || 0) > 0) return 2;
   return 0;
 }
