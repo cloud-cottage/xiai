@@ -33,3 +33,7 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+# 影像静态化（P0 产物 / 进度态）与上云打包（P1 构建包）的本机产物：按机器生成，不入库。
+/scripts/migration/out/
+/scripts/migration/.state/
+/deploy/cloudrun/out/

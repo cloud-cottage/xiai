@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# xiai-api 构建上下文排除表 —— **单一真源**（deploy/cloudrun/.dockerignore）
+#
+# docker 只认**上下文根**的 .dockerignore ⇒ 不要手敲 docker build；请用
+# deploy/cloudrun/package.sh（它会把本文件与 Dockerfile 复制到构建包根）。
+#
+# ⚠ 根锚定纪律：`/data` 的斜杠不可省 —— 写成 `data` 会连**内核依赖
+#   `src/data/{seed,assetmeta,uid}.js`** 一起剔除，镜像里 geom 薄桥直接起不来。
+# ═══════════════════════════════════════════════════════════════════════════
+
+# VCS / 本机状态
+/.git
+/.gitignore
+/.DS_Store
+/.runtime
+*.log
+.DS_Store
+
+# 环境文件（密钥一律不进镜像、不进构建上下文）
+.env
+.env.*
+
+# 与镜像无关的大目录（体量实测：data 1.2 G / qa-recheck 744 M / docs 294 M /
+# node_modules 100 M / server/.venv 61 M / dist 2.5 M / mockups 0.5 M）
+/data
+/qa-recheck
+/docs
+/node_modules
+/dist
+/mockups
+/scripts
+/cloudfunctions
+/functions
+/api
+/config
+/public
+/package-lock.json
+
+# 前端构建面（镜像只跑 xiai-api，不做前端构建）
+/IDEA.md
+/README.md
+/cloudbaserc.json
+/vercel.json
+/vite.config.js
+/index.html
+
+# Python 虚拟环境与缓存（任意层级）
+/server/.venv
+__pycache__
+*.pyc
+
+# 打包脚本自己的产物（否则 rsync 会把 out/buildctx 拷进自身）
+/deploy/cloudrun/out

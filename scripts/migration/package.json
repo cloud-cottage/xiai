@@ -1,0 +1,9 @@
+{
+  "name": "xiai-migration-scripts",
+  "private": true,
+  "type": "module",
+  "description": "xiai 一次性迁移/上传脚本（不参与前端构建）",
+  "dependencies": {
+    "@cloudbase/manager-node": "^5.10.3"
+  }
+}
