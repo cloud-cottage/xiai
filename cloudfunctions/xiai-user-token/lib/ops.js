@@ -4171,6 +4171,166 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
   return { ok: true, stampId, sealDoc, faceDocs }
 }
 
+/* --------------------------------------------------------------------------- *
+   **`existing` 分支的逐面补齐（本单 B）** —— `reviewSealImport` 的「印章已存在」落点
+   背景（真因）：幂等键 `(source, source_seal_id)` 命中时旧实现**只做影像回填 ＋ 翻状态、
+   根本不补面行** ⇒ 半采纳现场（印章与首面已落、第二面因 `xiai_faces` 上仓外建的
+   `(kind, sealId)` 唯一索引撞 `E11000` 没落）重放会把导入行翻成 `ACCEPTED` 而**永远缺一个
+   印面**（静默损伤）。本函数把缺的面按**与新建采纳同一套字段面与编号规则**补上：
+     · **幂等键命中 ⇒ 不发印章号、不建第二枚章**（本函数零 `issueCodeNumberAvoiding('seal')`）；
+     · **判定序（两遍，全量优先级）**：① **影像引用命中** —— 该面解析出的影像行 id 出现在既有
+       面行的 `face_image_id` ／ `edge_image_ids` ⇒ 已存在；② 否则按**确定性面行 id 位次**
+       （`fc-<序号>-<f|e><该面在导入行同类中的次序>`）命中 ⇒ 已存在；两者皆不中 ⇒ **缺失**；
+       先全量做 ① 再做 ② ⇒ 后面的面不会被前面的位次匹配抢占；
+     · 缺失面的**行 id**：位次 id 未被占用 ⇒ 直接用它（确定、可重放）；被占 ⇒ 走既有单点
+       `nextFaceIdOf`；**面号**走既有单点 `issueCodeNumberAvoiding('face')`
+       （`f1` 已占 ⇒ 自然落 `f2`）；写步由调用方经 `persist` 的 `kind:'set'`（确定性 `_id`
+       ⇒ 幂等 upsert）落盘；
+     · **影像解析结果回给调用方**做归属回填（`imageHits`，含**已存在面**的影像 —— 回填要覆盖
+       整章每一面）；
+     · 校验与新建采纳**同一套**（行级占位来源门 ＋ 逐面引用存在性 ＋ 占位摘要门）：`kind=FACE`
+       无引用 / 解析不到 ⇒ `{ok:false}`（该条保持 `PENDING`、本轮零写入）；`EDGE` 无引用放行。
+   **为什么不用 `facesOf()` 全量读**：平台 `.get()` 默认只回 100 行 ⇒ 全量读会漏掉本章的面行
+   ⇒ 把已存在的面误判成缺失（重复补面）。故按归属键做**显式限量**读取。
+ * --------------------------------------------------------------------------- */
+
+/** 本章既有面行的单次读取护栏（与既有 1000 行护栏同值）。 */
+const EXISTING_FACE_SCAN_LIMIT = 1000
+
+/**
+ * 由「导入行 ＋ 既有正式印章行」构造**缺失面行**（零落库；不发印章号）。
+ * @param {object} row 印章导入行
+ * @param {object} existing 既有正式印章行（幂等键命中）
+ * @param {{uid:string}} identity 服务端派生身份
+ * @param {string} at ISO 时戳
+ * @returns {Promise<{ok:true, faceDocs:Array<object>, imageHits:Array<object>}|{ok:false}>}
+ *   `faceDocs` ＝ 本轮缺失、待补的面行（可为空数组）；`imageHits` ＝ 解析命中的影像行
+ */
+async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
+  const stampId = text(existing && (existing.stamp_id || existing.sid || existing.id))
+  if (!stampId) return { ok: false }
+  const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
+  /* 行级占位来源门（与 `buildSealAcceptanceFromImport` 同判）。 */
+  if (sealPlaceholderRefDenial(text(row && row.source), faceDefs)) return { ok: false }
+  /* 逐面解析影像（与新建采纳同判）：`FACE` 无引用 / 解析不到 ⇒ 拒；`EDGE` 无引用放行。
+     解析结果**先于存在性判定**收集 ⇒ 已存在面的影像同样进回填命中表。 */
+  const imageHits = []
+  const resolved = []
+  for (const face of faceDefs) {
+    const hasRef = text(face.image_sha256) !== '' || text(face.image_storage_key) !== ''
+    if (!hasRef) {
+      if (face.kind === 'FACE') return { ok: false }
+      resolved.push({ face, image: null })
+      continue
+    }
+    const image = await findSealImportImageRow(face, null)
+    if (!image) return { ok: false }
+    if (sealPlaceholderDigestDenial(face, image)) return { ok: false }
+    imageHits.push(image)
+    resolved.push({ face, image })
+  }
+  /* 本章既有面行：`sealId` 为主、空集再按 `stamp_id` 兜底（建行侧两键同值同写 ⇒ 通常一次命中）。 */
+  const keyOf = (item) => text(item && (item._id || item.id))
+  const ownByKey = new Map()
+  for (const item of await readRows(COLLECTIONS.faces, { sealId: stampId }, { limit: EXISTING_FACE_SCAN_LIMIT })) {
+    const key = keyOf(item)
+    if (key !== '') ownByKey.set(key, item)
+  }
+  if (ownByKey.size === 0) {
+    for (const item of await readRows(COLLECTIONS.faces, { stamp_id: stampId }, { limit: EXISTING_FACE_SCAN_LIMIT })) {
+      const key = keyOf(item)
+      if (key !== '') ownByKey.set(key, item)
+    }
+  }
+  const own = [...ownByKey.values()]
+  const imageIdOf = (image) => (image ? text(image._id) || text(image.id) : '')
+  /* 位次：该面在导入行**同类**中的次序（与 `nextFaceIdOf` 的 `<f|e><n>` 同构）。 */
+  const positionOf = new Map()
+  const counters = { f: 0, e: 0 }
+  resolved.forEach(({ face }, index) => {
+    const letter = text(face.kind) === 'EDGE' ? 'e' : 'f'
+    counters[letter] += 1
+    positionOf.set(index, counters[letter])
+  })
+  /* 第 1 遍：影像引用命中（全量先做 ⇒ 后面的面不会被位次匹配抢占）。 */
+  const claimed = new Set()
+  const unmatched = []
+  resolved.forEach(({ face, image }, index) => {
+    const imageId = imageIdOf(image)
+    if (imageId !== '') {
+      const hit = own.find(
+        (item) =>
+          !claimed.has(keyOf(item)) &&
+          (face.kind === 'EDGE'
+            ? Array.isArray(item.edge_image_ids) && item.edge_image_ids.some((value) => text(value) === imageId)
+            : text(item.face_image_id) === imageId)
+      )
+      if (hit) {
+        claimed.add(keyOf(hit))
+        return
+      }
+    }
+    unmatched.push(index)
+  })
+  /* 第 2 遍：确定性面行 id 位次命中。 */
+  const serial = sealStampSerialOf(stampId)
+  const stillMissing = []
+  for (const index of unmatched) {
+    const face = resolved[index].face
+    const letter = text(face.kind) === 'EDGE' ? 'e' : 'f'
+    const candidate = `fc-${serial}-${letter}${positionOf.get(index)}`
+    const hit = own.find((item) => !claimed.has(keyOf(item)) && keyOf(item) === candidate)
+    if (hit) {
+      claimed.add(keyOf(hit))
+      continue
+    }
+    stillMissing.push({ index, candidate })
+  }
+  if (stillMissing.length === 0) return { ok: true, faceDocs: [], imageHits }
+  /* 补缺失面：行 id ＋ 面号（两者都走既有单点；`face_no` 避让**全库**已占号，与新建采纳同尺）。 */
+  const sealName = text(row && row.seal_name)
+  const source = text(row && row.source)
+  const taken = new Set(own.map(keyOf))
+  const usedFaceNos = await occupiedNosOf('face')
+  const assignedNos = new Set()
+  const faceDocs = []
+  for (const item of stillMissing) {
+    const { face, image } = resolved[item.index]
+    const faceId = taken.has(item.candidate) ? nextFaceIdOf(stampId, face.kind, taken) : item.candidate
+    taken.add(faceId)
+    const issued = await issueCodeNumberAvoiding('face', (no) => usedFaceNos.has(no) || assignedNos.has(no))
+    if (!issued.ok) return { ok: false }
+    assignedNos.add(issued.no)
+    const faceCode = codeId.encodeFaceCode(issued.no)
+    if (!faceCode.ok) return { ok: false }
+    const isEdge = face.kind === 'EDGE'
+    faceDocs.push({
+      id: faceId,
+      sealId: stampId,
+      stamp_id: stampId,
+      face_no: issued.no, // 识别编码：印面自增号（服务端计数器发号）
+      fid: faceCode.code, // 识别编码：由 `face_no` 恒重算
+      kind: face.kind,
+      face_image_id: !isEdge && image ? text(image.id) : null,
+      edge_image_ids: isEdge && image ? [text(image.id)] : [],
+      seal_name: text(face.seal_name) || sealName,
+      dynasty: text(face.dynasty) || text(row && row.dynasty),
+      seal_type: text(face.seal_type),
+      face_style: text(face.face_style),
+      seal_class: text(face.seal_class),
+      author: text(face.author),
+      author_person_id: text(face.author_person_id),
+      transcription: text(face.transcription),
+      image_source_kind: text(face.image_source_kind),
+      source,
+      uploaded_by: identity.uid,
+      created_at: at,
+      updated_at: at
+    })
+  }
+  return { ok: true, faceDocs, imageHits }
+}
+
 /* ---------------------------------------------------------------------------
   **无审核直写面（人类口径 2026-10-28）**：`createSealWithFaceDirect`（直写正式行）
   ＋ `querySealByFingerprint`（只读三态对照）
@@ -6650,7 +6810,22 @@ const ADMIN_OPS = Object.freeze({
       const seals = await sealsOf()
       /* **I-1 顺序（本单硬口径）**：**先落正式行**（印章 ＋ 印面；按 `(source_seal_id, source)`
          幂等键去重 ⇒ 重跑不产生重复行），**后翻导入行状态**（`expectAtLeast:1`）。 */
-      const existing = seals.find((item) => text(item && item.source_seal_id) === sourceSealId && text(item && item.source) === text(row && row.source))
+      /* **幂等键命中（本单 B.1）**：内存全量未命中 ⇒ **按幂等键定向读一次**。真因 —— `sealsOf()`
+         走裸 `collection.get()`，平台单次默认只回 **100 行** ⇒ 正式行 >100 时内存查找**必然漏命中**
+         ⇒ 会把「章已存在」误判成「新章」⇒ 重放时**再发一个印章号、建第二枚章**（比原缺陷更重）。
+         定向读按同一对键等值查询（`limit:1`）⇒ 与内存判据同尺、且不受 100 行上限影响。 */
+      const existing =
+        seals.find(
+          (item) => text(item && item.source_seal_id) === sourceSealId && text(item && item.source) === text(row && row.source)
+        ) ||
+        (
+          await readRows(
+            COLLECTIONS.seals,
+            { source: text(row && row.source), source_seal_id: sourceSealId },
+            { limit: 1 }
+          )
+        )[0] ||
+        null
       /* **本單 opt-in 的影像命中收集器**（第 7 參 `imageHitsSink`；`false` ⇒ 傳 `null` ⇒ 構造器
          零推入、零額外讀，與改前逐字相同）。 */
       const imageHits = backfillImageStamp ? [] : null
@@ -6675,19 +6850,28 @@ const ADMIN_OPS = Object.freeze({
             writes.push(step)
           }
         }
-      } else if (backfillImageStamp) {
-        /* **`existing` 分支（印章已存在、不新建）亦補回填**：本條 `faces` 引用的影像行按
-           `findSealImportImageRow` 逐條解析（**只讀**；解析不到 ⇒ 該面零步、不拒收本行），
-           命中者照同一單點回填到該既有印章的 `stamp_id` / `seq`。 */
-        const existingHits = []
-        const faceDefs = Array.isArray(row && row.faces) ? row.faces : []
-        for (const face of faceDefs) {
-          const image = await findSealImportImageRow(normalizeSealImportFace(face), null)
-          if (image) existingHits.push(image)
-        }
+      } else {
+        /* **`existing` 分支（本单 B）**：幂等键 `(source, source_seal_id)` 命中 ⇒ **不发印章号、
+           不建第二枚章**；**逐面补齐**缺的面行 →（opt-in）影像归属回填 → **最后**才翻状态。
+           旧实现只做回填 ＋ 翻状态、不补面行 ⇒ 半采纳现场重放会把导入行翻成 `ACCEPTED` 而永远
+           缺一个印面（静默损伤）；补齐后同单第二次重放即零写（面行全在 ⇒ `faceDocs` 空）。 */
         const existingStamp = text(existing.stamp_id) || text(existing.sid) || text(existing.id)
-        for (const step of await imageStampWriteStepsOf(existingStamp, existingHits, imageStampTakens, imageStampHandled)) {
-          writes.push(step)
+        const built = await buildMissingFaceDocsOfExistingSeal(row, existing, identity, at)
+        if (!built.ok) {
+          /* 该条失败：保持 `PENDING` 且本轮零写入（不动 seals / faces、不改本行）。 */
+          failed.push(rid)
+          continue
+        }
+        for (const faceDoc of built.faceDocs) {
+          writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
+          /* 批内缓存同步（零额外读）：后续行的避让读面看得见本轮补的面。 */
+          if (facesCache !== null) facesCache.push(faceDoc)
+        }
+        /* **回填写步插在面行写步之后**（opt-in；零命中原样零步；导行状态翻转仍在其后）。 */
+        if (backfillImageStamp) {
+          for (const step of await imageStampWriteStepsOf(existingStamp, built.imageHits, imageStampTakens, imageStampHandled)) {
+            writes.push(step)
+          }
         }
       }
       writes.push({ kind: 'update', collection: COLLECTIONS.sealImports, match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
@@ -8761,6 +8945,136 @@ function stripDocId(doc) {
   return copy
 }
 
+/* --------------------------------------------------------------------------- *
+   **写步失败真因展开（本单 A）** —— `WRITE_STEP_FAILED` 包装
+   背景（真因）：包装错只回显我们自己的 `WRITE_STEP_FAILED:3/6`，平台真因（唯一索引撞键的
+   `dup key` 与**索引名** / 集合不存在 / 权限 …）只挂在 `cause` 上 ⇒ 审计日志 `detail` 与任何
+   直接读 `error.message` 的诊断面**等于看不到真因**。故把「写步抛出的错 ＋ 其 `cause` 向下
+   一层」压成与 `index.js::errorFingerprint` 同形的 `name / code / message` 段**并进包装文案**
+   （以 ` ⇒ ` 连接：外因 ⇒ 内因）。
+   硬口径（与 `errorFingerprint` 逐条同尺）：
+     · **先抹长串、再截长**：≥40 位连续字母数字（base64 / hex 形态的密钥 / 令牌 / 密文）⇒
+       `<redacted>`，抹除先于一切提取（片段里也不带长串）；
+     · **`message` 段 = 首 60 字起步**；命中重复键类锚段且其窗口越过第 60 字 ⇒ 按锚窗口
+       （前 20 / 后 40 字）**延展补入**，总长 ≤ 120 —— 纯 60 字截断会把 `dup key` 与**索引名**
+       整段吃掉（与 `lib/aiEnhance.js` 2026-11-02 同一处置理由，锚集同族）；
+     · **纯函数、绝不自抛**：任何取值异常 ⇒ 该段回空串（诊断面不得反噬主路）；
+     · 只进 `message`，**不新增 `reason` 字面值**。
+ * --------------------------------------------------------------------------- */
+
+/** `message` 段**首段**字数（沿 `index.js::errorFingerprint` 的 60 字口径）。 */
+const WRITE_STEP_FP_HEAD = 60
+
+/** `message` 段**总长上限**（命中锚段延展时；与 `lib/aiEnhance.js::FINGERPRINT_MESSAGE_LIMIT` 同值）。 */
+const WRITE_STEP_FP_LIMIT = 120
+
+/** 锚段命中后**向前**取字数（与 `lib/aiEnhance.js::FINGERPRINT_ANCHOR_CONTEXT` 同值）。 */
+const WRITE_STEP_FP_CONTEXT = 20
+
+/** 锚段命中后**向后**取字数（40 而非 20）：真因文案里 `index: <索引名>` 与 `dup key:` 相距
+ *  可超 20 字，向后窗口不够就会把验收要求的两个读数之一截掉。 */
+const WRITE_STEP_FP_TRAIL = 40
+
+/**
+ * 重复键类锚段（**按序**：错误码族 → 文案 → 冲突键 → 索引名 → 已存在类）。与
+ * `lib/aiEnhance.js::DUPLICATE_KEY_ANCHORS` 同族、另加 `dup key` / `index:` —— 本包装的
+ * 验收判据是「文案里能看到 `dup key` **与索引名**」，而两者在真因文案里都落在第 60 字之后。
+ * 正则皆非 `/g` ⇒ `exec` 无 `lastIndex` 状态、可安全重复调用。
+ */
+const WRITE_STEP_FP_ANCHORS = Object.freeze([
+  /E\d{5}/,
+  /duplicate key/i,
+  /dup key/i,
+  /keyPattern/,
+  /keyValue/,
+  /index:/i,
+  /AlreadyExists/,
+  /RESOURCE_ALREADY_EXISTS/
+])
+
+/**
+ * 诊断指纹的 `message` 段取值（**纯函数；零 I/O、零自抛**）。
+ * @param {*} rawMessage 任意形态的 message（非字符串 ⇒ 当空串）
+ * @returns {string} 首 60 字（抹除后）＋ 必要时的锚窗口延展；取不到 ⇒ 空串
+ */
+function writeStepFingerprintMessageOf(rawMessage) {
+  try {
+    const scrubbed = String(rawMessage === undefined || rawMessage === null ? '' : rawMessage).replace(
+      /[A-Za-z0-9+/=]{40,}/g,
+      '<redacted>'
+    )
+    if (scrubbed === '') return ''
+    const total = scrubbed.length
+    const head = scrubbed.slice(0, WRITE_STEP_FP_HEAD)
+    if (total <= WRITE_STEP_FP_HEAD) return head
+    /* 锚窗口：起点抬到首段末尾（首段已显示的部分不重复取），窗口完全落在首段内 ⇒ 无需补。 */
+    const windows = []
+    for (const anchor of WRITE_STEP_FP_ANCHORS) {
+      const hit = anchor.exec(scrubbed)
+      if (!hit) continue
+      const start = Math.max(WRITE_STEP_FP_HEAD, hit.index - WRITE_STEP_FP_CONTEXT)
+      const end = Math.min(total, hit.index + hit[0].length + WRITE_STEP_FP_TRAIL)
+      if (end <= WRITE_STEP_FP_HEAD) continue
+      windows.push({ start, end })
+    }
+    if (windows.length === 0) return head
+    windows.sort((left, right) => left.start - right.start)
+    const merged = []
+    for (const window of windows) {
+      const last = merged.length > 0 ? merged[merged.length - 1] : null
+      if (last && window.start <= last.end) last.end = Math.max(last.end, window.end)
+      else merged.push({ start: window.start, end: window.end })
+    }
+    let out = head
+    for (const window of merged) {
+      const budget = WRITE_STEP_FP_LIMIT - out.length - 3 /* ' … ' */
+      if (budget <= 0) break
+      let piece = scrubbed.slice(window.start, window.end)
+      if (window.end < total) piece += '…'
+      if (piece.length > budget) piece = piece.slice(0, Math.max(0, budget))
+      out += ` … ${piece}`
+    }
+    return out
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 压一层为 `name / code / message` 三段（与 `errorFingerprint::segmentOf` 同形；
+ * **纯函数、绝不自抛** —— 取不到值 ⇒ 对应段回 `unknown`）。
+ * @param {*} value 任意形态的异常值
+ * @returns {string}
+ */
+function writeStepFingerprintSegmentOf(value) {
+  try {
+    const source = value !== null && typeof value === 'object' ? value : {}
+    const name = typeof source.name === 'string' && source.name !== '' ? source.name : 'unknown'
+    const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
+    const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
+    const message = writeStepFingerprintMessageOf(source.message)
+    return `${name} / code=${code} / ${message === '' ? 'unknown' : message}`
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * 写步失败的**真因后缀**：本层 ＋ `cause` 向下一层，以 ` ⇒ ` 连接（**无 `cause` ⇒ 只有本层**）。
+ * @param {*} error `persist` 捕获到的写步异常
+ * @returns {string} 形如 ` ⇒ Error / code=E11000 / E11000 duplicate key … index: ux_…`；异常 ⇒ 空串
+ */
+function writeStepFingerprintOf(error) {
+  try {
+    const segments = [writeStepFingerprintSegmentOf(error)]
+    const cause = error !== null && typeof error === 'object' ? error.cause : undefined
+    if (cause !== undefined && cause !== null) segments.push(writeStepFingerprintSegmentOf(cause))
+    return ` ⇒ ${segments.join(' ⇒ ')}`
+  } catch {
+    return ''
+  }
+}
+
 /**
  * 落盘（**唯一写点**）。
  *
@@ -8843,7 +9157,11 @@ async function persist(plan) {
         if (!primary) primary = id ? String(id) : ''
         completedSteps += 1
       } catch (error) {
-        const wrapped = new Error(`WRITE_STEP_FAILED:${index + 1}/${totalSteps}`)
+        /* **本单 A（真因展开）**：包装文案在 `WRITE_STEP_FAILED:i/n` 后并入「写步抛出的错 ＋
+           其 `cause` 向下一层」的 `name / code / message` 段（先抹 ≥40 位长串、再截长；
+           重复键锚段越过首 60 字则按锚窗口延展）⇒ `dup key` 与**索引名**直接可见。
+           **回包键面 / `reason` 一字不变**（只加长 `message`）。 */
+        const wrapped = new Error(`WRITE_STEP_FAILED:${index + 1}/${totalSteps}${writeStepFingerprintOf(error)}`)
         wrapped.failedStep = index + 1
         wrapped.totalSteps = totalSteps
         wrapped.completedSteps = completedSteps
@@ -9131,6 +9449,7 @@ module.exports = {
   aiUsage,
   setOpsDbProvider,
   opsDbInjected,
+  writeStepFingerprintMessageOf,
   setOpsStorageProvider,
   opsStorageInjected,
   setOpsStorageUploadProvider,

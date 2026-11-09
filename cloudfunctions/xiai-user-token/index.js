@@ -44,7 +44,7 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
-const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending } = require('./lib/ops.js')
+const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, writeStepFingerprintMessageOf } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
@@ -147,9 +147,14 @@ function serverNowSeconds() {
  * 供运维在客户端回包里直接看到真因（否则只有「權威存儲不可用」一句，无从定位）。
  * 硬口径：
  *  · **零密钥 / 零令牌 / 零用户隐私**：≥40 位连续字母数字长串（base64 / hex 形态的
- *    密钥、令牌、密文）一律抹成 `<redacted>`；message 只取前 60 字（**抹除先于截长**）。
+ *    密钥、令牌、密文）一律抹成 `<redacted>`；message 首 60 字（**抹除先于截长**）。
  *  · **纯函数、绝不自抛**：异常对象取不到值（null / 非对象 / 无 name / 无 message）⇒
  *    对应段回 `'unknown'`；本函数任何分支都不得抛错（诊断面不得反噬主路）。
+ *  · **`message` 段先抹长串再截长（本单 A；单点＝`ops.writeStepFingerprintMessageOf`）**：≥40 位
+ *    连续字母数字长串抹成 `<redacted>`；**首 60 字起步**，命中重复键类锚段且其窗口越过第 60 字
+ *    ⇒ 按锚窗口（前 20 / 后 40 字）延展、总长 ≤ 120 —— 纯 60 字截断会把 `WRITE_STEP_FAILED` 包装
+ *    文案里的 `dup key` 与**索引名**整段吃掉（与 `lib/aiEnhance.js` 同一处置理由）。
+ *    **无锚段越界时输出与改前逐字相同**（仍恰首 60 字）。
  *  · **cause 向下展开（本单补；与 `lib/aiEnhance.js::errorFingerprint` 同形）**：最多
  *    **两层** `cause`，各层同样压成三段、以 ` ⇒ ` 连接（外因 ⇒ 内因）—— 不展开就只回显
  *    我们自己的包装文案 `WRITE_STEP_FAILED:2/2`，平台真因（如 `DATABASE_COLLECTION_NOT_EXIST`
@@ -166,7 +171,7 @@ function errorFingerprint(error) {
       const rawCode = source.code !== undefined && source.code !== null ? source.code : source.errCode
       const code = rawCode !== undefined && rawCode !== null && rawCode !== '' ? String(rawCode) : ''
       const rawMessage = typeof source.message === 'string' ? source.message : ''
-      const scrubbed = rawMessage.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 60)
+      const scrubbed = writeStepFingerprintMessageOf(rawMessage)
       return `${name} / code=${code} / ${scrubbed === '' ? 'unknown' : scrubbed}`
     }
     const segments = [segmentOf(error)]
