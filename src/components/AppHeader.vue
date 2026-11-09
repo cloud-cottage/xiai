@@ -16,6 +16,11 @@ const initialQuery = typeof route.query.q === 'string' ? route.query.q : ''
 const menuOpen = ref(false)
 const userRef = ref(null)
 
+/* 頁頭 logo 在 `public/assets/` 下（**不是** import 的資源）：模板裡寫死的絕對 src
+   不會被 Vite 改寫（`@vitejs/plugin-vue` 的 `transformAssetUrls.includeAbsolute` 恒 false）
+   ⇒ 子路径下必须手工补 `BASE_URL`（`/xiai/`，与 `vite.config.js::base` 同源）。 */
+const logoUrl = `${import.meta.env.BASE_URL}assets/xiai-logo.svg`
+
 const user = computed(() => currentUser())
 const logged = isLoggedIn
 const gold = goldBalance
@@ -67,7 +72,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   <header class="app-header">
     <router-link class="app-header__brand" :to="{ name: 'square' }">
       <span class="app-header__logo-mark">
-        <img class="app-header__logo-img" src="/assets/xiai-logo.svg" alt="璽愛" />
+        <img class="app-header__logo-img" :src="logoUrl" alt="璽愛" />
       </span>
       <span class="app-header__logo-text">璽愛</span>
     </router-link>

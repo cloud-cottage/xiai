@@ -1,0 +1,37 @@
+{
+  "envId": "liwu-cny1313-d1gb2fukyb7cb19bb",
+  "functionRoot": "cloudfunctions",
+  "//timeout": "秒；四个函数的 timeout / memorySize 与旧环境（liwu-d8gek6jjdab1d087c）逐项对齐：xiai-user-token 900s/1024MB、xiai-admin-token 10s/256MB（读自 `cloudbase fn detail`，2026-11-09）。runtime 一律 Nodejs18.15 —— 函数里用到 fetch / AbortSignal.timeout，Nodejs10.15 跑不了。",
+  "//installDependency": "installDependency=true ⇒ 部署时云端 `npm install`（本仓 cloudfunctions/** 本地不带 node_modules，与 liwu 同一做法）。",
+  "//env": "环境变量（XIAI_*_SECRET / FEICUI_TOKEN_SECRET / YINYUAN_API_KEY …）**不在本文件**：密钥不入仓，由控制台 / 有权限的角色注入到新环境；本文件零密钥字面量。",
+  "functions": [
+    {
+      "name": "xiai-spa",
+      "timeout": 30,
+      "memorySize": 128,
+      "runtime": "Nodejs18.15",
+      "installDependency": false
+    },
+    {
+      "name": "xiai-web-api",
+      "timeout": 300,
+      "memorySize": 512,
+      "runtime": "Nodejs18.15",
+      "installDependency": true
+    },
+    {
+      "name": "xiai-admin-token",
+      "timeout": 10,
+      "memorySize": 256,
+      "runtime": "Nodejs18.15",
+      "installDependency": true
+    },
+    {
+      "name": "xiai-user-token",
+      "timeout": 900,
+      "memorySize": 1024,
+      "runtime": "Nodejs18.15",
+      "installDependency": true
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "xiai-user-token",
+  "version": "1.0.0",
+  "description": "玺爱 · 用户令牌云函数（写面 Phase A）：服务端验证登录 + 短 TTL 用户令牌（滑动续期）+ 一条经云端校验的用户写路径",
+  "main": "index.js",
+  "private": true,
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.8.5"
+  }
+}

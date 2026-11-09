@@ -102,7 +102,9 @@ const routes = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  /* 子路径（`/xiai/`）：history 基必须与 `vite.config.js::base` 同源 ⇒ 直接读 `BASE_URL`
+     （不写字面量，改 base 只需改一处）。BASE_URL 恒以 `/` 结尾（Vite 保证）。 */
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
   scrollBehavior() {
     return { top: 0 }

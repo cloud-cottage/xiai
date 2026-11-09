@@ -20,8 +20,10 @@ import { isAdmin, isLoggedIn } from '../data/session.js'
 export const FEICUI_FUNCTION_NAME = 'xiai-user-token'
 export const FEICUI_ISSUE_OP = 'issueFeicuiToken'
 
-/** 转发路由前缀（斐萃侧带 `Authorization: Feicui <token>` 打的就是它）。 */
-export const FEICUI_FORWARD_PREFIX = '/api/feicui/v1'
+/** 转发路由前缀（斐萃侧带 `Authorization: Feicui <token>` 打的就是它）。
+ *  子路径迁移后对外公开的路由＝网关 `api/xiai` 下的 `/api/feicui/v1/*`（服务端内部
+ *  路由段一字未改，前缀由 `cloudfunctions/xiai-web-api` 挂载时剥掉）。 */
+export const FEICUI_FORWARD_PREFIX = '/api/xiai/feicui/v1'
 
 /** 转发路由的 path 白名单（与服务端 `api/feicui/v1/[...path].js::ALLOWED_PATHS` 逐字同值）。 */
 export const FEICUI_RESOURCES = Object.freeze(['dynasties', 'authors', 'inscriptions'])

@@ -175,7 +175,7 @@ export const CLOUD_RETRYABLE_TIMEOUT_STAGES = Object.freeze(['sdk-load'])
    （報的是「文件不存在」而非權限錯 ⇒ 極易被誤當「無圖」靜默吞掉）。
    ⇒ 本層**一律按「envId + bucket + 對象鍵」構造**；bucket **走配置**（`VITE_XIAI_CB_STORAGE_BUCKET`），
    默認值 ＝ 下面這個**唯一一處**字面量（全倉只此一處，散落多處即判負）。 */
-export const CLOUD_STORAGE_BUCKET_DEFAULT = '6c69-liwu-d8gek6jjdab1d087c-1463728495'
+export const CLOUD_STORAGE_BUCKET_DEFAULT = '6c69-liwu-cny1313-d1gb2fukyb7cb19bb-1463728495'
 
 /** 影像展示件对象键形态（mapping.md §3：`xiai/images/` 加 sha 前两位 加 `/` 加 sha 加 点加扩展名）。
  *  `jpg` / `jpeg` 为 §3.68 AI 产物引入（AI 修復产物族扩 jpeg；浏览器原生解码，不经服务端转码）。 */

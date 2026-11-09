@@ -38,7 +38,9 @@ const code = computed(() => (share.value && share.value.code) || '')
 const link = computed(() => {
   if (!code.value) return ''
   const origin = typeof window !== 'undefined' && window.location ? window.location.origin : ''
-  return `${origin}/s/${code.value}`
+  /* 分享链接是**绝对 URL** ⇒ 必须带 history 基（`/xiai/`，与 `vite.config.js::base` 同源），
+     否则 `/s/<code>` 落到同域根（根归 liwu）。BASE_URL 恒以 `/` 结尾。 */
+  return `${origin}${import.meta.env.BASE_URL}s/${code.value}`
 })
 
 /** 打开弹窗即确保存在一条有效分享（已有有效分享 ⇒ 服务层直接沿用，不新生成链）。 */

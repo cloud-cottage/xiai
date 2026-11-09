@@ -1,0 +1,341 @@
+'use strict'
+/**
+ * 玺爱 · 用户令牌云函数 · **配置面（环境变量唯一真源）**（写面 Phase A）
+ * ----------------------------------------------------------------------------
+ * 口径（逐条，与管理员令牌函数 `xiai-admin-token/lib/config.js` **同形**）：
+ *   ① **本文件不写任何密钥 / 手机号 / 验证码字面值** ✗ —— 一律从环境变量读；
+ *   ② **配置缺失 ⇒ 拒绝、不静默降级**：缺 `XIAI_USER_SMS_CODE` / `XIAI_USER_TOKEN_SECRET`
+ *      一律返回结构化拒绝，`reason` 取**既有冻结字面值** `STORAGE_UNAVAILABLE`
+ *      （语义 ＝ 权威存储 / 内部不可用；**属「内部不可用」，不是「越权」⇒ 不得用 `FORBIDDEN` 冒充**）；
+ *   ③ **本文件不打印任何密钥 / 令牌**；`fingerprint()` 只给不可逆摘要前 12 位（诊断用）；
+ *   ④ **uid 由服务端确定性派生、且不可反推手机号**（`uidOf(phone)` ＝
+ *      `u-` ＋ `sha256(手机号).hex` 前 16 位；与前端 `src/data/uid.js::uidOf`
+ *      **同一算法 ⇒ 同值**）⇒ **前端无法自称 uid**
+ *      （若把 uid 塞进令牌由客户端在签发时自选，等于把身份交回客户端 ⇒ 本单显式不那样做）。
+ *      明文：uid **不是密码学保密**（单向、可复算）—— 它的作用只是**不把手机号写进数据行 /
+ *      不直接露出**；手机号只活在**服务端环境变量**与**本人本地会话**里。
+ *  **2026-10-29 单追加**：`secretPairOf`（CloudBase 凭据对解析；自
+ *  `api/_lib/aiRelay.js` 迁入本文件并导出）。只登记**环境变量名**（`CLOUDBASE_SECRET_ID` ＋
+ *  `CLOUDBASE_SECRET_KEY`，回退 `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`，
+ *  成对不混用），**本文件不写任何密钥值**（口径 ① 照旧）。
+ *  **2026-10-29 应急修单**：本函数现**只服务 Vercel 侧**（`api/_lib/aiRelay.js`：两族皆可、
+ *  成对不混用；回退只供本地 / CI）；云函数侧 `lib/ops.js` 已改走自己的
+ *  `cloudbaseKeyPairFromEnv()`（**只认 `CLOUDBASE_*`** —— 平台族变量在 SCF / CloudBase
+ *  运行时是**临时凭据、需 session token**，只传 id / key ⇒ `SIGN_PARAM_INVALID`）
+ *  ⇒ 两处**不共用**解析点。
+ */
+
+const crypto = require('crypto')
+
+/**
+ * 对外的 reason 取值面。
+ *
+ * 前 5 个＝**既有冻结表**（Phase A 沿用）。后 2 个＝**本单（採信）新增的待规范单确认字面值**：
+ *   · `ALREADY_ENDORSED` —— 幂等：同 `(faceId, field, value, user_id)` 已有采信行 ⇒ 零写入；
+ *   · `DUPLICATE_VALUE`  —— 提交侧防重：同 `(faceId, field, value)` 已有提交行 ⇒ 零写入
+ *     （同一段文字只允许一人提交，第二人应改用【採信】）。
+ * 二者**逐字登记在此**，便于规范侧确认后改名（改名只需改这两处 ＋ `ops.js` 的引用常量）。
+ */
+const REASONS = Object.freeze({
+  FORBIDDEN: 'FORBIDDEN',
+  INVALID_VALUE: 'INVALID_VALUE',
+  INVALID_FIELD: 'INVALID_FIELD',
+  MISSING_REQUIRED: 'MISSING_REQUIRED',
+  STORAGE_UNAVAILABLE: 'STORAGE_UNAVAILABLE',
+  ALREADY_ENDORSED: 'ALREADY_ENDORSED',
+  DUPLICATE_VALUE: 'DUPLICATE_VALUE',
+  /**
+   * **積分（「金」）餘額不足**（本單新增；**派單方 2026-10-28 裁定**的唯一新字面值）：
+   * 只由 `lib/ledger.js` 的扣费路径产出，且恒为**零写入**（预检早于任何流水写入）。
+   * 逐字登记在此，与前 7 个同表管理（改名只改本表 ＋引用处）。
+   */
+  INSUFFICIENT_POINTS: 'INSUFFICIENT_POINTS',
+  /**
+   * **AI 金鑰 / 上游 / 用量面**（本單新增 4 個字面值；**派單方凍結契約逐字點名**，非本單自造）：
+   *   · `KEY_INVALID`  —— `lib/aiKeys.js::resolveAiKey` 服務端校驗失敗（金鑰不存在 / 已吊銷 /
+   *     摘要不匹配）；恒**零寫入**、恒**不洩露具體原因**（三種情形同一條 ⇒ 防枚舉）。
+   *   · `CONFIG_MISSING`—— AI 上游配置缺失（缺環境變量 `XIAI_AI_UPSTREAM_SECRET` / 缺配置行）；
+   *     **fail-closed**：不得靜默用空密鑰、不得明文落庫；與 `api/feicui/v1` 既有的
+   *     `CONFIG_MISSING`（503 配置缺失）**同字面值、同語義**。
+   *   · `LIMIT_DAY` / `LIMIT_MINUTE` —— `lib/aiUsage.js::evaluateGate` 的**只讀判定**結果
+   *     （超日限 / 超分鐘限）；判定路徑**零寫入**。
+   * 另：每人 ACTIVE 金鑰 10 枚上限（契約原字面值 `LIMIT_EXCEEDED`）**不在本表** ⇒ 按派單方
+   * 指示**不自行新增**，一律回落既有 `INVALID_VALUE`（已在交付報告登記該願望值）。
+   * 逐字登記在此，與前 8 個同表管理（改名只改本表 ＋ 引用處）。
+   */
+  KEY_INVALID: 'KEY_INVALID',
+  CONFIG_MISSING: 'CONFIG_MISSING',
+  LIMIT_DAY: 'LIMIT_DAY',
+  LIMIT_MINUTE: 'LIMIT_MINUTE',
+  /**
+   * **上游調用失敗**（2026-10-31「管理員人工智能修復」返工單新增；**派單方 Zang 終審裁定**的
+   * 唯一新字面值 —— 表由 **12 值 → 13 值**）：只由 `lib/aiEnhance.js` 的上游失敗路徑產出
+   * （非 2xx / 超時 / 網絡錯 / 取圖失敗 / 圖形墨數不入册族），且**恆伴全額退款**
+   * （`refunded: true`；已預扣才退、未預扣不上本表）。
+   * 它是**端點面既有詞彙的登記**（`api/_lib::aiRelay.js` / `api/feicui/v1` 的
+   * `UPSTREAM_ERROR` 逐字同值、同語義），**不是新造詞**；改名只改本表 ＋引用處。
+   */
+  UPSTREAM_ERROR: 'UPSTREAM_ERROR'
+})
+
+/** 环境变量名（唯一一处定义点；**与管理员函数的环境变量名不重名** ⇒ 令牌不跨函数通用）。
+ *  **V3 追加**：`ADMIN_PHONE` ＝ 管理员白名单真源（挂在**本函数**上）；缺 / 空 ⇒
+ *  所有管理员类 op 一律结构化拒绝 ＋ 零写入（**不因未配置而放行**）。
+ *  **无审核直写收紧（S1 ＋ S2｜人类口径 2026-10-28）追加两项**（**只登记名字、本文件不写值**；
+ *  读点 ＝ `lib/ops.js::directWriteEnvOf`，缺 / 空 ⇒ **fail-closed 拒所有直写**）：
+ *    · `DIRECT_WRITE_PHONE` ＝ **分权手机号真源**：该身份**只能直写**、不得调 `review*` 系 op；
+ *    · `DIRECT_WRITE_SOURCES` ＝ **来源白名单**（逗号分隔，如 `feicui-local-dist`）：
+ *      `source` 不在表内 ⇒ 拒。 */
+const ENV_NAMES = Object.freeze({
+  SMS_CODE: 'XIAI_USER_SMS_CODE',
+  SECRET: 'XIAI_USER_TOKEN_SECRET',
+  VERSION: 'XIAI_USER_TOKEN_VERSION',
+  TTL_SECONDS: 'XIAI_USER_TOKEN_TTL_SECONDS',
+  LEEWAY_SECONDS: 'XIAI_USER_TOKEN_LEEWAY_SECONDS',
+  ADMIN_PHONE: 'XIAI_ADMIN_PHONE',
+  DIRECT_WRITE_PHONE: 'XIAI_DIRECT_WRITE_PHONE',
+  DIRECT_WRITE_SOURCES: 'XIAI_DIRECT_WRITE_SOURCES'
+})
+
+/** 环境 Id 的三个候选环境变量（**运行期注入**，与 liwu 既有函数 `fortuneDailySettlement` 同一读法；
+ *  工程纪律「envId 不在代码里写死」照旧成立）。 */
+const ENV_ID_NAMES = Object.freeze(['TCB_ENV', 'SCF_NAMESPACE', 'CLOUDBASE_ENV_ID'])
+
+/** TTL 默认 15 分钟（**与管理员令牌同值**）；可用环境变量覆盖（只改 TTL，不改判定顺序）。 */
+const DEFAULT_TTL_SECONDS = 900
+
+/** 跨实例时钟余量默认 60 秒（只作容差，**不作放宽**）。 */
+const DEFAULT_LEEWAY_SECONDS = 60
+
+/** 生产**默认卡死**的兜底版本号（撤销面：改环境变量即全体旧令牌失效）。 */
+const DEFAULT_VERSION = '1'
+
+/** 手机号形态（与前端 `auth.js::isPhoneLike` 逐字同正则）。 */
+const PHONE_PATTERN = /^1[3-9]\d{9}$/
+
+/** uid 前缀（与前端 `src/data/uid.js` / 管理员函数 `uidOf` **同一约定**）。 */
+const UID_PREFIX = 'u-'
+
+/** 摘要十六进制取前多少位（与前端 `src/data/uid.js::UID_HEX_LENGTH` 逐字同值）。 */
+const UID_HEX_LENGTH = 16
+
+/** 令牌里 `role` 的取值（**本函数只认 `user`**；管理员令牌由另一个函数签、另一把密钥）。 */
+const USER_ROLE = 'user'
+
+/**
+ * 结构化拒绝（**恰 3 键**：`{ok:false, reason, message}` —— 与工程既有拒绝形态同形，不加旁路字段）。
+ * @param {string} reason 冻结字面值（取值面见 `REASONS`）
+ * @param {string} message 繁體、如实、不泄漏内部标识
+ */
+function deny(reason, message) {
+  return { ok: false, reason, message }
+}
+
+function readString(env, name) {
+  const raw = env ? env[name] : undefined
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+function readInteger(env, name, fallback) {
+  const raw = readString(env, name)
+  if (raw === '') return fallback
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return Math.floor(parsed)
+}
+
+/** 手机号归一（只留数字）：比对前先归一，**不猜格式、不做模糊匹配**。 */
+function normalizePhone(value) {
+  return String(value === undefined || value === null ? '' : value).replace(/[^0-9]/g, '')
+}
+
+/** 手机号形态判定（归一后逐个匹配；**不猜格式**）。 */
+function isPhoneLike(value) {
+  return PHONE_PATTERN.test(normalizePhone(value))
+}
+
+/**
+ * **服务端唯一的 uid 派生**：`u-` ＋ `sha256(手机号).hex` 前 16 位（**单向、不可反推手机号**）。
+ * 与前端 `src/data/uid.js::uidOf` / 管理员函数 `uidOf` **同一算法 ⇒ 同值**（自检机械断言）。
+ * 明文：uid **不是密码学保密** —— 作用只是不把手机号写进数据行 / 不直接露出。
+ * 明文：uid **不由客户端提供**（既不在载荷里读、也不在令牌里由客户端自选）⇒
+ * 「创建者 uid」是服务端按已通过验证码校验的手机号**确定性算出**的。
+ */
+function uidOf(value) {
+  const digits = normalizePhone(value)
+  if (!isPhoneLike(digits)) return ''
+  return `${UID_PREFIX}${crypto.createHash('sha256').update(digits, 'utf8').digest('hex').slice(0, UID_HEX_LENGTH)}`
+}
+
+/** 运行期环境 Id（缺位 ⇒ 空串 ⇒ 由 node-sdk 走「当前环境」语义；**不写死**）。 */
+function readEnvId(env) {
+  const source = env || process.env
+  for (const name of ENV_ID_NAMES) {
+    const value = readString(source, name)
+    if (value) return value
+  }
+  return ''
+}
+
+/** 空值归一（与 `api/_lib/aiRelay.js` 的 `text` 逐字同语义；`secretPairOf` 的取值助手）。 */
+function text(value) {
+  return String(value === undefined || value === null ? '' : value).trim()
+}
+
+/**
+ * **CloudBase 凭据对解析**（纯函数、零 I/O、不碰网络）。
+ * **2026-10-29 单**：自 `api/_lib/aiRelay.js` **迁入本文件**并导出 —— 当时 `aiRelay.js` 的
+ * 两个默认实现改为从本文件引入并**重新导出**（`scripts/verify-ai-relay.mjs` 的 S1〜S3
+ * 现行引用路径继续可用）。
+ * **2026-10-29 应急修单**：云函数侧 `lib/ops.js::initClientFromEnv` **已退出共用**（改走
+ * 自己的 `cloudbaseKeyPairFromEnv()`，只认 `CLOUDBASE_*`）⇒ 本函数现**只服务 Vercel 侧**；
+ * 下面的平台族**回退**语义一字不变（Vercel 不注入平台族变量 ⇒ 回退只供本地 / CI）。
+ * 优先序（**成对不混用**：甲族 id ＋ 乙族 key **不得拼成一对**）：
+ *   ① `CLOUDBASE_SECRET_ID` ＋ `CLOUDBASE_SECRET_KEY`（生产已按此名填入）
+ *   ② `TENCENTCLOUD_SECRETID` ＋ `TENCENTCLOUD_SECRETKEY`（回退，供本地 / CI）
+ * 两族都缺（或只有单族一半 / 两族各一半的混给）⇒ 回空对 ⇒ 调用方仍按旧行为
+ * 「不带 `secretId` / `secretKey` 地 `init`」（不报错、不抛）。
+ * @param {object} env 环境（缺省 `process.env`）
+ * @returns {{secretId:string, secretKey:string}}
+ */
+function secretPairOf(env) {
+  const source = env || (typeof process !== 'undefined' ? process.env : {}) || {}
+  const id = text(source.CLOUDBASE_SECRET_ID)
+  const key = text(source.CLOUDBASE_SECRET_KEY)
+  if (id && key) return { secretId: id, secretKey: key }
+  const fallbackId = text(source.TENCENTCLOUD_SECRETID)
+  const fallbackKey = text(source.TENCENTCLOUD_SECRETKEY)
+  if (fallbackId && fallbackKey) return { secretId: fallbackId, secretKey: fallbackKey }
+  return { secretId: '', secretKey: '' }
+}
+
+/** 不可逆诊断指纹（sha256 前 12 位十六进制）；**绝不用于任何判定**。 */
+function fingerprint(value) {
+  return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex').slice(0, 12)
+}
+
+/** 手机号展示形态（`166****1656`）；**只用于上屏 / 日志**，不参与判定。 */
+function maskedPhone(value) {
+  const digits = normalizePhone(value)
+  if (digits.length < 7) return '***'
+  return `${digits.slice(0, 3)}****${digits.slice(-4)}`
+}
+
+/**
+ * 读配置。
+ * @param {object} [env] 环境（缺省 `process.env`；测试可注入）
+ * @returns {{ready:true, smsCode:string, secret:string, version:string, ttlSeconds:number,
+ *            leewaySeconds:number, envId:string, adminPhone:string}
+ *          |{ready:false, reason:string, message:string}}
+ */
+function readConfig(env) {
+  const source = env || process.env
+  const smsCode = readString(source, ENV_NAMES.SMS_CODE)
+  const secret = readString(source, ENV_NAMES.SECRET)
+  const missing = []
+  if (!smsCode) missing.push(ENV_NAMES.SMS_CODE)
+  if (!secret) missing.push(ENV_NAMES.SECRET)
+  if (missing.length > 0) {
+    return {
+      ready: false,
+      reason: REASONS.STORAGE_UNAVAILABLE,
+      /* 只报**缺失项的环境变量名**（不是密钥值）⇒ 可排障、不泄密。 */
+      message: `用戶令牌服務未配置（缺環境變量：${missing.join('、')}）⇒ 拒絕所有令牌操作；本次零寫入。`
+    }
+  }
+  return {
+    ready: true,
+    smsCode,
+    secret,
+    version: readString(source, ENV_NAMES.VERSION) || DEFAULT_VERSION,
+    ttlSeconds: readInteger(source, ENV_NAMES.TTL_SECONDS, DEFAULT_TTL_SECONDS),
+    leewaySeconds: readInteger(source, ENV_NAMES.LEEWAY_SECONDS, DEFAULT_LEEWAY_SECONDS),
+    envId: readEnvId(source),
+    /* **管理员白名单真源**：缺 / 空 ⇒ 空串 ⇒ 所有管理员类 op 结构化拒绝（安全默认）。
+       它**不参与** `ready` 判定 —— 缺它时普通用户写面（提交 / 采信）仍应可用。 */
+    adminPhone: normalizePhone(readString(source, ENV_NAMES.ADMIN_PHONE))
+  }
+}
+
+/**
+ * **「文档不存在」类错误判据**（供各 `doc(id).get()` 读点安全包裹用）。
+ *
+ * 背景：CloudBase node-sdk 的 `collection.doc(id).get()` 在**目标文档不存在**时并不回空 ——
+ * `@cloudbase/database` 的 `DocumentReference.get()` 走 `database.getDocument`（`queryType: DOC`），
+ * 服务端对不存在的文档回 **HTTP 404**；`@cloudbase/node-sdk` 的 `tcbapirequester` 收到非 200
+ * 会 `throw E({ code: statusCode, message: '404 Not Found | [url]' })` ⇒ 抛出的
+ * `TcbError.code === 404`（**数字**）。故「首次配置 / 读不存在的行」在生产必抛。
+ *
+ * 判据**只看错误码 / 错误名，绝不做 message 文本匹配**（message 会随 SDK / 语言版本漂移，
+ * 文本匹配既脆又可能把真存储故障吞成「未配置」）。逐条（命中其一即判「不存在」）：
+ *   · `error.code === 404`（数字）—— 生产实测的抛错形态（HTTP not-found ⇒ 文档不存在）；
+ *   · `error.code === 'DATABASE_QUERY_DOC_NONEXIST' | 'DOCUMENT_NOT_EXIST' | 'RESOURCE_NOT_FOUND'`
+ *     —— 部分 SDK / 服务端版本以字符串错误码回「文档不存在」（HTTP 200 body 带 code）；
+ *   · `error.errCode === -502005` —— wx-server-sdk 家族「database.document not exist」。
+ * 其余任何错误（连接失败 / 超时 / 权限 / 非 404 的 5xx …）一律**判否** ⇒ 由调用方**照旧上抛**，
+ * 绝不吞成「未配置」（守「真存储故障不得伪装成空」这条硬口径）。
+ * @param {any} error 捕获到的错误
+ * @returns {boolean} 是否属「文档不存在」类
+ */
+function isDocNotExistError(error) {
+  if (!error || typeof error !== 'object') return false
+  if (error.code === 404) return true
+  const code = typeof error.code === 'string' ? error.code : ''
+  if (code === 'DATABASE_QUERY_DOC_NONEXIST' || code === 'DOCUMENT_NOT_EXIST' || code === 'RESOURCE_NOT_FOUND') return true
+  if (error.errCode === -502005) return true
+  return false
+}
+
+/**
+ * **「集合不存在」类错误判据**（供 `readRows` 的**白名单降级**用；纯函数，**绝不自抛**）。
+ *
+ * 背景（生产实测真因）：CloudBase 里**从未被写过的集合**在 `.where(...).get()` 时回
+ * `code=DATABASE_COLLECTION_NOT_EXIST` ／ `[ResourceNotFound] Db or Table not exist: <name>`
+ * ⇒ `reviewCorrection` 的准备阶段读 `xiai_endorsements`（采信计数）即抛 ⇒ 整笔零写入
+ * （自 2026-10-04 起采纳 / 驳回在生产从未生效）。**只对「可选读面」集合**允许把
+ * 「集合不存在」当「零行」，其余集合与其余错误一律照旧上抛（口径见 `lib/ops.js` 的
+ * `OPTIONAL_READ_COLLECTIONS` 注释）。
+ *
+ * 判据（命中其一即判「集合不存在」）：
+ *   · `error.code === 'DATABASE_COLLECTION_NOT_EXIST'`（生产实测的错误码）；
+ *   · `error.errCode === 'DATABASE_COLLECTION_NOT_EXIST'`（部分 SDK 把同一码放 `errCode`）；
+ *   · message 文本兜底 **`[ResourceNotFound] Db or Table not exist`**（服务端对不存在的表回的
+ *     文本形态；仅此**一条**、足够特异的子串 —— 不做任何泛化文本匹配，避免把真故障吞成空集）。
+ * 其余任何错误（连接失败 / 超时 ETIMEDOUT / 权限 / 5xx / 文档不存在 …）一律**判否** ⇒
+ * 调用方照旧上抛，绝不吞成「无行」。
+ * @param {any} error 捕获到的错误
+ * @returns {boolean} 是否属「集合不存在」类
+ */
+function isCollectionNotExistError(error) {
+  if (!error || typeof error !== 'object') return false
+  const code = typeof error.code === 'string' ? error.code : ''
+  if (code === 'DATABASE_COLLECTION_NOT_EXIST') return true
+  if (typeof error.errCode === 'string' && error.errCode === 'DATABASE_COLLECTION_NOT_EXIST') return true
+  const message = typeof error.message === 'string' ? error.message : ''
+  if (message.indexOf('[ResourceNotFound] Db or Table not exist') !== -1) return true
+  return false
+}
+
+module.exports = {
+  REASONS,
+  ENV_NAMES,
+  ENV_ID_NAMES,
+  DEFAULT_TTL_SECONDS,
+  DEFAULT_LEEWAY_SECONDS,
+  DEFAULT_VERSION,
+  PHONE_PATTERN,
+  UID_PREFIX,
+  UID_HEX_LENGTH,
+  USER_ROLE,
+  deny,
+  normalizePhone,
+  isPhoneLike,
+  uidOf,
+  readEnvId,
+  secretPairOf,
+  fingerprint,
+  maskedPhone,
+  isDocNotExistError,
+  isCollectionNotExistError,
+  readConfig
+}

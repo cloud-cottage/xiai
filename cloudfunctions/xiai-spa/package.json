@@ -1,0 +1,8 @@
+{
+  "name": "xiai-spa",
+  "version": "1.0.0",
+  "description": "玺爱 · /xiai/ 子路径 SPA 深链回退（网关 HTTP 访问服务绑定）",
+  "main": "index.js",
+  "private": true,
+  "dependencies": {}
+}

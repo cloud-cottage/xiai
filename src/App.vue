@@ -85,7 +85,11 @@ function retryRouteLoad() {
   writeRetryMark()
   failedTarget.value = ''
   loadFailed.value = false
-  window.location.assign(target)
+  /* 整档导航拿的是**站内 path**（`fullPath` 不含 history 基）⇒ 必须补 `BASE_URL`
+     （`/xiai`），否则会跳出子路径落到同域根（根归 liwu）。 */
+  const base = import.meta.env.BASE_URL.replace(/\/$/, '')
+  const path = target.startsWith('/') ? target : `/${target}`
+  window.location.assign(`${base}${path}`)
 }
 
 function reloadPage() {

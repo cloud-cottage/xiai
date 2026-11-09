@@ -1,0 +1,10 @@
+{
+  "name": "xiai-web-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "玺爱 · Vercel `api/` 目录的云函数版（网关路由 api/xiai 挂载：health / feicui 转发 / ai 两薄壳）",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.18.3"
+  }
+}

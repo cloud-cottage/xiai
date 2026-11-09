@@ -12,8 +12,9 @@
  * 范围声明（**不得外推**）：本模块**不是** P5 的「权威存储 api 客户端」——
  * 不存原图、不取原图库、不改 yinsuo 代理指向，只读地换一份**展示件**；
  * 端点族、字段名、质量取值全部沿用服务端既有口径（此处不新立数值）。
- * 端基址单点登记：默认**同源** `/api`（dev 由 `vite.config.js` 的代理转到 xiai-api；
- * 面板重启后生效），可用 `VITE_XIAI_API_BASE` 覆盖。
+ * 端基址单点登记：默认同源 `/api/xiai`（子路径隔离：同域根 `/api/*` 归 liwu；
+ * dev 由 `vite.config.js` 的代理剥前缀后转到 xiai-api，面板重启后生效），
+ * 可用 `VITE_XIAI_API_BASE` 覆盖。
  */
 
 import { sniffBytesMime } from '../utils/image.js'
@@ -22,11 +23,14 @@ import { bytesToDataUrl } from '../data/assetmeta.js'
 /** 存储容器的 mime 字面值（本模块只对**它**触发转码；其余容器一律原生解码）。 */
 export const TIFF_STORAGE_MIME = 'image/tiff'
 
-/** 端基址（**唯一一处定义点**）：同源 `/api` 优先，`VITE_XIAI_API_BASE` 可覆盖。 */
+/** 端基址（**唯一一处定义点**）：同源 `/api/xiai` 优先，`VITE_XIAI_API_BASE` 可覆盖。 */
 export function displayApiBase() {
   const fromEnv =
     typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_XIAI_API_BASE : ''
-  const base = String(fromEnv || '').trim() || '/api'
+  /* 线上前缀 `/api/xiai`：同域根路径的 `/api/*` 归 liwu ⇒ 玺爱的 API 路由整族挂在
+     `api/xiai`（网关 HTTP 访问服务路径，见 `cloudfunctions/xiai-web-api`）。
+     dev 同前缀，由 `vite.config.js` 的 proxy `rewrite` 剥回 5191 的 `/api/*`。 */
+  const base = String(fromEnv || '').trim() || '/api/xiai'
   return base.replace(/\/+$/, '')
 }
 
