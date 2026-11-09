@@ -1758,12 +1758,51 @@ async function imageSeqsOf(stampId, kind) {
 }
 
 /* --------------------------------------------------------------------------- *
+   **占位 `stamp_id`（唯一索引避撞｜2026-11-09 真因修）**
+   背景（已控制台读数）：`xiai_images` 上有复合唯一索引 `ux_stamp_id_kind_seq(kind, seq,
+   stamp_id)`；`importFaceImages` 写行既不写 `seq`（不自造序号）也未写 `stamp_id` ⇒
+   `(kind, seq, stamp_id)` 恒同值 ⇒ **同批第二行起必撞 `E11000`**，被单行 catch 折叠成
+   `STORAGE_UNAVAILABLE`（首行写成、其余 19 行全挂即此）。
+   故写行侧落**确定性占位** `imp-` ＋ 该行 `sha256` 前 16 位（逐行唯一 ⇒ 恒不撞）；
+   **它是占位归属、不是真归属** —— 采纳回填把 `imp-` 开头视作**未归属**（`imageStampWriteStepsOf`
+   判定 ②），补真 `stamp_id` ＋ `seq`。前缀 / 构造 / 判定的字面**只此一处**（写行侧
+   `lib/importChannels.js` 与回填判定侧共用下列两个纯函数，零第二套）。
+ * --------------------------------------------------------------------------- */
+
+/** 占位 `stamp_id` 前缀（**唯一字面来源**；不进任何回包键面 / reason）。 */
+const IMAGE_STAMP_PLACEHOLDER_PREFIX = 'imp-'
+
+/**
+ * 确定性占位 `stamp_id`（`imp-` ＋ 摘要前 16 位；同一行恒同值、不同行必不同值 ⇒
+ * `(kind, seq, stamp_id)` 不再恒同 ⇒ 避开 `ux_stamp_id_kind_seq` 撞键）。
+ * @param {string} digest 该行 `sha256`（已过 64 位小写十六进制形态门）
+ * @returns {string} 形如 `imp-<16 位十六進制>`
+ */
+function imageStampPlaceholderOf(digest) {
+  return IMAGE_STAMP_PLACEHOLDER_PREFIX + text(digest).toLowerCase().slice(0, 16)
+}
+
+/**
+ * 是否**占位归属**（`imp-` 开头 ⇒ **未归属**，采纳回填补真值）。
+ * 空串**不在此判**（未归属的另一半形态由调用方显式判 `''` —— 两态并列、判据仍一处可读）。
+ * @param {string} stampId 行上 `stamp_id`
+ * @returns {boolean}
+ */
+function isImageStampPlaceholder(stampId) {
+  const value = text(stampId)
+  return value !== '' && value.indexOf(IMAGE_STAMP_PLACEHOLDER_PREFIX) === 0
+}
+
+/* --------------------------------------------------------------------------- *
    **采纳后影像归属回填（本单｜`reviewSealImport` 的 opt-in `backfill_image_stamp`）**
-   背景：批量影像入册通道（`importFaceImages`）写 `xiai_images` 时**故意不写 `stamp_id` /
-   `seq`**（它不知道归属）⇒ 归属由**采纳**时回填。本函数是该回填的**唯一实现点**：
-     · 判据：① 已归属本印且有合法 `seq` ⇒ **零写**（同一次采纳重放不再改行 ⇒ 幂等）；
-       ② 已归属**他印** ⇒ **零写**（不改写既有行，沿「重复采纳不改写既有行」口径）；
-       ③ 未归属（`stamp_id` 空）⇒ 补 `stamp_id` ＋ `seq`；
+   背景：批量影像入册通道（`importFaceImages`）写 `xiai_images` 时落**确定性占位** `stamp_id`
+   （`imp-` ＋ 该行 sha256 前 16 位，为避开 `ux_stamp_id_kind_seq`）、**仍不写 `seq`**（它不造
+   序号）⇒ 真归属与序号由**采纳**时回填。本函数是该回填的**唯一实现点**：
+     · 判据（**顺序即判定序**）：
+       ① 已等于目标 stamp 且有合法 `seq` ⇒ **零写**（同一次采纳重放不再改行 ⇒ 幂等）；
+       ② `stamp_id` 为空 / 以 `imp-` 开头（**占位 = 未归属**）/ 已等于目标但缺合法 `seq`
+          ⇒ **补真值**（`stamp_id` ＋ `seq`）—— 否则采纳永远补不上真 `stamp_id` / `seq`；
+       ③ 已归属**其它真 stamp** ⇒ **零写**（不改写既有行，沿「重复采纳不改写既有行」口径）；
      · `seq` **只走既有单点**（`imageSeqsOf` 读回 ＋ `nextImageSeqOf` 纯函数；**本处不自算号**）：
        同印同类递增、避开该组既有行，且**本批已分配号**由调用方传入的 `takenByKind` 累积
        （同批多面 / 多行共用一份占用集 ⇒ 批内互不重复）；
@@ -1792,9 +1831,13 @@ async function imageStampWriteStepsOf(stampId, imageRows, takenByKind, handled) 
     if (handled.has(dedupeKey)) continue
     handled.add(dedupeKey)
     const currentStamp = text(image.stamp_id)
-    /* ① 已归属本印且有合法号 ⇒ 零写（重放幂等）；② 已归属他印 ⇒ 零写（不改既有行）。 */
+    /* **判定序（与函数头注 ①②③ 逐字对应）**：
+       ① 已等于目标 stamp 且有合法号 ⇒ 零写（重放幂等）；
+       ② `stamp_id` 空 / `imp-` 占位（**占位 = 未归属**）/ 已等于目标但缺合法号 ⇒ 补真值；
+       ③ 已归属其它真 stamp ⇒ 零写（不改既有行）。 */
     if (currentStamp === stamp && isImageSeq(image.seq)) continue
-    if (currentStamp !== '') continue
+    const unassigned = currentStamp === '' || isImageStampPlaceholder(currentStamp)
+    if (!unassigned && currentStamp !== stamp) continue
     const kind = text(image.kind) === 'EDGE' ? 'EDGE' : 'FACE'
     const groupKey = `${stamp}|${kind}`
     if (!takenByKind.has(groupKey)) {
@@ -8982,6 +9025,13 @@ module.exports = {
   nextImageSeqOf,
   imageSeqsOf,
   isImageSeq,
+  /* **占位 `stamp_id`（2026-11-09 真因修）**：前缀唯一字面来源 ＋ 构造 / 判定两个纯函数，
+     加回填单点本体 `imageStampWriteStepsOf`（写行侧 `lib/importChannels.js` 与离线自检共用；
+     实现零第二套）。 */
+  IMAGE_STAMP_PLACEHOLDER_PREFIX,
+  imageStampPlaceholderOf,
+  isImageStampPlaceholder,
+  imageStampWriteStepsOf,
   SEAL_IMPORT_ID_PREFIX,
   SEAL_IMPORT_SEAL_FIELDS,
   SEAL_IMPORT_FACE_FIELDS,

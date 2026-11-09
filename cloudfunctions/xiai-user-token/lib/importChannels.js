@@ -32,6 +32,14 @@
  *     `ops.COLLECTIONS` 登记，**不进客户端云读面**）。
  *  ⑨ **不抛未捕获异常**：批级 `try/catch` 兜底，任何意外按 `STORAGE_UNAVAILABLE` 如实回报
  *     （文案带已写 / 已跳读数，**不谎称零写入**）。
+ *  ⑩ **占位 `stamp_id`（唯一索引避撞；本修单）**：影像行集合（`ops.COLLECTIONS.images`）上有
+ *     复合唯一索引 `ux_stamp_id_kind_seq(kind, seq, stamp_id)`；本通道**不写 `seq`**（不自造序号）⇒ 若
+ *     `stamp_id` 也留空，同批第二行起三元组恒同值必撞 `E11000`（被单行 catch 折叠成
+ *     `STORAGE_UNAVAILABLE`：首行写成、其余全挂即此）。故写行时落**确定性占位**
+ *     `stamp_id` ＝ `imp-` ＋该行 `sha256` 前 16 位（经 `ops.imageStampPlaceholderOf` 单点构造，
+ *     逐行唯一 ⇒ 恒不撞）—— 这是**占位归属、不是真归属**：真值由**采纳回填**
+ *     （`reviewSealImport` ＋ `backfill_image_stamp` ⇒ `ops.imageStampWriteStepsOf` 把 `imp-`
+ *     开头视作未归属）补 `stamp_id` ＋ `seq`；**本 op 仍零 `seq` 写入**。
  *
  * 存储 / 读点纪律：本文件**零集合名字面、零取库句柄字面**；单行失败的写入是**该行独立的一次
  * `persist`**（恰一个 `set` 步）⇒ 一行失败不影响他行。
@@ -258,7 +266,8 @@ function faceImageRowDenial(row) {
  * **批量影像入册**（管理员面）。
  * 顺序：载荷封闭两键 → `source` → `rows`（1〜200）→ 逐条：行级形态门 → 幂等预查（同
  * `sha256` 已有行 ⇒ `skipped`、不改既有行）→ **对象存在性与字节自校**（`ops.readArtifactBytes`
- * 回读、现算 sha256 与长度逐字比对）→ 内容寻址行落盘（**`stamp_id` / `seq` 本 op 不写**，
+ * 回读、现算 sha256 与长度逐字比对）→ 内容寻址行落盘（**`stamp_id` 写确定性占位 `imp-` ＋
+ * sha256 前 16 位**以避开唯一索引 `ux_stamp_id_kind_seq`、**`seq` 本 op 不写**，真归属与序号
  * 留给采纳回填）→ 计数。单行失败进 `failed[]`、**不中断整批**。
  * @param {object} payload 封闭两键 `{source, rows}`
  * @param {{uid:string, phone:string}} identity 服务端派生身份（门已在注册面）
@@ -325,7 +334,11 @@ async function importFaceImages(payload, identity, context) {
           continue
         }
         /* 内容寻址行：`id` 取自既有唯一规则点（`buildDirectImageRow`）⇒ 同图恒同 `_id`。
-           **`stamp_id` / `seq` 本 op 不写**（留给采纳回填，见 `reviewSealImport`）。 */
+           **`stamp_id` 写确定性占位** `imp-` ＋ 本行 `sha256` 前 16 位（经 `ops.imageStampPlaceholderOf`
+           单点构造；逐行唯一 ⇒ 复合唯一索引 `ux_stamp_id_kind_seq(kind, seq, stamp_id)` 不再恒同
+           三元组、第二行起不撞 `E11000`）；**`seq` 本 op 仍不写**（不自造序号）。占位归属是
+           **临时的**：采纳回填（`reviewSealImport` ＋ `backfill_image_stamp` ⇒
+           `ops.imageStampWriteStepsOf` 判定 ② 把 `imp-` 开头视作未归属）补真 `stamp_id` ＋ `seq`。 */
         const kind = row.kind
         const id = ops.buildDirectImageRow(
           { image_sha256: digest, image_bytes: row.bytes, image_storage_key: row.storage_key, kind },
@@ -337,6 +350,7 @@ async function importFaceImages(payload, identity, context) {
           mime: ops.text(row.mime).toLowerCase(),
           bytes: row.bytes,
           kind,
+          stamp_id: ops.imageStampPlaceholderOf(digest),
           source,
           created_at: at,
           id,
