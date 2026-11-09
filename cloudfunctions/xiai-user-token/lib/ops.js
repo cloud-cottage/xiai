@@ -206,7 +206,14 @@ const COLLECTIONS = Object.freeze({
   /* **管理員寫面審計行（§3.33.3 第 14 項｜AC-373 落点）**：`deleteSeal` 的**第二处审计载体**
      （第一处＝`index.js::audit` 的结构化日志）。**只写一行**、封闭键面；**不进云读面**
      （不入 `CLOUD_COLLECTIONS` / 客户端镜像），**不新建集合**（沿用规范在册名称）。 */
-  adminAudit: 'xiai_admin_audit'
+  adminAudit: 'xiai_admin_audit',
+  /* **關聯批兩集合（§3.61.8 / §4.1.20 / §4.1.21｜v1.64 在册、AC-538 / AC-548）**：本单新增的
+     批量落库通道 `importRelations` 的落点（`sealLinks` ＝ `xiai_seal_links`、
+     `personRelations` ＝ `xiai_person_relations`）。**只在此登记**（集合名仍只活在本文件；
+     实现点 `lib/importChannels.js` 零集合名字面），**不进客户端云读面**（不入 `CLOUD_COLLECTIONS`
+     / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL` ⇒ 客户端零读面）、**不开放任何直写入口**。 */
+  sealLinks: 'xiai_seal_links',
+  personRelations: 'xiai_person_relations'
 })
 
 /**
@@ -548,8 +555,21 @@ function sealPlaceholderDigestDenial(face, image) {
   return null
 }
 
-/** 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
-const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
+/**
+ * 印章导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由 ＋ **本单新增 opt-in 布尔**
+ * `backfill_image_stamp`）。
+ * · `backfill_image_stamp`（缺省 `false` ⇒ **既有行为逐字不变**；既有三个调用点不传该键）：
+ *   `true` ⇒ 采纳成功时把**被采纳行 `faces` 引用命中的影像行**补上 `stamp_id` ＋ `seq`
+ *   （`seq` 只走既有单点 `imageSeqsOf` / `nextImageSeqOf`，**本 op 不自算号**）并重写该影像行。
+ * · 值态门：给出即必须是**布林**（否则 `INVALID_VALUE` ＋ 零写入，与 `dry_run` 同族口径）。
+ */
+const SEAL_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze([
+  'batch_id',
+  'import_id',
+  'decision',
+  'note',
+  'backfill_image_stamp'
+])
 
 /* **item 通道切片 A（v1.61）**：印谱外部批量導入通道 ＋ 管理員採納通道。
    与 `src/data/seed.js` / `src/services/items.js` 的冻结面**逐字同值**。 */
@@ -1735,6 +1755,68 @@ async function imageSeqsOf(stampId, kind) {
     )
     return []
   }
+}
+
+/* --------------------------------------------------------------------------- *
+   **采纳后影像归属回填（本单｜`reviewSealImport` 的 opt-in `backfill_image_stamp`）**
+   背景：批量影像入册通道（`importFaceImages`）写 `xiai_images` 时**故意不写 `stamp_id` /
+   `seq`**（它不知道归属）⇒ 归属由**采纳**时回填。本函数是该回填的**唯一实现点**：
+     · 判据：① 已归属本印且有合法 `seq` ⇒ **零写**（同一次采纳重放不再改行 ⇒ 幂等）；
+       ② 已归属**他印** ⇒ **零写**（不改写既有行，沿「重复采纳不改写既有行」口径）；
+       ③ 未归属（`stamp_id` 空）⇒ 补 `stamp_id` ＋ `seq`；
+     · `seq` **只走既有单点**（`imageSeqsOf` 读回 ＋ `nextImageSeqOf` 纯函数；**本处不自算号**）：
+       同印同类递增、避开该组既有行，且**本批已分配号**由调用方传入的 `takenByKind` 累积
+       （同批多面 / 多行共用一份占用集 ⇒ 批内互不重复）；
+     · `kind` 取**影像行自己的类别**（EDGE / 其余 ⇒ FACE，与 `buildDirectImageRow` 同判）。
+   返回的是 `persist` 写步（`kind:'update'` ＋ `expectAtLeast:1`），**不落库**（落库由调用方
+   与本批其余写步一起走唯一写点 `persist`）。
+ * --------------------------------------------------------------------------- */
+
+/**
+ * 构造「采纳后影像归属回填」写步（零落库；`seq` 走既有单点、本函数不自算号）。
+ * @param {string} stampId 本次采纳得到的印章 id（`sid`）
+ * @param {Array<object>} imageRows 引用命中的影像行（`findSealImportImageRow` 的返回本体）
+ * @param {Map<string, Set<number>>} takenByKind 批内已分配号占用集（键 ＝ `<stampId>|<kind>`）
+ * @param {Set<string>} handled 批内已处理标记（键 ＝ `<stampId>|<imageId>`，去重同图多引）
+ * @returns {Promise<Array<object>>} 待落盘写步（每步恰一个影像行 update）
+ */
+async function imageStampWriteStepsOf(stampId, imageRows, takenByKind, handled) {
+  const steps = []
+  const stamp = text(stampId)
+  if (!stamp || !Array.isArray(imageRows)) return steps
+  for (const image of imageRows) {
+    if (!image || typeof image !== 'object') continue
+    const imageId = text(image._id) || text(image.id)
+    if (!imageId) continue
+    const dedupeKey = `${stamp}|${imageId}`
+    if (handled.has(dedupeKey)) continue
+    handled.add(dedupeKey)
+    const currentStamp = text(image.stamp_id)
+    /* ① 已归属本印且有合法号 ⇒ 零写（重放幂等）；② 已归属他印 ⇒ 零写（不改既有行）。 */
+    if (currentStamp === stamp && isImageSeq(image.seq)) continue
+    if (currentStamp !== '') continue
+    const kind = text(image.kind) === 'EDGE' ? 'EDGE' : 'FACE'
+    const groupKey = `${stamp}|${kind}`
+    if (!takenByKind.has(groupKey)) {
+      const taken = new Set()
+      /* 读抛错 ⇒ 按空集（与 `imageSeqsOf` 同一降级口径：如实 warn、不阻断写入）。 */
+      for (const existing of await imageSeqsOf(stamp, kind)) {
+        if (isImageSeq(existing && existing.seq)) taken.add(Number(existing.seq))
+      }
+      takenByKind.set(groupKey, taken)
+    }
+    const taken = takenByKind.get(groupKey)
+    const seq = nextImageSeqOf(stamp, kind, taken)
+    taken.add(seq)
+    steps.push({
+      kind: 'update',
+      collection: COLLECTIONS.images,
+      match: text(image._id) ? { _id: text(image._id) } : { id: imageId },
+      doc: { stamp_id: stamp, seq },
+      expectAtLeast: 1
+    })
+  }
+  return steps
 }
 
 /* ---------------------------------------------------------------------------
@@ -3896,15 +3978,19 @@ function buildPersonDocFromImport(row, identity, at, code) {
  * `kind=FACE` **无任何引用**亦 ⇒ `{ok:false}`（边款 `EDGE` 无引用则放行）。
  * **第 6 参 `imageOverlay`（无审核直写面追加；可选）**：直写 op 自建的影像登记行覆蓋層
  * （登记行尚未落库）⇒ 逐条校验时**先查覆蓋層**；**既有三个调用点不传 ⇒ 行为逐字不变**。
+ * **第 7 参 `imageHitsSink`（本单「采纳后影像归属回填」追加；可选数组）**：给了 ⇒ 逐条校验
+ * **命中的影像行**（`xiai_images` 行本体）依次推入该数组（同一行可被多面引用 ⇒ 由调用方去重）；
+ * **不传 ⇒ 零推入、零额外读、行为逐字不变**（`repairImportAcceptance` / 直写通道均不传）。
  * @param {object} row 印章导入行
  * @param {Array<object>} seals 既有正式印章行（用于编号分配）
  * @param {Array<object>} faces 既有印面行（用于 id 分配）
  * @param {{uid:string}} identity 服务端派生身份
  * @param {string} at ISO 时戳
  * @param {Array<object>} [imageOverlay] 直写通道的影像登记行覆蓋層（只读）
+ * @param {Array<object>} [imageHitsSink] 采纳回填用：引用命中的影像行收集器（只读收集）
  * @returns {Promise<{ok:true, stampId:string, sealDoc:object, faceDocs:Array<object>}|{ok:false}>}
  */
-async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, imageOverlay) {
+async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, imageOverlay, imageHitsSink) {
   const faceDefs = Array.isArray(row && row.faces) ? row.faces.map(normalizeSealImportFace) : []
   /* **佔位圖來源門 ＋ 摘要門**（本單新增｜影像例外；與提交門同判）：
      佔位鍵僅 sealbank（feicui）家族可引用；指向佔位鍵者其摘要必須 ≡ 登記摘要。 */
@@ -3922,6 +4008,8 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
     if (!image) return { ok: false }
     const digestDenial = sealPlaceholderDigestDenial(face, image)
     if (digestDenial) return { ok: false, reason: REASONS.INVALID_VALUE }
+    /* **采纳回填收集（本单 opt-in）**：命中影像行推入调用方收集器（不传 ⇒ 零行为变化）。 */
+    if (Array.isArray(imageHitsSink)) imageHitsSink.push(image)
     resolvedFaces.push({ face, image })
   }
   /* **识别编码（口径件 §3｜R-2 / R-5）**：采纳时由**服务端计数器**原子发号 ⇒ `seal_no`，
@@ -6390,6 +6478,11 @@ const ADMIN_OPS = Object.freeze({
    * `xiai_seals` ＋ `xiai_faces`（`review_status='APPROVED'`；重複採納**不改寫既有行**）；
    * **採納時逐條校驗影像引用對象存在**（缺失 ⇒ 該條拒絕 ＋ 零寫入；`kind=FACE` 無引用亦拒）；
    * **駁回** ⇒ **零寫入**（僅導入行狀態）。三態單向、終態不回退。reason 一律沿用既有凍結字面值。
+   * **本單 opt-in（第 5 鍵 `backfill_image_stamp`，缺省 `false` ⇒ 既有行為逐字不變）**：
+   * `true` ⇒ 採納成功時把**被採納行 `faces` 引用命中的影像行**補上 `stamp_id` ＋ `seq`
+   * （回填寫步插在**面行寫步之後**、導入行狀態翻轉之前；印章已存在的 `existing` 分支亦按
+   * `findSealImportImageRow` 逐條解析後補回填）—— `seq` 只走既有單點 `imageStampWriteStepsOf`
+   * （內部 `imageSeqsOf` ＋ `nextImageSeqOf`，本 op 不自算號）；`false` ⇒ **零回填寫步、零額外讀**。
    * @param {object} payload 载荷（允许键见 `SEAL_IMPORT_REVIEW_ALLOWED_KEYS`）
    * @param {{uid:string, phone:string}} identity **服务端派生**的身份
    * @param {{adminPhone?:string, nowSeconds?:number}} [context]
@@ -6411,6 +6504,13 @@ const ADMIN_OPS = Object.freeze({
           ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
           : '如實報回，不靜默丟鍵'
       return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    /* **本单 opt-in（第 5 键）：采纳后影像归属回填** —— 缺省 `false` ⇒ **既有行为逐字不变**
+       （既有调用点不传该键）；给出即必须是布林，否则 `INVALID_VALUE` ＋ 零写入（`dry_run` 同族）。 */
+    const rawBackfill = payload.backfill_image_stamp
+    const backfillImageStamp = rawBackfill === undefined ? false : rawBackfill
+    if (typeof backfillImageStamp !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, '影像歸屬回填開關（backfill_image_stamp）必須是布林值；本次零寫入。')
     }
     const batchId = text(payload.batch_id)
     const importId = text(payload.import_id)
@@ -6466,6 +6566,13 @@ const ADMIN_OPS = Object.freeze({
     const rejectedIds = []
     const skipped = skippedSeed.slice()
     const failed = []
+    /* **本單 opt-in（`backfill_image_stamp === true`）的回填狀態**：批內共用一份「已占用號」表
+       （`imageStampTakens`：鍵 ＝ `<stampId>|<kind>`）與「已處理」表（`imageStampHandled`：鍵 ＝
+       `<stampId>|<imageId>` ⇒ 同一影像行被多面 / 多行引用只回填一次）。缺省 `false` ⇒ 兩表
+       **永不被讀、零回填寫步**（既有行為逐字不變）；`seq` 只走既有單點 `imageStampWriteStepsOf`
+       （內部 `imageSeqsOf` ＋ `nextImageSeqOf`），**本 op 不自算號**。 */
+    const imageStampTakens = new Map()
+    const imageStampHandled = new Set()
     let sealsCache = null
     let facesCache = null
     const sealsOf = async () => {
@@ -6501,9 +6608,12 @@ const ADMIN_OPS = Object.freeze({
       /* **I-1 顺序（本单硬口径）**：**先落正式行**（印章 ＋ 印面；按 `(source_seal_id, source)`
          幂等键去重 ⇒ 重跑不产生重复行），**后翻导入行状态**（`expectAtLeast:1`）。 */
       const existing = seals.find((item) => text(item && item.source_seal_id) === sourceSealId && text(item && item.source) === text(row && row.source))
+      /* **本單 opt-in 的影像命中收集器**（第 7 參 `imageHitsSink`；`false` ⇒ 傳 `null` ⇒ 構造器
+         零推入、零額外讀，與改前逐字相同）。 */
+      const imageHits = backfillImageStamp ? [] : null
       if (!existing) {
         /* **影像引用逐条校验 ＋ 采纳落点构造**（与 `repairImportAcceptance` **同一套**构建函数）。 */
-        const built = await buildSealAcceptanceFromImport(row, seals, await facesOf(), identity, at)
+        const built = await buildSealAcceptanceFromImport(row, seals, await facesOf(), identity, at, null, imageHits)
         if (!built.ok) {
           /* 该条失败：保持 PENDING 且零写入（不动 seals / faces、不改本行）。 */
           failed.push(rid)
@@ -6515,6 +6625,26 @@ const ADMIN_OPS = Object.freeze({
         for (const faceDoc of built.faceDocs) {
           writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
           allFaces.push(faceDoc)
+        }
+        /* **回填寫步插在面行寫步之後**（opt-in；零命中原樣零步；導入行狀態翻轉仍在其後）。 */
+        if (backfillImageStamp) {
+          for (const step of await imageStampWriteStepsOf(built.stampId, imageHits, imageStampTakens, imageStampHandled)) {
+            writes.push(step)
+          }
+        }
+      } else if (backfillImageStamp) {
+        /* **`existing` 分支（印章已存在、不新建）亦補回填**：本條 `faces` 引用的影像行按
+           `findSealImportImageRow` 逐條解析（**只讀**；解析不到 ⇒ 該面零步、不拒收本行），
+           命中者照同一單點回填到該既有印章的 `stamp_id` / `seq`。 */
+        const existingHits = []
+        const faceDefs = Array.isArray(row && row.faces) ? row.faces : []
+        for (const face of faceDefs) {
+          const image = await findSealImportImageRow(normalizeSealImportFace(face), null)
+          if (image) existingHits.push(image)
+        }
+        const existingStamp = text(existing.stamp_id) || text(existing.sid) || text(existing.id)
+        for (const step of await imageStampWriteStepsOf(existingStamp, existingHits, imageStampTakens, imageStampHandled)) {
+          writes.push(step)
         }
       }
       writes.push({ kind: 'update', collection: COLLECTIONS.sealImports, match: { id: rid }, doc: privatePatch, expectAtLeast: 1 })
@@ -7495,6 +7625,53 @@ const ADMIN_OPS = Object.freeze({
       key: payload.key,
       timeout_ms: payload.timeout_ms
     })
+  },
+
+  /**
+   * **批量影像入册（本單新增 op｜`importFaceImages`｜管理員面）** —— 薄委派：業務邏輯單點在
+   * `lib/importChannels.js::importFaceImages`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；**零讀零寫地拒**，非管理員 ⇒
+   *    `FORBIDDEN` 且不載入實現、不觸任何集合 / 對象）；② 載荷封閉恰兩鍵 `source` / `rows`
+   *    （1〜200；未知鍵 `INVALID_FIELD`、缺鍵 `MISSING_REQUIRED`、值域 / 形態不符 `INVALID_VALUE`）；
+   *    ③ 幂等（同 `sha256` 已有行 ⇒ `skipped`、不改既有行）＋ 對象字節自校；④ 成功回包**恰 4 鍵**
+   *    `ok / written / skipped / failed`、失敗恒**恰 3 鍵**；⑤ **零新集合**（影像行落既有
+   *    `xiai_images`，集合名只經 `ops.COLLECTIONS`）、`reason` **零新增**、本處**不產 `plan`**
+   *    （落盤在實現內逐行走既有唯一寫點 `ops.persist`）。
+   * @param {object} payload 載荷（封閉兩鍵 `source` / `rows`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async importFaceImages(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。 */
+    const channels = require('./importChannels.js')
+    return channels.importFaceImages(payload, identity, context)
+  },
+
+  /**
+   * **批量關聯落庫（本單新增 op｜`importRelations`｜管理員面）** —— 薄委派：業務邏輯單點在
+   * `lib/importChannels.js::importRelations`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；**零讀零寫地拒**，非管理員 ⇒
+   *    `FORBIDDEN` 且不載入實現、不觸任何集合）；② 載荷封閉恰三鍵 `kind` / `source` / `rows`
+   *    （1〜500；`kind` 恰 `seal_link` / `person_relation` 兩值、不靜默歸一）；③ **懸空不拒收**
+   *    （§3.61.8 / AC-549：`ref` 未命中照常落行、行上 `unresolved: true`、`ref_name` 保留原值）；
+   *    ④ 幂等（確定性行 `id` 已有行 ⇒ `skipped`、不改既有行）；⑤ 成功回包**恰 5 鍵**
+   *    `ok / written / skipped / unresolved / failed`、失敗恒**恰 3 鍵**；⑥ **零新集合**
+   *    （`xiai_seal_links` / `xiai_person_relations` 只在 `ops.COLLECTIONS` 登記、**不進客戶端雲讀面**）、
+   *    `reason` **零新增**、本處**不產 `plan`**。
+   * @param {object} payload 載荷（封閉三鍵 `kind` / `source` / `rows`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async importRelations(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。 */
+    const channels = require('./importChannels.js')
+    return channels.importRelations(payload, identity, context)
   },
 
   /**
@@ -8758,6 +8935,12 @@ module.exports = {
   ARTIFACT_OBJECT_KEY_PATTERN,
   ARTIFACT_MIME,
   ARTIFACT_MAX_BYTES,
+  /* **批量導入通道（本單 `importFaceImages` / `importRelations`）依賴的三個導出**：
+     `text` / `hash16`（本文件既有純函數，只補登記到導出面、實現零改）＋
+     `ARTIFACT_DIGEST_PATTERN`（本文件既有同名內部常量，**直接導出、不另造第二套**）。 */
+  text,
+  hash16,
+  ARTIFACT_DIGEST_PATTERN,
   /* 展示件轉碼面（本單新增 `ensureDisplayArtifact`；供離線自檢直接斷言）。 */
   DISPLAY_ALLOWED_KEYS,
   /* 印人提案面（person-model §2 / §3；供离线自检直接断言）。 */

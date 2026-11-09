@@ -712,6 +712,21 @@ async function handleVerify(event, config, callContext) {
   if (op === 'ai-enhance-list') {
     if (Object.prototype.hasOwnProperty.call(opResult, 'rows')) response.rows = opResult.rows
   }
+  /* **批量導入通道讀數面（additive 透傳｜**按 `op` 收窄**｜本單 `importFaceImages` /
+     `importRelations`）**：`written` / `skipped` / `unresolved` / `failed` 四鍵**僅當
+     `op` ∈ 這兩個新 op 時**才逐字疊進回包，且**存在性驅動**（`opResult` 真有該鍵才疊 ——
+     `importFaceImages` 無 `unresolved` ⇒ 自然不疊，回包因此恰如其 op 鍵面：4 鍵讀數面 ／
+     5 鍵讀數面）；**其餘任何 op 一律不透傳這 4 個鍵**（即使 `opResult` 意外帶同名鍵 ——
+     例如 `reviewSealImport` / `reviewItemImport` 的 `skipped` / `failed` —— 亦一個都不外泄）
+     ⇒ 既有回包**逐字不變**（序列化後亦不新增鍵）。**`plan` 是內部落盤計劃（內部面）、
+     不在白名單內 ⇒ 絕不外傳**；既有字段一律不刪、不改。鍵名真源
+     ＝ `lib/importChannels.js::FACE_IMAGE_SUCCESS_KEYS` / `RELATION_SUCCESS_KEYS`。 */
+  if (op === 'importFaceImages' || op === 'importRelations') {
+    const IMPORT_CHANNEL_READOUT_KEYS = ['written', 'skipped', 'unresolved', 'failed']
+    for (const key of IMPORT_CHANNEL_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   return response
 }
 
