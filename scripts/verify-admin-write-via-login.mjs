@@ -254,7 +254,10 @@ console.log(JSON.stringify({ section: 'A', title: 'ADMIN_OPS 口径副本对账 
    `xiai_ai_enhance_tasks`、`status` / `list` 只读零写入；`reason` 零新增）。
    A1（2026-11-09 合法过期 ⇒ 期望 31 → 33）：新增**云导入两 op**
    `importFaceImages` / `importRelations`（字典序位在 `getAiUpstream` 之后、
-   `issueFeicuiToken` 之前；均为函数、零新 reason）。 */
+   `issueFeicuiToken` 之前；均为函数、零新 reason）。
+   A1（2026-11-10 合法过期 ⇒ 期望 33 → 34）：新增**影像行 storage 修复 op**
+   `repairImageStorage`（字典序位在 `registerFaceImage` 之后、
+   `repairImportAcceptance` 之前；函数、零新 reason）。 */
 const ADMIN_OPS_EXPECTED = [
   'ai-enhance-discard',
   'ai-enhance-face',
@@ -277,6 +280,7 @@ const ADMIN_OPS_EXPECTED = [
   'pullImportRows',
   'querySealByFingerprint',
   'registerFaceImage',
+  'repairImageStorage',
   'repairImportAcceptance',
   'replaceFaceImage',
   'reviewCorrection',
@@ -294,7 +298,7 @@ const adminOpsActual = sorted(Object.keys(ops.ADMIN_OPS))
 const adminOpsEqual = (expected) => canonical(sorted(expected)) === canonical(adminOpsActual)
 /* A1（2026-10-28 AI 金鑰單 合法过期 ⇒ 期望 14 → 16）：新增 **AI 上游配置面**两 op
    （`getAiUpstream` 只读公共面零密文 ＋ `setAiUpstream` 写配置先判主密钥 env）。 */
-check('A1', '`ADMIN_OPS` 恰含 33 项 {ai-enhance-discard, ai-enhance-face, ai-enhance-list, ai-enhance-status, ai-enhance-submit, createSealWithFaceDirect, deleteSeal, getAiUpstream, importFaceImages, importRelations, issueFeicuiToken, listPendingCorrectionsForAdmin, migrateCodeNumbers, migrateDynastyValues, migrateSealValueDomains, pullImportRows, querySealByFingerprint, repairImportAcceptance, replaceFaceImage, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setAiUpstream, revokeCorrectionAcceptance, setInviteReward}（2026-10-12 階段乙增 pullImportRows；本单增 issueFeicuiToken：仅管理员签发斐萃令牌、零落盘；2026-10-27 §4 增 migrateCodeNumbers 一次性发号重编；2026-10-28 增无审核直写两 op；2026-10-28 AI 金鑰單增上游配置两 op；2026-10-31 §3.68 增 ai-enhance-face（管理员人工智能修復）；2026-10-31 弃候选图单增 ai-enhance-discard（管理员弃 AI 修復候选图，零计费、零新集合）；2026-11-02 勘误只读面 v1.84 增 listPendingCorrectionsForAdmin（管理员白名单门、跨用户 PENDING、零写入）；2026-11-04 管理员撤销采纳增 revokeCorrectionAcceptance（只 ACCEPTED→REJECTED、三处落盘、零改写原始行）；2026-11-05 管理员删除印章增 deleteSeal（硬删印章/印面/未共用影像行及对象，保留照片与勘误，编号写入 released 供复用；2026-11-05 影像入册增 registerFaceImage（内容寻址入册、seq 单点、同 id 幂等；2026-11-05 印章上传上云增 createSealUpload（号源单轨、入云失败不落本地行））；2026-11-07 云模式印面圖替換增 replaceFaceImage（管理员原子入册影像行＋改面行指向，旧图与字节保留、零新 reason）；2026-11-08 异步两段式增 ai-enhance-list / ai-enhance-status / ai-enhance-submit（三 op 均落 `ADMIN_OPS`、字典序位在 `ai-enhance-face` 之后、`backfillAcceptedCorrections` 之前；提交即预扣、四态任务行 `xiai_ai_enhance_tasks`、`status` / `list` 只读零写入、`reason` 零新增）；2026-11-09 云导入增 importFaceImages / importRelations（两 op 均落 `ADMIN_OPS`、字典序位在 `getAiUpstream` 之后、`issueFeicuiToken` 之前、零新 reason）', ADMIN_OPS_EXPECTED, adminOpsActual)
+check('A1', '`ADMIN_OPS` 恰含 34 项 {ai-enhance-discard, ai-enhance-face, ai-enhance-list, ai-enhance-status, ai-enhance-submit, createSealWithFaceDirect, deleteSeal, getAiUpstream, importFaceImages, importRelations, issueFeicuiToken, listPendingCorrectionsForAdmin, migrateCodeNumbers, migrateDynastyValues, migrateSealValueDomains, pullImportRows, querySealByFingerprint, repairImageStorage, repairImportAcceptance, replaceFaceImage, reviewCorrection, reviewItemImport, reviewPersonImport, reviewPersonProposal, reviewSealImport, setAiUpstream, revokeCorrectionAcceptance, setInviteReward}（2026-10-12 階段乙增 pullImportRows；本单增 issueFeicuiToken：仅管理员签发斐萃令牌、零落盘；2026-10-27 §4 增 migrateCodeNumbers 一次性发号重编；2026-10-28 增无审核直写两 op；2026-10-28 AI 金鑰單增上游配置两 op；2026-10-31 §3.68 增 ai-enhance-face（管理员人工智能修復）；2026-10-31 弃候选图单增 ai-enhance-discard（管理员弃 AI 修復候选图，零计费、零新集合）；2026-11-02 勘误只读面 v1.84 增 listPendingCorrectionsForAdmin（管理员白名单门、跨用户 PENDING、零写入）；2026-11-04 管理员撤销采纳增 revokeCorrectionAcceptance（只 ACCEPTED→REJECTED、三处落盘、零改写原始行）；2026-11-05 管理员删除印章增 deleteSeal（硬删印章/印面/未共用影像行及对象，保留照片与勘误，编号写入 released 供复用；2026-11-05 影像入册增 registerFaceImage（内容寻址入册、seq 单点、同 id 幂等；2026-11-05 印章上传上云增 createSealUpload（号源单轨、入云失败不落本地行））；2026-11-07 云模式印面圖替換增 replaceFaceImage（管理员原子入册影像行＋改面行指向，旧图与字节保留、零新 reason）；2026-11-08 异步两段式增 ai-enhance-list / ai-enhance-status / ai-enhance-submit（三 op 均落 `ADMIN_OPS`、字典序位在 `ai-enhance-face` 之后、`backfillAcceptedCorrections` 之前；提交即预扣、四态任务行 `xiai_ai_enhance_tasks`、`status` / `list` 只读零写入、`reason` 零新增）；2026-11-09 云导入增 importFaceImages / importRelations（两 op 均落 `ADMIN_OPS`、字典序位在 `getAiUpstream` 之后、`issueFeicuiToken` 之前、零新 reason）；2026-11-10 影像行 storage 修复增 repairImageStorage（落 `ADMIN_OPS`、字典序位在 `registerFaceImage` 之后、`repairImportAcceptance` 之前、零新 reason）', ADMIN_OPS_EXPECTED, adminOpsActual)
 check('A1n1', '负对照①（必红）：期望数组抽掉 `migrateCodeNumbers` ⇒ 与现实值不等', false, adminOpsEqual(ADMIN_OPS_EXPECTED.filter((op) => op !== 'migrateCodeNumbers')))
 check('A1n2', '负对照②（必红）：期望数组多一个不存在的 op ⇒ 与现实值不等', false, adminOpsEqual([...ADMIN_OPS_EXPECTED, 'noSuchOp'].sort()))
 check('A1b', '`reviewCorrection` 亦未混入用户写面 `OPS`', false, Object.prototype.hasOwnProperty.call(ops.OPS, 'reviewCorrection'))
