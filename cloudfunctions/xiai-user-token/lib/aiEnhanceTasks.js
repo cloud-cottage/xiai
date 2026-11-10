@@ -6,9 +6,14 @@
  * 背景（派单方实测真因）：旧的同步长调用（一次 HTTP 往返跑完「预扣 → 上游入队 → 轮询 90 秒
  * → 下载 / 转码 / 入库」，实测 24〜53 秒）会被 CloudBase 网关约 60 秒掐断回包，而云函数
  * （超时 900 秒）仍在继续跑并写成功 ⇒ 用户看到「本次未寫入」，实际已扣金、候选图已入库。
- * 本单把长任务拆成**两次快调用**：`ai-enhance-submit`（提交：预扣 + 上游入队，墙钟预算 25 秒）
+ * 本单把长任务拆成**两次快调用**：`ai-enhance-submit`（提交：预扣 + 上游入队 ＋ 同步入册，段墙钟预算 50 秒 —— 段内上游 POST 预算 45 秒）
  * 与 `ai-enhance-status`（单轮推进：查上游 + 取图 + 入册，整轮预算 45 秒 —— 三段一律用整轮剩余预算封顶），彻底绕开网关上限；
  * `ai-enhance-list` 为该印面下**未采纳**候选任务的只读清单。
+ *
+ * **提交段三个预算数（按实测真因调升；演进理由见常量面「提交段三个预算数」注块）**：
+ * 上游 POST 预算 **45 秒** ／ 提交段整段硬上限 **50 秒** ／ 收尾宽限 **6 秒**
+ * ⇒ 最坏墙钟 **56 秒 < 网关约 60 秒**；起因是该上游 `nano-banana-fast` **同步出图**、
+ * 实测 24〜53 秒，旧 25 秒预算卡在真实生成耗时的一半（正常一次生成也必超时退款）。
  *
  * 职责（本单范围）：三 op 的载荷封闭键面 / 管理员门复核 / 幂等预查 / 图源取字节 / 上游配置 /
  * 预扣与退款 / 上游入队与单轮查询 / 取图与入册 / 任务行状态机与清单投影 —— 只在此落地；
@@ -37,9 +42,9 @@
  *     → 解析上游配置（缺则零扣费）→ **先落任务行 `SUBMITTED`（`charge_state:'PENDING'` ＋
  *     `charge_amount:0`）→ 预扣 10 金 → 回写 `charge_amount:10 / charge_state:'CHARGED' /
  *     charge_balance_after`**（`idem_key` 形态沿用 `ai-enhance-<image_id>-<request_id>`）
- *     → 调上游 `POST /images/edits` 取异步任务号（**整段墙钟预算 25 秒**：读源字节 / 解配置 /
+ *     → 调上游 `POST /images/edits` 取异步任务号（**上游 POST 预算 45 秒 / 整段墙钟 50 秒**：读源字节 / 解配置 /
  *     落行 / 扣费 / 上游 POST 每步都在段内，超时即**先退款、再把行转 `FAILED(UPSTREAM_ERROR,
- *     「提交超過 25 秒…」)`**、**绝不等网关约 60 秒**；收尾写库另给 ≤10 秒宽限 ⇒ 总时长 ≤ 35 秒）
+ *     「提交超過 45 秒…」)`**、**绝不等网关约 60 秒**；收尾写库另给 ≤6 秒宽限 ⇒ 最坏总时长 ≤ 56 秒）
  *     → 行回写 `upstream_task_id`、`deadline_at` ＝ `created_at` ＋ 20 分钟。成功回包**恰五键**
  *     `ok / task_id / status / source_image_id / charge{amount,balance}`；失败回包**恰四键**
  *     `ok / reason / message / refunded`。上游是同步回图的老形态 ⇒ **submit 内直接完成入库并置
@@ -145,11 +150,33 @@ const LIST_ROW_KEYS = Object.freeze(['task_id', 'status', 'image_id', 'source_im
 /** 退款流水的幂等键后缀（与原 `CHARGE` 的 `idem_key` 区分；原行不删）。 */
 const REFUND_IDEM_SUFFIX = '-refund'
 
-/** 提交跳墙钟预算：**25 秒**（超时即退款并置 `FAILED`）。 */
-const SUBMIT_POST_BUDGET_MS = 25000
-/** 提交段**收尾写库**（退款 ＋ 行转 `FAILED`）宽限：**≤10 秒** —— 绝对截止 ＝ 段截止 ＋ 本值
- *  ⇒ 整段总时长 ≤ 35 秒（仍显著低于网关约 60 秒掐断线）。 */
-const SUBMIT_CLEANUP_GRACE_MS = 10000
+/* --------------------------------------------------------------------------- *
+  提交段三个预算数（**按派单方实测真因上调；演进理由逐条**）
+ * ---------------------------------------------------------------------------
+ * 实测证据（新环境、已部署 `b4e153d`）：
+ *   ① `probeAiUpstream` ⇒ `ok / http_status 200 / elapsed_ms 2769 / base_host www.maizitech.ai`
+ *      ⇒ **出网正常**（不是平台问题）；
+ *   ② 上游 `nano-banana-fast` 是**同步出图**（回包里直接带图、不是回 `task_id`），
+ *      历史成功耗时 **24〜53 秒**；
+ *   ③ 旧口径 `SUBMIT_POST_BUDGET_MS = 25000` 卡在真实生成耗时的一半 ⇒ 管理员真实提交
+ *      （`CHARGE -10` @11:32:58Z）活到 25 秒上限才撞预算 ⇒ 退款 ＋ 置 `FAILED`
+ *      （`upstream_task_id` 空、`error_message` = 「提交超過時限（25 秒）」）⇒ **正常一次生成也必超时、永不成功**。
+ * ⇒ 只调预算口径、**逻辑一字不动**：
+ *   · 上游 POST 预算 **25 → 45 秒**（历史耗时上限 53 秒以内的取值，给同步出图留空间）；
+ *   · 提交段整段硬上限 **25 → 50 秒**（＝ POST 45 秒 ＋ 读源 / 落行 / 扣费 / 入册的段内余量）；
+ *   · 收尾宽限 **10 → 6 秒**（退款 ＋ 行转 `FAILED` 的写库时间）。
+ * ⇒ **最坏墙钟 ＝ 50 ＋ 6 ＝ 56 秒 < 网关约 60 秒掐断线**（原 25 ＋ 10 ＝ 35 秒同理，余量不变式）。
+ * --------------------------------------------------------------------------- */
+
+/** 上游 `POST /images/edits` **段内预算**：**45 秒**（超时即退款并置 `FAILED`；
+ *  该上游为同步出图、历史成功耗时 24〜53 秒 ⇒ 取 45 秒给真实生成留空间）。 */
+const SUBMIT_POST_BUDGET_MS = 45000
+/** 提交段**整段墙钟硬上限**：**50 秒**（绝对截止 ＝ 提交起始 ＋ 本值；读源字节 / 解配置 / 落行 /
+ *  扣费 / 上游 POST / 同步入册 / 行回写**每步都在段内**，到点即停止等待）。 */
+const SUBMIT_SEGMENT_BUDGET_MS = 50000
+/** 提交段**收尾写库**（退款 ＋ 行转 `FAILED`）宽限：**≤6 秒** —— 绝对截止 ＝ 段截止 ＋ 本值
+ *  ⇒ 最坏总时长 ≤ 56 秒（50 ＋ 6，仍低于网关约 60 秒掐断线）。 */
+const SUBMIT_CLEANUP_GRACE_MS = 6000
 /** 任务行 `charge_state`（**恰两字面值**）：`PENDING` ＝ 已落行尚未扣费 / `CHARGED` ＝ 已扣费。
  *  **读旧行缺该键 ⇒ 按 `CHARGED` 处理**（历史行一行不改、照旧走退款护栏）。 */
 const CHARGE_STATE = Object.freeze({ PENDING: 'PENDING', CHARGED: 'CHARGED' })
@@ -569,7 +596,7 @@ function taskErrorOf(parsed) {
 }
 
 /**
- * 调上游 `POST <base_url>/images/edits` **取异步任务号**（提交跳；**墙钟预算 25 秒**）。
+ * 调上游 `POST <base_url>/images/edits` **取异步任务号**（提交跳；**上游 POST 预算 45 秒**）。
  * 请求体五键与同步面逐字同（`model` / `prompt`（`lib/aiEnhancePrompt.js` 逐字）/ `size` `1:1` /
  * `resolution` `1K` / `image` `data:` URL）；回包三分支：
  *   · `data[0].task_id` ＝ **异步入队回执** ⇒ 回 `{ok:true, task_id}`（**不轮询**）；
@@ -603,7 +630,7 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
       signal: AbortSignal.timeout(timeoutMs)
     })
     status = Number(response && response.status) || 0
-    /* 墙钟预算 25 秒（**响应到手也超时即拒** —— 后续还要下载 / 落行，不能把预算吃光）。 */
+    /* 上游 POST 预算 45 秒（**响应到手也超时即拒** —— 后续还要下载 / 落行，不能把预算吃光）。 */
     if (Date.now() - startedAt > SUBMIT_POST_BUDGET_MS) {
       return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, `提交超過時限（${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒）`) }
     }
@@ -971,10 +998,10 @@ function submitReplay(taskId, row) {
  *     → ⑤b 预扣 10 金 → ⑤c 回写 `charge_amount:10 / charge_state:'CHARGED' / charge_balance_after`
  *  → ⑥ 调上游取任务号 → ⑦ 行回写 `upstream_task_id`（老形态同步回图 ⇒ 同步入册并置 `READY`）
  *  → ⑧ 成功回包恰 5 键。
- * **整段墙钟硬上限 25 秒**（函数入口取绝对截止 `submitDeadlineAt`）：读源字节 / 解配置 / 落行 /
+ * **上游 POST 预算 45 秒 ／ 整段墙钟硬上限 50 秒**（函数入口取绝对截止 `submitDeadlineAt`）：读源字节 / 解配置 / 落行 /
  * 扣费 / 上游 POST **每步都经 `withinBudget` 封顶** ⇒ 超限即**先退款、再把行转
- * `FAILED(UPSTREAM_ERROR, 「提交超過 25 秒…」)`** 并返回失败（**绝不等网关约 60 秒**）；
- * 收尾写库（退款 ＋ 转 `FAILED`）另给 ≤10 秒宽限 ⇒ **整段总时长 ≤ 35 秒**。
+ * `FAILED(UPSTREAM_ERROR, 「提交超過 45 秒…」)`** 并返回失败（**绝不等网关约 60 秒**）；
+ * 收尾写库（退款 ＋ 转 `FAILED`）另给 ≤6 秒宽限 ⇒ **最坏总时长 ≤ 56 秒（50 ＋ 6）**。
  * **行未落 ⇒ 无失败行可转**（此时尚未扣费 ⇒ 回 4 键失败、`refunded:false`）；**本次未真扣费的
  * 失败路径一律零退款**（不给未扣费的行凭空 +10 金）。
  * @param {object} payload 载荷（封闭四键 `image_id` / `seal_id` / `face_id` / `request_id`）
@@ -987,18 +1014,19 @@ async function submitEnhanceTask(payload, identity, context) {
   const ops = opsModule()
   const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
   if (identityDenial) return submitFailure(identityDenial.reason, identityDenial.message, false)
-  /* 本跳起始时刻（老形态同步回图路的 `elapsed_ms` 记账基准）＋ **整段墙钟硬上限 25 秒**
+  /* 本跳起始时刻（老形态同步回图路的 `elapsed_ms` 记账基准）＋ **整段墙钟硬上限 50 秒**
      （函数入口取绝对截止 ⇒ 读源字节 / 解配置 / 落行 / 扣费 / 上游 POST 每步都在其内）。 */
   const submitStartedAt = Date.now()
-  const submitDeadlineAt = submitStartedAt + SUBMIT_POST_BUDGET_MS
-  /* 收尾写库（退款 ＋ 行转 `FAILED`）另给 ≤10 秒宽限；绝对截止 ＝ 段截止 ＋ 宽限 ⇒ 总时长 ≤ 35 秒。 */
+  const submitDeadlineAt = submitStartedAt + SUBMIT_SEGMENT_BUDGET_MS
+  /* 收尾写库（退款 ＋ 行转 `FAILED`）另给 ≤6 秒宽限；绝对截止 ＝ 段截止 ＋ 宽限 ⇒ 最坏总时长 ≤ 56 秒。 */
   const cleanupDeadlineAt = submitDeadlineAt + SUBMIT_CLEANUP_GRACE_MS
   /* 段内每一步：到点即停止等待（`BUDGET_EXPIRED` ＝ 超限哨兵；存储侧调用没有中止缝）。
      **开工前不另查预算** —— 段内任一步到点都会以哨兵收口，不再新发请求。 */
   const budgeted = (promise) => withinBudget(promise, submitDeadlineAt)
   const cleanupBudgeted = (promise) => withinBudget(promise, cleanupDeadlineAt)
-  /* 段超限文案头（回包与行内 `error_message` 同源；**恒以「提交超過 25 秒」起头**）。 */
-  const overBudgetHead = `提交超過 ${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒（整段牆鐘硬上限）`
+  /* 段超限文案头（回包与行内 `error_message` 同源；**恒以「提交超過 <上游 POST 预算秒> 秒」起头**
+     —— 秒数一律由 `SUBMIT_POST_BUDGET_MS` 格式化（**零字面秒数**），括注另给整段硬上限常量）。 */
+  const overBudgetHead = `提交超過 ${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒（上游 POST 預算；整段牆鐘硬上限 ${Math.round(SUBMIT_SEGMENT_BUDGET_MS / 1000)} 秒）`
   const overBudgetMessage = (refunded) =>
     refunded === true
       ? `${overBudgetHead} ⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
@@ -1276,7 +1304,7 @@ async function submitEnhanceTask(payload, identity, context) {
     })
   }
 
-  /* ⑥ 调上游取异步任务号（**整段墙钟 25 秒**：非 2xx / 超时 / 网络错 / 缺任务号 / 段超限
+  /* ⑥ 调上游取异步任务号（**上游 POST 预算 45 秒 / 整段墙钟 50 秒**：非 2xx / 超时 / 网络错 / 缺任务号 / 段超限
      ⇒ 先退款、再置 `FAILED` —— **绝不等网关约 60 秒**）。 */
   const imageDataUrl = dataUrlOf(sourceMime, sourceBytes)
   const postedOutcome = await budgeted(submitUpstreamTask(upstream, imageDataUrl))
@@ -2114,6 +2142,7 @@ module.exports = {
   LIST_FAILURE_KEYS,
   LIST_ROW_KEYS,
   SUBMIT_POST_BUDGET_MS,
+  SUBMIT_SEGMENT_BUDGET_MS,
   SUBMIT_CLEANUP_GRACE_MS,
   CHARGE_STATE,
   STATUS_QUERY_BUDGET_MS,
