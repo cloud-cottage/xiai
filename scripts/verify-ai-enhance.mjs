@@ -10,7 +10,7 @@
  * 断言面（本套 **45** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
  * ＋ 产物族 jpeg 扩面 6 条（I 段）＋ 候選行 `row` 1 条（A5）＋ ⑨ 重复键兜底专项 6 条（J 段 · 736b340）；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
- *      A0 `ADMIN_OPS` 注册面（恰 34 项、`ai-enhance-face` 在册且为函数）；
+ *      A0 `ADMIN_OPS` 注册面（恰 36 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 9 键**（原 8 键仍逐字在场 ＋ 新增 `row`）；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
  *         ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号；
  *      A2 `preview.sha256` **逐字 ＝ 上传字节的 sha256**（且上传字节与上游回图字节**逐字节相等**、
@@ -479,7 +479,7 @@ section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 34 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 34, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 36 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 36, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
@@ -1738,6 +1738,9 @@ const taskRows = () => [...fakeDb.bucketOf(TASK_COLLECTION).values()]
 const taskSetCalls = () => fakeDb.hooks.setCalls.filter((call) => call.collection === TASK_COLLECTION).length
 const taskReads = () => fakeDb.hooks.queries.filter((query) => query.collection === TASK_COLLECTION).length
 const sortedKeys = (list) => list.slice().sort()
+/** 任务行 `xiai_ai_enhance_tasks` 的**期望键面**（恰 19 项，含 `_id`；字典序 ＝ `shapeOf` 同一把尺 ——
+ *  本单增 `charge_state`，故 18 → 19）。 */
+const TASK_ROW_KEYS = ['_id', 'charge_amount', 'charge_balance_after', 'charge_state', 'created_at', 'deadline_at', 'error_message', 'error_reason', 'face_id', 'product_image_id', 'refunded', 'request_id', 'seal_id', 'source_image_id', 'status', 'uid', 'updated_at', 'upstream_status', 'upstream_task_id'].sort()
 /** 既有 `reason` 冻结面（13 值；与 `verify-ai-enhance-discard` G2 同一张表）。 */
 const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE', 'ALREADY_ENDORSED', 'DUPLICATE_VALUE', 'INSUFFICIENT_POINTS', 'KEY_INVALID', 'CONFIG_MISSING', 'LIMIT_DAY', 'LIMIT_MINUTE', 'UPSTREAM_ERROR']
 
@@ -1912,7 +1915,7 @@ let kSubmitReply = null
   const rows = taskRows()
   const row = rows.length === 1 ? rows[0] : null
   const chargeRows = flowRowsOf(ADMIN_IDENTITY.uid).filter((entry) => entry.kind === 'CHARGE' && entry.idem_key === `ai-enhance-${SRC_OK}-${K_RID}`)
-  check('K4', 'submit 成功（异步入队）：回包**恰 5 键** `ok / task_id / status / source_image_id / charge`、`status` 逐字 `SUBMITTED`、`task_id` 形态 `aiet-`＋16 位十六进制、`charge` 恰 `amount / balance` 两键且 `amount` 恰 10；**提交即预扣恰 1 次**（`CHARGE` 行 `delta = -10`、`ref_type = AI_IMAGE`、`idem_key` 三段封闭）；任务行落 `xiai_ai_enhance_tasks` 且**字段面恰 18 项**（含 `_id`）、`status = SUBMITTED`、`upstream_task_id` 逐字 ＝ 上游回执号、`deadline_at` 晚于 `created_at` 20 分钟', {
+  check('K4', 'submit 成功（异步入队）：回包**恰 5 键** `ok / task_id / status / source_image_id / charge`、`status` 逐字 `SUBMITTED`、`task_id` 形态 `aiet-`＋16 位十六进制、`charge` 恰 `amount / balance` 两键且 `amount` 恰 10；**提交即预扣恰 1 次**（`CHARGE` 行 `delta = -10`、`ref_type = AI_IMAGE`、`idem_key` 三段封闭）；任务行落 `xiai_ai_enhance_tasks` 且**字段面恰 19 项**（含 `_id`；本单增 `charge_state`）、`status = SUBMITTED`、`upstream_task_id` 逐字 ＝ 上游回执号、`deadline_at` 晚于 `created_at` 20 分钟', {
     keys: 'charge,ok,source_image_id,status,task_id',
     ok: true,
     status: 'SUBMITTED',
@@ -1924,7 +1927,8 @@ let kSubmitReply = null
     refType: 'AI_IMAGE',
     idemKey: `ai-enhance-${SRC_OK}-${K_RID}`,
     taskRowCount: 1,
-    taskRowKeys: 18,
+    taskRowKeys: 19,
+    taskRowKeyList: TASK_ROW_KEYS,
     taskRowStatus: 'SUBMITTED',
     upstreamTaskId: K_ENQUEUE_TASK_ID,
     deadlineAhead: true,
@@ -1944,6 +1948,7 @@ let kSubmitReply = null
     idemKey: chargeRows[0] && chargeRows[0].idem_key,
     taskRowCount: rows.length,
     taskRowKeys: row ? Object.keys(row).length : -1,
+    taskRowKeyList: row ? Object.keys(row).sort() : null,
     taskRowStatus: row && row.status,
     upstreamTaskId: row && row.upstream_task_id,
     deadlineAhead: !!row && Date.parse(row.deadline_at) - Date.parse(row.created_at) === tasks.TASK_DEADLINE_MS,
