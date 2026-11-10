@@ -747,6 +747,34 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
+  /* **AI 上游連通探測讀數面（additive 透傳｜**按 `op` 收窄**｜本單 `probeAiUpstream`）**：
+     `http_status` / `elapsed_ms` / `error_class` / `base_host` 四鍵（＋信封裡既有的 `ok`）
+     **僅當 `op === 'probeAiUpstream'` 且 `opResult` 確有該鍵時**才逐字疊進回包 ⇒ 測量面
+     恰如該 op 的封閉 5 鍵面；**其餘任何 op 一律不透傳這 4 個鍵**（即使 `opResult` 意外帶同名鍵
+     —— 例如各修復 / 遷移 op 的 `scanned` 族 —— 亦一個都不外泄）⇒ 既有回包逐字不變。
+     拒絕面（`ok:false`）走上面的早退分支、恒 3 鍵、零讀數鍵；**零明文密鑰、零完整路徑、
+     零響應體**（`base_host` 只是 `host[:port]`）；`plan` 不在白名單內 ⇒ 絕不外傳。 */
+  if (op === 'probeAiUpstream') {
+    const PROBE_UPSTREAM_READOUT_KEYS = ['http_status', 'elapsed_ms', 'error_class', 'base_host']
+    for (const key of PROBE_UPSTREAM_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **AI 修復孤兒扣費補退讀數面（additive 透傳｜**按 `op` 收窄**｜本單
+     `repairOrphanEnhanceCharges`）**：`scanned` / `eligible` / `written` / `rows` / `failed`
+     五鍵**僅當 `op === 'repairOrphanEnhanceCharges'` 且 `opResult` 確有該鍵時**才逐字疊進回包，
+     且**存在性驅動** ⇒ `dry_run` 輪回**恰 4 鍵**（`ok / scanned / eligible / rows`）、真寫輪回
+     **恰 5 鍵**（`ok / scanned / written / rows / failed`），恰如該 op 的封閉鍵面；**其餘任何 op
+     一律不透傳這 5 個鍵**（`rows` 與 `pullImportRows` / `listPointsFlow` 同字但按 op 隔離、
+     `scanned` 與各遷移 op 同字亦不外泄）⇒ 既有回包逐字不變。失敗回包（`ok:false`）走上面的
+     早退分支、恒 3 鍵、零讀數鍵；**零新集合**（寫步在 op 內逐行走 `ledger.refundPoints`、
+     不產 `plan` ⇒ `plan` 絕不外傳）。 */
+  if (op === 'repairOrphanEnhanceCharges') {
+    const REPAIR_ORPHAN_CHARGE_READOUT_KEYS = ['scanned', 'eligible', 'written', 'rows', 'failed']
+    for (const key of REPAIR_ORPHAN_CHARGE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   return response
 }
 

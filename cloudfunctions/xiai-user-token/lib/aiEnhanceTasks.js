@@ -22,22 +22,30 @@
  *     行字段（冻结）：`_id`（＝对外 `task_id` ＝ `aiet-` ＋ `sha256(uid 竖线 request_id)` 十六进制
  *     **前 16 位**）、`uid`、`request_id`、`source_image_id`、`seal_id`、`face_id`、`status`
  *     （**只允许** `SUBMITTED` / `RUNNING` / `READY` / `FAILED` 四个字面值）、`upstream_task_id`、
- *     `upstream_status`（数字）、`product_image_id`、`charge_amount`、`charge_balance_after`、
+ *     `upstream_status`（数字）、`product_image_id`、`charge_amount`、`charge_state`
+ *     （**恰两字面值** `PENDING`（已落行、尚未扣费）/ `CHARGED`（已扣费）；**读旧行缺该键 ⇒
+ *     按 `CHARGED` 处理、历史行一行不改**）、`charge_balance_after`、
  *     `error_reason`、`error_message`、`refunded`（布尔）、`created_at`、`updated_at`、
  *     `deadline_at`；另按派单方明文点名补记 `elapsed_ms`（入册耗时）。
  *  ② **管理员门**：三 op 的**第一行**都是既有的 `ops.adminWhitelistDenial`（零读零写地拒；
  *     缺 env / 非白名单 ⇒ 结构化拒绝，**不因未配置而放行**）。
  *  ③ **`ai-enhance-submit`**：载荷封闭**恰四键** `image_id` / `seal_id` / `face_id` / `request_id`
  *     （多一键 / 少一键都拒；`request_id` 必须 8〜64 位字母数字或下划线横线，否则 `INVALID_VALUE`）
- *     → 幂等预查（同 uid 同 `request_id` 已有行 ⇒ **直接回放该行，零扣费零上游**）
+ *     → 幂等预查（同 uid 同 `request_id` 已有行 ⇒ **直接回放该行，零扣费零上游**；行是
+ *     `charge_state:'PENDING'` 的中断残留 ⇒ **续做本跳**，不回放半成品）
  *     → 读源影像行与对象字节（与 `lib/aiEnhance.js` ④ 步**同一套拒绝面**，零扣费）
- *     → 解析上游配置（缺则零扣费）→ 预扣 10 金（`idem_key` 形态沿用
- *     `ai-enhance-<image_id>-<request_id>`）→ 调上游 `POST /images/edits` 取异步任务号
- *     （**这一跳墙钟预算 25 秒**，超时即退款并置 `FAILED`）→ 落任务行 `SUBMITTED`、
- *     `deadline_at` ＝ 当前 ＋ 20 分钟。成功回包**恰五键** `ok / task_id / status /
- *     source_image_id / charge{amount,balance}`；失败回包**恰四键** `ok / reason / message /
- *     refunded`。上游是同步回图的老形态 ⇒ **submit 内直接完成入库并置 `READY`**，
- *     回包形状不变（仍恰五键、**不带 `image_id`** —— `image_id` 只由 status op 给出）。
+ *     → 解析上游配置（缺则零扣费）→ **先落任务行 `SUBMITTED`（`charge_state:'PENDING'` ＋
+ *     `charge_amount:0`）→ 预扣 10 金 → 回写 `charge_amount:10 / charge_state:'CHARGED' /
+ *     charge_balance_after`**（`idem_key` 形态沿用 `ai-enhance-<image_id>-<request_id>`）
+ *     → 调上游 `POST /images/edits` 取异步任务号（**整段墙钟预算 25 秒**：读源字节 / 解配置 /
+ *     落行 / 扣费 / 上游 POST 每步都在段内，超时即**先退款、再把行转 `FAILED(UPSTREAM_ERROR,
+ *     「提交超過 25 秒…」)`**、**绝不等网关约 60 秒**；收尾写库另给 ≤10 秒宽限 ⇒ 总时长 ≤ 35 秒）
+ *     → 行回写 `upstream_task_id`、`deadline_at` ＝ `created_at` ＋ 20 分钟。成功回包**恰五键**
+ *     `ok / task_id / status / source_image_id / charge{amount,balance}`；失败回包**恰四键**
+ *     `ok / reason / message / refunded`。上游是同步回图的老形态 ⇒ **submit 内直接完成入库并置
+ *     `READY`**，回包形状不变（仍恰五键、**不带 `image_id`** —— `image_id` 只由 status op 给出）。
+ *     **任何失败路径 ⇒ 行转 `FAILED` ＋ 退款**（沿用 `refundTen`，`refunded` 照实报；**本次未真扣费
+ *     的路径零退款** —— 绝不凭空 +10 金）。
  *  ④ **`ai-enhance-status`**：载荷封闭**恰一键** `task_id` → 读任务行（不存在 ⇒ `INVALID_VALUE`，
  *     文案写明「該修復任務不存在」）→ 已是 `READY` / `FAILED` 终态 ⇒ **直接回放，零上游零扣费**
  *     → 否则**单轮推进**：查上游（单查预算 20 秒）；`pending` / `processing` ⇒ 行置 `RUNNING`
@@ -82,7 +90,7 @@
  */
 
 const crypto = require('crypto')
-const { REASONS, isCollectionNotExistError } = require('./config.js')
+const { REASONS, deny, isCollectionNotExistError } = require('./config.js')
 const { AI_ENHANCE_PROMPT } = require('./aiEnhancePrompt.js')
 /* 纯函数与常量单点（已导出面）：产物族 / 源键形态 / 幂等键 / 新影像行编号 / 尺寸与分辨率 / 金额。 */
 const aiEnhance = require('./aiEnhance.js')
@@ -139,6 +147,12 @@ const REFUND_IDEM_SUFFIX = '-refund'
 
 /** 提交跳墙钟预算：**25 秒**（超时即退款并置 `FAILED`）。 */
 const SUBMIT_POST_BUDGET_MS = 25000
+/** 提交段**收尾写库**（退款 ＋ 行转 `FAILED`）宽限：**≤10 秒** —— 绝对截止 ＝ 段截止 ＋ 本值
+ *  ⇒ 整段总时长 ≤ 35 秒（仍显著低于网关约 60 秒掐断线）。 */
+const SUBMIT_CLEANUP_GRACE_MS = 10000
+/** 任务行 `charge_state`（**恰两字面值**）：`PENDING` ＝ 已落行尚未扣费 / `CHARGED` ＝ 已扣费。
+ *  **读旧行缺该键 ⇒ 按 `CHARGED` 处理**（历史行一行不改、照旧走退款护栏）。 */
+const CHARGE_STATE = Object.freeze({ PENDING: 'PENDING', CHARGED: 'CHARGED' })
 
 /** 单轮推进预算（status op）：单查 20 秒 / 下载 25 秒 / 入册段 45 秒 / **整轮 45 秒**
  *  （整轮 45 秒 ＝ 规范 §3.80.6 / `AC-698`「單次完成（下載 ＋ 轉碼 ＋ 入庫）整體控制在 45 秒以內」；
@@ -415,6 +429,17 @@ async function refundTen(uid, idemKey, refId) {
   } catch {
     return false
   }
+}
+
+/**
+ * **读任务行的扣费状态**（读点单点；**缺键 / 未知值 ⇒ 一律按 `CHARGED` 处理** —— 历史行没有
+ * `charge_state`、且它们**确实已扣过费** ⇒ 退款护栏照旧生效；本函数**只读不写**、不回填旧行）。
+ * @param {object|null} row 已读到的任务行
+ * @returns {'PENDING'|'CHARGED'}
+ */
+function chargeStateOf(row) {
+  const value = row && typeof row.charge_state === 'string' ? row.charge_state.trim() : ''
+  return value === CHARGE_STATE.PENDING ? CHARGE_STATE.PENDING : CHARGE_STATE.CHARGED
 }
 
 /* --------------------------------------------------------------------------- *
@@ -825,15 +850,20 @@ async function registerProductImage(params) {
  * 置 `FAILED` ＋（未退过才）全额退款，回**恰 5 键**的失败回包。
  * 任务行状态写入失败 ⇒ **不谎报 `FAILED`**：回包 `status` 给出**库内实况**（原状态）、
  * `reason` 转 `STORAGE_UNAVAILABLE` 并在文案里带上原失败原因（退款结果照实报）。
+ * **退款只对真扣过费的行发生**：`charge_state` 为 `PENDING`（已落行、扣费从未成功）⇒ **零退款**
+ * （否则会给未扣费的行凭空 +10 金）；旧行缺该键 ⇒ 按 `CHARGED` 照旧退。
  */
 async function failTask(taskId, row, reason, message) {
   const uid = text(row.uid)
   const idemKey = aiEnhance.idemKeyOf(text(row.source_image_id), text(row.request_id))
+  const charged = chargeStateOf(row) === CHARGE_STATE.CHARGED
+  const needsRefund = charged && row.refunded !== true
   let refunded = row.refunded === true
-  if (!refunded) refunded = await refundTen(uid, idemKey, text(taskId))
+  if (needsRefund) refunded = await refundTen(uid, idemKey, text(taskId))
   /* **退款未成 ⇒ 不置终态**：行保持原状态 ⇒ 下一次 `ai-enhance-status` 重试退款
-     （行上 `refunded` 仍为 `false` ⇒ 不会重复退；账本幂等键再加一道双保险）。 */
-  if (!refunded) {
+     （行上 `refunded` 仍为 `false` ⇒ 不会重复退；账本幂等键再加一道双保险）。
+     `PENDING`（本就未扣费、`needsRefund:false`）不进本分支 —— 直接置终态、`refunded` 恒 `false`。 */
+  if (needsRefund && !refunded) {
     return statusFailure(
       REASONS.STORAGE_UNAVAILABLE,
       `${message}（退款未能完成 ⇒ 本次**未置 FAILED**、行狀態維持「${text(row.status)}」；請重試本操作以補退款。）`,
@@ -902,10 +932,19 @@ function submitReplay(taskId, row) {
 /**
  * **提交一次人工智能修復**（管理员面；会計費：单张 10 金；服务端裁决）。
  * 顺序（**判定全部在扣费 / 调上游之前**）：
- *  ⓪ 管理员门（**第一行**；零读零写地拒）→ ① 载荷封闭恰四键 → ② 幂等预查（已有行 ⇒ 回放）
+ *  ⓪ 管理员门（**第一行**；零读零写地拒）→ ① 载荷封闭恰四键 → ② 幂等预查（已有行 ⇒ 回放；
+ *     行是 `charge_state:'PENDING'` 的中断残留 ⇒ **续做本跳**）
  *  → ③ 读源影像行 / 拼对象键 / 取字节（拒绝面：零扣费）→ ④ 上游配置（缺 ⇒ 零扣费）
- *  → ⑤ 预扣 10 金 → ⑥ 调上游取任务号（25 秒预算；失败 ⇒ 全额退款 ＋ 置 `FAILED`）
- *  → ⑦ 落任务行 `SUBMITTED`（老形态同步回图 ⇒ 同步入册并置 `READY`）→ ⑧ 成功回包恰 5 键。
+ *  → ⑤a **先落任务行 `SUBMITTED`**（`charge_state:'PENDING'` ＋ `charge_amount:0`）
+ *     → ⑤b 预扣 10 金 → ⑤c 回写 `charge_amount:10 / charge_state:'CHARGED' / charge_balance_after`
+ *  → ⑥ 调上游取任务号 → ⑦ 行回写 `upstream_task_id`（老形态同步回图 ⇒ 同步入册并置 `READY`）
+ *  → ⑧ 成功回包恰 5 键。
+ * **整段墙钟硬上限 25 秒**（函数入口取绝对截止 `submitDeadlineAt`）：读源字节 / 解配置 / 落行 /
+ * 扣费 / 上游 POST **每步都经 `withinBudget` 封顶** ⇒ 超限即**先退款、再把行转
+ * `FAILED(UPSTREAM_ERROR, 「提交超過 25 秒…」)`** 并返回失败（**绝不等网关约 60 秒**）；
+ * 收尾写库（退款 ＋ 转 `FAILED`）另给 ≤10 秒宽限 ⇒ **整段总时长 ≤ 35 秒**。
+ * **行未落 ⇒ 无失败行可转**（此时尚未扣费 ⇒ 回 4 键失败、`refunded:false`）；**本次未真扣费的
+ * 失败路径一律零退款**（不给未扣费的行凭空 +10 金）。
  * @param {object} payload 载荷（封闭四键 `image_id` / `seal_id` / `face_id` / `request_id`）
  * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
  * @param {{adminPhone?:string, nowSeconds?:number, requestId?:string}} [context]
@@ -916,8 +955,28 @@ async function submitEnhanceTask(payload, identity, context) {
   const ops = opsModule()
   const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
   if (identityDenial) return submitFailure(identityDenial.reason, identityDenial.message, false)
-  /* 本跳起始时刻（老形态同步回图路的 `elapsed_ms` 记账基准）。 */
+  /* 本跳起始时刻（老形态同步回图路的 `elapsed_ms` 记账基准）＋ **整段墙钟硬上限 25 秒**
+     （函数入口取绝对截止 ⇒ 读源字节 / 解配置 / 落行 / 扣费 / 上游 POST 每步都在其内）。 */
   const submitStartedAt = Date.now()
+  const submitDeadlineAt = submitStartedAt + SUBMIT_POST_BUDGET_MS
+  /* 收尾写库（退款 ＋ 行转 `FAILED`）另给 ≤10 秒宽限；绝对截止 ＝ 段截止 ＋ 宽限 ⇒ 总时长 ≤ 35 秒。 */
+  const cleanupDeadlineAt = submitDeadlineAt + SUBMIT_CLEANUP_GRACE_MS
+  /* 段内每一步：到点即停止等待（`BUDGET_EXPIRED` ＝ 超限哨兵；存储侧调用没有中止缝）。
+     **开工前不另查预算** —— 段内任一步到点都会以哨兵收口，不再新发请求。 */
+  const budgeted = (promise) => withinBudget(promise, submitDeadlineAt)
+  const cleanupBudgeted = (promise) => withinBudget(promise, cleanupDeadlineAt)
+  /* 段超限文案头（回包与行内 `error_message` 同源；**恒以「提交超過 25 秒」起头**）。 */
+  const overBudgetHead = `提交超過 ${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒（整段牆鐘硬上限）`
+  const overBudgetMessage = (refunded) =>
+    refunded === true
+      ? `${overBudgetHead} ⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
+      : `${overBudgetHead} ⇒ 退款未能完成，請重試本操作以補退款。`
+  /* 段超限且**行未落**（此前零扣费、零上游）。 */
+  const overBudgetBeforeRow = () =>
+    submitFailure(REASONS.UPSTREAM_ERROR, `${overBudgetHead} ⇒ 本次未扣費、未落任務行、未調上游。`, false)
+  /* 写行结果 → 并入文案的诊断串（`BUDGET_EXPIRED` ＝ 收尾超限，不是抛错）。 */
+  const writeNoteOf = (outcome) =>
+    outcome === BUDGET_EXPIRED ? '（任務行落盤超過收尾寬限、未完成）' : text(outcome)
 
   /* ① 载荷封闭恰四键（形态 → 未知键 → 缺 / 空键 → 值域 → 请求号形态；全部早于任何读写）。 */
   if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -960,12 +1019,22 @@ async function submitEnhanceTask(payload, identity, context) {
   const taskId = taskIdOf(uid, requestId)
   const idemKey = aiEnhance.idemKeyOf(imageId, requestId)
 
-  /* ② 幂等预查（同 uid 同 request_id 已有行 ⇒ 直接回放该行：零扣费、零上游、零写入）。 */
-  const existing = await readTaskRow(taskId)
-  if (existing) return submitReplay(taskId, existing)
+  /* ② 幂等预查（同 uid 同 request_id 已有行 ⇒ 直接回放该行：零扣费、零上游、零写入）。
+     **例外**：行是「已落行、未扣费」的中断残留（`charge_state:'PENDING'` ＋ 无上游任务号 ＋ 非终态）
+     ⇒ 视作**未完成的提交**、续做本跳（扣费 → 上游 → 行回写），不回放半成品。 */
+  const existing = await budgeted(readTaskRow(taskId))
+  if (existing === BUDGET_EXPIRED) return overBudgetBeforeRow()
+  const resumable =
+    existing &&
+    chargeStateOf(existing) === CHARGE_STATE.PENDING &&
+    text(existing.upstream_task_id) === '' &&
+    text(existing.status) === TASK_STATUS.SUBMITTED &&
+    existing.refunded !== true
+  if (existing && !resumable) return submitReplay(taskId, existing)
 
   /* ③ 读源影像行 → 拼对象键 → 取字节（与同步面 ④ 步同一套拒绝面：全部零扣费、未调上游）。 */
-  const sourceRow = await readImageRow(imageId)
+  const sourceRow = await budgeted(readImageRow(imageId))
+  if (sourceRow === BUDGET_EXPIRED) return overBudgetBeforeRow()
   if (!sourceRow) {
     return submitFailure(REASONS.INVALID_VALUE, '原圖影像編號（image_id）在影像行中不存在；本次零扣費、零寫入、未調上游。', false)
   }
@@ -975,17 +1044,24 @@ async function submitEnhanceTask(payload, identity, context) {
   }
   const opsRead = opsModule()
   let sourceBytes = null
+  let sourceExpired = false
   for (const ext of aiEnhance.SOURCE_KEY_EXTS) {
     const candidate = `xiai/images/${digest.slice(0, 2)}/${digest}${ext}`
     if (!aiEnhance.SOURCE_KEY_PATTERN.test(candidate)) continue
     try {
-      const bytes = await opsRead.readArtifactBytes(candidate)
+      const bytes = await budgeted(opsRead.readArtifactBytes(candidate))
+      /* 段预算到点 ⇒ **停止尝试**（不再读下一个候选、不把哨兵当字节）。 */
+      if (bytes === BUDGET_EXPIRED) {
+        sourceExpired = true
+        break
+      }
       sourceBytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
       break
     } catch {
       /* 该扩展名候选对象不存在 ⇒ 试下一个候选（`.tiff` 源件一律不在候选面内）。 */
     }
   }
+  if (sourceExpired) return overBudgetBeforeRow()
   if (!sourceBytes) {
     return submitFailure(
       REASONS.STORAGE_UNAVAILABLE,
@@ -1007,7 +1083,9 @@ async function submitEnhanceTask(payload, identity, context) {
 
   /* ④ 上游配置（缺 ⇒ `CONFIG_MISSING` ＋ 零扣费 —— 未预扣即拒）。 */
   const aiUpstream = require('./aiUpstream.js')
-  const upstream = await aiUpstream.resolveUpstreamSecret()
+  const upstreamOutcome = await budgeted(aiUpstream.resolveUpstreamSecret())
+  if (upstreamOutcome === BUDGET_EXPIRED) return overBudgetBeforeRow()
+  const upstream = upstreamOutcome
   if (!upstream || upstream.ok === false) {
     return submitFailure(
       (upstream && upstream.reason) || REASONS.CONFIG_MISSING,
@@ -1016,99 +1094,266 @@ async function submitEnhanceTask(payload, identity, context) {
     )
   }
 
-  /* ⑤ 预扣 10 金（`idem_key` 三段封闭；余额不足 ⇒ `INSUFFICIENT_POINTS` ＋ 零扣费）。 */
-  const charged = await chargeTen(uid, idemKey, taskId)
-  if (!charged.ok) return submitFailure(charged.reason, `${charged.message}（本次零扣費、未調上游）`, false)
-  /* 并发同请求号：另一路已持 charge（账本幂等）⇒ 回看它的行，有则回放（恰一路真跑）。 */
-  if (charged.idempotent) {
-    const raced = await readTaskRow(taskId)
-    if (raced) return submitReplay(taskId, raced)
-  }
-
-  /* ⑥ 调上游取异步任务号（墙钟预算 25 秒；非 2xx / 超时 / 网络错 / 缺任务号 ⇒ 全额退款 ＋ 置 FAILED）。 */
-  const imageDataUrl = dataUrlOf(sourceMime, sourceBytes)
-  const posted = await submitUpstreamTask(upstream, imageDataUrl)
-  if (!posted.ok) {
-    const refunded = await refundTen(uid, idemKey, taskId)
-    const rowNote = await writeFailedTaskRow(
-      taskId,
-      { uid, request_id: requestId, source_image_id: imageId, seal_id: sealId, face_id: faceId, upstream_status: 0, charge_balance_after: charged.balance },
-      posted.reason,
-      posted.message,
-      refunded
-    )
-    return submitFailure(posted.reason, appendWriteNote(posted.message, rowNote), refunded)
-  }
-
+  /* ⑤a **先落任务行**（`SUBMITTED` ＋ `charge_state:'PENDING'` ＋ `charge_amount:0`）—— 行在扣费之前，
+     任何中断最多留下「有行无扣费 / 有行已扣费」，**绝不出现「已扣费却无行」**（后者正是孤儿流水的
+     成因；由 `repairOrphanEnhanceCharges` 收口）。落行失败 ⇒ 本次不扣费、不调上游。 */
   const createdAt = nowIso()
-  const deadlineAt = new Date(Date.parse(createdAt) + TASK_DEADLINE_MS).toISOString()
-  const baseDoc = {
+  const rowDeadlineAt = new Date(Date.parse(createdAt) + TASK_DEADLINE_MS).toISOString()
+  const pendingDoc = {
     uid,
     request_id: requestId,
     source_image_id: imageId,
     seal_id: sealId,
     face_id: faceId,
-    upstream_status: Number(posted.status) || 0,
-    charge_amount: AI_ENHANCE_COST,
-    charge_balance_after: charged.balance,
+    status: TASK_STATUS.SUBMITTED,
+    upstream_task_id: '',
+    upstream_status: 0,
+    product_image_id: '',
+    charge_amount: 0,
+    charge_state: CHARGE_STATE.PENDING,
+    charge_balance_after: 0,
     error_reason: '',
     error_message: '',
     refunded: false,
     created_at: createdAt,
     updated_at: createdAt,
-    deadline_at: deadlineAt
+    deadline_at: rowDeadlineAt
+  }
+  try {
+    const persisted = await budgeted(persistTaskRow(taskId, pendingDoc))
+    if (persisted === BUDGET_EXPIRED) return overBudgetBeforeRow()
+  } catch (error) {
+    return submitFailure(
+      REASONS.STORAGE_UNAVAILABLE,
+      `任務行落盤失敗（權威存儲不可用）⇒ 本次未扣費、未調上游、未落行；可重試本操作。（診斷：${diagnoseOf(error)}）`,
+      false
+    )
   }
 
-  /* ⑦a 异步入队（老形态不在场）：落任务行 `SUBMITTED`。落行失败 ⇒ 全额退款（行不存在 ⇒ 无从轮询）。 */
-  if (posted.task_id) {
-    const doc = Object.assign({}, baseDoc, {
-      status: TASK_STATUS.SUBMITTED,
-      upstream_task_id: posted.task_id,
-      product_image_id: ''
+  /* 行已在场的失败收口：**先退款**（收尾宽限内；本次未真扣费 ⇒ 零退款）→ 行转 `FAILED` → 恰 4 键。
+     `message` 可为字符串或 `(refunded) => string`（段超限文案要按退款结果定稿）。 */
+  const failAfterRow = async ({ reason, message, charged, balance, chargeAmount, upstreamStatus }) => {
+    let refunded = false
+    if (charged) {
+      const refundOutcome = await cleanupBudgeted(refundTen(uid, idemKey, taskId))
+      refunded = refundOutcome === true
+    }
+    const finalMessage = typeof message === 'function' ? message(refunded) : message
+    const rowNote = await cleanupBudgeted(
+      writeFailedTaskRow(
+        taskId,
+        {
+          uid,
+          request_id: requestId,
+          source_image_id: imageId,
+          seal_id: sealId,
+          face_id: faceId,
+          upstream_status: Number(upstreamStatus) || 0,
+          charge_balance_after: balance
+        },
+        reason,
+        finalMessage,
+        refunded,
+        {
+          amount: Number(chargeAmount) || 0,
+          state: charged ? CHARGE_STATE.CHARGED : CHARGE_STATE.PENDING,
+          balance
+        }
+      )
+    )
+    return submitFailure(reason, appendWriteNote(finalMessage, writeNoteOf(rowNote)), refunded)
+  }
+
+  /* ⑤b 预扣 10 金（`idem_key` 三段封闭；余额不足 ⇒ `INSUFFICIENT_POINTS` ＋ 零扣费）。 */
+  const chargedOutcome = await budgeted(chargeTen(uid, idemKey, taskId))
+  if (chargedOutcome === BUDGET_EXPIRED) {
+    /* 扣费未在段内返回 ⇒ 结果未知：**先退款**（账本幂等键保证只退一次）再转 `FAILED`。 */
+    return await failAfterRow({
+      reason: REASONS.UPSTREAM_ERROR,
+      message: overBudgetMessage,
+      charged: true,
+      balance: 0,
+      chargeAmount: AI_ENHANCE_COST,
+      upstreamStatus: 0
     })
+  }
+  const charged = chargedOutcome
+  if (!charged.ok) {
+    /* 扣费失败 ⇒ 行转 `FAILED`（`charge_amount:0` / `charge_state:'PENDING'` ＝ 未扣实况）、
+       **零退款**（本次未扣过一分钱）、零上游。 */
+    return await failAfterRow({
+      reason: charged.reason,
+      message: `${charged.message}（本次零扣費、未調上游）`,
+      charged: false,
+      balance: 0,
+      chargeAmount: 0,
+      upstreamStatus: 0
+    })
+  }
+  /* 并发同请求号：另一路已持 charge（账本幂等）且**已把行推到扣费后状态** ⇒ 回放它的行（恰一路真跑）。
+     行仍是本路写的 `PENDING` ⇒ 说明另一路尚未推进（或本路是 PENDING 残留的续做）⇒ 本路继续。 */
+  if (charged.idempotent) {
+    const raced = await budgeted(readTaskRow(taskId))
+    if (raced === BUDGET_EXPIRED) {
+      return await failAfterRow({
+        reason: REASONS.UPSTREAM_ERROR,
+        message: overBudgetMessage,
+        charged: true,
+        balance: charged.balance,
+        chargeAmount: AI_ENHANCE_COST,
+        upstreamStatus: 0
+      })
+    }
+    if (raced && chargeStateOf(raced) === CHARGE_STATE.CHARGED && text(raced.status) !== TASK_STATUS.FAILED) {
+      return submitReplay(taskId, raced)
+    }
+  }
+
+  /* ⑤c 回写扣费实况（`charge_amount:10 / charge_state:'CHARGED' / charge_balance_after`）。
+     回写失败 ⇒ **不谎报**：退款（收尾宽限）＋ 行转 `FAILED`（`writeFailedTaskRow` 整行落）。 */
+  try {
+    const updated = await budgeted(
+      updateTaskRow(taskId, {
+        charge_amount: AI_ENHANCE_COST,
+        charge_state: CHARGE_STATE.CHARGED,
+        charge_balance_after: charged.balance
+      })
+    )
+    if (updated === BUDGET_EXPIRED) {
+      return await failAfterRow({
+        reason: REASONS.UPSTREAM_ERROR,
+        message: overBudgetMessage,
+        charged: true,
+        balance: charged.balance,
+        chargeAmount: AI_ENHANCE_COST,
+        upstreamStatus: 0
+      })
+    }
+  } catch (error) {
+    return await failAfterRow({
+      reason: REASONS.STORAGE_UNAVAILABLE,
+      message: `扣費實況回寫失敗（權威存儲不可用）⇒ 本次已停止並全額退回 ${AI_ENHANCE_COST} 金；請重新提交。（診斷：${diagnoseOf(error)}）`,
+      charged: true,
+      balance: charged.balance,
+      chargeAmount: AI_ENHANCE_COST,
+      upstreamStatus: 0
+    })
+  }
+
+  /* ⑥ 调上游取异步任务号（**整段墙钟 25 秒**：非 2xx / 超时 / 网络错 / 缺任务号 / 段超限
+     ⇒ 先退款、再置 `FAILED` —— **绝不等网关约 60 秒**）。 */
+  const imageDataUrl = dataUrlOf(sourceMime, sourceBytes)
+  const postedOutcome = await budgeted(submitUpstreamTask(upstream, imageDataUrl))
+  if (postedOutcome === BUDGET_EXPIRED) {
+    return await failAfterRow({
+      reason: REASONS.UPSTREAM_ERROR,
+      message: overBudgetMessage,
+      charged: true,
+      balance: charged.balance,
+      chargeAmount: AI_ENHANCE_COST,
+      upstreamStatus: 0
+    })
+  }
+  const posted = postedOutcome
+  if (!posted.ok) {
+    return await failAfterRow({
+      reason: posted.reason,
+      message: posted.message,
+      charged: true,
+      balance: charged.balance,
+      chargeAmount: AI_ENHANCE_COST,
+      upstreamStatus: 0
+    })
+  }
+
+  /* ⑦ 行回写（**只补差量键**：行体由 ⑤a 落定，`created_at` / `deadline_at` 一字不改）。 */
+  const chargePatch = {
+    upstream_status: Number(posted.status) || 0,
+    charge_amount: AI_ENHANCE_COST,
+    charge_state: CHARGE_STATE.CHARGED,
+    charge_balance_after: charged.balance,
+    error_reason: '',
+    error_message: '',
+    refunded: false
+  }
+
+  /* ⑦a 异步入队（老形态不在场）：行回写 `SUBMITTED` ＋ 上游任务号。回写失败 ⇒ 全额退款
+     （行上没有任务号 ⇒ 本面无从轮询）。 */
+  if (posted.task_id) {
     try {
-      await persistTaskRow(taskId, doc)
+      const updated = await budgeted(
+        updateTaskRow(
+          taskId,
+          Object.assign({ status: TASK_STATUS.SUBMITTED, upstream_task_id: posted.task_id, product_image_id: '' }, chargePatch)
+        )
+      )
+      if (updated === BUDGET_EXPIRED) {
+        return await failAfterRow({
+          reason: REASONS.UPSTREAM_ERROR,
+          message: overBudgetMessage,
+          charged: true,
+          balance: charged.balance,
+          chargeAmount: AI_ENHANCE_COST,
+          upstreamStatus: Number(posted.status) || 0
+        })
+      }
     } catch (error) {
-      const refunded = await refundTen(uid, idemKey, taskId)
+      const refundOutcome = await cleanupBudgeted(refundTen(uid, idemKey, taskId))
+      const refunded = refundOutcome === true
       return submitFailure(
         REASONS.STORAGE_UNAVAILABLE,
-        `任務行落盤失敗（權威存儲不可用）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；上游任務已入隊但本面不追蹤，請重新提交。（診斷：${diagnoseOf(error)}）`,
+        `任務行落盤失敗（權威存儲不可用）⇒ ${refunded ? `已全額退回 ${AI_ENHANCE_COST} 金` : '退款未能完成'}；上游任務已入隊但行上未記任務號、本面不追蹤，請重新提交。（診斷：${diagnoseOf(error)}）`,
         refunded
       )
     }
     return submitSuccess(taskId, TASK_STATUS.SUBMITTED, imageId, charged.balance)
   }
 
-  /* ⑦b 同步回图的老形态：**submit 内直接完成入库并置 `READY`**（回包形状不变、仍不带 `image_id`）。 */
+  /* ⑦b 同步回图的老形态：**submit 内直接完成入库并置 `READY`**（回包形状不变、仍不带 `image_id`）。
+     入册段吃**同一段预算**（到点即停等待 ⇒ 由下面统一按段超限收口）。 */
   const elapsedMs = Date.now() - submitStartedAt
-  const ingested = await registerProductImage({
-    bytes: posted.bytes,
-    sealId,
-    sourceImageId: imageId,
-    requestId,
-    chargeBalanceAfter: charged.balance,
-    upstreamStatus: Number(posted.status) || 0,
-    elapsedMs
-  })
-  if (!ingested.ok) {
-    const refunded = await refundTen(uid, idemKey, taskId)
-    const rowNote = await writeFailedTaskRow(
-      taskId,
-      { uid, request_id: requestId, source_image_id: imageId, seal_id: sealId, face_id: faceId, upstream_status: Number(posted.status) || 0, charge_balance_after: charged.balance },
-      ingested.reason,
-      ingested.message,
-      refunded
-    )
-    return submitFailure(ingested.reason, appendWriteNote(ingested.message, rowNote), refunded)
+  const ingestOutcome = await budgeted(
+    registerProductImage({
+      bytes: posted.bytes,
+      sealId,
+      sourceImageId: imageId,
+      requestId,
+      chargeBalanceAfter: charged.balance,
+      upstreamStatus: Number(posted.status) || 0,
+      elapsedMs,
+      budgetDeadlineAt: submitDeadlineAt
+    })
+  )
+  if (ingestOutcome === BUDGET_EXPIRED || !ingestOutcome.ok) {
+    const expired = ingestOutcome === BUDGET_EXPIRED || Date.now() >= submitDeadlineAt
+    return await failAfterRow({
+      reason: expired ? REASONS.UPSTREAM_ERROR : ingestOutcome.reason,
+      message: expired ? overBudgetMessage : ingestOutcome.message,
+      charged: true,
+      balance: charged.balance,
+      chargeAmount: AI_ENHANCE_COST,
+      upstreamStatus: Number(posted.status) || 0
+    })
   }
-  const readyDoc = Object.assign({}, baseDoc, {
-    status: TASK_STATUS.READY,
-    upstream_task_id: '',
-    product_image_id: ingested.image_id,
-    elapsed_ms: ingested.elapsed_ms
-  })
+  const ingested = ingestOutcome
   try {
-    await persistTaskRow(taskId, readyDoc)
+    const updated = await budgeted(
+      updateTaskRow(
+        taskId,
+        Object.assign(
+          { status: TASK_STATUS.READY, upstream_task_id: '', product_image_id: ingested.image_id, elapsed_ms: ingested.elapsed_ms },
+          chargePatch
+        )
+      )
+    )
+    if (updated === BUDGET_EXPIRED) {
+      /* 候选影像行已入册（确定性 `_id` ⇒ 重放不建第二行）⇒ **不退款**：重放同 request_id 只补任务行。 */
+      return submitFailure(
+        REASONS.UPSTREAM_ERROR,
+        `${overBudgetHead} ⇒ 候選影像行已入册但任務行落盤未完成；請重放本次提交（同請求號不重複扣費、不重複入册）。`,
+        false
+      )
+    }
   } catch (error) {
     /* 候选影像行已入册（确定性 `_id` ⇒ 重放不建第二行）⇒ **不退款**：重放同 request_id 只补任务行。 */
     return submitFailure(
@@ -1120,9 +1365,14 @@ async function submitEnhanceTask(payload, identity, context) {
   return submitSuccess(taskId, TASK_STATUS.READY, imageId, charged.balance)
 }
 
-/** 失败路径的 `FAILED` 行落盘（尽力而为；失败 ⇒ 返回诊断串由调用方并入文案，**不吞成成功**）。 */
-async function writeFailedTaskRow(taskId, base, reason, message, refunded) {
+/** 失败路径的 `FAILED` 行落盘（尽力而为；失败 ⇒ 返回诊断串由调用方并入文案，**不吞成成功**）。
+ * @param {{amount?:number, state?:string, balance?:number}} [charge] 行上扣费实况
+ *   （缺省 ＝ `charge_amount:10 / CHARGED / balance 取 base` —— 即「已扣费」的老口径；
+ *   **本次未真扣费的路径必传** `{amount:0, state:CHARGE_STATE.PENDING, balance:0}`）。 */
+async function writeFailedTaskRow(taskId, base, reason, message, refunded, charge) {
   const now = nowIso()
+  const chargeDoc = charge && typeof charge === 'object' ? charge : {}
+  const charged = chargeDoc.state !== CHARGE_STATE.PENDING
   const doc = {
     uid: text(base.uid),
     request_id: text(base.request_id),
@@ -1133,8 +1383,9 @@ async function writeFailedTaskRow(taskId, base, reason, message, refunded) {
     upstream_task_id: '',
     upstream_status: Number(base.upstream_status) || 0,
     product_image_id: '',
-    charge_amount: AI_ENHANCE_COST,
-    charge_balance_after: Number(base.charge_balance_after) || 0,
+    charge_amount: Number.isFinite(Number(chargeDoc.amount)) ? Number(chargeDoc.amount) : AI_ENHANCE_COST,
+    charge_state: charged ? CHARGE_STATE.CHARGED : CHARGE_STATE.PENDING,
+    charge_balance_after: Number.isFinite(Number(chargeDoc.balance)) ? Number(chargeDoc.balance) : Number(base.charge_balance_after) || 0,
     error_reason: reason,
     error_message: message,
     refunded: refunded === true,
@@ -1545,6 +1796,266 @@ async function listEnhanceTasks(payload, identity, context) {
   return { ok: true, rows: projected }
 }
 
+/* --------------------------------------------------------------------------- *
+  op ④ · 管理员运维两面（`ADMIN_OPS` 薄委派的**实现点**；本文件零第二套门 / 零新集合）
+ *   · `probeAiUpstream`            —— 上游 `GET {base}/models` 连通探测：**零扣费、零写库**；
+ *   · `repairOrphanEnhanceCharges` —— 孤儿扣费（`ref_id` ＝ `aiet-…` 却无任务行）补退款。
+ * --------------------------------------------------------------------------- */
+
+/** 探测载荷（**封闭恰零键** —— 目标 URL / 方法 / 次数一律服务端给定，客户端零入参）。 */
+const PROBE_ALLOWED_KEYS = Object.freeze([])
+/** 探测回包键面（**恰 5 键**）。 */
+const PROBE_REPLY_KEYS = Object.freeze(['ok', 'http_status', 'elapsed_ms', 'error_class', 'base_host'])
+/** 探测硬上限 **8 秒**（`withinBudget` ＝ `Promise.race`；到点即回、绝不拖到网关线）。 */
+const PROBE_BUDGET_MS = 8000
+/** `error_class` 值域（**封闭五值**；`OK` ＝ 2xx 到手）。 */
+const PROBE_ERROR_CLASSES = Object.freeze(['OK', 'TIMEOUT', 'DNS', 'CONNECT', 'TLS', 'HTTP'])
+
+/** 孤儿扣费修復载荷（**封闭恰二键**）。 */
+const REPAIR_ORPHAN_ALLOWED_KEYS = Object.freeze(['dry_run', 'limit'])
+/** `limit` 缺省 / 值域（1〜200）。 */
+const REPAIR_ORPHAN_LIMIT_DEFAULT = 50
+const REPAIR_ORPHAN_LIMIT_MAX = 200
+/** 单次读 `CHARGE` 流水护栏（工程既有「limit ≤ 1000」惯例；超出存量由派单方调大常量分轮处理）。 */
+const REPAIR_ORPHAN_SCAN_LIMIT = 1000
+/** 孤儿行回包行面（**恰 3 键**；`amount` ＝ `Math.abs(delta)` —— 流水行**没有 `amount` 键**）。 */
+const REPAIR_ORPHAN_ROW_KEYS = Object.freeze(['ref_id', 'idem_key', 'amount'])
+
+/** 上游 `base_url` → **只回 host（可带端口）**；解析不了 ⇒ 空串（**零路径、零查询、零凭据**）。 */
+function baseHostOf(baseUrl) {
+  const raw = text(baseUrl)
+  if (raw === '') return ''
+  try {
+    return new URL(raw).host
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 探测失败分类（**纯函数、零 I/O**；五值封闭 `TIMEOUT / TLS / DNS / CONNECT`，`OK` / `HTTP`
+ * 由调用方按状态码给）。**零密钥、零完整路径、零响应体** —— 只吃错误对象的 name / code / message。
+ * @param {any} error 上游 fetch 抛出的错误（或任何非 Response 的回值）
+ * @returns {'TIMEOUT'|'DNS'|'CONNECT'|'TLS'}
+ */
+function probeErrorClassOf(error) {
+  const name = text(error && error.name)
+  const code = text(error && (error.code !== undefined && error.code !== null ? error.code : error.errCode))
+  const message = text(error && error.message)
+  const blob = `${name} ${code} ${message}`
+  if (name === 'TimeoutError' || name === 'AbortError' || /ETIMEDOUT|CONNECT_TIMEOUT|timed?[ -]?out|timeout/i.test(blob)) {
+    return 'TIMEOUT'
+  }
+  if (/ERR_TLS|ERR_SSL|EPROTO|CERT_[A-Z_]+|UNABLE_TO_VERIFY|DEPTH_ZERO_SELF_SIGNED|SELF_SIGNED|TLS handshake|SSL routines/i.test(blob)) {
+    return 'TLS'
+  }
+  if (/ENOTFOUND|EAI_AGAIN|EAI_FAIL|EAI_NONAME|ENODATA|getaddrinfo|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|EAI_|network/i.test(blob)) {
+    /* `EAI_*` ＝ DNS 解析族；`ECONN*` ＝ 连不上（连通层）⇒ 归 `CONNECT`。 */
+    return /ENOTFOUND|EAI_AGAIN|EAI_FAIL|EAI_NONAME|ENODATA|getaddrinfo|EAI_/.test(blob) ? 'DNS' : 'CONNECT'
+  }
+  return 'CONNECT'
+}
+
+/** 探测回包（**恰 5 键**；`error_class` 越值一律归 `CONNECT`，不把未知值漏出封闭值域）。 */
+function probeReply(ok, httpStatus, elapsedMs, errorClass, baseHost) {
+  return {
+    ok: ok === true,
+    http_status: Number.isInteger(httpStatus) ? httpStatus : 0,
+    elapsed_ms: Number.isInteger(elapsedMs) && elapsedMs > 0 ? elapsedMs : 0,
+    error_class: PROBE_ERROR_CLASSES.indexOf(errorClass) === -1 ? 'CONNECT' : errorClass,
+    base_host: text(baseHost)
+  }
+}
+
+/**
+ * **探测 AI 上游连通**（管理员面；**零扣费、零写库、零入参**）。
+ * 顺序：⓪ 管理员门（**第一行**，零读零写地拒）→ ① 载荷封闭**恰零键** → ② 解上游配置
+ * （缺 / `base_url` 非法 ⇒ 3 键拒绝面、**不发请求**）→ ③ 一次 `GET {base}/models`
+ * （**硬上限 8 秒**：`withinBudget` ＝ `Promise.race` 到点即回，绝不等网关）→ ④ 回包**恰 5 键**
+ * `ok / http_status / elapsed_ms / error_class / base_host`。
+ * **零明文密钥**（认证头只在服务端内存流转）、**零完整路径**（只回 `host[:port]`）、
+ * **零响应体**（不读 `body` / `json`，只看状态码）。
+ * @param {object} payload 载荷（封闭恰零键；请传空对象 `{}`）
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<object>} 探测面恰 5 键 / 拒绝面恰 3 键（既有冻结 `reason`）
+ */
+async function probeAiUpstream(payload, identity, context) {
+  /* ⓪ 管理员门（既有单点；**第一行**，零读零写地拒）。 */
+  const ops = opsModule()
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ① 载荷封闭恰零键（未知键 ⇒ `INVALID_FIELD`；缺 / 非对象 ⇒ `MISSING_REQUIRED`）。 */
+  if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload；探測入參封閉恰零鍵，請傳空物件）；本次零請求、零扣費、零寫入。')
+  }
+  const unknown = Object.keys(payload).filter((key) => PROBE_ALLOWED_KEYS.indexOf(key) === -1)
+  if (unknown.length > 0) {
+    return deny(
+      REASONS.INVALID_FIELD,
+      `載荷含未知欄位：${unknown.join('、')}（AI 上游連通探測入參封閉恰零鍵；目標、方法、次數一律由服務端給定）；本次零請求、零扣費、零寫入。`
+    )
+  }
+  /* ② 解上游配置（缺 ⇒ 既有 `reason`；`base_url` 缺 / 非法 ⇒ `CONFIG_MISSING`；两者都**不发请求**）。 */
+  const aiUpstream = require('./aiUpstream.js')
+  const upstream = await aiUpstream.resolveUpstreamSecret()
+  if (!upstream || upstream.ok === false) {
+    return deny((upstream && upstream.reason) || REASONS.CONFIG_MISSING, `${(upstream && upstream.message) || 'AI 上游未配置'}；本次零請求、零扣費、零寫入。`)
+  }
+  const baseUrl = text(upstream.base_url)
+  const baseHost = baseHostOf(baseUrl)
+  if (baseUrl === '' || baseHost === '') {
+    return deny(REASONS.CONFIG_MISSING, 'AI 上游 base_url 缺失或不是合法 URL ⇒ 無從探測；本次零請求、零扣費、零寫入。')
+  }
+  /* ③ 一次 `GET {base}/models`（**硬上限 8 秒**；到点即回、不等响应、不读响应体）。 */
+  const startedAt = Date.now()
+  const deadlineAt = startedAt + PROBE_BUDGET_MS
+  const url = `${baseUrl.replace(/\/+$/, '')}/models`
+  let outcome = null
+  try {
+    const fetchImpl = resolveFetch()
+    outcome = await withinBudget(
+      fetchImpl(url, { method: 'GET', headers: authHeadersOf(upstream), signal: AbortSignal.timeout(PROBE_BUDGET_MS) }),
+      deadlineAt
+    )
+  } catch (error) {
+    outcome = error
+  }
+  const elapsedMs = Math.max(0, Date.now() - startedAt)
+  /* ④ 到点 ⇒ `TIMEOUT`（零状态码）；有状态码 ⇒ `OK`（2xx）/ `HTTP`（非 2xx）；抛错 ⇒ 五值分类。 */
+  if (outcome === BUDGET_EXPIRED) return probeReply(false, 0, elapsedMs, 'TIMEOUT', baseHost)
+  const status = outcome && typeof outcome.status === 'number' ? Number(outcome.status) : null
+  if (status === null) return probeReply(false, 0, elapsedMs, probeErrorClassOf(outcome), baseHost)
+  const ok = status >= 200 && status < 300
+  return probeReply(ok, status, elapsedMs, ok ? 'OK' : 'HTTP', baseHost)
+}
+
+/** 孤儿行投影（**恰 3 键**；`amount` ＝ `Math.abs(delta)` —— 流水行本身没有 `amount` 键）。 */
+function projectOrphanChargeRow(row) {
+  return {
+    ref_id: text(row && row.ref_id),
+    idem_key: text(row && row.idem_key),
+    amount: Math.abs(Number(row && row.delta))
+  }
+}
+
+/**
+ * **补退孤儿扣费**（管理员面；`kind='CHARGE'` 且 `ref_id` 以 `aiet-` 开头的流水中：
+ * `xiai_ai_enhance_tasks` **无该 `_id` 行** 且 该 `idem_key` **无 `REFUND` 流水** ⇒ 补退款）。
+ * 顺序：⓪ 管理员门（**第一行**，零读零写地拒）→ ① 载荷封闭**恰二键**
+ * `dry_run`（布林，**缺省 `true` ＝ 只读预览**）／ `limit`（1〜200 整数，**缺省 50**）
+ * → ② 只读扫描（「集合不存在」按既有判据降级空集；真存储故障 ⇒ 结构化失败、不伪装）
+ * → ③ 逐行判定（**有任务行 ⇒ 不选**；**已有 `REFUND` ⇒ 不选**；`delta` 非整数 ⇒ 不选 —— 不猜金额）
+ * → ④ `dry_run:true` ⇒ **零写入**、回**恰 4 键** `ok / scanned / eligible / rows`；
+ *    `dry_run:false` ⇒ 逐行 `ledger.refundPoints`（幂等键 ＝ 原 `idem_key` ＋ `-refund`、
+ *    **必带 `ref_id`**）⇒ 回**恰 5 键** `ok / scanned / written / rows / failed`
+ *    （`ok === (failed === 0)`；同键重放回 `idempotent:true` ⇒ **不计 `written` ⇒ 重跑 `written=0`**）。
+ * **非 `aiet-` 前缀的流水一律不读不写**；`rows` 元素恒**恰 3 键** `ref_id / idem_key / amount`
+ * 且条数 ≤ `limit`（`eligible` 仍报真实孤儿总数）；`reason` **零新增**、**零 `plan`**、**零新集合**。
+ * @param {object} payload 载荷（封闭二键 `dry_run` / `limit`）
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<object>} dry_run 恰 4 键 / 真写恰 5 键 / 拒绝面恰 3 键
+ */
+async function repairOrphanEnhanceCharges(payload, identity, context) {
+  /* ⓪ 管理员门（既有单点；**第一行**，零读零写地拒）。 */
+  const ops = opsModule()
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ① 载荷封闭恰二键（形态 → 未知键 → 值域；全部早于任何读写）。 */
+  if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+  }
+  const unknown = Object.keys(payload).filter((key) => REPAIR_ORPHAN_ALLOWED_KEYS.indexOf(key) === -1)
+  if (unknown.length > 0) {
+    return deny(
+      REASONS.INVALID_FIELD,
+      `載荷含未知欄位：${unknown.join('、')}（AI 修復孤兒扣費補退入參封閉二鍵：dry_run / limit）；本次零寫入。`
+    )
+  }
+  const dryRun = payload.dry_run === undefined ? true : payload.dry_run
+  if (typeof dryRun !== 'boolean') {
+    return deny(REASONS.INVALID_VALUE, 'dry_run 必須是布林值（缺省 true ＝ 只讀預覽）；本次零寫入。')
+  }
+  const limit = payload.limit === undefined ? REPAIR_ORPHAN_LIMIT_DEFAULT : payload.limit
+  if (!Number.isInteger(limit) || limit < 1 || limit > REPAIR_ORPHAN_LIMIT_MAX) {
+    return deny(REASONS.INVALID_VALUE, `limit 必須是 1〜${REPAIR_ORPHAN_LIMIT_MAX} 之間的整數（缺省 ${REPAIR_ORPHAN_LIMIT_DEFAULT}）；本次零寫入。`)
+  }
+  /* ② 只读扫描 `CHARGE` 流水（「集合不存在」⇒ 空集；其余错误原样上抛为结构化失败）。 */
+  const flowCollection = ops.ledger.LEDGER_COLLECTIONS.flow
+  let chargeRows = []
+  try {
+    chargeRows = await ops.readRows(flowCollection, { kind: ops.ledger.FLOW_KINDS.CHARGE }, { limit: REPAIR_ORPHAN_SCAN_LIMIT })
+  } catch (error) {
+    if (!isCollectionNotExistError(error)) {
+      return deny(REASONS.STORAGE_UNAVAILABLE, `積分流水讀取失敗（權威存儲不可用）；本次零寫入。（診斷：${diagnoseOf(error)}）`)
+    }
+    chargeRows = []
+  }
+  /* **范围收窄（先过滤再判定）**：`kind='CHARGE'` ∧ `ref_id` 以 `aiet-` 开头 —— 其余流水零接触。 */
+  const scoped = (Array.isArray(chargeRows) ? chargeRows : []).filter(
+    (row) => text(row && row.ref_id).indexOf(TASK_ID_PREFIX) === 0
+  )
+  /* ③ 逐行判定（有任务行 / 已有退款 / 金额不实 ⇒ 一律不选）。 */
+  const eligible = []
+  for (const row of scoped) {
+    const refId = text(row.ref_id)
+    const idemKey = text(row.idem_key)
+    const delta = Number(row.delta)
+    if (idemKey === '' || !Number.isInteger(delta) || delta === 0) continue
+    const taskRow = await readTaskRow(refId)
+    if (taskRow) continue /* 有任务行 ⇒ 不是孤儿（负对照：有行不选）。 */
+    let refunds = []
+    try {
+      refunds = await ops.readRows(flowCollection, { idem_key: `${idemKey}${REFUND_IDEM_SUFFIX}` }, { limit: 1 })
+    } catch (error) {
+      if (!isCollectionNotExistError(error)) {
+        return deny(REASONS.STORAGE_UNAVAILABLE, `積分流水讀取失敗（權威存儲不可用）；本次零寫入。（診斷：${diagnoseOf(error)}）`)
+      }
+      refunds = []
+    }
+    if (Array.isArray(refunds) && refunds.length > 0) continue /* 已有 `REFUND` ⇒ 不重复退。 */
+    eligible.push({ row, refId, idemKey, amount: Math.abs(delta) })
+  }
+  /* ④a `dry_run` ⇒ **零写入**、恰 4 键（`rows` ≤ `limit`、`eligible` 报真实总数）。 */
+  if (dryRun) {
+    return {
+      ok: true,
+      scanned: scoped.length,
+      eligible: eligible.length,
+      rows: eligible.slice(0, limit).map((item) => projectOrphanChargeRow({ ref_id: item.refId, idem_key: item.idemKey, delta: item.row.delta }))
+    }
+  }
+  /* ④b 真写：逐行补退款（幂等键 ＝ 原 `idem_key` ＋ `-refund`、`ref_id` 必带）⇒ 恰 5 键。 */
+  const rows = []
+  let written = 0
+  let failed = 0
+  for (const item of eligible.slice(0, limit)) {
+    try {
+      const refunded = await ops.ledger.refundPoints({
+        uid: text(item.row.uid),
+        amount: item.amount,
+        kind: ops.ledger.FLOW_KINDS.REFUND,
+        ref_type: text(item.row.ref_type) || aiEnhance.REF_TYPE_AI_IMAGE,
+        ref_id: item.refId,
+        idem_key: `${item.idemKey}${REFUND_IDEM_SUFFIX}`
+      })
+      /* 同键重放 ⇒ 账本回 `idempotent:true` ⇒ **本轮零新写**（重跑 `written=0`）。 */
+      if (!refunded || refunded.ok !== true) {
+        failed += 1
+        continue
+      }
+      if (refunded.idempotent === true) continue
+      written += 1
+      rows.push({ ref_id: item.refId, idem_key: item.idemKey, amount: item.amount })
+    } catch {
+      /* 单行退款失败 ⇒ 如实计 `failed`（不中断整批、不吞成成功）。 */
+      failed += 1
+    }
+  }
+  return { ok: failed === 0, scanned: scoped.length, written, rows, failed }
+}
+
 module.exports = {
   AI_ENHANCE_SUBMIT_OP,
   AI_ENHANCE_STATUS_OP,
@@ -1567,16 +2078,30 @@ module.exports = {
   LIST_FAILURE_KEYS,
   LIST_ROW_KEYS,
   SUBMIT_POST_BUDGET_MS,
+  SUBMIT_CLEANUP_GRACE_MS,
+  CHARGE_STATE,
   STATUS_QUERY_BUDGET_MS,
   STATUS_DOWNLOAD_BUDGET_MS,
   STATUS_INGEST_BUDGET_MS,
   STATUS_ROUND_BUDGET_MS,
   LIST_MAX_ROWS,
+  /* **管理员运维两面（本单新增）**：键面 / 值域 / 预算常量 ＋ 实现点（供离线自检直接断言）。 */
+  PROBE_ALLOWED_KEYS,
+  PROBE_REPLY_KEYS,
+  PROBE_BUDGET_MS,
+  PROBE_ERROR_CLASSES,
+  REPAIR_ORPHAN_ALLOWED_KEYS,
+  REPAIR_ORPHAN_LIMIT_DEFAULT,
+  REPAIR_ORPHAN_LIMIT_MAX,
+  REPAIR_ORPHAN_ROW_KEYS,
+  chargeStateOf,
   setTaskFetchProvider,
   taskFetchInjected,
   taskIdOf,
   projectTaskRow,
   submitEnhanceTask,
   statusEnhanceTask,
-  listEnhanceTasks
+  listEnhanceTasks,
+  probeAiUpstream,
+  repairOrphanEnhanceCharges
 }

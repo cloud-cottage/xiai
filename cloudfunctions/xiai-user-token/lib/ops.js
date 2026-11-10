@@ -7477,6 +7477,31 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「AI 上游連通探測」（本單新增 op｜`probeAiUpstream`｜管理員面）** —— 薄委派：業務邏輯
+   * 單點在 `lib/aiEnhanceTasks.js::probeAiUpstream`（本處零第二套邏輯；`require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；零讀零寫地拒，拒絕面＝既有凍結
+   *    3 鍵 `ok / reason / message`）；② 載荷**封閉恰零鍵**（未知鍵 ⇒ `INVALID_FIELD`、缺 / 非對象 ⇒
+   *    `MISSING_REQUIRED`；目標、方法、次數一律服務端給定）；③ **零扣費、零寫庫、零 `plan`**、
+   *    **零新集合**；④ 對當前上游 `base_url` 發**一次** `GET {base}/models`，**硬上限 8 秒**
+   *    （`withinBudget` ＝ `Promise.race` 到點即回，絕不等網關）；⑤ 測量面回包**恰 5 鍵**
+   *    `ok / http_status / elapsed_ms / error_class / base_host`（`error_class` 值域封閉五值
+   *    `OK / TIMEOUT / DNS / CONNECT / TLS / HTTP`）；⑥ **零明文密鑰、零完整路徑（只回
+   *    `host[:port]`）、零響應體**（不讀 `body` / `json`，只看狀態碼）。
+   * @param {object} payload 載荷（封閉恰零鍵；請傳空物件 `{}`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<object>} 測量面恰 5 鍵 / 拒絕面恰 3 鍵
+   */
+  async probeAiUpstream(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { probeAiUpstream: runProbe } = require('./aiEnhanceTasks.js')
+    return runProbe(payload, identity, context)
+  },
+
+  /**
    * **E-3 只讀取行（本單新增 op｜`pullImportRows`）**：把**雲端**三族導入行（待審 / 終態）
    * **單向取回本機** —— 階段甲復用於存量搬遷，階段乙用於「雲端包 → 本機審」。
    *
@@ -8290,6 +8315,36 @@ const ADMIN_OPS = Object.freeze({
         writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }]
       }
     }
+  },
+
+  /**
+   * **管理員「AI 修復孤兒扣費補退」（本單新增 op｜`repairOrphanEnhanceCharges`｜管理員面）** ——
+   * 薄委派：業務邏輯單點在 `lib/aiEnhanceTasks.js::repairOrphanEnhanceCharges`（本處零第二套邏輯；
+   * `require` 延遲以打破加載環）。
+   * 硬口徑：① **第一行即管理員門**（既有 `adminWhitelistDenial`；零讀零寫地拒 ⇒ 既有凍結 3 鍵
+   *    `ok / reason / message`）；② 載荷**封閉恰二鍵** `dry_run`（布林、**缺省 `true` ＝ 只讀預覽**）
+   *    ＋ `limit`（1〜200 整數、**缺省 50**；未知鍵 ⇒ `INVALID_FIELD`、越界 ⇒ `INVALID_VALUE`）；
+   * ③ 只掃 `xiai_points_flow` 中 `kind='CHARGE'` 且 `ref_id` **以 `aiet-` 開頭**的流水 ——
+   *    **其餘流水一律零接觸**；④ 入選條件 ＝ `xiai_ai_enhance_tasks` **無該 `_id` 行** 且
+   *    該 `idem_key` **無 `REFUND` 流水**（有行不選、已有退款不重複退）；⑤ `dry_run:true` ⇒
+   *    **零寫入**、回**恰 4 鍵** `ok / scanned / eligible / rows`；`dry_run:false` ⇒ 補退款
+   *    （`ledger.refundPoints`，冪等鍵 ＝ 原 `idem_key` ＋ `-refund`、`ref_id` 必帶；**單行失敗不中斷
+   *    整批**）⇒ 回**恰 5 鍵** `ok / scanned / written / rows / failed`（`ok === (failed === 0)`；
+   *    冪等重跑 ⇒ `written=0`）；⑥ `rows` 元素恒**恰 3 鍵** `ref_id / idem_key / amount`
+   *    （`amount = Math.abs(delta)` —— 流水行**沒有 `amount` 鍵**）、條數 ≤ `limit`；
+   *    **零新集合、零 `plan`、`reason` 零新增**。
+   * @param {object} payload 載荷（封閉二鍵 `dry_run` / `limit`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<object>} dry_run 恰 4 鍵 / 真寫恰 5 鍵 / 拒絕面恰 3 鍵
+   */
+  async repairOrphanEnhanceCharges(payload, identity, context) {
+    /* ① 管理員門（既有單點；**本函數第一行**，零讀零寫地拒）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { repairOrphanEnhanceCharges: runRepair } = require('./aiEnhanceTasks.js')
+    return runRepair(payload, identity, context)
   },
 
   /**
