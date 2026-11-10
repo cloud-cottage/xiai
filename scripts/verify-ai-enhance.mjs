@@ -2202,8 +2202,9 @@ let kSubmitReply = null
 
 /* ---------------- K10：单次预算全部显著低于网关 60 秒上限 ---------------- */
 {
-  check('K10', '超时预算：提交 25 秒 / 单查 20 秒 / 下载 25 秒 / 入册 45 秒 / 整轮 45 秒，**任一 ≥ 60 秒即判负**；任务期限恰 20 分钟（`deadline_at` − `created_at`）', {
-    submit: 25000,
+  check('K10', '超时预算：提交段 50 秒（整段硬上限）/ 上游 POST 45 秒 / 单查 20 秒 / 下载 25 秒 / 入册 45 秒 / 整轮 45 秒，**任一 ≥ 60 秒即判负**；任务期限恰 20 分钟（`deadline_at` − `created_at`）', {
+    submitSegment: 50000,
+    submit: 45000,
     query: 20000,
     download: 25000,
     ingest: 45000,
@@ -2211,6 +2212,7 @@ let kSubmitReply = null
     deadline: 1200000,
     allBelowGateway: true
   }, {
+    submitSegment: tasks.SUBMIT_SEGMENT_BUDGET_MS,
     submit: tasks.SUBMIT_POST_BUDGET_MS,
     query: tasks.STATUS_QUERY_BUDGET_MS,
     download: tasks.STATUS_DOWNLOAD_BUDGET_MS,
@@ -2218,6 +2220,7 @@ let kSubmitReply = null
     round: tasks.STATUS_ROUND_BUDGET_MS,
     deadline: tasks.TASK_DEADLINE_MS,
     allBelowGateway: [
+      tasks.SUBMIT_SEGMENT_BUDGET_MS,
       tasks.SUBMIT_POST_BUDGET_MS,
       tasks.STATUS_QUERY_BUDGET_MS,
       tasks.STATUS_DOWNLOAD_BUDGET_MS,

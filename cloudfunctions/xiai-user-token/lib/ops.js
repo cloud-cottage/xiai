@@ -5440,7 +5440,7 @@ const ADMIN_OPS = Object.freeze({
    * `image_id / seal_id / face_id / request_id`（多一鍵 / 少一鍵都拒；`request_id` 須 8〜64 位
    * 字母數字或底線橫線，否則 `INVALID_VALUE`）；③ 幂等預查（同 uid 同 `request_id` 已有行 ⇒
    * **回放該行、零扣費零上游**）→ 圖源與上游配置拒绝面（零扣費）→ 預扣 10 金（`idem_key` ＝
-   * `ai-enhance-<image_id>-<request_id>`，與同步面逐字同形）→ 上游入隊**牆鐘預算 25 秒**
+   * `ai-enhance-<image_id>-<request_id>`，與同步面逐字同形）→ 提交段 50 秒 / 上游 POST 45 秒 / 收尾宽限 6 秒（最坏 56 秒 < 網關 60 秒）
    * （超時退款並置 `FAILED`）→ 落任務行 `SUBMITTED`、`deadline_at` ＝ 當前 ＋ 20 分鐘；
    * ④ 成功回包**恰 5 鍵**（`ok / task_id / status / source_image_id / charge{amount,balance}`；
    * **不帶 `image_id`**）、失敗回包**恰 4 鍵**；⑤ **零新集合**（任務行落 `xiai_ai_enhance_tasks`、
