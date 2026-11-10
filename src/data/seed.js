@@ -930,6 +930,31 @@ export const SEAL_IMPORT_IMAGE_STATUS = {
  */
 export const SEAL_PLACEHOLDER_IMAGE_KEY = 'placeholder/seal-no-image'
 
+/**
+ * **部署 base（唯一取值点；读 `vite.config.js::base`，线上 `/xiai/`）** —— 恒以 `/` 结尾。
+ * ---------------------------------------------------------------------------
+ * 随包资产（`public/**`）在子路径部署下挂在 `base` 之下：写站根绝对路径 `/placeholders/…`
+ * 在 `/xiai/` 子路径下**恒 404**（真实回归：游客态首页每加载一次发出 100 个 404）。
+ * **两档求值（任何一档都不得抛错）**：
+ *   ① Vite 注入：dev 是运行期 `import.meta.env` 对象、build 期静态替换成 `"/xiai/"` ⇒ 浏览器取它；
+ *   ② 无 `import.meta.env`（node 离线脚本 / 测试 `import` 本文件）⇒ 回退 **`/`（base 之前的站根相对）**：
+ *      `scripts/verify-seal-placeholder.mjs:186` 与 `scripts/register-seal-placeholder-image.mjs:46`
+ *      都按 `asset_url` **去首斜杠后映射到 `public/`** ⇒ 回退若写成 `/xiai/` 会让这两支读到
+ *      `public/xiai/placeholders/…` 直接 ENOENT（离线自检红、登记脚本废）。node 侧没有「部署 base」概念。
+ */
+const SITE_BASE_URL = (() => {
+  let injected = ''
+  try {
+    /* `import.meta?.env?.BASE_URL`：node 下 `import.meta.env` 为 undefined ⇒ 可选链短路，不抛。 */
+    const base = import.meta?.env?.BASE_URL
+    if (typeof base === 'string' && base !== '') injected = base
+  } catch {
+    injected = ''
+  }
+  if (injected) return injected.endsWith('/') ? injected : `${injected}/`
+  return '/'
+})()
+
 /** 占位图登记面（`xiai_images` 行 ＝ 本对象去掉 `asset_url` ＋ 行级元数据；见 register 脚本）。 */
 export const SEAL_PLACEHOLDER_IMAGE = Object.freeze({
   key: SEAL_PLACEHOLDER_IMAGE_KEY,
@@ -939,8 +964,10 @@ export const SEAL_PLACEHOLDER_IMAGE = Object.freeze({
   mime: 'image/jpeg',
   width: 512,
   height: 512,
-  /* 随包资产：`public/placeholders/seal-no-image.jpg`（Vite 原样拷到站点根）。 */
-  asset_url: '/placeholders/seal-no-image.jpg',
+  /* 随包资产：`public/placeholders/seal-no-image.jpg` —— **base 感知**（`SITE_BASE_URL` 拼接）：
+     浏览器侧＝ `/xiai/placeholders/…`（与 `vite.config.js::base` 同源）；node 侧＝站根相对回退。
+     **站根绝对字面量 `/placeholders/…` 是回归根因，不得回退成它。** */
+  asset_url: `${SITE_BASE_URL}placeholders/seal-no-image.jpg`,
   /* **刻意不是** `server`：内容寻址判据（`cloudBaseObjectKeyOf`）不认它，也不会拼出假对象键。 */
   storage: 'bundled',
   /* 唯一允许引用本键的来源家族（值域外一律拒）。 */

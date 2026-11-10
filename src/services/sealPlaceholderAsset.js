@@ -4,7 +4,9 @@
  * 背景：`placeholder/seal-no-image` **不是**内容寻址键（云端桶里没有这个对象），
  * `data/cloudbase.js::cloudBaseObjectKeyOf` 对它一律回空串 —— **刻意不为此放宽通用判据**。
  * 于是占位图的字节来源只有一处：**仓内随包资产**（`public/placeholders/seal-no-image.jpg`，
- * HTTP 站根相对路径 ⇒ `SEAL_PLACEHOLDER_IMAGE.asset_url`）。
+ * **base 感知 URL** ⇒ `SEAL_PLACEHOLDER_IMAGE.asset_url`：浏览器侧 `SITE_BASE_URL`＝`/xiai/`
+ * ⇒ `/xiai/placeholders/…`；node 无 `import.meta.env` ⇒ 站根相对回退）。
+ * ⚠ 站根绝对路径 `/placeholders/…` 在 `/xiai/` 子路径下恒 404（已修的回归根因），别改回去。
  *
  * 口径（逐条）：
  *   · **只认登记键**：`isSealPlaceholderImageRow(row)` 按 `storage_key` 逐字比对常量，别的一律不认；
