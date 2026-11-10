@@ -5225,7 +5225,13 @@ function newerCorrectionWins(candidate, incumbent) {
     （`scanned ≤ limit`）；`storage` **缺省（`undefined` / `null`）或空串 / 空白** ⇒ 待补（`eligible`）；
     **已有非空 `storage` 的行一律不碰** ⇒ **幂等**（重跑同 `cursor` ⇒ `written = 0`）。
   · **写步（仅 `dry_run:false`）**：逐行一次 `persist`（`kind:'update'` ＋ `match:{_id}` ＋
-    `doc:{storage:'server'}` ＋ **`expectAtLeast:1`**）；单行失败进 `failed[]`、**不中断整批**。
+    `doc:{storage:'server'}` ＋ **`expectAtLeast:1`**）；单行失败不中断整批。
+    **读数以真写入结果为准**（读数不实修）：`persist` 的成败只是一次请求的**回报**，不等于该行
+    真的落了（回报丢失 ⇒ 写已生效却抛错；回报未带受影响行数 ⇒ 写没生效却不抛）⇒ 故**逐行写、
+    整窗读回**：写完用**同一窗口语义**重读一遍（`readStorageRepairWindow` 同一读路），按**行终态**
+    逐行定真伪 —— 读回 `storage === 'server'` ⇒ 计 `written`；否则 ⇒ 进 `failed`。
+    ⇒ `written` ＝ 本窗口**真正生效**行数、`failed` ＝ 本窗口**真没写成**行；已存在 / 已同值 /
+    被跳过的行**既不计 `written` 也不进 `failed`**（不在尝试名单内）。
     **本 op 自己产写步、不产 `plan`** ⇒ `index.js` 的落盘分支不触发（`plan` 亦不在透传白名单）。
   · **回包封闭**：`dry_run` ⇒ **恰 4 键** `ok / scanned / eligible / next_cursor`；真写 ⇒ **恰 5 键**
     `ok / scanned / written / next_cursor / failed`（`failed` **恒为数组**，元素 ＝ `{_id, reason}`、
@@ -8042,7 +8048,11 @@ const ADMIN_OPS = Object.freeze({
    *   ③ **扫描**：`xiai_images` 按 `_id` **升序**、**严格大于 `cursor`** 的前 `limit` 行 ＝ 本轮窗口
    *      （`scanned ≤ limit`）；`storage` 缺省 / 空串 / 空白 ⇒ **待补**；**已有非空值的行不碰**；
    *   ④ **写步（仅 `dry_run:false`）**：逐行一次 `persist`（`update` ＋ `match:{_id}` ＋
-   *      `doc:{storage:'server'}` ＋ **`expectAtLeast:1`**）；单行失败进 `failed[]`、**不中断整批**；
+   *      `doc:{storage:'server'}` ＋ **`expectAtLeast:1`**）；单行失败**不中断整批**；**读数以真写入
+   *      结果为准** —— 写完用**同一窗口语义**整窗读回（`readStorageRepairWindow` 同一读路），按
+   *      **行终态**逐行定真伪：读回 `storage === 'server'` ⇒ 计 `written`，否则 ⇒ 进 `failed`
+   *      （⇒ `persist` 抛错但行已生效 ⇒ 照计 `written`；`persist` 没抛但行没落 ⇒ 进 `failed`）；
+   *      **已存在 / 已同值 / 被跳过的行既不计 `written` 也不进 `failed`**；
    *      **本 op 不产 `plan`**（写步在 op 内执行 ⇒ `index.js` 落盘分支不触发、`plan` 零外传）；
    *   ⑤ **回包封闭**：`dry_run` ⇒ **恰 4 键** `ok / scanned / eligible / next_cursor`；真写 ⇒
    *      **恰 5 键** `ok / scanned / written / next_cursor / failed`（`failed` 恒数组、元素
@@ -8111,9 +8121,14 @@ const ADMIN_OPS = Object.freeze({
       /* 预演轮：**零写入**（回包恰 4 键；`eligible` 是数据属性、不随 `dry_run` 变）。 */
       return { ok: true, scanned, eligible: eligibleRows.length, next_cursor: nextCursor }
     }
-    /* ⑤ 真写：逐行一次 `persist`（`update` ＋ `expectAtLeast:1`）；单行失败不中断整批。 */
+    /* ⑤ 真写：逐行一次 `persist`（`update` ＋ `expectAtLeast:1`）；单行失败不中断整批。
+       **读数以真写入结果为准（本单读数不实修）**：`persist` 的成败只是**一次请求的回报**，不等于
+       该行真的落了 —— 回报丢失 ⇒ 写已生效却抛错（⇒ 若据此计 `failed` 就是虚根）；回报里读不出
+       受影响行数 ⇒ 写没生效却不抛（⇒ 若据此计 `written` 就是虚报）。故**逐行写、整窗读回**：
+       写完用**同一窗口语义**重读一遍，按**行的终态**逐行定真伪。 */
     let written = 0
     const failed = []
+    const attemptedIds = []
     for (const row of eligibleRows) {
       const docId = text(row && row._id)
       if (docId === '') {
@@ -8121,14 +8136,41 @@ const ADMIN_OPS = Object.freeze({
         failed.push({ _id: '', reason: REASONS.STORAGE_UNAVAILABLE })
         continue
       }
+      attemptedIds.push(docId)
       try {
         await persist({
           writes: [{ kind: 'update', collection: COLLECTIONS.images, match: { _id: docId }, doc: { storage: 'server' }, expectAtLeast: 1 }]
         })
-        written += 1
       } catch (error) {
-        failed.push({ _id: docId, reason: REASONS.STORAGE_UNAVAILABLE })
-        console.warn(`[xiai] repairImageStorage 單行補寫失敗（_id：${docId}；不中斷整批）：`, text(error && error.message))
+        /* **此处不下真伪结论**：回报失败 ≠ 没写成（平台侧可能已生效、响应丢失）⇒ 由下方读回定。 */
+        console.warn(`[xiai] repairImageStorage 單行補寫回報失敗（讀回定真偽；_id：${docId}；不中斷整批）：`, text(error && error.message))
+      }
+    }
+    if (attemptedIds.length > 0) {
+      /* 读回（**唯一判据**）：同一窗口语义重读（`_id` 升序、严格大于 `cursor` 的前 `limit` 行）⇒
+         尝试行的终态。**本窗口内行 `_id` 不变、集合无并发改写** ⇒ 窗口集合稳定 ⇒ 一次读全覆盖。
+         少读到的行（并发删 / 窗口漂移，理论不发生）⇒ 补一次单行读；仍读不到 ⇒ 不敢称生效 ⇒ 进
+         `failed`（**绝不拿「读不到」冒充已写**）。 */
+      const after = await readStorageRepairWindow(cursor, limit)
+      const stateById = new Map()
+      for (const row of after) stateById.set(text(row && row._id), row)
+      const missing = attemptedIds.filter((docId) => !stateById.has(docId))
+      for (const docId of missing) {
+        try {
+          const hit = rowsOf(await resolveDb().collection(COLLECTIONS.images).doc(docId).get())
+          if (hit.length > 0) stateById.set(docId, hit[0])
+        } catch (error) {
+          console.warn(`[xiai] repairImageStorage 讀回補查失敗（_id：${docId}；不中斷整批）：`, text(error && error.message))
+        }
+      }
+      for (const docId of attemptedIds) {
+        const row = stateById.get(docId)
+        if (row && text(row.storage).trim().toLowerCase() === 'server') {
+          written += 1
+        } else {
+          failed.push({ _id: docId, reason: REASONS.STORAGE_UNAVAILABLE })
+          console.warn(`[xiai] repairImageStorage 單行補寫未生效（讀回非 server；_id：${docId}；不中斷整批）`)
+        }
       }
     }
     return { ok: true, scanned, written, next_cursor: nextCursor, failed }
