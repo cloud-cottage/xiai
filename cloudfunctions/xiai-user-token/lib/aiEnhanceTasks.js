@@ -846,19 +846,46 @@ async function registerProductImage(params) {
   终态机（退款只退一次：行上 `refunded` 布尔为护栏 ＋ 账本幂等键双保险）
  * --------------------------------------------------------------------------- */
 
+/** 失败文案里的「已退款」断言（**唯一登记处**：`failTask` 各调用方的退款句都以此为面）。 */
+const REFUND_CLAIM = `已全額退回 ${AI_ENHANCE_COST} 金`
+/** 从未真扣费时替换断言用的事实句（**不含「退款 / 退回」字样** —— 未扣费就不得称退）。 */
+const NO_CHARGE_FACT = '本次未扣費（任務行從未進入已扣費狀態）'
+/** 退款已尝试但未成时替换断言用的事实句（其后注脚另说「未置 FAILED / 請重試補退款」）。 */
+const REFUND_UNDONE_FACT = '退款未能完成'
+
 /**
- * 置 `FAILED` ＋（未退过才）全额退款，回**恰 5 键**的失败回包。
+ * 按事实改写失败文案里的退款断言（断言不在场 ⇒ 原样返回；**绝不放行未改写的断言**）。
+ * @param {string} message 调用方失败文案
+ * @param {string} fact 替换句（未扣费 / 退款未成两口径）
+ * @returns {string}
+ */
+function rewordRefundClaim(message, fact) {
+  const raw = text(message)
+  return raw.indexOf(REFUND_CLAIM) === -1 ? raw : raw.split(REFUND_CLAIM).join(fact)
+}
+
+/**
+ * 置 `FAILED` ＋（**真扣过费且未退过才**）全额退款，回**恰 5 键**的失败回包。
  * 任务行状态写入失败 ⇒ **不谎报 `FAILED`**：回包 `status` 给出**库内实况**（原状态）、
  * `reason` 转 `STORAGE_UNAVAILABLE` 并在文案里带上原失败原因（退款结果照实报）。
  * **退款只对真扣过费的行发生**：`charge_state` 为 `PENDING`（已落行、扣费从未成功）⇒ **零退款**
  * （否则会给未扣费的行凭空 +10 金）；旧行缺该键 ⇒ 按 `CHARGED` 照旧退。
+ * **回包第三位与文案按事实分流（T13）**：
+ *  · **真退过款**（本次退成 ／ 行上早有历史真退款 `refunded:true`）⇒ 行写 `refunded:true`、
+ *    回包 `true`、文案保留「已全額退回」；行上原为 `true` 者**保持 `true`**（历史真退款不被洗掉）、
+ *    **不重复退款**（`needsRefund` 已被护栏挡住）；
+ *  · **从未扣费**（`charge_state:'PENDING'`）⇒ 零退款、行写 `refunded:false`、回包 `false`、
+ *    文案里的退款断言换成「本次未扣費」的事实句（**不出现「已退款 / 已全額退回」**）。
+ * `charge_state` 在本函数**只读不写** ⇒ `FAILED` 行上如实保留（`PENDING` 就是 `PENDING`）。
+ * 退款已尝试但未成 ⇒ 文案里的退款断言摘换成「退款未能完成」（注脚另说未置终态），回包 `false`。
  */
 async function failTask(taskId, row, reason, message) {
   const uid = text(row.uid)
   const idemKey = aiEnhance.idemKeyOf(text(row.source_image_id), text(row.request_id))
   const charged = chargeStateOf(row) === CHARGE_STATE.CHARGED
-  const needsRefund = charged && row.refunded !== true
-  let refunded = row.refunded === true
+  const alreadyRefunded = row.refunded === true
+  const needsRefund = charged && !alreadyRefunded
+  let refunded = alreadyRefunded
   if (needsRefund) refunded = await refundTen(uid, idemKey, text(taskId))
   /* **退款未成 ⇒ 不置终态**：行保持原状态 ⇒ 下一次 `ai-enhance-status` 重试退款
      （行上 `refunded` 仍为 `false` ⇒ 不会重复退；账本幂等键再加一道双保险）。
@@ -866,29 +893,34 @@ async function failTask(taskId, row, reason, message) {
   if (needsRefund && !refunded) {
     return statusFailure(
       REASONS.STORAGE_UNAVAILABLE,
-      `${message}（退款未能完成 ⇒ 本次**未置 FAILED**、行狀態維持「${text(row.status)}」；請重試本操作以補退款。）`,
+      `${rewordRefundClaim(message, REFUND_UNDONE_FACT)}（退款未能完成 ⇒ 本次**未置 FAILED**、行狀態維持「${text(row.status)}」；請重試本操作以補退款。）`,
       false,
       text(row.status)
     )
   }
+  /* 到此只有两态：**真退过款**（本次刚退成 ／ 行上早有历史真退款）⇒ 照实报 `true`；
+     **从未扣过费**（`charge_state:'PENDING'`）⇒ 零退款、回 `false`、文案不称退款。 */
+  const actuallyRefunded = refunded === true
+  const finalMessage = actuallyRefunded ? message : rewordRefundClaim(message, NO_CHARGE_FACT)
   const now = nowIso()
   try {
     await updateTaskRow(taskId, {
       status: TASK_STATUS.FAILED,
-      refunded: true,
+      /* 只写事实：`true` ⇔ 真退过款；`false` ⇔ 从未扣费（行上原为 `true` 者此处也写 `true`）。 */
+      refunded: actuallyRefunded,
       error_reason: reason,
-      error_message: message,
+      error_message: finalMessage,
       updated_at: now
     })
   } catch (error) {
     return statusFailure(
       REASONS.STORAGE_UNAVAILABLE,
-      `${message}（任務行狀態寫入失敗 ⇒ 庫內仍為「${text(row.status)}」，可重試本操作；退款結果：已退。診斷：${diagnoseOf(error)}）`,
-      true,
+      `${finalMessage}（任務行狀態寫入失敗 ⇒ 庫內仍為「${text(row.status)}」，可重試本操作；退款結果：${actuallyRefunded ? '已退' : '本次未扣費、無款可退'}。診斷：${diagnoseOf(error)}）`,
+      actuallyRefunded,
       text(row.status)
     )
   }
-  return statusFailure(reason, message, true, TASK_STATUS.FAILED)
+  return statusFailure(reason, finalMessage, actuallyRefunded, TASK_STATUS.FAILED)
 }
 
 /** 终态回放（`READY`：**恰 6 键**）。`preview` 取候选影像行本体（读不到 ⇒ 结构化失败、可重试）。 */
@@ -1230,9 +1262,13 @@ async function submitEnhanceTask(payload, identity, context) {
       })
     }
   } catch (error) {
+    /* 文案按退款结果定稿（`message` 可为函数）：退款成了才说「已全額退回」。 */
     return await failAfterRow({
       reason: REASONS.STORAGE_UNAVAILABLE,
-      message: `扣費實況回寫失敗（權威存儲不可用）⇒ 本次已停止並全額退回 ${AI_ENHANCE_COST} 金；請重新提交。（診斷：${diagnoseOf(error)}）`,
+      message: (refunded) =>
+        refunded === true
+          ? `扣費實況回寫失敗（權威存儲不可用）⇒ 本次已停止並全額退回 ${AI_ENHANCE_COST} 金；請重新提交。（診斷：${diagnoseOf(error)}）`
+          : `扣費實況回寫失敗（權威存儲不可用）⇒ 本次已停止；退款未能完成，請重試本操作以補退款。（診斷：${diagnoseOf(error)}）`,
       charged: true,
       balance: charged.balance,
       chargeAmount: AI_ENHANCE_COST,
