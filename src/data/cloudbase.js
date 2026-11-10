@@ -76,11 +76,20 @@ export const CLOUD_COLLECTION_KEYS = Object.freeze(Object.keys(CLOUD_COLLECTIONS
 
 /**
  * 分页页宽（CloudBase 客户端 `.get()` 有默认条数上限 ⇒ **必须分页**，不能假设「一次读完」）。
- * 取 100：任何已知上限（20 / 100 / 1000）下都不会漏行 —— 每页按**实际返回条数**推进游标。
+ *
+ * 取 **1000** ＝ 客户端 web SDK 单次 `get()` 的已知上限（本单把 100 提到 1000：全量水合由
+ * ≈118 页降到 **≈12 页**，实测约 5 请求/秒 ⇒ 往返从 ≈24 s 降到 ≈2.4 s，45 s 总预算内充裕）。
+ *
+ * ⚠️ **页宽 1000 只是「请求值」，实际以服务端返回条数为准**（向后兼容 / 容错，一字未改）：
+ *   平台把单次返回条数压到更低（20 / 100 …）时**不丢行** —— 游标按**实际返回条数**推进、
+ *   收尾判据是**空页**（**不看**「少于请求页宽」）；每页仍带稳定 `_id` 升序。实现见
+ *   `fetchAllRowsDetailed`（其头注与循环内注释逐条写了这条口径）。
  */
-export const CLOUD_PAGE_SIZE = 100
+export const CLOUD_PAGE_SIZE = 1000
 
-/** 分页护栏（防止服务端异常时死循环；100 × 100 = 10000 行封顶，远大于 237）。 */
+/** 分页护栏（防止服务端异常时死循环）。**页数上限仍 100 —— 本单不改大**；按页宽 1000 计
+ *  理论封顶 100 × 1000 ＝ 100,000 行，而现有 5 集合合计 ≈11,800 行只需 ≈12 页 ⇒ 护栏仍有
+ *  8 倍以上余量（护栏只防死循环，不是行数配额）。 */
 export const CLOUD_MAX_PAGES = 100
 
 /* **v2 必修 2（分頁穩定次序）**：分頁**每一頁**都帶穩定次序 —— 按 `_id` 升序。
@@ -89,24 +98,31 @@ export const CLOUD_MAX_PAGES = 100
 export const CLOUD_ORDER_FIELD = '_id'
 export const CLOUD_ORDER_DIRECTION = 'asc'
 
-/* **v2 必修 1（超時護欄）／v3 T1 調預算**：水合的**總預算**（預設 20 秒；可由構建期變數
-   `VITE_XIAI_CB_TIMEOUT_MS` 配）。覆蓋「SDK 裝載 / `init` / 匿名登錄 / 每一頁查詢」全部階段：
-   **任一階段超預算 ⇒ 判失敗**（`reason: 'TIMEOUT'`）—— 與 `SDK_UNAVAILABLE` /
-   `ANONYMOUS_LOGIN_FAILED` **同一條失敗狀態機** ⇒ 數據層自動回落本地實現。
-   **不得讓頁面無限 pending**（質檢實據：400 ms 後仍 pending ⇒ 長期空態）。
+/* **v2 必修 1（超時護欄）／v3 T1 調預算／本單再調 45 秒**：水合的**總預算**（預設 **45 秒**；
+   可由構建期變數 `VITE_XIAI_CB_TIMEOUT_MS` 配 —— 缺省 / 非正數 / 非數字一律回落本常量）。覆蓋
+   「SDK 裝載 / `init` / 匿名登錄 / 每一頁查詢」全部階段：**任一階段超預算 ⇒ 判失敗**
+   （`reason: 'TIMEOUT'`）—— 與 `SDK_UNAVAILABLE` / `ANONYMOUS_LOGIN_FAILED` **同一條失敗狀態機**
+   ⇒ 數據層自動回落本地實現。**不得讓頁面無限 pending**（質檢實據：400 ms 後仍 pending ⇒ 長期空態）。
 
-   **為什麼由 8 秒調到 20 秒（線上 E2E 實據 2026-09-28）**：冷緩存首次加載的**最壞路徑**
-   ＝「獨立 SDK 塊（實測 758,535 B ＝ 750.5 KiB，另存 `assets/index.esm-*.js`，與主 bundle 分離）
-   ＋ `init` ＋ 匿名登錄 ＋ 三集合分頁（每頁 79 行、服務端上限 20 ⇒ 4 頁/集合，共 12 次查詢）」。
-   750 KiB 在 3 Mbit/s（≈375 KiB/s）的移動網上**光下載就 ~2 s**、在 1 Mbit/s（≈125 KiB/s）上
-   **~6 s**、在 500 kbit/s（≈62 KiB/s）上 **~12 s**；再疊 TLS/HTTP2 建連（0.2–2 s）、
-   `init`（<50 ms）、匿名登錄（0.3–2 s）、12 次分頁查詢（每次 0.1–0.8 s ⇒ 1.2–9.6 s）
-   ⇒ **典型 3–10 s、冷緩存弱網 15–25 s**。8 秒預算會把「本來能成功」的加載判成 TIMEOUT
-   ⇒ 靜默回落 8 行本機示範資料（線上實據：廣場穩定顯示「共 8 枚」而雲端實有 79 枚）。
-   20 秒 = 上述最壞路徑的**上四分位再加餘量**，同時仍是**有界**的（不會無限 pending）。
-   取值參照不是猜的：`VITE_XIAI_CB_TIMEOUT_MS` 由構建期注入，`cloudBaseTimeoutMs()` 只認
-   正數有限值（見該函數），配置缺失 / 非法一律回落到本常量。 */
-export const CLOUD_HYDRATE_TIMEOUT_MS = 20000
+   **預算演進（三段，皆有實據）**：
+   · **8 秒（v1）→ 20 秒（v3 T1，線上 E2E 實據 2026-09-28）**：冷緩存首次加載的**最壞路徑**
+     ＝「獨立 SDK 塊（實測 758,535 B ＝ 750.5 KiB，另存 `assets/index.esm-*.js`，與主 bundle 分離）
+     ＋ `init` ＋ 匿名登錄 ＋ 三集合分頁（每頁 79 行、服務端上限 20 ⇒ 4 頁/集合，共 12 次查詢）」；
+     750 KiB 在 3 Mbit/s（≈375 KiB/s）上光下載就 ~2 s、500 kbit/s 上 ~12 s，再疊建連 / 登錄 /
+     12 次查詢 ⇒ 典型 3–10 s、冷緩存弱網 15–25 s。8 秒會把「本來能成功」的加載判成 TIMEOUT
+     ⇒ 靜默回落 8 行本機示範資料（線上實據：廣場穩定顯示「共 8 枚」而雲端實有 79 枚）。
+   · **20 秒 → 45 秒（本單，2026-11 實測）**：數據已從 74 枚長到 **1,251 枚** —— 5 集合行數
+     1,251 + 1,741 + 6,439 + 570 + 1,742 ≈ **11,800 行**。舊頁寬 100 ⇒ ≈118 頁，實測約
+     **5 請求/秒 ⇒ ≈24 s > 20 s** ⇒ 游客態**必然 TIMEOUT**、整站回落本機示範資料（現場實據：
+     131 個請求全 200 卻仍報「雲端資料暫時未能讀取」＝ **命中水合超時，不是集合讀不到**）。
+     頁寬提到 1000 後全量水合只需 ≈12 頁（≈2.4 s 往返），但 SDK 塊下載 / 匿名登錄 / 弱網抖動仍要
+     餘量 ⇒ **45 秒**；它仍**是有界的**（不會無限 pending）。
+   · **取值參照不是猜的**：`VITE_XIAI_CB_TIMEOUT_MS` 由構建期注入，`cloudBaseTimeoutMs()` 只認
+     正數有限值（見該函數），配置缺失 / 非法一律回落到本常量 ⇒ **缺省 45 s**。
+   · **與重試 / 階段預算對齊（本單）**：重試預算 `CLOUD_HYDRATE_RETRY_BUDGET_MS`（30 s）＋ 首輪
+     `sdk-load` 上限（12 s）＋ 重試延遲（0.8 s）≈ **42.8 s ≤ 45 s** ⇒ 兩輪合計仍不越本總預算；
+     各階段預算見 `CLOUD_STAGE_BUDGET_MS`（各自再 min 上本輪剩餘 ⇒ 永不超總預算）。 */
+export const CLOUD_HYDRATE_TIMEOUT_MS = 45000
 
 /**
  * **CloudBase SDK app 級超時**（傳給本文件 `sdk.init({ timeout })`）。
@@ -118,12 +134,12 @@ export const CLOUD_HYDRATE_TIMEOUT_MS = 20000
  *
  * **對本文件既有行為零變化**（這是本常量的硬約束，不是副作用）：本文件的 `sdk.init` 只服務
  * **讀面水合**（匿名登錄 ＋ 逐集合分頁查詢），每一段 `await` 都被 `withBudget` 釘住——
- * 總預算 `CLOUD_HYDRATE_TIMEOUT_MS`（20 秒）＋ 分階段預算 `CLOUD_STAGE_BUDGET_MS`
- * （`sdk-load` 12 s / `anonymous-login` 8 s / 單頁 `query` 8 s，各自再 min 上本輪剩餘）。
+ * 總預算 `CLOUD_HYDRATE_TIMEOUT_MS`（45 秒）＋ 分階段預算 `CLOUD_STAGE_BUDGET_MS`
+ * （`sdk-load` 12 s / `anonymous-login` 8 s / 單頁 `query` 15 s，各自再 min 上本輪剩餘）。
  * 外層到點就抛 `CloudTimeoutError` ⇒ SDK 那層根本沒機會跑到 120 秒。抬高它只是**摘掉一道
  * 會在 15 秒先於外層預算動手的硬上限**，讓「外層還沒判死、SDK 先掐斷」這種錯配不再可能。
  *
- * 注意：**不得**與水合預算 `CLOUD_HYDRATE_TIMEOUT_MS`（20 秒，見其頭注）混為一談——
+ * 注意：**不得**與水合預算 `CLOUD_HYDRATE_TIMEOUT_MS`（45 秒，見其頭注）混為一談——
  * 後者是我們自己的牆鐘預算，前者只是把 SDK 內建的硬上限抬高到「不會先於外層預算掐斷」。
  *
  * ⚠️ **長跑路線不在此文件**：`ai-enhance-face`（要跑 20–60 秒，外層預算 120000 由
@@ -134,37 +150,50 @@ export const CLOUD_HYDRATE_TIMEOUT_MS = 20000
 export const CLOUD_SDK_TIMEOUT_MS = 120000
 
 /**
- * **按階段預算（v3 T1）** —— 讓「SDK 塊下載 / 匿名登錄 / 單頁查詢」**各自不被誤判為整體超時**。
+ * **按階段預算（v3 T1；本單隨 45 s 總預算對齊）** —— 讓「SDK 塊下載 / 匿名登錄 / 單頁查詢」
+ * **各自不被誤判為整體超時**。
  *
  * 形態：`每階段的實際等待上限 ＝ min(該階段預算, 本輪總預算剩餘)`。
- *   · 為什麼要分階段：8 秒總預算的失敗**幾乎總發生在 SDK 塊下載**（最大、最慢、冷緩存），
+ *   · 為什麼要分階段：預算內的失敗**幾乎總發生在 SDK 塊下載**（最大、最慢、冷緩存），
  *     而後面的登錄與查詢根本沒機會跑；只報一句「整體超時」也分不出是**慢**還是**壞**。
  *     分階段後：`CloudTimeoutError.stage`（`sdk-load` / `anonymous-login` / `<集合>@<游標>`）
  *     與狀態上的 `timeoutStage` 直接把**是哪一段**寫清楚。
  *   · 為什麼仍受總預算約束：每階段的上限還要 **min 上「本輪剩餘」** ⇒ 總牆鐘仍被總預算釘住
- *     （不會因為「每階段各自 12 秒」把一次加載拖成 3 分鐘）。
+ *     （不會因為「每階段各自幾秒」把一次加載拖成三分鐘）。
  *   · 取值：`sdk-load` 12000（750 KiB ⇒ 62 KiB/s 的鏈路仍能在本階段內下完）、
  *     `anonymous-login` 8000（匿名登錄是單次往返，8 秒足夠；超過即視為鑑權面異常）、
- *     `query` 8000（**單頁**查詢；4 頁 × 8000 不會發生 —— 總預算會先到）。
+ *     `query` **15000**（**單頁**查詢；本單把頁寬 100 → 1000 ⇒ 單頁載荷最多 ×10，
+ *       8 s 在弱網上會把「還來得及」的單頁誤判成整體超時 ⇒ 抬到 15 s。
+ *       仍受 `min(15000, 本輪剩餘)` 約束 ⇒ **抬單頁不抬總預算**，總牆鐘仍 45 s；
+ *       多頁 × 15000 也不會發生 —— 總預算會先到）。
+ *   · 對齊讀數：三階段上限 12 + 8 + 15 ＝ 35 s ≤ 45 s 總預算；重試輪另見
+ *     `CLOUD_HYDRATE_RETRY_BUDGET_MS`（30 s ≤ 45 s 總預算）。
  */
 export const CLOUD_STAGE_BUDGET_MS = Object.freeze({
   'sdk-load': 12000,
   'anonymous-login': 8000,
-  query: 8000
+  query: 15000
 })
 
 /**
- * **冷啟動自動重試（v3 T1）**：`sdk-load` 階段超時 ⇒ **自動再來一輪**（預算見下），
- * 且**這一輪不寫 `failed`**（狀態維持 `pending / HYDRATING_RETRY` ⇒ 視圖維持載入態，
+ * **冷啟動自動重試（v3 T1；本單隨 45 s 總預算對齊）**：`sdk-load` 階段超時 ⇒ **自動再來一輪**
+ * （預算見下），且**這一輪不寫 `failed`**（狀態維持 `pending / HYDRATING_RETRY` ⇒ 視圖維持載入態，
  * **不回落本地種子**）。為什麼只認 `sdk-load`、只重試一次：
  *   · SDK 塊是**可緩存的靜態資源** ⇒ 第一次超時時那次下載**仍在後台繼續**（`withBudget`
  *     只放棄等待、不取消請求），第二輪多半命中瀏覽器 HTTP 緩存 ⇒ **第二輪是更便宜的一輪**；
  *   · 登錄 / 查詢超時代表**服務端或鑑權面異常**，重試只是把等待翻倍（**不重試**：
  *     立即走既有 `failed / TIMEOUT` ⇒ 回落本地，這正是「不把立即失敗拖成長等待」的守則）；
- *   · 只一次：最壞牆鐘 ＝ 首輪 `sdk-load` 上限 12 s ＋ 等待 0.8 s ＋ 重試輪 12 s ≈ **25 s**，
- *     之後仍是既有的 `failed / TIMEOUT` 回落（有界，不會無限重試 / 無限 pending）。
+ *   · 只一次：最壞牆鐘 ＝ 首輪 `sdk-load` 上限 12 s ＋ 等待 0.8 s ＋ 重試輪 30 s ≈ **42.8 s
+ *     ≤ 45 s 總預算**（`CLOUD_HYDRATE_TIMEOUT_MS`）⇒ **兩輪合計也不越總預算**，之後仍是既有的
+ *     `failed / TIMEOUT` 回落（有界，不會無限重試 / 無限 pending）。
+ *
+ * **為什麼由 12 s 抬到 30 s（本單）**：重試輪要**重跑整條水合**（SDK 裝載 → 登錄 → 全量分頁）。
+ * 舊值 12 s ＝ `sdk-load` 階段上限 12 s ⇒ 重試輪若再次慢在裝載段，**登錄與查詢拿到 0 秒預算**
+ * （`min(階段預算, 本輪剩餘)` 一到 0 就立刻判超時）⇒ 重試形同虛設。頁寬 1000後全量水合只要
+ * ≈12 頁，30 s 足以讓重試輪真的跑完；且 12 + 0.8 + 30 ≈ 42.8 s 仍 ≤ 45 s ⇒ **重試預算不超過
+ * 總預算**（本常量的硬約束：`CLOUD_HYDRATE_RETRY_BUDGET_MS ≤ CLOUD_HYDRATE_TIMEOUT_MS`）。
  */
-export const CLOUD_HYDRATE_RETRY_BUDGET_MS = 12000
+export const CLOUD_HYDRATE_RETRY_BUDGET_MS = 30000
 export const CLOUD_HYDRATE_RETRY_DELAY_MS = 800
 /** 只有這幾個階段的超時會觸發自動重試（見上）。 */
 export const CLOUD_RETRYABLE_TIMEOUT_STAGES = Object.freeze(['sdk-load'])
@@ -289,7 +318,7 @@ export function cloudBaseFileIdDenial() {
 
 /**
  * 水合总预算（毫秒）。口径：`VITE_XIAI_CB_TIMEOUT_MS` 缺失 / 非正数 / 非数字 ⇒
- * 回落默认 `CLOUD_HYDRATE_TIMEOUT_MS`（20 秒；为什么是 20 s 见该常量的头注）；**不设「0 ＝ 無限」的暗门**
+ * 回落默认 `CLOUD_HYDRATE_TIMEOUT_MS`（**45 秒**；为什么是 45 s 见该常量的头注）；**不设「0 ＝ 無限」的暗门**
  * （那样的配置错误会让页面又变回「无限 pending」）。
  */
 export function cloudBaseTimeoutMs() {
@@ -1101,9 +1130,16 @@ export function rowsOfReply(reply) {
  * 收尾判据仍是**空页**（不看「少于页宽」）；游标按**实际返回条数**推进
  * ⇒ 服务端上限低于页宽时也能读全。每页的等待上限＝总预算剩余（超时 ⇒ `CloudTimeoutError`）。
  *
+ * **页宽只是请求值（本单口径明文）**：`CLOUD_PAGE_SIZE` ＝ 1000 是**请求**的 `limit`，
+ * 服务端因平台限制只回更少（100 / 20 …）时 —— 收尾判据不看页宽比较、游标按**实际返回条数**
+ * 推进 ⇒ **不丢行、不重复**（重复另有 `_id` 去重网兜底）。
+ *
  * @param {object} db `app.database()`
  * @param {string} collectionName 集合名
- * @param {{deadline?:number}} [options] `deadline` ＝ 总预算到点时刻（毫秒时间戳；0 ⇒ 不设限）
+ * @param {{deadline?:number, onPage?:(p:{pages:number,rows:number,nextOffset:number})=>void}} [options]
+ *   `deadline` ＝ 总预算到点时刻（毫秒时间戳；0 ⇒ 不设限）；`onPage` ＝ **每页读回后**的进度
+ *   回调（纯诊断用；回调抛错不影响翻页）。进度读数由 `hydrate()` 记进 `hydrationDiag`
+ *   ⇒ 中途超时时 `console.warn` 仍能看到「读到哪、读了几行」。
  * @returns {Promise<{rows:Array<object>, pages:number, duplicatesRemoved:number, ordered:boolean, uniqueIds:number}>}
  */
 export async function fetchAllRowsDetailed(db, collectionName, options = {}) {
@@ -1144,6 +1180,15 @@ export async function fetchAllRowsDetailed(db, collectionName, options = {}) {
       rows.push(row)
     })
     offset += batch.length
+    /* **诊断进度（本单补）**：每页读回即回报一次（已完成页数 / 已取**去重后**行数 / 下一游标）
+       ⇒ 中途超时时 `hydrationDiag` 里有「读到哪」的读数。回调抛错**不影响**翻页。 */
+    if (typeof options.onPage === 'function') {
+      try {
+        options.onPage({ pages, rows: rows.length, nextOffset: offset })
+      } catch {
+        /* 诊断回调绝不污染读数路径。 */
+      }
+    }
   }
   return { rows, pages, duplicatesRemoved, ordered, uniqueIds: seen.size }
 }
@@ -1357,8 +1402,77 @@ export async function cloudObjectBytesOfRow(row, options = {}) {
 }
 
 /* ---------------------------------------------------------------------------
-   8. 水合（一次性把 237 行拉进内存快照；并发去重、可重试、绝不抛错）
+   8. 水合（一次性把全量行拉进内存快照；并发去重、可重试、绝不抛错）
    --------------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------------
+   8.0 **失败诊断读数（本单补）**：水合失败时 `console.warn` 必须自带
+   「阶段 / 已完成页数 / 已取行数 / 耗时 / 页宽」——否则页面只有一句
+   「雲端資料暫時未能讀取」，**水合超时**与**集合读不到（0 行 / 查询真抛错）**
+   在线上分不开，下次排障只能靠猜。
+
+   口径（排障先看这条日志，再看状态）：
+     · `TIMEOUT` ＋ `stage`（`sdk-load` / `anonymous-login` / `<集合>@<游标>`）＝ **水合超时**：
+       `pages` / `rows` 显示**读到哪、读了多少**，`elapsedMs` 是本轮实际耗时；
+     · `CLOUD_EMPTY_SUSPECT` ＝ **集合读得到但回 0 行**（权限 / 配置被挡，**不是超时**）；
+     · `QUERY_FAILED` ＝ **查询真抛错**（带 `error` 原文）；
+     · `SDK_UNAVAILABLE` / `ANONYMOUS_LOGIN_FAILED` / `DATABASE_UNAVAILABLE` ＝ 前置阶段没过。
+
+   纪律：**纯诊断通道** —— 不改任何 `reason` 字面值、不进返回结构、不改变失败状态机与回落
+   行为；诊断自身绝不会抛错（`console` 被探针吞掉也不影响 `fail()` 写状态）。
+   --------------------------------------------------------------------------- */
+
+/** 本轮水合的诊断容器（每轮 `startHydrationRound()` 重置；页 / 行进度逐页累加）。 */
+let hydrationDiag = null
+
+/** 开一轮诊断容器（`attempt` / 本轮预算 / 起点时刻）。 */
+function beginHydrationDiag(attempt, budgetMs) {
+  hydrationDiag = { attempt, budgetMs, startedAt: Date.now(), current: '', pages: {}, rows: {} }
+}
+
+/** 本轮已耗时（毫秒；无读数 ⇒ `null`，调用方按「—」印）。 */
+function hydrationElapsedMs() {
+  const startedAt = hydrationDiag && Number(hydrationDiag.startedAt) > 0 ? Number(hydrationDiag.startedAt) : 0
+  return startedAt ? Date.now() - startedAt : null
+}
+
+/** 记录某集合的分页进度（`fetchAllRowsDetailed` 的 `onPage` 回调；**每页都写** ⇒ 中途超时也能看到读到哪）。 */
+function noteHydrationProgress(key, progress) {
+  if (!hydrationDiag || !progress) return
+  hydrationDiag.current = `${key}@${progress.nextOffset}`
+  hydrationDiag.pages[key] = progress.pages
+  hydrationDiag.rows[key] = progress.rows
+}
+
+/** 组一份失败诊断读数（**只用于日志**，不进状态结构）。 */
+function hydrationDiagReadout(extra = {}) {
+  const diag = hydrationDiag || {}
+  return {
+    ...extra,
+    attempt: diag.attempt,
+    budgetMs: diag.budgetMs,
+    elapsedMs: hydrationElapsedMs(),
+    /* 当前正卡在哪一页（`<集合>@<游标>`）；超时阶段名通常与它同值。 */
+    current: diag.current || '',
+    pagesDone: diag.pages || {},
+    rowsFetched: diag.rows || {},
+    pageSize: CLOUD_PAGE_SIZE,
+    maxPages: CLOUD_MAX_PAGES,
+    stageBudgets: CLOUD_STAGE_BUDGET_MS
+  }
+}
+
+/**
+ * 失败诊断通道（**只打日志**）：标签 `[xiai:cloudbase]` ＋ 一行 JSON 读数。
+ * 挂在 `fail()` 单点 ⇒ **每条**失败状态（含超时 / 集合读不到 / 查询抛错）都会留一条读数。
+ */
+function warnHydrationFailure(reason, extra = {}) {
+  try {
+    console.warn('[xiai:cloudbase] 水合失败诊断', JSON.stringify(hydrationDiagReadout({ reason, ...extra })))
+  } catch {
+    /* 诊断通道绝不影响失败状态机。 */
+  }
+}
 
 let hydration = null
 /**
@@ -1376,7 +1490,18 @@ let retryResolve = null
 /** 写入失败态（**代次守卫**：非本轮 ⇒ 一字不写，避免僵尸阶段覆盖既有结论）。 */
 function fail(gen, reason, message, extra = {}) {
   if (gen !== generation) return statusRef.value
-  setStatus('failed', { reason, message, ...extra })
+  /* **失败诊断（本单补，单点挂载）**：每条失败状态都留一条带
+     「阶段 / 页数 / 行数 / 耗时 / 页宽」的 `console.warn` ⇒ 水合超时与
+     「集合读不到」下次能一眼分开（读数见 8.0 节）。
+     `collection` 是**纯诊断键**（只进日志、不进状态结构 ⇒ 状态键面一字未变）。 */
+  const { collection = '', ...statusExtra } = extra
+  warnHydrationFailure(reason, {
+    ...statusExtra,
+    message,
+    stage: typeof statusExtra.timeoutStage === 'string' ? statusExtra.timeoutStage : '',
+    collection
+  })
+  setStatus('failed', { reason, message, ...statusExtra })
   appRef = null
   return statusRef.value
 }
@@ -1447,9 +1572,18 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
   /* **空集诊断容器（§3c）**：逐集合判定 → 诚实空态 / 可疑空集分别登记。 */
   const emptyVerified = []
   const emptySuspects = []
+  /* **失败诊断（本单补）**：记下「正在读哪个集合」⇒ 查询抛错时 `fail()` 的
+     `console.warn` 能点名是哪一族集合读不到（超时则由 `CloudTimeoutError.stage` 承载）。 */
+  let currentCollection = ''
   try {
     for (const [key, collectionName] of Object.entries(CLOUD_COLLECTIONS)) {
-      const detailed = await fetchAllRowsDetailed(db, collectionName, { deadline })
+      currentCollection = collectionName
+      if (hydrationDiag) hydrationDiag.current = `${collectionName}@0`
+      const detailed = await fetchAllRowsDetailed(db, collectionName, {
+        deadline,
+        /* **进度回调（纯诊断）**：每页写一次「已完成页数 / 已取行数 / 下一游标」。 */
+        onPage: (progress) => noteHydrationProgress(collectionName, progress)
+      })
       raw[key] = detailed.rows
       /* 分页读数**如实上报**（页数 / 去重网命中数 / 是否真带稳定次序 / 唯一 `_id` 数）。 */
       paging[key] = {
@@ -1469,7 +1603,10 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     }
   } catch (err) {
     if (err instanceof CloudTimeoutError) throw err
-    return fail(gen, 'QUERY_FAILED', `雲端資料讀取失敗（${(err && err.message) || '未知原因'}），已回落到本機示範資料`)
+    /* `collection` ＝ 纯诊断键（只进 `console.warn`，不进状态）：点名**哪个集合**读失败。 */
+    return fail(gen, 'QUERY_FAILED', `雲端資料讀取失敗（${(err && err.message) || '未知原因'}），已回落到本機示範資料`, {
+      collection: currentCollection
+    })
   }
   /* **可疑空集 ⇒ 回落（§3c）**：与 `QUERY_FAILED` **同一条失败状态机**（`fail()` ⇒ `failed` ⇒
      `db.js::readCollection` 走既有「非 ready」分支 ⇒ 本地实现）；诊断字段（集合名 / 云端行数 /
@@ -1541,6 +1678,9 @@ function startHydrationRound(budget, attempt) {
   generation += 1
   const gen = generation
   const deadline = budget > 0 ? Date.now() + budget : 0
+  /* **失败诊断（本单补）**：每轮重置读数容器（轮次 / 本轮预算 / 起点）⇒ 失败时的日志
+     能给出「第几轮、预算多少、已耗时多少、读到哪、读了几行」。 */
+  beginHydrationDiag(attempt, budget)
   /* **同步起跑**（`hydrate()` 是 async 函数 ⇒ 体内首个 await 之前**同步**执行）：
      `pending` 状态必须在**本次调用返回前**就位 —— 否则紧随其后的同步读取会读到 `off`
      ⇒ 走回本地种子（「先假后真」）。 */
@@ -1553,10 +1693,14 @@ function startHydrationRound(budget, attempt) {
       }
       /* 先**作廢本輪**（僵尸阶段的后续写入一律被代次守卫挡掉），再写失败态。 */
       generation += 1
+      /* **失败文案不误导（本单）**：印「阶段 + 本轮预算 + 已耗时」——
+         与 `QUERY_FAILED`（查询真抛错）/ `CLOUD_EMPTY_SUSPECT`（集合回 0 行）三分得开；
+         已耗时读数来自 `hydrationDiag`（拿不到 ⇒ 印「—」，不编数）。 */
+      const elapsed = hydrationElapsedMs()
       return fail(
         generation,
         'TIMEOUT',
-        `雲端資料讀取超時（本輪預算 ${budget} ms，階段「${err.stage}」未落定），已回落到本機示範資料`,
+        `雲端資料讀取超時（本輪預算 ${budget} ms，已用 ${elapsed === null ? '—' : elapsed} ms，階段「${err.stage}」未落定），已回落到本機示範資料`,
         { timeoutMs: budget, timeoutStage: err.stage, attempt }
       )
     }
@@ -1576,11 +1720,21 @@ function startHydrationRound(budget, attempt) {
  */
 function scheduleHydrationRetry(budget, err) {
   generation += 1 /* 作廢本輪 */
+  /* **失败诊断（本单补）**：重试窗口**不写 `failed`**（不走 `fail()`）⇒ 在这里补一条
+     `console.warn`，否则「`sdk-load` 超时 → 自动重试」这一段在线上不留痕（读数含
+     阶段 / 阶段预算 / 本轮已耗时 / 已完成页数）。 */
+  warnHydrationFailure('TIMEOUT', {
+    stage: err.stage,
+    stageBudgetMs: err.budgetMs,
+    timeoutMs: budget,
+    retryScheduled: true,
+    collection: ''
+  })
   setStatus('pending', {
     reason: 'HYDRATING_RETRY',
     /* **D-1**：必须印**该阶段实际耗尽的等待上限**（`CloudTimeoutError.budgetMs`
        ＝ `min(阶段预算, 本輪剩余)`，如 `sdk-load` 的 12000），**不得**印本轮的**总预算**
-       （20000）—— 后者会让人误以为「等了 20 秒」，与真实归因不符。 */
+       （45000）—— 后者会让人误以为「等了 45 秒」，与真实归因不符。 */
     message: `雲端資料載入較慢（階段「${err.stage}」超出 ${err.budgetMs} ms 預算），即將自動重試…`,
     timeoutMs: budget,
     timeoutStage: err.stage,
