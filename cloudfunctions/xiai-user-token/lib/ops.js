@@ -5209,6 +5209,130 @@ function newerCorrectionWins(candidate, incumbent) {
   return idOf(candidate) > idOf(incumbent)
 }
 
+/* --------------------------------------------------------------------------- *
+  影像行 `storage` 一次性修复面（本单新增 op `repairImageStorage`）
+ * --------------------------------------------------------------------------- *
+  · **背景（真因）**：新环境批量入册的 6,347 行影像行**全部缺 `storage` 键**，而前端
+    `src/data/cloudbase.js::cloudBaseObjectKeyOf` 的**第一道前置门** ＝
+    `String(row.storage).trim().toLowerCase() === 'server'` —— 判不过 ⇒ **直接回空对象键**
+    ⇒ 页面落「印面圖片暫缺」（旧行都有 `storage:'server'`）。故本 op 把 `xiai_images` 里
+    **缺 / 空 `storage` 的行逐行补写成 `storage: 'server'`**（取值与 `buildDirectImageRow`
+    逐字一致，**不另立第二值**）。
+  · **载荷封闭恰三键**：`dry_run`（**布林、缺省 `true`**）、`limit`（**1〜500 整数、缺省 200**）、
+    `cursor`（**字符串** ＝ 上轮回包的 `next_cursor`；缺省 / 空串 ⇒ 从头）。未知键 / 身份类键 ⇒
+    `INVALID_FIELD`；形态不符 ⇒ `INVALID_VALUE`。**全部判定早于任何读写**。
+  · **扫描窗口**：`xiai_images` 按 `_id` **升序**、**严格大于 `cursor`** 的前 `limit` 行 ＝ 本轮窗口
+    （`scanned ≤ limit`）；`storage` **缺省（`undefined` / `null`）或空串 / 空白** ⇒ 待补（`eligible`）；
+    **已有非空 `storage` 的行一律不碰** ⇒ **幂等**（重跑同 `cursor` ⇒ `written = 0`）。
+  · **写步（仅 `dry_run:false`）**：逐行一次 `persist`（`kind:'update'` ＋ `match:{_id}` ＋
+    `doc:{storage:'server'}` ＋ **`expectAtLeast:1`**）；单行失败进 `failed[]`、**不中断整批**。
+    **本 op 自己产写步、不产 `plan`** ⇒ `index.js` 的落盘分支不触发（`plan` 亦不在透传白名单）。
+  · **回包封闭**：`dry_run` ⇒ **恰 4 键** `ok / scanned / eligible / next_cursor`；真写 ⇒ **恰 5 键**
+    `ok / scanned / written / next_cursor / failed`（`failed` **恒为数组**，元素 ＝ `{_id, reason}`、
+    `reason` 只用既有冻结值 `STORAGE_UNAVAILABLE`）；`next_cursor` ＝ 本轮窗口末行 `_id`（**字符串**）／
+    窗口空 ⇒ **`null`**（＝ 已扫尽，下一轮可停）。失败（含门拒）恒**恰 3 键** `{ok, reason, message}`。
+  · **读路（两路同一窗口语义）**：主路 ＝ 真实 SDK 一条
+    `where({_id: command.gt(cursor)}).orderBy('_id','asc').limit(limit)`（`db.command` 算子与本文件
+    CAS 发号面 `db.command.inc` 同源）；**退路**（离线假体无 `command`）＝ 全量分页读（链有 `skip`
+    ⇒ 逐页翻，无则整桶一次取回）＋ 内存排序。两路都再过同一个纯函数 `storageRepairWindowOf`
+    ⇒ **游标推进式逐字一致、游标绝不回退**。
+  · **零新增 `reason` 字面值、零新集合**（读写都在既有 `COLLECTIONS.images`）；**第一行即
+    `adminWhitelistDenial`**（零读零写地拒；非管理员 ⇒ `FORBIDDEN`）。
+ * --------------------------------------------------------------------------- */
+
+/** `repairImageStorage` 载荷封闭键面（恰三键）。 */
+const REPAIR_IMAGE_STORAGE_ALLOWED_KEYS = Object.freeze(['dry_run', 'limit', 'cursor'])
+/** `limit` 缺省值（＝ 本轮最多扫描行数）。 */
+const REPAIR_IMAGE_STORAGE_DEFAULT_LIMIT = 200
+/** `limit` 上界（1〜500；派单口径，不得放宽）。 */
+const REPAIR_IMAGE_STORAGE_MAX_LIMIT = 500
+/** 退路分页：单页行数 ＋ 最多页数（防卡死护栏；64 × 200 = 12,800 行 ＞ 存量 6,347 行）。 */
+const REPAIR_IMAGE_STORAGE_PAGE_SIZE = 200
+const REPAIR_IMAGE_STORAGE_MAX_PAGES = 64
+/** 成功回包读数键面（**`index.js` 按 `op` 收窄透传的键名真源**；两态合计恰 5 键）。 */
+const REPAIR_IMAGE_STORAGE_READOUT_KEYS = Object.freeze(['scanned', 'eligible', 'written', 'next_cursor', 'failed'])
+
+/**
+ * 行是否**缺 `storage`**（待补判据）：`undefined` / `null` ／ 空串 ／ 纯空白 ⇒ `true`；
+ * **任何非空值（含 `'server'` / `'local'` / 非字符串）⇒ `false`（一律不碰 ⇒ 幂等）**。
+ * 与前端门 `String(row.storage).trim().toLowerCase() === 'server'` 对齐：只有缺 / 空的行
+ * 才会把展示件解析成空键。
+ * @param {object|null|undefined} row 影像行
+ * @returns {boolean}
+ */
+function storageRepairNeeded(row) {
+  const value = row ? row.storage : undefined
+  if (value === undefined || value === null) return true
+  return typeof value === 'string' && value.trim() === ''
+}
+
+/**
+ * **窗口纯函数（零 I/O、绝不自抛）**：按 `_id` 升序、**严格大于 `after`** 的前 `windowSize` 行。
+ * 两读路共用 ⇒ 同一游标推进式；无 `_id` 的行**不入窗**（无法定址、无法推进游标）。
+ * @param {Array<object>} rows 候选行
+ * @param {string} after 上轮回包的 `next_cursor`（空串 ⇒ 不设下界）
+ * @param {number} windowSize 本轮窗口上限（＝ `limit`）
+ * @returns {Array<object>}
+ */
+function storageRepairWindowOf(rows, after, windowSize) {
+  const cursor = text(after)
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => {
+      const id = text(row && row._id)
+      return id !== '' && (cursor === '' || id > cursor)
+    })
+    .sort((left, right) => {
+      const a = text(left && left._id)
+      const b = text(right && right._id)
+      return a < b ? -1 : a > b ? 1 : 0
+    })
+    .slice(0, Math.max(0, windowSize))
+}
+
+/**
+ * 取本轮扫描窗口（**只读**）：`_id` 升序、严格大于 `after` 的前 `windowSize` 行。
+ * 主路（真实 SDK）＝ 一条范围查询；退路（离线假体无 `db.command`）＝ 全量分页读 ＋ 内存收口。
+ * 任一路抛错都**原样上抛**（由 `index.js` 转 `STORAGE_UNAVAILABLE`；**绝不吞成 0 行**）。
+ * @param {string} after 游标（上轮回包 `next_cursor`；空串 ⇒ 从头）
+ * @param {number} windowSize 窗口上限（＝ `limit`）
+ * @returns {Promise<Array<object>>}
+ */
+async function readStorageRepairWindow(after, windowSize) {
+  const db = resolveDb()
+  const cursor = text(after)
+  const command = db && db.command
+  /* 主路：`where({_id: gt(cursor)}) → orderBy('_id','asc') → limit(windowSize)`（`command` 缺席才走退路）。 */
+  if (command && typeof command.gt === 'function') {
+    const match = cursor === '' ? {} : { _id: command.gt(cursor) }
+    let chain = db.collection(COLLECTIONS.images).where(match)
+    if (chain && typeof chain.orderBy === 'function') chain = chain.orderBy('_id', 'asc')
+    if (chain && typeof chain.limit === 'function') chain = chain.limit(windowSize)
+    return storageRepairWindowOf(rowsOfReply(await chain.get()), cursor, windowSize)
+  }
+  /* 退路：链有 `skip` ⇒ 逐页翻（`_id` 升序）；无 `skip`（极简假体）⇒ 整桶一次取回后再收口。
+     页读不满 / 本页零新增（无 `skip` ⇒ 每页同一批行）⇒ 已扫尽，收口（防死循环）。 */
+  const probe = db.collection(COLLECTIONS.images).where({})
+  if (!probe || typeof probe.get !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
+  const collected = []
+  if (typeof probe.skip !== 'function') {
+    collected.push(...rowsOfReply(await probe.get()))
+  } else {
+    let offset = 0
+    for (let page = 0; page < REPAIR_IMAGE_STORAGE_MAX_PAGES; page += 1) {
+      let chain = db.collection(COLLECTIONS.images).where({})
+      if (typeof chain.orderBy === 'function') chain = chain.orderBy('_id', 'asc')
+      if (offset > 0 && typeof chain.skip === 'function') chain = chain.skip(offset)
+      if (typeof chain.limit === 'function') chain = chain.limit(REPAIR_IMAGE_STORAGE_PAGE_SIZE)
+      const rows = rowsOfReply(await chain.get())
+      if (rows.length === 0) break
+      collected.push(...rows)
+      if (rows.length < REPAIR_IMAGE_STORAGE_PAGE_SIZE) break
+      offset += rows.length
+    }
+  }
+  return storageRepairWindowOf(collected, cursor, windowSize)
+}
+
 const ADMIN_OPS = Object.freeze({
   /**
    * **管理員「弃候選圖」（`ai-enhance-discard`）** —— 薄委派：業務邏輯單點在
@@ -7902,6 +8026,115 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **影像行 `storage` 一次性修复（幂等管理员 op｜本单新增 `repairImageStorage`）**：
+   * 把 `xiai_images` 里**缺 / 空 `storage` 的行逐行补写成 `storage:'server'`** —— 前端
+   * `src/data/cloudbase.js::cloudBaseObjectKeyOf` 的**前置门**（判不过 ⇒ 空对象键 ⇒
+   * 页面「印面圖片暫缺」）；新环境入册的 6,347 行全缺此键，旧行都有。
+   *
+   * 契约（逐条；实现单点在本文件 `storageRepairNeeded` / `storageRepairWindowOf` /
+   * `readStorageRepairWindow`，**零第二套**）：
+   *   ① **第一行即 `adminWhitelistDenial`**（缺 env ⇒ 结构化拒 ＋ 零读零写；非管理员 ⇒
+   *      `FORBIDDEN` ＋ **零读零写**）；
+   *   ② **载荷封闭恰三键** `dry_run`（布林、**缺省 `true`**；给了但非布林 ⇒ `INVALID_VALUE`）
+   *      ＋ `limit`（1〜500 整数、**缺省 200**；越界 / 非整数 ⇒ `INVALID_VALUE`）＋ `cursor`
+   *      （字符串 ＝ 上轮回包 `next_cursor`；缺省 / 空串 ⇒ 从头；给了但非字符串 ⇒ `INVALID_VALUE`）；
+   *      未知键 / 身份类键 ⇒ `INVALID_FIELD`；**全部判定早于任何读写**；
+   *   ③ **扫描**：`xiai_images` 按 `_id` **升序**、**严格大于 `cursor`** 的前 `limit` 行 ＝ 本轮窗口
+   *      （`scanned ≤ limit`）；`storage` 缺省 / 空串 / 空白 ⇒ **待补**；**已有非空值的行不碰**；
+   *   ④ **写步（仅 `dry_run:false`）**：逐行一次 `persist`（`update` ＋ `match:{_id}` ＋
+   *      `doc:{storage:'server'}` ＋ **`expectAtLeast:1`**）；单行失败进 `failed[]`、**不中断整批**；
+   *      **本 op 不产 `plan`**（写步在 op 内执行 ⇒ `index.js` 落盘分支不触发、`plan` 零外传）；
+   *   ⑤ **回包封闭**：`dry_run` ⇒ **恰 4 键** `ok / scanned / eligible / next_cursor`；真写 ⇒
+   *      **恰 5 键** `ok / scanned / written / next_cursor / failed`（`failed` 恒数组、元素
+   *      `{_id, reason}`、`reason` 只用既有冻结值 `STORAGE_UNAVAILABLE`）；`next_cursor` ＝ 窗口末行
+   *      `_id`（字符串）／窗口空 ⇒ `null`（已扫尽）。失败恒**恰 3 键**；
+   *   ⑥ **幂等**：同 `cursor` 重跑（已补写）⇒ `eligible = 0` / `written = 0`、零写入；
+   *      **零新增 `reason` 字面值、零新集合**（读写都在 `COLLECTIONS.images`）。
+   * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`（三键皆可缺）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, scanned:number, eligible:number, next_cursor:string|null}|
+   *                   {ok:true, scanned:number, written:number, next_cursor:string|null, failed:Array<object>}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async repairImageStorage(payload, identity, context) {
+    /* ① 管理员门（**本函数第一行**；零读零写地拒 —— 非管理员 ⇒ `FORBIDDEN` 且零读写）。 */
+    const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (identityDenial) return identityDenial
+    /* ② 载荷封闭恰三键（形态 → 未知键 / 身份类键 → `dry_run` → `limit` → `cursor`）。 */
+    const input = payload === undefined || payload === null ? {} : payload
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+    }
+    const unknown = Object.keys(input).filter((key) => REPAIR_IMAGE_STORAGE_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+      const hint =
+        identityKeys.length > 0
+          ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    /* `dry_run`：**缺省 `true`**（给了但非布林 ⇒ `INVALID_VALUE` ＋ 零读零写）。 */
+    let dryRun = true
+    if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+      if (typeof input.dry_run !== 'boolean') {
+        return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+      }
+      dryRun = input.dry_run
+    }
+    /* `limit`：缺省 200、1〜500 整数（越界 / 非整数 ⇒ `INVALID_VALUE` ＋ 零读零写）。 */
+    let limit = REPAIR_IMAGE_STORAGE_DEFAULT_LIMIT
+    if (Object.prototype.hasOwnProperty.call(input, 'limit')) {
+      const rawLimit = input.limit
+      if (typeof rawLimit !== 'number' || !Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > REPAIR_IMAGE_STORAGE_MAX_LIMIT) {
+        return deny(REASONS.INVALID_VALUE, `\`limit\` 必須是 1〜${REPAIR_IMAGE_STORAGE_MAX_LIMIT} 的整數；本次零寫入。`)
+      }
+      limit = rawLimit
+    }
+    /* `cursor`：字符串（上轮回包 `next_cursor`）；缺省 / 空串 ⇒ 从头；非字符串 ⇒ `INVALID_VALUE`。 */
+    let cursor = ''
+    if (Object.prototype.hasOwnProperty.call(input, 'cursor')) {
+      const rawCursor = input.cursor
+      if (typeof rawCursor !== 'string') {
+        return deny(REASONS.INVALID_VALUE, '`cursor` 必須是字符串（上一輪回包的 `next_cursor`）；本次零寫入。')
+      }
+      cursor = rawCursor.trim()
+    }
+    /* ③ 扫描窗口（**只读**；真故障原样上抛 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`，绝不吞成 0 行）。 */
+    const window = await readStorageRepairWindow(cursor, limit)
+    const scanned = window.length
+    const nextCursor = scanned > 0 ? text(window[scanned - 1] && window[scanned - 1]._id) : null
+    /* ④ 判定：缺 / 空 `storage` ⇒ 待补；**已有非空值一律不碰**（幂等）。 */
+    const eligibleRows = window.filter(storageRepairNeeded)
+    if (dryRun) {
+      /* 预演轮：**零写入**（回包恰 4 键；`eligible` 是数据属性、不随 `dry_run` 变）。 */
+      return { ok: true, scanned, eligible: eligibleRows.length, next_cursor: nextCursor }
+    }
+    /* ⑤ 真写：逐行一次 `persist`（`update` ＋ `expectAtLeast:1`）；单行失败不中断整批。 */
+    let written = 0
+    const failed = []
+    for (const row of eligibleRows) {
+      const docId = text(row && row._id)
+      if (docId === '') {
+        /* 无 `_id` ⇒ 无法定址（窗口纯函数已滤掉此类行；此处只作兜底，不谎报成功）。 */
+        failed.push({ _id: '', reason: REASONS.STORAGE_UNAVAILABLE })
+        continue
+      }
+      try {
+        await persist({
+          writes: [{ kind: 'update', collection: COLLECTIONS.images, match: { _id: docId }, doc: { storage: 'server' }, expectAtLeast: 1 }]
+        })
+        written += 1
+      } catch (error) {
+        failed.push({ _id: docId, reason: REASONS.STORAGE_UNAVAILABLE })
+        console.warn(`[xiai] repairImageStorage 單行補寫失敗（_id：${docId}；不中斷整批）：`, text(error && error.message))
+      }
+    }
+    return { ok: true, scanned, written, next_cursor: nextCursor, failed }
+  },
+
+  /**
    * **印面圖入册（本單新增 op｜`registerFaceImage`｜管理員面）**：把「本機已交權威存儲的印面圖」
    * 在云端 `xiai_images` **建 / 覆写那一行**（内容寻址 `_id`），让 `lib/aiEnhance.js` ④ 步的
    * 严格查行（按 `id`）能命中 —— 本机镜像的序号式 id（`img-<印章序号>f`）由客户端在成功后
@@ -9378,6 +9611,13 @@ module.exports = {
   /* **歷史「已採納未落面」一次性回填面（§3.79｜本單 `backfillAcceptedCorrections`）**：
      載荷封閉恰二鍵（`dry_run` 必有布林 ＋ `limit` 1〜200）—— 供離線自檢直接斷言。 */
   BACKFILL_ALLOWED_KEYS,
+  /* **影像行 `storage` 一次性修復面（本單 `repairImageStorage`）**：封閉三鍵面 ＋ 值域常數 ＋
+     成功回包讀數鍵面（供離線自檢直接斷言；`index.js` 的按 `op` 收窄透傳以
+     `REPAIR_IMAGE_STORAGE_READOUT_KEYS` 為鍵面真源）。 */
+  REPAIR_IMAGE_STORAGE_ALLOWED_KEYS,
+  REPAIR_IMAGE_STORAGE_DEFAULT_LIMIT,
+  REPAIR_IMAGE_STORAGE_MAX_LIMIT,
+  REPAIR_IMAGE_STORAGE_READOUT_KEYS,
   /* **本單 I-2 / I-3**：修復通道面與待審取行護欄（供離線自檢直接斷言）。 */
   IMPORT_REVIEW_PAGE_SIZE,
   IMPORT_REPAIR_SCAN_LIMIT,

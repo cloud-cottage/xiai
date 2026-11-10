@@ -40,6 +40,10 @@
  *     逐行唯一 ⇒ 恒不撞）—— 这是**占位归属、不是真归属**：真值由**采纳回填**
  *     （`reviewSealImport` ＋ `backfill_image_stamp` ⇒ `ops.imageStampWriteStepsOf` 把 `imp-`
  *     开头视作未归属）补 `stamp_id` ＋ `seq`；**本 op 仍零 `seq` 写入**。
+ *  ⑪ **影像行必落 `storage: 'server'`（本修单）**：前端 `src/data/cloudbase.js::cloudBaseObjectKeyOf`
+ *     的**前置门** ＝ `String(row.storage).trim().toLowerCase() === 'server'`，判不过 ⇒ 回空对象键 ⇒
+ *     页面「印面圖片暫缺」；故本通道写行恒带该键（取值与 `ops.buildDirectImageRow` 逐字一致）。
+ *     存量缺键行由管理员一次性 op `repairImageStorage` 补齐（不在本文件）。
  *
  * 存储 / 读点纪律：本文件**零集合名字面、零取库句柄字面**；单行失败的写入是**该行独立的一次
  * `persist`**（恰一个 `set` 步）⇒ 一行失败不影响他行。
@@ -344,12 +348,18 @@ async function importFaceImages(payload, identity, context) {
           { image_sha256: digest, image_bytes: row.bytes, image_storage_key: row.storage_key, kind },
           at
         ).id
+        /* **`storage: 'server'` 是前端展示件解析的前置门（本修单补写；与既有影像行逐字一致）**：
+           `src/data/cloudbase.js::cloudBaseObjectKeyOf` 的**第一道门** ＝
+           `String(row.storage).trim().toLowerCase() === 'server'` —— 判不过就**直接回空对象键**
+           ⇒ 页面落「印面圖片暫缺」（旧行都有 `storage:'server'`，新环境入册的行漏了这一键即全数不出图）。
+           取值与 `lib/ops.js::buildDirectImageRow` 的 `storage: 'server'` 逐字相同（**不另立第二值**）。 */
         const doc = {
           sha256: digest,
           storage_key: row.storage_key,
           mime: ops.text(row.mime).toLowerCase(),
           bytes: row.bytes,
           kind,
+          storage: 'server',
           stamp_id: ops.imageStampPlaceholderOf(digest),
           source,
           created_at: at,

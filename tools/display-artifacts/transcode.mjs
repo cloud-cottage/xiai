@@ -15,16 +15,25 @@
  *     （`>` 后缀即「仅当大于时缩放」，不得改写）
  *
  * 产物键（内容寻址，与入库行 sha256 同键 ⇒ 采纳后自动接上）：
- *   展示件  xiai/display/<sha 前两位>/<sha>.webp
- *   缩略图  xiai/thumb/<sha 前两位>/<sha>.webp
+ *   展示件  <display-prefix><sha 前两位>/<sha>.<display-ext>   （默认 xiai/display/<sha2>/<sha>.webp）
+ *   缩略图  <thumb-prefix><sha 前两位>/<sha>.webp              （默认 xiai/thumb/<sha2>/<sha>.webp；恒为 webp）
+ *   新增可配：--display-prefix（默认 xiai/display/）、--display-ext（png|webp，默认 webp）、
+ *   --thumb-prefix（默认 xiai/thumb/）。前端对 `.tiff` 源件行派生的展示键是
+ *   `xiai/images/<sha 前两位>/<sha>.png`（src/data/cloudbase.js::cloudBaseObjectKeyOf），
+ *   故前端要出图必须用 `--display-prefix xiai/images/ --display-ext png`。
+ *   PNG 编码：`-define png:compression-level=9 -strip`，同样零重采样、保留原宽高（无 -resize）。
  *
  * 幂等：上传前先探同键对象（getFileInfo → HEAD 拿 content-length）；
  *   已存在且字节数一致 ⇒ skipped（不重复上传）；已存在但字节数不同 ⇒ 默认 conflict（不覆盖），
  *   加 --overwrite ⇒ 直接覆盖上传（status=ok，行上记 overwrote:true，覆盖后再重探字节复核）。
  * 续跑：进度 JSONL 逐行追加（envId / sha / status / native_w,h / thumb_w,h / 字节 / 耗时 / 错误摘要），
- *   默认文件 progress-<envId>.jsonl 按环境隔离 —— 换环境必须用独立进度文件；
+ *   默认文件按「环境 + 展示前缀 + 扩展名」隔离：
+ *     默认形态（xiai/display/ + .webp）⇒ progress-<envId>.jsonl（沿用旧名，历史断点不丢）；
+ *     其它形态 ⇒ progress-<envId>-<前缀 slug>-<扩展名>.jsonl。
+ *   换环境 / 换展示键形态必须各自独立进度文件，否则已 ok 的行会把另一形态整批误跳过；
+ *   行上另记 display_prefix / display_ext / thumb_prefix，读回时与本次形态不符的行一律不算进度。
  *   启动时读回，status ∈ {ok, skipped} 的 sha 直接跳过；failed / conflict 会被重新检查。
- *   旧单文件 progress.jsonl 只属于默认环境，仅作其基线只读合入；其它环境一律不读、本脚本永不写它。
+ *   旧单文件 progress.jsonl 只属于默认环境 + 默认键形态，仅作其基线只读合入；其它一律不读、本脚本永不写它。
  *
  * 用法见同目录 README.md。
  */
@@ -49,6 +58,12 @@ const DEFAULT_ORIGINALS = path.join(REPO_ROOT, 'data', 'originals');
 const LEGACY_PROGRESS = path.join(SCRIPT_DIR, 'progress.jsonl');
 const DEFAULT_ENV = 'liwu-d8gek6jjdab1d087c';
 const DEFAULT_BATCH = 500;
+// 产物键形态默认值（= 历史布局）。前端对 `.tiff` 源件行派生的展示键是
+// xiai/images/<sha2>/<sha>.png ⇒ 出图给前端要用 --display-prefix xiai/images/ --display-ext png
+const DEFAULT_DISPLAY_PREFIX = 'xiai/display/';
+const DEFAULT_THUMB_PREFIX = 'xiai/thumb/';
+const DEFAULT_DISPLAY_EXT = 'webp';   // webp（q92 零重采样）| png（png:compression-level=9 零重采样）
+const DISPLAY_EXTS = ['webp', 'png'];
 const DEFAULT_CONCURRENCY = 4;
 // CloudBase 批量存储 API 硬限：单次最多 50 个 fileID，超限报 INVALID_PARAM——
 //   "getFileInfo 失败（重试 2 次）: Cannot operate more than 50 files one time
@@ -62,19 +77,37 @@ const MAGICK_TIMEOUT_MS = 180_000;
 const CRED_MARGIN_MS = 10 * 60 * 1000;   // 临时密钥剩余不足 10 分钟就先刷新
 const THUMB_MAX = 256;          // 缩略图长边上限（展示件无上限、零重采样）
 
-/** 默认进度文件路径：按环境隔离 —— progress-<envId>.jsonl（换环境必须用独立进度文件） */
-function progressFileFor(envId) {
+/** 前缀 slug：`xiai/images/` → `xiai-images`（进进度文件名，保证不同形态不同文件） */
+function prefixSlug(p) {
+  return String(p).replace(/^\/+|\/+$/g, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'prefix';
+}
+
+/**
+ * 默认进度文件路径：按「环境 + 展示前缀 + 扩展名」隔离 ——
+ *   默认键形态（xiai/display/ + .webp）⇒ progress-<envId>.jsonl（沿用旧名，历史断点不丢）；
+ *   其它形态 ⇒ progress-<envId>-<前缀 slug>-<扩展名>.jsonl（不与已跑过的 webp/display 批互跳）。
+ */
+function progressFileFor(envId, displayPrefix = DEFAULT_DISPLAY_PREFIX, displayExt = DEFAULT_DISPLAY_EXT) {
   const safe = String(envId).replace(/[^A-Za-z0-9._-]+/g, '_');
-  return path.join(SCRIPT_DIR, `progress-${safe}.jsonl`);
+  if (displayPrefix === DEFAULT_DISPLAY_PREFIX && displayExt === DEFAULT_DISPLAY_EXT) {
+    return path.join(SCRIPT_DIR, `progress-${safe}.jsonl`);
+  }
+  return path.join(SCRIPT_DIR, `progress-${safe}-${prefixSlug(displayPrefix)}-${displayExt}.jsonl`);
 }
 
 const HELP = `用法: node tools/display-artifacts/transcode.mjs [选项]
 
   --manifest <path>     images_manifest.jsonl（默认 ${DEFAULT_MANIFEST}）
   --originals <dir>     内容寻址 TIFF 根目录（默认 data/originals）
-  --progress <path>     进度 JSONL（默认按环境隔离：tools/display-artifacts/progress-<envId>.jsonl；
-                        显式指定则照旧用该路径。换环境必须用独立进度文件）
+  --progress <path>     进度 JSONL（默认按「环境 + 展示前缀 + 扩展名」隔离：
+                        tools/display-artifacts/progress-<envId>[-<前缀 slug>-<ext>].jsonl；
+                        显式指定则照旧用该路径。换环境 / 换展示键形态必须用独立进度文件）
   --env <envId>         目标 CloudBase 环境（默认 ${DEFAULT_ENV}）
+  --display-prefix <p>  展示件对象键前缀（默认 ${DEFAULT_DISPLAY_PREFIX}；前端 .tiff 源件行
+                        派生键要传 xiai/images/）
+  --display-ext <png|webp>  展示件编码/扩展名（默认 ${DEFAULT_DISPLAY_EXT}：q92 零重采样；
+                        png：-define png:compression-level=9 -strip，同样零重采样、保留原宽高）
+  --thumb-prefix <p>    缩略图对象键前缀（默认 ${DEFAULT_THUMB_PREFIX}；缩略图恒为 .webp）
   --limit <n>           只处理前 n 张（小量试跑用）
   --batch <n>           单批张数（默认 ${DEFAULT_BATCH}：转码 → 探测 → 上传 → 落进度）
   --concurrency <n>     子进程并发（默认 ${DEFAULT_CONCURRENCY}）
@@ -100,6 +133,9 @@ function parseArgs(argv) {
     progress: null,            // null ⇒ 用按环境隔离的默认路径 progressFileFor(env)
     progressExplicit: false,   // 显式 --progress ⇒ 照旧读写指定路径（向后兼容）
     env: DEFAULT_ENV,
+    displayPrefix: DEFAULT_DISPLAY_PREFIX,
+    displayExt: DEFAULT_DISPLAY_EXT,
+    thumbPrefix: DEFAULT_THUMB_PREFIX,
     limit: 0,
     batch: DEFAULT_BATCH,
     concurrency: DEFAULT_CONCURRENCY,
@@ -121,6 +157,9 @@ function parseArgs(argv) {
       case '--originals': o.originals = take(); break;
       case '--progress': o.progress = take(); o.progressExplicit = true; break;
       case '--env': o.env = take(); break;
+      case '--display-prefix': o.displayPrefix = take(); break;
+      case '--display-ext': o.displayExt = String(take()).toLowerCase(); break;
+      case '--thumb-prefix': o.thumbPrefix = take(); break;
       case '--limit': o.limit = Number(take()); break;
       case '--batch': o.batch = Number(take()); break;
       case '--concurrency': o.concurrency = Number(take()); break;
@@ -135,7 +174,29 @@ function parseArgs(argv) {
   for (const [k, v] of [['limit', o.limit], ['batch', o.batch], ['concurrency', o.concurrency], ['probeChunk', o.probeChunk]]) {
     if (!Number.isFinite(v) || v < 0 || (k !== 'limit' && v < 1)) die(`--${k} 取值非法: ${v}`);
   }
+  // 对象键形态：前缀必须是相对键前缀（不许绝对路径 / 穿越），自动补尾部 '/'
+  const normPrefix = (raw, name) => {
+    const p = String(raw == null ? '' : raw).trim();
+    if (!p) die(`--${name} 不能为空`);
+    if (p.startsWith('/')) die(`--${name} 必须是相对对象键前缀，不得以 / 开头: ${raw}`);
+    if (p.split('/').includes('..')) die(`--${name} 不得含 ..: ${raw}`);
+    return p.endsWith('/') ? p : `${p}/`;
+  };
+  o.displayPrefix = normPrefix(o.displayPrefix, 'display-prefix');
+  o.thumbPrefix = normPrefix(o.thumbPrefix, 'thumb-prefix');
+  if (!DISPLAY_EXTS.includes(o.displayExt)) {
+    die(`--display-ext 取值非法: ${o.displayExt}（只支持 ${DISPLAY_EXTS.join(' | ')}）`);
+  }
   return o;
+}
+
+/** 展示件对象键：`<display-prefix><sha 前两位>/<sha>.<display-ext>` */
+function displayKeyOf(sha, o) {
+  return `${o.displayPrefix}${sha.slice(0, 2)}/${sha}.${o.displayExt}`;
+}
+/** 缩略图对象键：`<thumb-prefix><sha 前两位>/<sha>.webp`（缩略图恒 webp） */
+function thumbKeyOf(sha, o) {
+  return `${o.thumbPrefix}${sha.slice(0, 2)}/${sha}.webp`;
 }
 
 /* ------------------------------------------------------------------ 工具函数 */
@@ -361,11 +422,21 @@ function scanOriginals(dir) {
   return map;
 }
 
-function loadProgress(file, envId = null) {
+/** 行上记录的键形态是否与本次一致（老行无这些字段 ⇒ 不据此排除；有则必须逐字相等） */
+function rowShapeMatches(j, shape) {
+  if (!shape) return true;
+  if (j.display_prefix != null && j.display_prefix !== shape.displayPrefix) return false;
+  if (j.display_ext != null && j.display_ext !== shape.displayExt) return false;
+  if (j.thumb_prefix != null && j.thumb_prefix !== shape.thumbPrefix) return false;
+  return true;
+}
+
+function loadProgress(file, envId = null, shape = null) {
   const map = new Map();
-  if (!fs.existsSync(file)) return { map, lines: 0, broken: 0, foreign: 0 };
+  if (!fs.existsSync(file)) return { map, lines: 0, broken: 0, foreign: 0, shapeForeign: 0 };
   let broken = 0;
   let foreign = 0;
+  let shapeForeign = 0;
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(l => l.trim().length > 0);
   for (const line of lines) {
     try {
@@ -374,10 +445,13 @@ function loadProgress(file, envId = null) {
       // 环境隔离：带 envId 且与本环境不符的行一律不算本环境进度
       // （老行无 envId 字段 ⇒ 历史产物，照旧接受；新行都带 envId）
       if (envId && j.envId && j.envId !== envId) { foreign++; continue; }
+      // 键形态隔离：行上记了展示前缀/扩展名（或缩略图前缀）而与本次不符 ⇒ 不算本次进度
+      // （显式 --progress 共用一个文件时也不会把 webp/display 那批 ok 当成 png/images 已完成）
+      if (!rowShapeMatches(j, shape)) { shapeForeign++; continue; }
       map.set(j.sha, j);
     } catch { broken++; }
   }
-  return { map, lines: lines.length, broken, foreign };
+  return { map, lines: lines.length, broken, foreign, shapeForeign };
 }
 
 /**
@@ -387,28 +461,31 @@ function loadProgress(file, envId = null) {
  *     作基线只读合入（保住历史断点），随后被本环境文件的同 sha 行覆盖；
  *   - 跑其它环境一律不读旧单文件 —— 不得把另一环境的 ok 当成本环境已完成。
  */
-function loadMergedProgress(file, envId, legacyFile, useLegacyBaseline) {
+function loadMergedProgress(file, envId, legacyFile, useLegacyBaseline, shape = null) {
   const map = new Map();
   let broken = 0;
   let foreign = 0;
+  let shapeForeign = 0;
   let legacyLines = 0;
   if (useLegacyBaseline) {
-    const st = loadProgress(legacyFile, envId);
+    const st = loadProgress(legacyFile, envId, shape);
     for (const [k, v] of st.map) map.set(k, v);
     legacyLines = st.lines;
     broken += st.broken;
     foreign += st.foreign;
+    shapeForeign += st.shapeForeign;
   }
-  const st = loadProgress(file, envId);
+  const st = loadProgress(file, envId, shape);
   for (const [k, v] of st.map) map.set(k, v);
   broken += st.broken;
   foreign += st.foreign;
-  return { map, lines: st.lines, broken, foreign, legacyLines };
+  shapeForeign += st.shapeForeign;
+  return { map, lines: st.lines, broken, foreign, shapeForeign, legacyLines };
 }
 
 /* ------------------------------------------------------------ 转码（一遍出两个对象） */
 
-async function transcode(row, originalsMap, tmpRoot) {
+async function transcode(row, originalsMap, tmpRoot, opts) {
   const sha = row.sha;
   const src = originalsMap.get(sha);
   if (!src) {
@@ -418,14 +495,21 @@ async function transcode(row, originalsMap, tmpRoot) {
   }
   const dir = path.join(tmpRoot, sha);
   fs.mkdirSync(dir, { recursive: true });
-  const dispPath = path.join(dir, 'native.webp');
+  const dispExt = opts.displayExt;                       // 'webp' | 'png'
+  const dispPath = path.join(dir, `native.${dispExt}`);
   const thumbPath = path.join(dir, 'thumb.webp');
   const srcArg = `${src}[0]`; // 多页取第 1 页；16bit 不改变尺寸
 
-  // 展示件：零重采样，只做容器/编码转换（不带 -resize、无上限）
-  await pExecFile(MAGICK_BIN, [srcArg, '-strip', '-quality', '92', '-define', 'webp:method=6', dispPath],
-    { timeout: MAGICK_TIMEOUT_MS, maxBuffer: 4 << 20 });
-  // 缩略图：长边 ≤256，只缩不放（`>` 后缀 = 仅当大于时缩放）
+  // 展示件：零重采样，只做容器/编码转换（不带 -resize、无上限、不改宽高）
+  if (dispExt === 'png') {
+    // PNG：最大压缩 + 去元数据，**仍零重采样**（无 -resize，保留原宽高）
+    await pExecFile(MAGICK_BIN, [srcArg, '-define', 'png:compression-level=9', '-strip', dispPath],
+      { timeout: MAGICK_TIMEOUT_MS, maxBuffer: 4 << 20 });
+  } else {
+    await pExecFile(MAGICK_BIN, [srcArg, '-strip', '-quality', '92', '-define', 'webp:method=6', dispPath],
+      { timeout: MAGICK_TIMEOUT_MS, maxBuffer: 4 << 20 });
+  }
+  // 缩略图：长边 ≤256，只缩不放（`>` 后缀 = 仅当大于时缩放）；恒为 webp
   await pExecFile(MAGICK_BIN, [srcArg, '-resize', `${THUMB_MAX}x${THUMB_MAX}>`, '-strip', '-quality', '82', thumbPath],
     { timeout: MAGICK_TIMEOUT_MS, maxBuffer: 4 << 20 });
 
@@ -441,7 +525,10 @@ async function transcode(row, originalsMap, tmpRoot) {
   if (![srcInfo, dispInfo, thumbInfo].every(x => Number.isFinite(x.w) && Number.isFinite(x.h) && x.w > 0 && x.h > 0)) {
     throw new Error(`identify 尺寸异常: ${JSON.stringify(linesOut)}`);
   }
-  if (dispInfo.fmt !== 'WEBP' || thumbInfo.fmt !== 'WEBP') throw new Error(`产物不是 WEBP: ${JSON.stringify(linesOut)}`);
+  const expectDispFmt = dispExt.toUpperCase(); // 'WEBP' | 'PNG'
+  if (dispInfo.fmt !== expectDispFmt || thumbInfo.fmt !== 'WEBP') {
+    throw new Error(`产物格式异常（期望展示件=${expectDispFmt} 缩略图=WEBP）: ${JSON.stringify(linesOut)}`);
+  }
 
   // 展示件断言：宽高必须与源 TIFF 第 1 页逐字相等（零重采样）
   if (dispInfo.w !== srcInfo.w || dispInfo.h !== srcInfo.h) {
@@ -479,11 +566,13 @@ function appendProgress(file, rec) {
 
 /* ------------------------------------------------------------ 回读抽样 */
 
-async function readbackSample(cloud, shas, originalsMap, tmpRoot) {
+async function readbackSample(cloud, shas, originalsMap, tmpRoot, opts) {
+  const dispExt = opts.displayExt;
+  const expectDispFmt = dispExt.toUpperCase();
   const results = [];
   for (const sha of shas) {
-    const displayKey = `xiai/display/${sha.slice(0, 2)}/${sha}.webp`;
-    const thumbKey = `xiai/thumb/${sha.slice(0, 2)}/${sha}.webp`;
+    const displayKey = displayKeyOf(sha, opts);
+    const thumbKey = thumbKeyOf(sha, opts);
     const src = originalsMap.get(sha);
     const item = { sha, pass: true, notes: [] };
     try {
@@ -496,9 +585,9 @@ async function readbackSample(cloud, shas, originalsMap, tmpRoot) {
       const urls = await cloud.tempUrls([displayKey, thumbKey]);
       const dir = path.join(tmpRoot, 'readback', sha);
       fs.mkdirSync(dir, { recursive: true });
-      for (const [label, key, expect] of [
-        ['display', displayKey, { w: sw, h: sh }],
-        ['thumb', thumbKey, { long: expectThumbLong }],
+      for (const [label, key, expect, ext] of [
+        ['display', displayKey, { w: sw, h: sh }, dispExt],
+        ['thumb', thumbKey, { long: expectThumbLong }, 'webp'],
       ]) {
         const info = urls.get(key);
         if (!info || info.code !== 'SUCCESS' || !info.url) {
@@ -519,12 +608,13 @@ async function readbackSample(cloud, shas, originalsMap, tmpRoot) {
           } catch (e) { dlErr = e.message; }
         }
         if (!buf) { item.pass = false; item.notes.push(`${label} 下载失败: ${dlErr}`); continue; }
-        const f = path.join(dir, `${label}.webp`);
+        const f = path.join(dir, `${label}.${ext}`);
         fs.writeFileSync(f, buf);
         const idOut = await pExecFile(MAGICK_BIN, ['identify', '-format', '%m %w %h', f],
           { timeout: MAGICK_TIMEOUT_MS, maxBuffer: 1 << 20 });
         const [fmt, w, h] = idOut.stdout.trim().split(/\s+/);
-        if (fmt !== 'WEBP') { item.pass = false; item.notes.push(`${label} 格式=${fmt}`); }
+        const wantFmt = label === 'display' ? expectDispFmt : 'WEBP';
+        if (fmt !== wantFmt) { item.pass = false; item.notes.push(`${label} 格式=${fmt} 期望=${wantFmt}`); }
         const nw = Number(w), nh = Number(h);
         if (label === 'display') {
           if (nw !== expect.w || nh !== expect.h) {
@@ -554,10 +644,16 @@ async function main() {
 
   const manifest = loadManifest(path.resolve(opts.manifest));
   const originalsMap = scanOriginals(path.resolve(opts.originals));
-  // 进度文件：默认按环境隔离 progress-<envId>.jsonl；显式 --progress 照旧用指定路径（向后兼容）
-  const progressFile = opts.progressExplicit ? path.resolve(opts.progress) : progressFileFor(opts.env);
-  // 旧单文件 progress.jsonl 只属于默认环境：仅「跑默认环境 且 未显式 --progress」时作基线只读合入
-  const useLegacyBaseline = !opts.progressExplicit && opts.env === DEFAULT_ENV && fs.existsSync(LEGACY_PROGRESS);
+  // 进度文件：按「环境 + 展示前缀 + 扩展名」隔离（默认形态沿用旧名 progress-<envId>.jsonl）；
+  // 显式 --progress 照旧用指定路径（向后兼容），形态差异由行级 display_prefix/display_ext 过滤兜底
+  const progressFile = opts.progressExplicit ? path.resolve(opts.progress) : progressFileFor(opts.env, opts.displayPrefix, opts.displayExt);
+  // 本次键形态（读回时行上记了别的前缀/扩展名 ⇒ 不算本形态进度）
+  const shape = { displayPrefix: opts.displayPrefix, displayExt: opts.displayExt, thumbPrefix: opts.thumbPrefix };
+  const isDefaultShape = opts.displayPrefix === DEFAULT_DISPLAY_PREFIX && opts.displayExt === DEFAULT_DISPLAY_EXT
+    && opts.thumbPrefix === DEFAULT_THUMB_PREFIX;
+  // 旧单文件 progress.jsonl 只属于默认环境 + 默认键形态：
+  // 仅「跑默认环境 且 未显式 --progress 且 默认键形态」时作基线只读合入
+  const useLegacyBaseline = !opts.progressExplicit && opts.env === DEFAULT_ENV && isDefaultShape && fs.existsSync(LEGACY_PROGRESS);
 
   const manifestShas = new Set(manifest.rows.map(r => r.sha));
   const orphanShas = [...originalsMap.keys()].filter(s => !manifestShas.has(s)).sort();
@@ -569,13 +665,15 @@ async function main() {
   const totalBeforeLimit = list.length;
   if (opts.limit > 0) list = list.slice(0, opts.limit);
 
-  const progressState = loadMergedProgress(progressFile, opts.env, LEGACY_PROGRESS, useLegacyBaseline);
+  const progressState = loadMergedProgress(progressFile, opts.env, LEGACY_PROGRESS, useLegacyBaseline, shape);
   const progressMap = progressState.map;
   const TERMINAL = new Set(['ok', 'skipped']); // 续跑只跳过成功态；failed/conflict 重新检查
 
   console.log(`[config] env=${opts.env} overwrite=${opts.overwrite} dryRun=${opts.dryRun} includeOrphans=${opts.includeOrphans} limit=${opts.limit || 'ALL'} batch=${opts.batch} concurrency=${opts.concurrency}`);
-  console.log(`[config] manifest=${path.resolve(opts.manifest)} originals=${path.resolve(opts.originals)} progress=${progressFile}（按环境隔离${useLegacyBaseline ? `；另以旧档 ${LEGACY_PROGRESS} ${progressState.legacyLines} 行作基线（只属默认环境，只读）` : '；不读旧档 progress.jsonl'}）`);
+  console.log(`[config] 展示件键=${opts.displayPrefix}<sha2>/<sha>.${opts.displayExt} 缩略图键=${opts.thumbPrefix}<sha2>/<sha>.webp`);
+  console.log(`[config] manifest=${path.resolve(opts.manifest)} originals=${path.resolve(opts.originals)} progress=${progressFile}（按环境＋展示前缀＋扩展名隔离${useLegacyBaseline ? `；另以旧档 ${LEGACY_PROGRESS} ${progressState.legacyLines} 行作基线（只属默认环境＋默认键形态，只读）` : '；不读旧档 progress.jsonl'}）`);
   if (progressState.foreign > 0) console.log(`[progress] 忽略异环境行=${progressState.foreign}（envId≠${opts.env}，不计入本环境续跑）`);
+  if (progressState.shapeForeign > 0) console.log(`[progress] 忽略异键形态行=${progressState.shapeForeign}（display_prefix/display_ext/thumb_prefix 与本次不符，不计入本次续跑）`);
   if (progressState.broken > 0) console.log(`[progress] 解析失败行=${progressState.broken}`);
   console.log(`[scan] manifest 行数=${manifest.lineCount} 唯一 sha=${manifest.rows.length} 重复=${manifest.dup} 非法行=${manifest.bad}`);
   console.log(`[scan] 磁盘 TIFF=${originalsMap.size} manifest 外孤儿=${orphanShas.length}`);
@@ -596,6 +694,7 @@ async function main() {
   for (const row of missing) {
     const rec = {
       sha: row.sha, envId: opts.env, at: new Date().toISOString(), status: 'failed',
+      display_prefix: opts.displayPrefix, display_ext: opts.displayExt, thumb_prefix: opts.thumbPrefix,
       native_w: null, native_h: null, thumb_w: null, thumb_h: null,
       display_bytes: null, thumb_bytes: null, ms: 0, error: 'source TIFF missing on disk',
       orphan: !!row.orphan,
@@ -634,7 +733,7 @@ async function main() {
       const t0 = Date.now();
       for (let attempt = 0; attempt <= RETRIES; attempt++) {
         try {
-          const r = await transcode(row, originalsMap, tmpRoot);
+          const r = await transcode(row, originalsMap, tmpRoot, opts);
           return { row, ok: true, r, ms: Date.now() - t0 };
         } catch (e) {
           if (e.permanent || attempt === RETRIES) {
@@ -653,6 +752,7 @@ async function main() {
         failureNotes.push(`${short(res.row.sha)} 转码失败: ${res.error}`);
         const rec = {
           sha: res.row.sha, envId: opts.env, at: new Date().toISOString(), status: 'failed',
+          display_prefix: opts.displayPrefix, display_ext: opts.displayExt, thumb_prefix: opts.thumbPrefix,
           native_w: null, native_h: null, thumb_w: null, thumb_h: null,
           display_bytes: null, thumb_bytes: null, ms: res.ms, error: res.error,
           orphan: !!res.row.orphan,
@@ -667,8 +767,8 @@ async function main() {
       let probeMap;
       try {
         const keys = good.flatMap(x => [
-          `xiai/display/${x.row.sha.slice(0, 2)}/${x.row.sha}.webp`,
-          `xiai/thumb/${x.row.sha.slice(0, 2)}/${x.row.sha}.webp`,
+          displayKeyOf(x.row.sha, opts),
+          thumbKeyOf(x.row.sha, opts),
         ]);
         probeMap = await cloud.probe(keys);
       } catch (e) {
@@ -677,6 +777,7 @@ async function main() {
           failureNotes.push(`${short(x.row.sha)} 探测失败: ${e.message}`);
           const rec = {
             sha: x.row.sha, envId: opts.env, at: new Date().toISOString(), status: 'failed',
+            display_prefix: opts.displayPrefix, display_ext: opts.displayExt, thumb_prefix: opts.thumbPrefix,
             native_w: x.r.nativeW, native_h: x.r.nativeH, thumb_w: x.r.thumbW, thumb_h: x.r.thumbH,
             display_bytes: x.r.dispBytes, thumb_bytes: x.r.thumbBytes, ms: x.ms, error: `probe: ${e.message}`,
             orphan: !!x.row.orphan,
@@ -689,8 +790,8 @@ async function main() {
 
       const settled = await pool(good, opts.concurrency, async (x) => {
         const sha = x.row.sha;
-        const displayKey = `xiai/display/${sha.slice(0, 2)}/${sha}.webp`;
-        const thumbKey = `xiai/thumb/${sha.slice(0, 2)}/${sha}.webp`;
+        const displayKey = displayKeyOf(sha, opts);
+        const thumbKey = thumbKeyOf(sha, opts);
         const objects = {};
         let status = null;
         let err = null;
@@ -747,6 +848,8 @@ async function main() {
 
         const rec = {
           sha, envId: opts.env, at: new Date().toISOString(), status,
+          display_prefix: opts.displayPrefix, display_ext: opts.displayExt, thumb_prefix: opts.thumbPrefix,
+          display_key: displayKey, thumb_key: thumbKey,
           native_w: x.r.nativeW, native_h: x.r.nativeH,
           thumb_w: x.r.thumbW, thumb_h: x.r.thumbH,
           display_bytes: x.r.dispBytes, thumb_bytes: x.r.thumbBytes,
@@ -773,8 +876,8 @@ async function main() {
       for (const rec of settled) {
         if (!rec || !rec.overwrote) continue;
         const s = rec.sha;
-        if (rec.objects.display === 'overwrote') owCheck.push({ key: `xiai/display/${s.slice(0, 2)}/${s}.webp`, bytes: rec.display_bytes });
-        if (rec.objects.thumb === 'overwrote') owCheck.push({ key: `xiai/thumb/${s.slice(0, 2)}/${s}.webp`, bytes: rec.thumb_bytes });
+        if (rec.objects.display === 'overwrote') owCheck.push({ key: displayKeyOf(s, opts), bytes: rec.display_bytes });
+        if (rec.objects.thumb === 'overwrote') owCheck.push({ key: thumbKeyOf(s, opts), bytes: rec.thumb_bytes });
       }
       if (owCheck.length > 0) {
         try {
@@ -820,7 +923,7 @@ async function main() {
 
   /* ---------------- 对账三读数 ---------------- */
   // 重新读回进度，保证统计口径来自磁盘
-  const finalProgress = loadMergedProgress(progressFile, opts.env, LEGACY_PROGRESS, useLegacyBaseline).map;
+  const finalProgress = loadMergedProgress(progressFile, opts.env, LEGACY_PROGRESS, useLegacyBaseline, shape).map;
   const counts = { ok: 0, skipped: 0, conflict: 0, failed: 0, none: 0 };
   const successShas = [];
   for (const row of list) {
@@ -861,7 +964,7 @@ async function main() {
   console.log('-------------------------------------------');
   console.log(`[本 run 处理明细] 幂等跳过=${disp.resumeSkip}（命中进度，未转码/未探测/未上传） 新处理=${(disp.ok || 0) + (disp.skipped || 0) + (disp.conflict || 0) + (disp.failed || 0) + (disp.decoded || 0)}（ok=${disp.ok || 0} 对象已存在=${disp.skipped || 0} conflict=${disp.conflict || 0} failed=${disp.failed || 0} decoded=${disp.decoded || 0} overwrote=${disp.overwrote || 0}） 未处理=${disp.none || 0}`);
   console.log(`[统计] 解码成功=${stats.decoded} 张；对象级：已存在同字节=${stats.exists} 新上传=${stats.uploaded} 覆盖上传=${stats.overwrote} conflict=${stats.conflict}；图片级 failed=${stats.failed}（含缺源文件 ${missing.length}）`);
-  console.log(`[统计] 本 run 处理唯一 sha=${doneThisRun.size}；进度文件=${progressFile}（本环境累计 ${loadProgress(progressFile, opts.env).lines} 行${useLegacyBaseline ? ` ＋ 旧档基线只读 ${LEGACY_PROGRESS}` : ''}）`);
+  console.log(`[统计] 本 run 处理唯一 sha=${doneThisRun.size}；进度文件=${progressFile}（本环境本形态累计 ${loadProgress(progressFile, opts.env, shape).lines} 行${useLegacyBaseline ? ` ＋ 旧档基线只读 ${LEGACY_PROGRESS}` : ''}）`);
   if (orphanShas.length > 0) {
     const orphanInBatch = list.filter(r => r.orphan);
     if (opts.includeOrphans) {
@@ -931,7 +1034,7 @@ async function main() {
     const samples = [];
     for (let i = 0; i < take; i++) samples.push(arr[Math.floor((i * arr.length) / take)]);
     console.log(`[回读] 抽 ${samples.length} 张回读（断言：可被 magick identify 解码；展示件宽高==源 TIFF 第1页；缩略图长边==min(原长边,256)）`);
-    const rb = await readbackSample(cloud, samples, originalsMap, tmpRoot);
+    const rb = await readbackSample(cloud, samples, originalsMap, tmpRoot, opts);
     rb.forEach((it, i) => {
       console.log(`  [回读 ${i + 1}/${rb.length}] ${short(it.sha)} ${it.pass ? 'PASS' : 'FAIL'}  ${it.notes.join('; ')}`);
       if (!it.pass) readbackFail++;

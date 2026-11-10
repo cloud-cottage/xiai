@@ -1,11 +1,11 @@
 # tools/display-artifacts — 展示件 / 缩略图离线批量转码 + 直传 COS
 
 把内容寻址 TIFF（`data/originals/<sha 前两位>/<sha>.tiff`）离线批量转成
-**展示件 WebP** 与 **缩略图 WebP**，直传多云对象存储，供前端直出 ——
+**展示件**（WebP 或 PNG，零重采样）与 **缩略图 WebP**，直传多云对象存储，供前端直出 ——
 不经云函数，绕开 6MB 请求体与 60s 网关。
 
 - 入口：`transcode.mjs`（Node 18+，无第三方依赖；只用本机 `magick` 与 `@cloudbase/node-sdk`）
-- 写集：仅本目录（`transcode.mjs` / `README.md` / `progress-<envId>.jsonl`；旧档 `progress.jsonl` 只读作默认环境基线，**永不写**）
+- 写集：仅本目录（`transcode.mjs` / `README.md` / `progress-<envId>[-<前缀 slug>-<ext>].jsonl`；旧档 `progress.jsonl` 只读作默认环境＋默认键形态基线，**永不写**）
 - 不碰 `src/**`、`cloudfunctions/**`、`docs/**`、`scripts/**`、`package.json`，不 git add/commit/push，
   **不写任何数据库集合**（只写 COS 对象 + 本地进度文件）
 - TIFF 与中间产物一律落在 `$TMPDIR`，跑完自动清理，**不写进仓库**
@@ -14,7 +14,8 @@
 
 | 产物 | 口径 | 实际命令 |
 | --- | --- | --- |
-| 展示件 | **零重采样**：既不放大也不缩小，保留原图宽高，只做 TIFF→WebP 容器/编码转换；无任何 `-resize`、无上限 | `magick '<src>[0]' -strip -quality 92 -define webp:method=6 <out>` |
+| 展示件（WebP，默认） | **零重采样**：既不放大也不缩小，保留原图宽高，只做 TIFF→WebP 容器/编码转换；无任何 `-resize`、无上限 | `magick '<src>[0]' -strip -quality 92 -define webp:method=6 <out>` |
+| 展示件（PNG，`--display-ext png`） | 同样**零重采样**：只做 TIFF→PNG 容器/编码转换，保留原图宽高；无任何 `-resize`、无上限 | `magick '<src>[0]' -define png:compression-level=9 -strip <out>` |
 | 缩略图 | 长边上限 **256**，**只缩不放**（原图长边 <256 保持原尺寸） | `magick '<src>[0]' -resize 256x256> -strip -quality 82 <out>` |
 
 - `[0]`：源是多页 TIFF 时取第 1 页；**16bit 不得因此改变尺寸**。
@@ -27,13 +28,43 @@
 
 ## 产物键（内容寻址，与入库行 sha256 同键 ⇒ 采纳后自动接上）
 
+键形态由三个参数决定：`--display-prefix`（默认 `xiai/display/`）、`--display-ext`（`webp`|`png`，默认 `webp`）、
+`--thumb-prefix`（默认 `xiai/thumb/`）；**缩略图恒为 `.webp`**（只有展示件换前缀/扩展名）。
+
+### （a）旧布局 —— 默认参数（历史批次已跑的就是它）
+
 ```
-xiai/display/<sha 前两位>/<sha>.webp     展示件（原生尺寸）
-xiai/thumb/<sha 前两位>/<sha>.webp       缩略图（长边 ≤256）
+xiai/display/<sha 前两位>/<sha>.webp     展示件（原生尺寸，q92 WebP）
+xiai/thumb/<sha 前两位>/<sha>.webp       缩略图（长边 ≤256，WebP）
 ```
 
+```bash
+node tools/display-artifacts/transcode.mjs --env <envId> --limit 20
+```
+
+### （b）前端实际需要的布局 —— `xiai/images/<sha 前两位>/<sha>.png`
+
+```
+--display-prefix xiai/images/ --display-ext png
+⇒ xiai/images/<sha 前两位>/<sha>.png     展示件（原生尺寸，PNG，零重采样）
+  xiai/thumb/<sha 前两位>/<sha>.webp      缩略图（不变）
+```
+
+```bash
+node tools/display-artifacts/transcode.mjs --env <envId> --limit 20 \
+  --display-prefix xiai/images/ --display-ext png
+```
+
+**为什么必须是这个键（不传就出不了图）**：前端 `src/data/cloudbase.js::cloudBaseObjectKeyOf`
+对**源件行**（`storage_key` 以 `.tiff` 结尾）是机械派生展示键的 ——
+`xiai/images/<sha 前两位>/<sha>.png`（键内摘要必须 ≡ 行内 sha256，否则返回空串、不猜不拼）。
+前端只会去这个键取展示件；对象传成 `xiai/display/*.webp` ⇒ **键形态不符 ⇒ 页面「印面圖片暫缺」**。
+另：桶安全规则按扩展名放行（实测）—— `.png` 匿名可读、`.tiff` 匿名拒读 ⇒ 展示件用 `.png` 正落在可读面上。
+该键与源件键 `xiai/images/<sha 前两位>/<sha>.tiff` **同目录、同名、不同后缀**，互不覆盖。
+
 目标环境默认 `liwu-d8gek6jjdab1d087c`（生产在用），`--env` 可切。
-**换环境必须用独立进度文件** —— 默认进度文件名带环境后缀 `progress-<envId>.jsonl`，随 `--env` 自动切换（详见「续跑语义」）。
+**换环境、换展示键形态都必须各自独立进度文件** —— 默认进度文件名带
+`progress-<envId>[-<前缀 slug>-<ext>].jsonl`，随 `--env` / `--display-prefix` / `--display-ext` 自动切换（详见「续跑语义」）。
 
 ## 用法
 
@@ -50,6 +81,11 @@ node tools/display-artifacts/transcode.mjs
 # 换环境跑：进度自动切到 progress-<envId>.jsonl（换环境必须用独立进度文件）
 node tools/display-artifacts/transcode.mjs --env liwu-cny1313-d1gb2fukyb7cb19bb --limit 20
 
+# 前端要的形态：xiai/images/<sha2>/<sha>.png（.tiff 源件行的派生展示键）；进度另存
+# progress-<envId>-xiai-images-png.jsonl，不与已跑过的 webp/display 批互跳
+node tools/display-artifacts/transcode.mjs --env liwu-cny1313-d1gb2fukyb7cb19bb --limit 20 \
+  --display-prefix xiai/images/ --display-ext png
+
 # 新环境覆盖迁移：同键不同字节 ⇒ 直接覆盖（不删先）；不传 --overwrite 则维持 conflict 不覆盖
 node tools/display-artifacts/transcode.mjs --env liwu-cny1313-d1gb2fukyb7cb19bb --limit 20 --overwrite
 
@@ -61,8 +97,11 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 | --- | --- | --- |
 | `--manifest <path>` | `/Users/kevin/bistro/feicui/exports/seal_import_seal_20261010_01/images_manifest.jsonl` | 入口清单 |
 | `--originals <dir>` | `data/originals` | 内容寻址 TIFF 根目录 |
-| `--progress <path>` | `tools/display-artifacts/progress-<envId>.jsonl` | 进度 JSONL，**按环境隔离**；显式指定则照旧用该路径（向后兼容） |
+| `--progress <path>` | `tools/display-artifacts/progress-<envId>[-<前缀 slug>-<ext>].jsonl` | 进度 JSONL，**按「环境 + 展示前缀 + 扩展名」隔离**；显式指定则照旧用该路径（向后兼容） |
 | `--env <envId>` | `liwu-d8gek6jjdab1d087c` | 目标 CloudBase 环境（进度文件随它切换） |
+| `--display-prefix <p>` | `xiai/display/` | 展示件对象键前缀（自动补尾部 `/`；绝对路径 / `..` 直接报错）。前端 `.tiff` 源件行要 `xiai/images/` |
+| `--display-ext <png\|webp>` | `webp` | 展示件编码与扩展名：`webp` = q92 零重采样；`png` = `-define png:compression-level=9 -strip` **同样零重采样**（无 `-resize`、保留原宽高）。其它取值直接报错 |
+| `--thumb-prefix <p>` | `xiai/thumb/` | 缩略图对象键前缀（缩略图恒 `.webp`，长边口径不变） |
 | `--limit <n>` | 0（全部） | 只处理前 n 张（按 manifest 顺序；`--include-orphans` 时孤儿排在后面） |
 | `--batch <n>` | 500 | 单批张数：转码 → 探测 → 上传 → 落进度（每批落盘一次） |
 | `--concurrency <n>` | 4 | `magick` 子进程并发 |
@@ -111,23 +150,32 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 ## 续跑语义
 
 - 进度文件 JSONL 逐行追加（每批落盘一次），**中途被掐不丢已完成进度**。
-- **换环境必须用独立进度文件**：默认文件名带环境后缀 `progress-<envId>.jsonl`
-  （如 `progress-liwu-cny1313-d1gb2fukyb7cb19bb.jsonl`），随 `--env` 自动切换。
-  进度以 sha 为键、不带环境维度，若跨环境共用单文件，旧环境已 `ok` 的 6,347 行会让新环境整批被误跳过。
-- 向后兼容：显式 `--progress <path>` 时**照旧**读写指定路径（不加后缀、不分环境，换环境请自行分文件）。
+- **进度文件按「环境 + 展示前缀 + 扩展名」隔离**：默认文件名
+  `progress-<envId>.jsonl`（**默认键形态 `xiai/display/` + `.webp` 沿用旧名**，历史断点不丢）；
+  其它形态 ⇒ `progress-<envId>-<前缀 slug>-<ext>.jsonl`
+  （如 `progress-liwu-cny1313-d1gb2fukyb7cb19bb-xiai-images-png.jsonl`）。
+  进度以 sha 为键、本身不带「这是哪批产物」的语义，若跨环境 / 跨键形态共用单文件，
+  旧批已 `ok` 的几千行会让新环境 / 新形态整批被误跳过 —— 所以维度必须进文件名。
+- 行上另记 `display_prefix / display_ext / thumb_prefix`（＋ `display_key / thumb_key`）：
+  读回时与本次形态不符的行一律不算进度 —— 就算显式 `--progress` 共用一个文件也不会互相误跳。
+- 向后兼容：显式 `--progress <path>` 时**照旧**读写指定路径（不加后缀、不分环境，换环境/换形态请自行分文件）。
 - 读取规则（以「对应本环境的那个文件」为准）：
-  - 本环境文件 `progress-<envId>.jsonl`（或显式 `--progress` 指定的路径）始终为准；
-  - 旧单文件 `progress.jsonl` **只属于默认环境** `liwu-d8gek6jjdab1d087c`：仅在「跑默认环境 且 未显式 `--progress`」时
+  - 本环境文件 `progress-<envId>[-<前缀 slug>-<ext>].jsonl`（或显式 `--progress` 指定的路径）始终为准；
+  - 旧单文件 `progress.jsonl` **只属于默认环境 `liwu-d8gek6jjdab1d087c` ＋默认键形态**（`xiai/display/` + `.webp`）：
+    仅在「跑默认环境 且 未显式 `--progress` 且 默认键形态」时
     作**只读基线**合入（保住历史 6,347 行断点），同 sha 行随后被本环境文件覆盖；
   - 跑其它环境**一律不读**旧单文件，本脚本也**永不写**旧单文件 ——
     **不得把另一环境的 `ok` 当成本环境已完成**。
 - 每行进度带 `envId` 字段；读回时 `envId` 与本环境不符的行一律忽略（历史行无 `envId` 字段，照旧接受）。
+  行上还带 `display_prefix / display_ext / thumb_prefix`；**有这些字段而与本次形态不符的行同样忽略**
+  （老行没有 ⇒ 照旧接受，它们本就只属于默认形态）。
 - 启动时读回：`status ∈ {ok, skipped}` 的 sha 直接跳过（不转码、不探测、不上传）；
   `failed` / `conflict` 会被重新检查（失败可自愈，冲突持续暴露给派单方裁定）。
 - `dry-run` 不写进度，不会污染后续真跑的幂等判断。
-- 字段：`envId / sha / at / status / native_w / native_h / thumb_w / thumb_h / display_bytes / thumb_bytes / ms / objects / overwrote? / error? / orphan? / manifest_mismatch?`
+- 字段：`envId / sha / at / status / display_prefix / display_ext / thumb_prefix / display_key / thumb_key /
+  native_w / native_h / thumb_w / thumb_h / display_bytes / thumb_bytes / ms / objects / overwrote? / error? / orphan? / manifest_mismatch?`
   （`native_*` = 展示件原生宽高 == 源 TIFF 宽高，**无缩放语义**；`thumb_*` = 缩略图宽高；
-  `overwrote:true` = 本行有对象被 `--overwrite` 覆盖。）
+  `display_key` / `thumb_key` = 本行实际上传的对象键；`overwrote:true` = 本行有对象被 `--overwrite` 覆盖。）
 
 ## 对账三读数（每次跑完必打）
 
@@ -146,8 +194,8 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 
 从本次成功 sha 中均匀抽 **12 张**，用 `getTempFileURL` 下载回 `$TMPDIR` 断言：
 
-- 两族对象都能被 `magick identify` 解码且格式为 `WEBP`；
-- 展示件宽高 **逐字等于** 源 TIFF 第 1 页宽高；
+- 两族对象都能被 `magick identify` 解码：展示件格式 **== `--display-ext`**（`webp`⇒`WEBP`、`png`⇒`PNG`），缩略图恒 `WEBP`；
+- 展示件宽高 **逐字等于** 源 TIFF 第 1 页宽高（与扩展名无关，PNG 形态同样零重采样）；
 - 缩略图长边 == `min(源长边, 256)`。
 
 打印 `[回读 n/12] … PASS/FAIL` 与汇总；有 FAIL ⇒ 退出码 1。
@@ -219,9 +267,41 @@ node tools/display-artifacts/transcode.mjs --include-orphans --limit 10 --dry-ru
 
 全量（6,347 张 × 2 族）由派单方另跑（已见其以 `--env 新环境 --overwrite` 起跑，写入同一环境隔离进度文件）。
 
+### 新键形态小量验证（2026-11-10，`--env liwu-cny1313-d1gb2fukyb7cb19bb --limit 20 --display-prefix xiai/images/ --display-ext png`）
+
+进度文件：**新建** `progress-liwu-cny1313-d1gb2fukyb7cb19bb-xiai-images-png.jsonl`（按「环境＋展示前缀＋扩展名」隔离，
+与同环境已跑过的 `progress-liwu-cny1313-d1gb2fukyb7cb19bb.jsonl`（webp/display 批）互不干扰）。
+
+1. **首跑 20 张全 ok**：`[config] 展示件键=xiai/images/<sha2>/<sha>.png 缩略图键=xiai/thumb/<sha2>/<sha>.webp`、
+   `[plan] 待处理=20`、逐行 `ok native=…x… thumb=…x… disp=…B thumb=…B`、
+   `读数2 = 20（ok=20 skipped=0；conflict=0 failed=0 none=0）`、`读数3 = 40`；
+   对象级 `已存在同字节=20 新上传=20`（20 个缩略图与既有 webp 批**同字节** ⇒ `exists`，零重传；20 个 `.png` 展示件全新上传）；
+   回读 `12/12 PASS`（展示件格式 `PNG`、宽高 == 源 TIFF 第 1 页；缩略图长边 == `min(原长边,256)`）；**退出码 0**。
+2. **抽样 3 个真实对象键与字节**（独立探针 `getFileInfo`，不走本脚本）：
+   - `xiai/images/d2/d24c3c12cf5f156cd45e1b144134c2247f362783b84707ebed362c6d1edd8c84.png` = **108,906 B**（同源 webp 展示件 16,202 B）
+   - `xiai/images/20/2096330e5ad015e61d822f00e24ae4e29149ae55b00d9412b03d2558a691eadc.png` = **89,704 B**
+   - `xiai/images/45/455d3951fb452c0cd0cbbcd49e84181fccde1a9336043c7273ed128cd39ce5d6.png` = **154,603 B**
+   远端 `size` 与进度行 `display_bytes` 逐字相等。
+3. **getFileInfo 回探 20 键**（另带 20 个缩略图键）：展示件 `SUCCESS=20 / 缺失 0`、缩略图 `SUCCESS=20 / 缺失 0`
+   ⇒ 合计 40 键全在；远端字节 == 进度行记录字节 **40/40**、不等 0。
+4. **同参数重跑（幂等）**：`[plan] 续跑跳过=20 待处理=0`、
+   `[本 run 处理明细] 幂等跳过=20 … 新处理=0（ok=0 对象已存在=0 conflict=0 failed=0 decoded=0）`、
+   解码 0 张、新上传 0 个、回读仍 `12/12 PASS`、**退出码 0**。
+   再用**全新 `--progress`**（强制重探、绕过进度）同参数跑：`读数2 = 20（ok=0 skipped=20）`、
+   对象级 `已存在同字节=40 新上传=0 覆盖上传=0 conflict=0`、回读 `12/12 PASS`、退出码 0
+   ⇒ 远端字节与本地**逐字相同**、零重复上传。
+5. **隔离复核**：既有 4 个进度文件 md5 逐字不变 —— `progress.jsonl` `6fde02fe4f1f6ff48cfa7d63a5f25ad9`、
+   `progress-liwu-cny1313-d1gb2fukyb7cb19bb.jsonl` `a603b205e3ccad55f592a95167a1ffda`、
+   `progress-originals.jsonl` `b16293c9c86c21713d745ada225002b9`、
+   `progress-originals-liwu-cny1313.jsonl` `01ee59d0d35dac23a127e0ddd9bdf0af`（跑前跑后一致）；
+   新形态文件恰 20 行、行上 `envId / display_prefix=xiai/images/ / display_ext=png / thumb_prefix=xiai/thumb/` 全一致。
+   默认形态回归：`--limit 1 --dry-run`（默认环境、默认参数）仍走 `progress-liwu-d8gek6jjdab1d087c.jsonl`
+   并合入旧档 `progress.jsonl` **12,683 行**只读基线（基线条件加上「默认键形态」后未变）。
+   本地 `node --check` 通过；`--display-ext jpg` / `--display-prefix /abs` 均被参数校验直接拒（退出码 1）。
+
 ## upload-originals.mjs — 原图 TIFF 直传 COS（同目录新增）
 
-与 `transcode.mjs` 分工：transcode 只产展示件/缩略图（`xiai/display`、`xiai/thumb`）；
+与 `transcode.mjs` 分工：transcode 只产展示件/缩略图（`xiai/display`、`xiai/thumb`，前缀与展示件扩展名可配，见「产物键」）；
 本脚本把**原图 TIFF 字节本身**搬到内容寻址键，供影像入册 op 回读对象字节、现算 sha256 逐字比对：
 
 ```

@@ -44,7 +44,7 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
-const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, writeStepFingerprintMessageOf } = require('./lib/ops.js')
+const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, writeStepFingerprintMessageOf, REPAIR_IMAGE_STORAGE_READOUT_KEYS } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
@@ -579,6 +579,21 @@ async function handleVerify(event, config, callContext) {
   if (op === 'repairImportAcceptance') {
     const REPAIR_READOUT_KEYS = ['dry_run', 'scanned', 'orphan', 'changed', 'samples', 'idempotent']
     for (const key of REPAIR_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **影像行 `storage` 修复读数面（additive 透传｜**按 `op` 收窄**｜本单 `repairImageStorage`）**：
+     `scanned` / `eligible` / `written` / `next_cursor` / `failed` 五键**仅当 `op === 'repairImageStorage'`
+     且 `opResult` 确有该键时**才逐字叠进回包，且**存在性驱动** ⇒ `dry_run` 轮回**恰 4 键读数面**
+     （`scanned / eligible / next_cursor`）、真写轮回**恰 5 键读数面**（`scanned / written /
+     next_cursor / failed`），恰如该 op 的封闭键面；**其余任何 op 一律不透传这 5 个键**（即使
+     `opResult` 意外带同名键 —— 例如 `importFaceImages` / `reviewItemImport` 的 `written` /
+     `failed`、各迁移 op 的 `scanned` —— 亦一个都不外泄）⇒ 既有回包**逐字不变**（序列化后亦不
+     新增键）；**失败回包（`ok:false`）走上面的早退分支、恒 3 键、零读数键**；**`plan` 是内部落盘
+     计划（内部面）、不在白名单内 ⇒ 绝不外传**（本 op 不产 `plan` —— 写步在 op 内逐行走 `persist`）。
+     既有字段一律不刪、不改。键名真源 ＝ `lib/ops.js::REPAIR_IMAGE_STORAGE_READOUT_KEYS`。 */
+  if (op === 'repairImageStorage') {
+    for (const key of REPAIR_IMAGE_STORAGE_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
