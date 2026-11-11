@@ -19,6 +19,10 @@
       "destination": "/xiai/index.html"
     },
     {
+      "source": "/xiai/:path*",
+      "destination": "/xiai/index.html"
+    },
+    {
       "source": "/((?!assets/|yinyuan/|xiai/|api/).*)",
       "destination": "/xiai/index.html"
     }
