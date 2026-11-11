@@ -4130,6 +4130,10 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
   }
   const taken = new Set((Array.isArray(faces) ? faces : []).map((item) => text(item && item.id)))
   const faceDocs = []
+  /* **主印面标记（本单新增）**：新建印章的 FACE 行里，`face_no` 最小的那一枚置
+     `is_primary:true`（`face_no` 在下面按同类循环递增 ⇒ 「首个 FACE」即最小号），其余 FACE 置
+     `false`；**`EDGE` 永不置该键**（边款不参与主印面判定）。 */
+  let primaryAssigned = false
   for (const { face, image } of resolvedFaces) {
     const faceId = nextFaceIdOf(stampId, face.kind, taken)
     taken.add(faceId)
@@ -4165,8 +4169,12 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
       source,
       uploaded_by: identity.uid,
       created_at: at,
-      updated_at: at
+      updated_at: at,
+      /* **主印面标记**（本单新增）：FACE 行恒带布尔；首个 FACE（`face_no` 最小）⇒ `true`，
+         其余 ⇒ `false`。`EDGE` **不落该键**（不得给边款置主印面）。 */
+      ...(isEdge ? {} : { is_primary: !primaryAssigned })
     })
+    if (!isEdge && !primaryAssigned) primaryAssigned = true
   }
   return { ok: true, stampId, sealDoc, faceDocs }
 }
@@ -4294,6 +4302,12 @@ async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
   const usedFaceNos = await occupiedNosOf('face')
   const assignedNos = new Set()
   const faceDocs = []
+  /* **主印面标记（本单新增）**：本章**既有 FACE 面已经存在**（哪怕无 `is_primary` 标记）⇒ 本轮补的
+     新行一律 `is_primary:false`，把「谁是主印面」交给 `repairPrimaryFace` 按**全章**最小 `face_no`
+     统一回填（不让后补的面越过既有更小面号抢标记）；只有本章**尚无任何 FACE 面**时，首个补的
+     FACE 行才是主印面。`EDGE` 永不置该键。 */
+  const ownHasFace = own.some((item) => text(item && item.kind) !== 'EDGE')
+  let primaryAssigned = ownHasFace
   for (const item of stillMissing) {
     const { face, image } = resolved[item.index]
     const faceId = taken.has(item.candidate) ? nextFaceIdOf(stampId, face.kind, taken) : item.candidate
@@ -4325,8 +4339,11 @@ async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
       source,
       uploaded_by: identity.uid,
       created_at: at,
-      updated_at: at
+      updated_at: at,
+      /* **主印面标记**（本单新增；见上方 `ownHasFace` 注）：`EDGE` 不落该键。 */
+      ...(isEdge ? {} : { is_primary: !primaryAssigned })
     })
+    if (!isEdge && !primaryAssigned) primaryAssigned = true
   }
   return { ok: true, faceDocs, imageHits }
 }
@@ -8344,6 +8361,31 @@ const ADMIN_OPS = Object.freeze({
     if (identityDenial) return identityDenial
     /* 延遲 require：與修復面同法（打破加載環；離線自檢不需要 SDK）。 */
     const { repairOrphanEnhanceCharges: runRepair } = require('./aiEnhanceTasks.js')
+    return runRepair(payload, identity, context)
+  },
+
+  /**
+   * **主印面回填（本单新增 op｜`repairPrimaryFace`｜管理员面）** —— 薄委派：业务逻辑单点、
+   * 载荷封闭键面与回包读数键面都在 `lib/sealCards.js`（本处零第二套逻辑；`require` 延迟以打破
+   * 加载环、离线自检不需要 SDK）。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（既有 `adminWhitelistDenial`；缺 env / 非白名单 ⇒
+   * 结构化拒 ＋ **零读零写**）；② 载荷封闭恰两键 `{dry_run?:boolean, limit?:number}`
+   * （`dry_run` 缺省 `true`；`limit` 1〜500 整数、缺省 200；未知键 / 身份类键 ⇒ `INVALID_FIELD`）；
+   * ③ 扫「**有 FACE 面但无任何 `is_primary=true`**」的章，把 `face_no` 最小的 FACE 行置
+   * `is_primary:true`；**`EDGE` 永不置**；④ **幂等**：已有 primary 的章不碰 ⇒ 同参重放
+   * `written === 0`；⑤ `dry_run` **零写**（`written` 恒 0）；⑥ 成功回包**恰 5 键**
+   * `{ok, scanned, eligible, written, next_cursor}`、失败恒**恰 3 键**；`reason` **零新增**；
+   * ⑦ **零新集合**（读写都在 `xiai_seals` / `xiai_faces`）、**不产 `plan`**（写步在本 op 内经
+   * `persist` 逐行执行 ＋ 读回定真伪 ⇒ `index.js` 无内部落盘计划可外传）。
+   * @param {object} [payload] `{dry_run?:boolean, limit?:number}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async repairPrimaryFace(payload, identity, context) {
+    /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/sealCards.js::repairPrimaryFace` 的**第一行**（零读零写地拒）。 */
+    const { repairPrimaryFace: runRepair } = require('./sealCards.js')
     return runRepair(payload, identity, context)
   },
 

@@ -48,6 +48,10 @@ const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, write
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
+/* **首页卡片分页读面（本单新增）**：`PUBLIC_OPS` ＝ **匿名可调**的只读 op 表（本文件在令牌 /
+   会话 / 配置判定**之前**按它分流，只放行白名单里的 op）；`REPAIR_PRIMARY_FACE_READOUT_KEYS`
+   ＝ 主印面回填 op 的读数键面真源（按 op 收窄透传 ⇒ 其余 op 回包逐字不变）。 */
+const { PUBLIC_OPS, REPAIR_PRIMARY_FACE_READOUT_KEYS } = require('./lib/sealCards.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
 
@@ -775,7 +779,54 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
+  /* **主印面回填讀數面（additive 透傳｜**按 `op` 收窄**｜本單 `repairPrimaryFace`）**：
+     `scanned` / `eligible` / `written` / `next_cursor` 四鍵**僅當 `op === 'repairPrimaryFace'`
+     且 `opResult` 確有該鍵時**才逐字疊進回包（鍵名真源 ＝
+     `lib/sealCards.js::REPAIR_PRIMARY_FACE_READOUT_KEYS`）；**其餘任何 op 一律不透傳這 4 個鍵**
+     （`scanned` / `eligible` / `written` 與各修復 / 遷移 op 同字但按 op 隔離、`next_cursor` 與
+     `repairImageStorage` 同字亦不外泄）⇒ 既有回包**逐字不變**。失敗回包（`ok:false`）走上面的
+     早退分支、恒 3 鍵、零讀數鍵；**本 op 不產 `plan`**（寫步在 op 內逐行走 `persist`）⇒ `plan` 零外傳。 */
+  if (op === 'repairPrimaryFace') {
+    for (const key of REPAIR_PRIMARY_FACE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   return response
+}
+
+/**
+ * **匿名只读动作（本单新增｜`action:'public'`）**：**不验令牌、不读身份、零写入**。
+ *
+ * 硬口径（逐条）：
+ *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；表外 op ⇒ `FORBIDDEN` ＋ 零读）；
+ *     `repairPrimaryFace` 等管理员 op **不在这张表上** ⇒ 匿名调不到，仍必须走 `action:'verify'`
+ *     验令牌 ＋ 白名单身份；
+ *   · 载荷 / 回包键面由各 op 自己封闭（本函数**零改写、零补键** ⇒ 公开面回包恰如 op 契约）；
+ *   · 读失败 ⇒ `STORAGE_UNAVAILABLE`（内部故障**绝不伪装** `FORBIDDEN`），并带不可逆指纹摘要。
+ * @param {object} event 事件（`{action:'public', op, payload}`）
+ * @returns {Promise<object>} op 的原始回包（成功恰 5 键 `{ok, rows, next_cursor, has_more, total}`）
+ */
+async function handlePublic(event) {
+  const op = typeof event.op === 'string' ? event.op.trim() : ''
+  if (!Object.prototype.hasOwnProperty.call(PUBLIC_OPS, op)) {
+    return deny(REASONS.FORBIDDEN, `未知的公開讀取操作（op）：${op || '（空）'}；本次零讀取。`)
+  }
+  try {
+    return await PUBLIC_OPS[op](event.payload)
+  } catch (error) {
+    audit({
+      action: 'public',
+      outcome: REASONS.STORAGE_UNAVAILABLE,
+      op,
+      stage: 'read',
+      detail: (error && error.message) || 'unknown',
+      serverNow: serverNowSeconds()
+    })
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `公開讀取服務的權威存儲不可用；本次零寫入。（診斷：${errorFingerprint(error)}）`
+    )
+  }
 }
 
 /**
@@ -786,6 +837,11 @@ async function handleVerify(event, config, callContext) {
 exports.main = async function main(event, context) {
   const input = event && typeof event === 'object' ? event : {}
   const action = typeof input.action === 'string' ? input.action.trim() : ''
+  /* **匿名只读面（本单新增）**：`action:'public'` 在**令牌 / 会话 / 配置判定之前**分流 ——
+     只放行 `PUBLIC_OPS` 白名单（`listSealCards`）；表外 op（含一切管理员 op）**仍必须**走
+     `action:'verify'` 验令牌 ＋ 白名单身份。公开面无写面 ⇒ 与配置面（密钥 / TTL）无关，
+     故**不因令牌配置缺失而拒**（读面不该被写面的配置故障连坐）。 */
+  if (action === 'public') return await handlePublic(input)
   let config = null
   try {
     config = readConfig()
