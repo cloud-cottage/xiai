@@ -1,0 +1,23 @@
+# Vercel 构建上下文瘦身：只保留前端构建必需文件。
+# 实测未瘦身前：上传 1.2 GB（根 data/ 独占）、文件数 2.3 万
+# ⇒ 触发 `files should NOT have more than 15000 items` 与大归档 EPIPE。
+#
+# ★ 必须用前导 `/` 锚定根目录：不带斜杠的模式会匹配**任意层级**同名目录，
+#   会把 `src/data/`（前端核心，seed.js / session.js / assetmeta.js 都在里面）一起排掉，
+#   表现为构建报 `npm run build ... exited with 1`。
+/node_modules
+/dist
+/data
+/docs
+/tools
+/scripts
+/server
+/qa-recheck
+/deploy
+/.hermes
+/.vercel
+/tmp
+*.log
+*.zip
+*.tgz
+*.DS_Store
