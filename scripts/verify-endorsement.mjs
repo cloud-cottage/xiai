@@ -29,9 +29,10 @@
  */
 
 import { createRequire } from 'node:module'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 const require = createRequire(import.meta.url)
@@ -599,21 +600,144 @@ const ADMIN_ACTION_EXPECTED = [
 }
 
 /* D2：上屏文案繁體（正 / 负对照）。 */
-/** 去注释（**JS 块 / 行注释** ＋ **HTML 注释**）—— 「不得据源码注释判负」。 */
+/** 去注释（**SFC 感知**）—— 「不得据源码注释判负」；行号一个不漂。
+ *  词法常量**就地建**：本文件在本定义点**之前**就有调用点（D1d〜D1f），模块级 `const` 会踩 TDZ。 */
 function stripComments(src) {
-  return src
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+  const SFC_TOP_OPEN = /^<(template|script|style)(?=[\s/>])/
+  const SFC_TOP_CLOSE = /^<\/(template|script|style)>/
+  const HTML_COMMENT = /<!--[\s\S]*?-->/g
+  const JS_BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g
+  const JS_LINE_COMMENT = /(^|[^:])\/\/[^\n]*/g
+  /** 注释 ⇒ 等长空白（**换行原样保留** ⇒ 多行注释只被抹空、行数不变）。 */
+  const blankOut = (matched) => matched.replace(/[^\n]/g, ' ')
+  const lines = String(src).split('\n')
+  /* 每行归属哪一段：按**列 0 的顶层段**切（开标签行归**新**段；闭标签行归**本**段）。 */
+  let kind = 'outside'
+  const kinds = lines.map((line) => {
+    const open = SFC_TOP_OPEN.exec(line)
+    if (open) {
+      kind = open[1]
+      return kind
+    }
+    if (SFC_TOP_CLOSE.test(line)) {
+      const current = kind
+      kind = 'outside'
+      return current
+    }
+    return kind
+  })
+  /* 同类行并成段后**整段**剥（块注释可跨行 ⇒ 不得逐行剥）：
+     · **模板段只剥 `<!-- -->`** —— `accept="image/*"` 里的 `/*` 是属性值的一部分、不是 CSS
+       注释开头（旧实现把它当块注释 ⇒ 3217〜4076 行整段被剥空，真简体残留全看不见）；
+     · script / style 段（与非 SFC 源）剥**块注释**与**行注释**（`//` 仍避 `:` 前缀 ⇒ `https://` 不误伤）。 */
+  const out = []
+  for (let at = 0; at < lines.length; ) {
+    const kindAt = kinds[at]
+    let end = at
+    while (end < lines.length && kinds[end] === kindAt) end += 1
+    const chunk = lines.slice(at, end).join('\n')
+    if (kindAt === 'template') out.push(chunk.replace(HTML_COMMENT, blankOut))
+    else
+      out.push(
+        chunk
+          .replace(JS_BLOCK_COMMENT, blankOut)
+          .replace(JS_LINE_COMMENT, (matched, lead) => lead + ' '.repeat(matched.length - lead.length))
+      )
+    at = end
+  }
+  return out.join('\n')
 }
-const SIMPLIFIED_ONLY = [
-  '误', '采', '纳', '录', '赞', '据', '态', '员', '审', '选', '数', '条', '页', '码',
-  '账', '帐', '证', '认', '这', '为', '会', '个', '须', '标', '签', '项', '备', '处',
-  '确', '历', '验', '权', '传', '镜', '线', '写', '记', '该', '请', '择', '试', '档'
-]
-const hasSimplified = (text) => SIMPLIFIED_ONLY.some((ch) => String(text).includes(ch))
+/* ---------------------------------------------------------------------------
+ * 简体专用字表（**由仓内真源推导**，不手抄清单）：
+ *   base ＝ 逐字表 `S2T_GLYPH_SOURCE` 里「简→繁会变 且 繁→简回得来」的字（实测 2,478）；
+ *   plus ＝ 词组 s2t 表 `#REST` 显式条目里「只出现在简体侧、且 `t2s(c)===c`」的上下文相关字
+ *          （实测 90；`#AUTO` 块**没有**独立繁体侧 —— 其值由逐字表重算、已计入 base）；
+ *   合计 **2,568** 字（两表不相交：上下文相关字一律不进逐字表）。
+ * ------------------------------------------------------------------------ */
+const trad = await import(pathToFileURL(path.join(ROOT, 'src/utils/traditional.js')).href)
+const isGlyphChar = (ch) => ch !== '\n' && ch !== ' ' && ch !== '\r'
+const s2tTable = trad.s2tGlyphTable()
+const t2sTable = trad.t2sGlyphTable()
+const s2tOf = (ch) => s2tTable[ch] || ch
+const t2sOf = (ch) => t2sTable[ch] || ch
+
+const SIMPLIFIED_BASE = new Set(
+  Array.from(trad.S2T_GLYPH_SOURCE)
+    .filter(isGlyphChar)
+    .filter((ch) => s2tOf(ch) !== ch && t2sOf(s2tOf(ch)) === ch)
+)
+
+/** 词组 s2t 表 `#REST` 两侧字集（公共前缀压缩还原；与 `traditional.js::decodePhraseTable` 同尺）。 */
+function phraseRestSides(fileText) {
+  const sep = fileText.indexOf('\n#REST\n')
+  const lines = fileText.slice(sep + 7).split('\n').filter((line) => line.length > 0)
+  const keyChars = new Set()
+  const valueChars = new Set()
+  let prev = ''
+  for (const line of lines) {
+    const tab = line.indexOf('\t')
+    const n = line.charCodeAt(0) - 97
+    const key = prev.slice(0, n) + line.slice(1, tab)
+    for (const ch of key) keyChars.add(ch)
+    for (const ch of line.slice(tab + 1)) valueChars.add(ch)
+    prev = key
+  }
+  return { keyChars, valueChars }
+}
+const restSides = phraseRestSides(readFileSync(path.join(ROOT, 'src/utils/traditional-phrases-s2t.txt'), 'utf8'))
+const SIMPLIFIED_CTX = new Set(
+  Array.from(trad.S2T_CONTEXT_SENSITIVE_CHARS)
+    .filter(isGlyphChar)
+    .filter((ch) => restSides.keyChars.has(ch) && !restSides.valueChars.has(ch) && t2sOf(ch) === ch)
+)
+const SIMPLIFIED_ONLY = new Set([...SIMPLIFIED_BASE, ...SIMPLIFIED_CTX])
+const hasSimplified = (text) => {
+  for (const ch of String(text)) if (SIMPLIFIED_ONLY.has(ch)) return true
+  return false
+}
 check('D2p', '繁體判据**正向对照**（含简化字「误」⇒ 必须命中）', true, hasSimplified('錯誤的误写'))
 check('D2n', '繁體判据**负向对照**（繁體「誤」⇒ 不命中）', false, hasSimplified('錯誤的誤寫'))
+check('D2p2', '正向对照②：植入「暂无合适人选」⇒ **必命中**（真简体残留必报红）', true, hasSimplified('暂无合适人选'))
+check('D2n2', '负向对照②：繁體「誤」「無」**一律不得报**', { 誤: false, 無: false }, { 誤: hasSimplified('錯誤的誤寫'), 無: hasSimplified('錯誤的無寫') })
+check('D2w', '字表恰 **2,568** 字（base 2,478 ＋ ctx 90）且必含「无 适 册 区 弹 将 关 闭」', {
+  base: 2478,
+  ctx: 90,
+  size: 2568,
+  missing: []
+}, {
+  base: SIMPLIFIED_BASE.size,
+  ctx: SIMPLIFIED_CTX.size,
+  size: SIMPLIFIED_ONLY.size,
+  missing: [...'无适册区弹将关闭'].filter((ch) => !SIMPLIFIED_ONLY.has(ch))
+})
+/* 哨兵（本单新增）：模板段注入带 `accept="image/*"` 属性的文本 ⇒ 其后文**不被剥离**、行数不漂。 */
+{
+  const probe = [
+    '<template>',
+    '  <input type="file" accept="image/*" />',
+    '  <p data-sentinel>SENTINEL-AFTER-ACCEPT</p>',
+    '</template>',
+    '<script setup>',
+    '/* 多行注释：简体误',
+    '   第二行 */',
+    'const sentinel = "SENTINEL-SCRIPT"',
+    '</script>'
+  ].join('\n')
+  const stripped = stripComments(probe)
+  check('D2s', '哨兵：模板段 `accept="image/*"` 不被当块注释 ⇒ 其后文照常在场；块注释只在 script 段剥；行数一个不漂', {
+    acceptIntact: true,
+    afterAcceptIntact: true,
+    scriptSentinel: true,
+    multiLineCommentStripped: true,
+    lines: 9
+  }, {
+    acceptIntact: stripped.includes('accept="image/*"'),
+    afterAcceptIntact: stripped.includes('SENTINEL-AFTER-ACCEPT'),
+    scriptSentinel: stripped.includes('SENTINEL-SCRIPT'),
+    multiLineCommentStripped: !stripped.includes('简体误') && !stripped.includes('第二行'),
+    lines: stripped.split('\n').length
+  })
+}
 {
   const targets = [
     'src/services/endorsements.js',
@@ -663,11 +787,37 @@ check('D2n', '繁體判据**负向对照**（繁體「誤」⇒ 不命中）', f
   })
 }
 
-/* D4：静态唯一性（云函数持久化路径仍在 ops.js；集合名 ^xiai_）。 */
+/* D4：静态唯一性（持久化路径只在 lib/ops.js ＋ lib/sealCards.js；集合名 ^xiai_）。 */
 {
   const files = walkFiles(FUNCTION_DIR)
-  const withCollection = files.filter((file) => /collection\s*\(/.test(readFileSync(file, 'utf8'))).map((f) => path.relative(ROOT, f))
-  check('D4', '**唯一持久化路径**：`collection(` 只出现在 lib/ops.js', ['cloudfunctions/xiai-user-token/lib/ops.js'], withCollection)
+  /* 探测器**单点**：D4 与下面的负对照同一把尺（路径 ⇒ 含 `collection(` 的仓内相对路径）。 */
+  const filesWithCollection = (list) =>
+    list.filter((file) => /collection\s*\(/.test(readFileSync(file, 'utf8'))).map((f) => path.relative(ROOT, f))
+  const withCollection = filesWithCollection(files)
+  check('D4', '**持久化路径封闭**：除 `lib/ops.js` 与 `lib/sealCards.js`（首页卡片读面 / 主印面回填 / 印人回填单点）外**零** `collection(`', [
+    'cloudfunctions/xiai-user-token/lib/ops.js',
+    'cloudfunctions/xiai-user-token/lib/sealCards.js'
+  ], withCollection)
+  /* **负对照（本单新增）**：把一段含 `collection(` 的文本写到**仓外临时路径**下喂同一把尺 ⇒
+     必命中 1、干净文件 0（证明探测器非恒绿）；`finally` 里 `rmSync` ⇒ 用完即删、仓内零残留。 */
+  const probeDir = mkdtempSync(path.join(tmpdir(), 'xiai-d4-probe-'))
+  try {
+    const probeHit = path.join(probeDir, 'probe-hit.js')
+    const probeMiss = path.join(probeDir, 'probe-miss.js')
+    writeFileSync(probeHit, 'const db = collection(x)\n')
+    writeFileSync(probeMiss, 'const db = {}\n')
+    check('D4n', '负对照（必红）：**仓外**临时文件含 `collection(` ⇒ 探测器命中 1；干净文件 0（用完即删、零仓内污染）', {
+      outsideRepo: true,
+      hit: 1,
+      miss: 0
+    }, {
+      outsideRepo: path.relative(ROOT, probeDir).startsWith('..'),
+      hit: filesWithCollection([probeHit]).length,
+      miss: filesWithCollection([probeMiss]).length
+    })
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true })
+  }
   /* **本单收紧（原尺过宽）**：原实现扫全文件的「集合式字面值」，把 `courtesy_names` /
      `art_names` / `alias_names` 这三个**字段名**误判为集合字面值 ⇒ 误报。改为止锚
      **`collection(...)` 的实参来源 —— `COLLECTIONS` 集合登记表的值**（集合名只在此登记；

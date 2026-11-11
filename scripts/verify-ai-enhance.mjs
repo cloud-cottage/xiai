@@ -10,7 +10,7 @@
  * 断言面（本套 **45** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
  * ＋ 产物族 jpeg 扩面 6 条（I 段）＋ 候選行 `row` 1 条（A5）＋ ⑨ 重复键兜底专项 6 条（J 段 · 736b340）；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
- *      A0 `ADMIN_OPS` 注册面（恰 36 项、`ai-enhance-face` 在册且为函数）；
+ *      A0 `ADMIN_OPS` 注册面（恰 38 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 9 键**（原 8 键仍逐字在场 ＋ 新增 `row`）；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
  *         ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号；
  *      A2 `preview.sha256` **逐字 ＝ 上传字节的 sha256**（且上传字节与上游回图字节**逐字节相等**、
@@ -479,7 +479,7 @@ section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 36 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 36, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 38 项且 `ai-enhance-face` 在册（函数；薄委派）', { count: 38, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
@@ -1929,6 +1929,7 @@ let kSubmitReply = null
     taskRowCount: 1,
     taskRowKeys: 19,
     taskRowKeyList: TASK_ROW_KEYS,
+    adminOpsCount: 38,
     taskRowStatus: 'SUBMITTED',
     upstreamTaskId: K_ENQUEUE_TASK_ID,
     deadlineAhead: true,
@@ -1949,6 +1950,7 @@ let kSubmitReply = null
     taskRowCount: rows.length,
     taskRowKeys: row ? Object.keys(row).length : -1,
     taskRowKeyList: row ? Object.keys(row).sort() : null,
+    adminOpsCount: Object.keys(ops.ADMIN_OPS).length,
     taskRowStatus: row && row.status,
     upstreamTaskId: row && row.upstream_task_id,
     deadlineAhead: !!row && Date.parse(row.deadline_at) - Date.parse(row.created_at) === tasks.TASK_DEADLINE_MS,
