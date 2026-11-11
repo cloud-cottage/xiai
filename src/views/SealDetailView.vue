@@ -421,7 +421,7 @@ const imageCorrectionConsequences = computed(() => {
   if (imageCorrectionAction.value === 'replace') {
     return (
       '審核通過後印面改指新圖、舊圖將被刪除（舊圖仍被其它印面引用時只改指向、不刪舊圖）；' +
-      '審核通過前印面指向不改、影像不動。新圖必須先入册（取得影像編號）才能提交。'
+      '審核通過前印面指向不改、影像不動。新圖必須先入冊（取得影像編號）才能提交。'
     )
   }
   return (
@@ -544,7 +544,7 @@ async function confirmImageCorrection() {
       /* **入册失败 ⇒ 硬报错、不编造 id、不发提交**（原样上屏服务端 / 上传通道文案）。 */
       if (!prepared || prepared.ok !== true) {
         imageCorrectionFeedback.value =
-          (prepared && prepared.message) || '新圖上傳入册失敗，本次零提交，請稍後重試。'
+          (prepared && prepared.message) || '新圖上傳入冊失敗，本次零提交，請稍後重試。'
         return
       }
       newImage = prepared.new_image
@@ -3852,7 +3852,7 @@ onBeforeUnmount(() => {
                   提交印人提案
                 </button>
                 <span class="field__hint">
-                  庫中無此人 ⇒ 可先提交印人提案（提交面在「可標記屬性」区，本弹窗将关闭），經管理員審覈通過後即可在此選中。
+                  庫中無此人 ⇒ 可先提交印人提案（提交面在「可標記屬性」區，本彈窗將關閉），經管理員審覈通過後即可在此選中。
                 </span>
               </template>
             </template>

@@ -2085,7 +2085,7 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
   const sealIdText = String(sealId === null || sealId === undefined ? '' : sealId).trim()
   const faceIdText = String(faceId === null || faceId === undefined ? '' : faceId).trim()
   if (!sealIdText || !faceIdText) {
-    return imageCorrectionDenial('MISSING_REQUIRED', '入册新圖需要印面與所屬印章編號；本次零提交。')
+    return imageCorrectionDenial('MISSING_REQUIRED', '入冊新圖需要印面與所屬印章編號；本次零提交。')
   }
   const sourceFile = file && typeof file === 'object' ? file : null
   const body = bytes instanceof Uint8Array ? bytes : bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : null
@@ -2126,7 +2126,7 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
     if (!exported || exported.ok !== true) {
       return imageCorrectionDenial(
         'ENCODE_FAILED',
-        `新圖處理失敗：${(exported && exported.message) || '本機未能編出存儲件'}（本次零上傳、零入册、零提交）`
+        `新圖處理失敗：${(exported && exported.message) || '本機未能編出存儲件'}（本次零上傳、零入冊、零提交）`
       )
     }
     artifactBytes = exported.bytes
@@ -2135,8 +2135,8 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
     if (!artifactBytes || artifactBytes.length === 0 || artifactMime !== STORAGE_MIME) {
       return imageCorrectionDenial(
         'ENCODE_FAILED',
-        `新圖處理失敗：產物不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${artifactMime || '認不出'}），已拒絕入册` +
-          '（本次零上傳、零入册、零提交）。'
+        `新圖處理失敗：產物不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${artifactMime || '認不出'}），已拒絕入冊` +
+          '（本次零上傳、零入冊、零提交）。'
       )
     }
   }
@@ -2154,13 +2154,13 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
   if (!sha256 || !storageKey || !Number.isInteger(storedBytes) || storedBytes <= 0) {
     return imageCorrectionDenial(
       'STORAGE_UNAVAILABLE',
-      '新圖上傳回包缺少內容尋址讀數（sha256 / bytes / storage_key）；本次零入册、零提交，請重試。'
+      '新圖上傳回包缺少內容尋址讀數（sha256 / bytes / storage_key）；本次零入冊、零提交，請重試。'
     )
   }
   if (storageKey !== artifactObjectKeyOf(sha256)) {
     return imageCorrectionDenial(
       'STORAGE_UNAVAILABLE',
-      '新圖未產生雲端內容尋址對象鍵；本次零入册、零提交，請重試。'
+      '新圖未產生雲端內容尋址對象鍵；本次零入冊、零提交，請重試。'
     )
   }
   /* 存储回包的**容器自检**：入册声明的 mime 必须恒等于 `STORAGE_MIME`（单页 8bit Deflate TIFF）；
@@ -2169,8 +2169,8 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
   if (storedMime && storedMime !== STORAGE_MIME) {
     return imageCorrectionDenial(
       'ENCODE_FAILED',
-      `新圖處理失敗：入庫對象不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${storedMime}），已拒絕入册` +
-        '（本次零入册、零提交）。'
+      `新圖處理失敗：入庫對象不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${storedMime}），已拒絕入冊` +
+        '（本次零入冊、零提交）。'
     )
   }
   const imageMime = STORAGE_MIME
@@ -2191,13 +2191,13 @@ export async function prepareImageCorrectionReplacement({ sealId = '', faceId = 
   if (gate && gate.mode === 'local-dev') {
     return imageCorrectionDenial(
       'STORAGE_UNAVAILABLE',
-      '本機為 dev / 離線形態（沒有雲端入册面）⇒ 替換用新圖無法入册；本次零提交。'
+      '本機為 dev / 離線形態（沒有雲端入冊面）⇒ 替換用新圖無法入冊；本次零提交。'
     )
   }
   if (!gate || gate.ok !== true) {
     return imageCorrectionDenial(
       (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
-      (gate && gate.message) || '新圖入册失敗；本次零提交，請稍後重試。'
+      (gate && gate.message) || '新圖入冊失敗；本次零提交，請稍後重試。'
     )
   }
   const fromReadout = typeof gate.image_id === 'string' ? gate.image_id.trim() : ''

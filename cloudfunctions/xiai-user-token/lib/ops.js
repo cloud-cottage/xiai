@@ -2628,7 +2628,7 @@ const OPS = Object.freeze({
       if (registered === null) {
         return deny(
           REASONS.INVALID_VALUE,
-          `替換用新圖尚未入册（sha256：${digest.slice(0, 12)}…；請先經 registerFaceImage 入册）⇒ 拒絕提交；本次零寫入。`
+          `替換用新圖尚未入冊（sha256：${digest.slice(0, 12)}…；請先經 registerFaceImage 入冊）⇒ 拒絕提交；本次零寫入。`
         )
       }
       newImageId = text(registered.id) || text(registered._id)
@@ -3830,7 +3830,7 @@ const REPAIR_ALLOWED_KEYS = MIGRATE_ALLOWED_KEYS
 /* **本单 I-2**：修复通道逐集合面（集合 ＝ 导入集合；键 ＝ 幂等键字段；正式集合见 `formal`）。 */
 const IMPORT_REPAIR_TARGETS = Object.freeze([
   Object.freeze({ key: 'person', imports: COLLECTIONS.personImports, formal: COLLECTIONS.persons, idKey: 'source_person_id', label: '印人' }),
-  Object.freeze({ key: 'item', imports: COLLECTIONS.itemImports, formal: COLLECTIONS.items, idKey: 'source_item_id', label: '印谱' }),
+  Object.freeze({ key: 'item', imports: COLLECTIONS.itemImports, formal: COLLECTIONS.items, idKey: 'source_item_id', label: '印譜' }),
   Object.freeze({ key: 'seal', imports: COLLECTIONS.sealImports, formal: COLLECTIONS.seals, idKey: 'source_seal_id', label: '印章' })
 ])
 
@@ -5054,7 +5054,7 @@ async function applyImageCorrectionAcceptance(row, at) {
     if (newImageRow === null) {
       return deny(
         REASONS.INVALID_VALUE,
-        `替換用新圖尚未入册（new_image_id：${newImageId}）⇒ 拒絕執行；狀態維持 PENDING、本次零寫入。`
+        `替換用新圖尚未入冊（new_image_id：${newImageId}）⇒ 拒絕執行；狀態維持 PENDING、本次零寫入。`
       )
     }
     /* 共用保护（**先判、后写**）：旧图仍被其它印面引用 ⇒ 不删旧图、只改指向。 */
@@ -7107,7 +7107,7 @@ const ADMIN_OPS = Object.freeze({
       }
     }
     if (targets.length === 0 && skippedSeed.length === 0) {
-      return deny(REASONS.NOT_FOUND, `未找到匹配的印谱外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
+      return deny(REASONS.NOT_FOUND, `未找到匹配的印譜外部導入行（batch_id：${batchId || '（空）'} / import_id：${importId || '（空）'}）；本次零寫入。`)
     }
     const accepted = decision === ITEM_IMPORT_STATUS.ACCEPTED
     const seconds = Number.isFinite(Number(context && context.nowSeconds))
