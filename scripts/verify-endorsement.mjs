@@ -695,6 +695,37 @@ const hasSimplified = (text) => {
   for (const ch of String(text)) if (SIMPLIFIED_ONLY.has(ch)) return true
   return false
 }
+/* ---------------------------------------------------------------------------
+ * D2 **已知假阳性白名单**（**精确四元组**：`file` ＋ `line` ＋ `char` ＋ 该行含 `mustContain`）。
+ * 只剔除「繁體合法、却被字表误判为简体」的已知检测器噪声：
+ *   · **不得**按 `file` 整文件豁免；
+ *   · **不得**按字符通配（必须同 `file` ＋ 同 `line` ＋ 同 `char` ＋ 行内容含 `mustContain`）。
+ * 每条都由 `D2a` 回读源码**自证**（该行仍含 `mustContain` 且仍含该字符），白名单过期 ⇒ 报红
+ * （防止该行日后被改写后，白名单反过来掩蔽真回归）。
+ * ------------------------------------------------------------------------- */
+const SIMPLIFIED_ALLOWED = [
+  { file: 'cloudfunctions/xiai-user-token/lib/ops.js', line: 766, char: '巨',
+    mustContain: '陳巨來印風',
+    why: '人名用字（陳巨來），繁體合法；詞組表把「巨万→鉅萬」誤歸簡體側，屬檢測器噪聲' }
+]
+/* 回读仓内源码的某一行（1-based）。`stripComments` 逐行等长抹注释 ⇒ 扫描行号 ＝ 源码行号。 */
+const sourceLineCache = new Map()
+function sourceLineOf(fileRel, lineNo) {
+  if (!sourceLineCache.has(fileRel)) {
+    sourceLineCache.set(fileRel, readFileSync(path.join(ROOT, fileRel), 'utf8').split('\n'))
+  }
+  const lines = sourceLineCache.get(fileRel)
+  return lineNo >= 1 && lineNo <= lines.length ? lines[lineNo - 1] : undefined
+}
+/** 命中是否被白名单剔除：**同 file ＋ 同 line ＋ 同 char ＋ 该行含 mustContain** 四者同时成立。
+ *  任一不符 ⇒ 返回 `null`（照常报红）；`allowList` 可注入（负对照用同一把尺）。 */
+function allowedEntryOf(hit, allowList) {
+  const list = allowList || SIMPLIFIED_ALLOWED
+  const entry = list.find((item) => item.file === hit.file && item.line === hit.line && item.char === hit.char)
+  if (!entry) return null
+  const text = sourceLineOf(entry.file, entry.line)
+  return typeof text === 'string' && text.includes(entry.mustContain) ? entry : null
+}
 check('D2p', '繁體判据**正向对照**（含简化字「误」⇒ 必须命中）', true, hasSimplified('錯誤的误写'))
 check('D2n', '繁體判据**负向对照**（繁體「誤」⇒ 不命中）', false, hasSimplified('錯誤的誤寫'))
 check('D2p2', '正向对照②：植入「暂无合适人选」⇒ **必命中**（真简体残留必报红）', true, hasSimplified('暂无合适人选'))
@@ -746,8 +777,72 @@ check('D2w', '字表恰 **2,568** 字（base 2,478 ＋ ctx 90）且必含「无 
     'cloudfunctions/xiai-user-token/lib/config.js',
     'src/views/SealDetailView.vue'
   ]
-  const hits = targets.filter((rel) => hasSimplified(stripComments(readFileSync(path.join(ROOT, rel), 'utf8'))))
-  check('D2', '本单新增 / 触及文件（去注释）上屏文案无简化字', [], hits)
+  /* D2 命中改为**逐命中**（file ＋ line ＋ char）而非「整文件命中」，再按白名单**精确四元组**过滤：
+     命中项同时满足 同 file ＋ 同 line ＋ 同 char ＋ 该行含 `mustContain` ⇒ 剔除并打 `[D2-allow]` 日志。 */
+  const hits = []
+  targets.forEach((rel) => {
+    stripComments(readFileSync(path.join(ROOT, rel), 'utf8'))
+      .split('\n')
+      .forEach((line, index) => {
+        for (const ch of line) if (SIMPLIFIED_ONLY.has(ch)) hits.push({ file: rel, line: index + 1, char: ch })
+      })
+  })
+  const allowedHits = hits.filter((hit) => allowedEntryOf(hit) !== null)
+  const remaining = hits.filter((hit) => allowedEntryOf(hit) === null)
+  allowedHits.forEach((hit) => {
+    console.log(`[D2-allow] ${path.basename(hit.file)}:${hit.line} '${hit.char}' 白名单剔除`)
+  })
+  check('D2', `本单新增 / 触及文件（去注释）上屏文案无简化字（已知假阳性白名单 ${SIMPLIFIED_ALLOWED.length} 条：按 文件＋行＋字符＋行内容 精确剔除，非整文件豁免）`, [], [...new Set(remaining.map((hit) => hit.file))])
+  /* D2a **白名单自证**：逐条回读源码，断言该行**仍含 `mustContain` 且仍含该字符**。
+     任一条过期（行被改写 / 字被换掉）⇒ `stale` 非空 ⇒ 报红，防止白名单掩蔽真回归。 */
+  const stale = SIMPLIFIED_ALLOWED.filter((entry) => {
+    const text = sourceLineOf(entry.file, entry.line)
+    return !(typeof text === 'string' && text.includes(entry.mustContain) && text.includes(entry.char))
+  })
+  check('D2a', `白名单自证：逐条回读源码，该行仍含 mustContain 且仍含该字符（${SIMPLIFIED_ALLOWED.length} 条，过期 ⇒ 报红）`, {
+    allow: SIMPLIFIED_ALLOWED.length,
+    stale: []
+  }, {
+    allow: SIMPLIFIED_ALLOWED.length,
+    stale: stale.map((entry) => `${entry.file}:${entry.line}:${entry.char}`)
+  })
+  /* D2aN **负对照**：仓内临时文件写入真简体 ＋ 注入**同形**白名单项 ⇒ 只有「四元组全对」才豁免；
+     `mustContain` / 行号 / 字符 任一不符 ⇒ **不得**被误豁免（不整文件豁免、不按字符通配）。
+     `finally` 里 `rmSync` ⇒ 用完即删、仓内零残留。 */
+  const negRel = path.join('scripts', `d2-allow-neg-${process.pid}.tmp.js`)
+  try {
+    writeFileSync(
+      path.join(ROOT, negRel),
+      ['// 临时负对照文件（D2aN 用完即删）', "const NEG_LINE = '简体残留'", 'export default NEG_LINE', ''].join('\n')
+    )
+    const negHits = []
+    stripComments(readFileSync(path.join(ROOT, negRel), 'utf8'))
+      .split('\n')
+      .forEach((line, index) => {
+        for (const ch of line) if (SIMPLIFIED_ONLY.has(ch)) negHits.push({ file: negRel, line: index + 1, char: ch })
+      })
+    const negHit = negHits.find((hit) => hit.line === 2 && hit.char === '简')
+    const injected = (patch) => Object.assign({ file: negRel, line: 2, char: '简', mustContain: '简体残留', why: '负对照注入' }, patch)
+    check('D2aN', '负对照（必不误豁免）：仓内临时文件真简体 ＋ 同形白名单注入 ⇒ 仅四元组全对才剔除；mustContain / 行号 / 字符 任一不符 ⇒ 照常报红（用完即删、零仓内污染）', {
+      probeHit: true,
+      mustContainMismatch: true,
+      wrongLine: true,
+      wrongChar: true,
+      fullMatch: true
+    }, {
+      probeHit: negHit !== undefined,
+      /* 同 file ＋ 同 line ＋ 同 char，但 `mustContain` 不在该行 ⇒ 不得豁免。 */
+      mustContainMismatch: negHit ? allowedEntryOf(negHit, [injected({ mustContain: '陳巨來印風' })]) === null : false,
+      /* 同 file ＋ 同 char ＋ 行内确含 mustContain，但**行号不同** ⇒ 不得豁免。 */
+      wrongLine: negHit ? allowedEntryOf(negHit, [injected({ line: 3 })]) === null : false,
+      /* 同 file ＋ 同 line ＋ 行内确含 mustContain，但**字符不同** ⇒ 不得豁免。 */
+      wrongChar: negHit ? allowedEntryOf(negHit, [injected({ char: '体' })]) === null : false,
+      /* 对照组：四元组全对 ⇒ 确实豁免（证明过滤器非「一律不豁免」的恒等实现）。 */
+      fullMatch: negHit ? allowedEntryOf(negHit, [injected({})]) !== null : false
+    })
+  } finally {
+    rmSync(path.join(ROOT, negRel), { force: true })
+  }
 }
 
 /* D3：既有 `STORAGE_KEYS` 逐字未动 ＋ 恰新增两个键。 */
