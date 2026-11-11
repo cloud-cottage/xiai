@@ -25,6 +25,13 @@
  *      `is_primary=true`」的章，把 `face_no` 最小的 FACE 行置 `is_primary:true`；`EDGE` 永不置；
  *      幂等（已有 primary 的章不碰）；`dry_run`（缺省 true）**零写**；回包恰 5 键
  *      `{ ok, scanned, eligible, written, next_cursor }`。
+ *   ③ 公开读 op：`suggestAuthors`（**匿名可调**，`PUBLIC_OPS` 第 2 成员；§3.82.4）
+ *      —— 载荷封闭恰 3 键 `{face_id, name, limit}`、回包恰 4 键 `{ok, query, normalized,
+ *      candidates}`（候选元素恰 7 键）；**零写、零扣费**；无命中 ⇒ `ok:true` ＋ `[]`。
+ *   ④ 管理员 op：`repairAuthorPersonId`（落 `ADMIN_OPS`；§3.82.5）—— 只扫 `kind='FACE'`
+ *      且无 `author_person_id` 的行，四道匹配**阈值 80** 回填 `author_person_id` ＋
+ *      `author_match`（恰 5 键）＋ 印章级 `xiai_seal_links` 补条（幂等）；`EDGE` 一律不处理；
+ *      `dry_run` 回包恰 5 键、真写恰 6 键；**不产 `plan`**。
  *
  * 性能口径（**本模块的硬约束**）：
  *   · **零全表扫描做分页** —— 分页一律交给 DB（`cursor` ＋ 升序 ＋ `limit`），服务端只在内存里
@@ -40,7 +47,10 @@
  * （历史行未回填）。`EDGE`（边款）**永不**参与主印面判定。
  */
 
-const { REASONS, deny } = require('./config.js')
+const { REASONS, deny, isCollectionNotExistError } = require('./config.js')
+/* **作者校验（§3.82）实现单点**：归一 / 四道匹配 / 载荷与回包键面的**纯函数引擎**在
+   `lib/authorMatch.js`（零 DB、零写点）；本文件只做**读写接线**（与 `repairPrimaryFace` 同法）。 */
+const authorMatch = require('./authorMatch.js')
 
 /** 延迟取 `lib/ops.js`（打破加载环；离线自检不需要 SDK）。 */
 function opsOf() {
@@ -740,22 +750,362 @@ async function repairPrimaryFace(payload, identity, context) {
   return { ok: true, scanned, eligible, written, next_cursor: nextCursor }
 }
 
-/* --------------------------------------------------------------------------
+/* ---------------------------------------------------------------------------
+ * 作者校验（§3.82）：公开只读 op `suggestAuthors` ＋ 管理员 op `repairAuthorPersonId`
+ * ---------------------------------------------------------------------------
+ * 归一 / 四道匹配 / 载荷与回包键面的**纯函数单点 ＝ `lib/authorMatch.js`**；本节只做
+ * **读写接线**（读走 `readOrderedWindow` / `ops.readRows`，写走 `ops.persist` 逐行 ＋
+ * **整窗读回定真伪** —— 不拿 persist 回报冒充成功）。两个 op 的键面真源都在
+ * `lib/authorMatch.js`（`index.js` 按 op 收窄透传引那里）。
+ * ------------------------------------------------------------------------ */
+
+/** 印人行读取窗口（分页读全量印人；**有界**，绝不无界循环）。 */
+const PERSON_PAGE_SIZE = 500
+const PERSON_SCAN_CAP = 5000
+
+/**
+ * 按印面编号读面行（`_id` → `id` 两形态；皆不中 ⇒ `null`，**不猜**）。
+ * @returns {Promise<object|null>}
+ */
+async function readFaceRowOf(db, faceId) {
+  const ops = opsOf()
+  const id = text(faceId)
+  if (id === '') return null
+  const byPrimaryKey = await ops.readRows(ops.COLLECTIONS.faces, { _id: id }, { limit: 1 })
+  if (byPrimaryKey.length > 0) return byPrimaryKey[0]
+  const byAppId = await ops.readRows(ops.COLLECTIONS.faces, { id }, { limit: 1 })
+  return byAppId.length > 0 ? byAppId[0] : null
+}
+
+/**
+ * 按印章键读印章行（`stamp_id` → `_id` → `id`；与 `sealKeyOf` 的取键序同尺）。
+ * @returns {Promise<object|null>}
+ */
+async function readSealRowOf(db, sealId) {
+  const ops = opsOf()
+  const id = text(sealId)
+  if (id === '') return null
+  const attempts = [{ stamp_id: id }, { _id: id }, { id }]
+  for (const match of attempts) {
+    const rows = await ops.readRows(ops.COLLECTIONS.seals, match, { limit: 1 })
+    if (rows.length > 0) return rows[0]
+  }
+  return null
+}
+
+/**
+ * 读全量印人行（`_id` 升序分页；**有界** `PERSON_SCAN_CAP`）—— 匹配面没有服务端检索
+ * 索引，四道匹配必须逐人比对 ⇒ 这是本 op 唯一的全集合读（**只读、零写**）。
+ * @returns {Promise<Array<object>>}
+ */
+async function readAllPersons(db) {
+  const ops = opsOf()
+  const rows = []
+  let after = ''
+  while (rows.length < PERSON_SCAN_CAP) {
+    const want = Math.min(PERSON_PAGE_SIZE, PERSON_SCAN_CAP - rows.length)
+    const page = await readOrderedWindow(db, ops.COLLECTIONS.persons, {
+      match: {},
+      idField: '_id',
+      after,
+      limit: want
+    })
+    if (page.length === 0) break
+    for (const row of page) rows.push(row)
+    const last = text(page[page.length - 1] && page[page.length - 1]._id)
+    if (last === '' || last === after) break
+    after = last
+    if (page.length < want) break
+  }
+  return rows
+}
+
+/**
+ * **回源取作者名**（只给 `face_id` 时的查询串）：
+ * `faces.author` → 印章 `seal_yz_person_name` → 印章 `author`；三者皆空 ⇒ 空串。
+ */
+async function authorTextFromFaceOf(db, face) {
+  const direct = text(face && face.author)
+  if (direct !== '') return direct
+  const seal = await readSealRowOf(db, faceSealKeyOf(face))
+  if (!seal) return ''
+  return text(seal.seal_yz_person_name) || text(seal.author)
+}
+
+/**
+ * **公开只读 op `suggestAuthors`（匿名可调｜零写零扣费）**：
+ * 给姓名（`name`）或印面（`face_id`）⇒ 回一批候选（人 / 朝代 / 命中字段 / 分数）。
+ * **无命中不报错**（`ok:true` ＋ `candidates: []`）。
+ *
+ * 载荷封闭恰 3 键 `{face_id, name, limit}`（未知 / 身份类键 ⇒ `INVALID_FIELD`；
+ * `limit` 1〜10 整数缺省 5、越界 ⇒ `INVALID_VALUE`；两键皆空 ⇒ `MISSING_REQUIRED`；
+ * **以上判定全部早于任何读**）。回包**恰 4 键** `{ok, query, normalized, candidates}`：
+ * `query` ＝ 最终用于匹配的**原文**（入参 `name` 非空 ⇒ 其原文；只给 `face_id` ⇒ 回源取值）、
+ * `normalized` ＝ §3.82.1 五步归一形；候选元素**恰 7 键**、`matched_field` 封闭五值。
+ * @param {object} [payload] 封闭 3 键
+ * @returns {Promise<{ok:true, query:string, normalized:string, candidates:Array<object>}|
+ *                   {ok:false, reason:string, message:string}>}
+ */
+async function suggestAuthors(payload) {
+  const parsed = authorMatch.parseSuggestAuthorsPayload(payload)
+  if (!parsed.ok) return parsed
+  const input = parsed.value
+  const db = dbOf()
+  let queryRaw = ''
+  let currentPersonId = ''
+  if (input.name.trim() !== '') {
+    /* 入参 `name` 非空 ⇒ `query` ＝ 其**原文**（逐字）。 */
+    queryRaw = input.name
+  } else {
+    const face = await readFaceRowOf(db, input.face_id)
+    if (!face) return deny(REASONS.INVALID_VALUE, '該印面不存在；本次零讀取。')
+    /* `is_current` ＝ 该人是否为**当前这枚印面的作者引用**（由真源派生、不编造）。 */
+    currentPersonId = text(face.author_person_id)
+    queryRaw = await authorTextFromFaceOf(db, face)
+    if (queryRaw === '') {
+      return deny(REASONS.MISSING_REQUIRED, '該印面與其所屬印章皆無作者名 ⇒ 無從匹配；本次零讀取。')
+    }
+  }
+  const normalized = authorMatch.normalizeAuthorName(queryRaw)
+  const persons = await readAllPersons(db)
+  const candidates = authorMatch.buildCandidates(normalized, persons, input.limit, currentPersonId)
+  return { ok: true, query: queryRaw, normalized, candidates }
+}
+
+/**
+ * **管理员 op `repairAuthorPersonId`（一次性回填；`ADMIN_OPS` 成员）**：
+ * 扫 `xiai_faces` 中 **`kind='FACE'` 且 `author_person_id` 空且 `author` 非空** 的行，
+ * 按归一后的作者名做四道匹配；**阈值 80**（`name`/`alias`/`courtesy` 命中才回填，
+ * `art`(70) / `contains`(50) 只进候选不回填）；`EDGE` 一律不处理。
+ *
+ * 载荷封闭恰 3 键 `{dry_run:true, limit:200, cursor:''}`（未知 / 身份类键 ⇒
+ * `INVALID_FIELD`；`limit` 1〜500 整数缺省 200；判定早于任何读）。
+ * 回包：`dry_run` 恰 5 键 `{ok, scanned, eligible, matched, samples}`（`samples` ≤ 5、
+ * 元素恰 4 键 `{row_id, query, person_id, score}`）；真写恰 6 键
+ * `{ok, scanned, eligible, matched, written, failed}`（`written` ＝ **整窗读回**确认
+ * 已落的行数；同参重放 ⇒ `written = 0`，幂等）。
+ *
+ * 写面（逐条）：① 面行 `author_person_id` ＋ `author_match`（**恰 5 键**
+ * `{field, score, query, normalized, at}`），逐行一次 `persist`（`update` ＋
+ * `expectAtLeast:1`）；② 读回确认后，为每个命中的面补**印章级** `xiai_seal_links`
+ * 行（`kind:'印人'`、`unresolved:false`；同 (`source_seal_id`, `ref_id`, `kind`) 已有行
+ * ⇒ 零新增、幂等）。**seals 行一个字不写**（引用只活在印面行 / 关联行，P1-2）；
+ * **不产 `plan`**；`reason` 零新增、零新集合。
+ * @param {object} [payload] 封闭 3 键
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ */
+async function repairAuthorPersonId(payload, identity, context) {
+  const ops = opsOf()
+  /* ① 管理员门（**第一行**；缺 env / 非白名单 ⇒ 结构化拒 ＋ 零读零写）。 */
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷门（全部判定早于任何读）。 */
+  const parsed = authorMatch.parseRepairAuthorPersonIdPayload(payload)
+  if (!parsed.ok) return parsed
+  const input = parsed.value
+  const seconds = Number.isFinite(Number(context && context.nowSeconds))
+    ? Math.floor(Number(context.nowSeconds))
+    : Math.floor(Date.now() / 1000)
+  const at = new Date(seconds * 1000).toISOString()
+  const db = dbOf()
+  /* ③ 扫描窗口：`kind='FACE'` 且 `_id` 严格大于 `cursor` 的前 `limit` 行（服务端排序）。
+     退路读面（注入式假体）不带 `match` ⇒ 这里**再判一次 `kind`**（防御，不改语义）。 */
+  const window = await readOrderedWindow(db, ops.COLLECTIONS.faces, {
+    match: { kind: 'FACE' },
+    idField: '_id',
+    after: input.cursor,
+    limit: input.limit
+  })
+  const faceRows = window.filter((row) => row && typeof row === 'object' && text(row.kind) === 'FACE')
+  const scanned = faceRows.length
+  /* ④ 判定：`author_person_id` 空 ＋ `author` 非空 ⇒ 待回填（**已有引用的行一律不碰**）。 */
+  const eligibleRows = faceRows.filter(
+    (row) => text(row.author_person_id) === '' && text(row.author) !== ''
+  )
+  const eligible = eligibleRows.length
+  if (scanned === 0) {
+    return input.dry_run
+      ? { ok: true, scanned: 0, eligible: 0, matched: 0, samples: [] }
+      : { ok: true, scanned: 0, eligible: 0, matched: 0, written: 0, failed: [] }
+  }
+  const persons = await readAllPersons(db)
+  const targets = []
+  for (const row of eligibleRows) {
+    const rowId = text(row._id) || text(row.id)
+    if (rowId === '') continue
+    const queryRaw = text(row.author)
+    const normalized = authorMatch.normalizeAuthorName(queryRaw)
+    const hit = authorMatch.bestMatchOf(normalized, persons)
+    /* **阈值 80**：`art`(70) / `contains`(50) 命中不进回填面（只可能出现在候选读面）。 */
+    if (!hit || hit.score < authorMatch.BACKFILL_MIN_SCORE) continue
+    targets.push({
+      rowId,
+      sealId: faceSealKeyOf(row),
+      queryRaw,
+      normalized,
+      personId: hit.person_id,
+      displayName: hit.display_name,
+      field: hit.field,
+      score: hit.score
+    })
+  }
+  const matched = targets.length
+  /* ⑤ 预演轮：**零写入**（`samples` ≤ 5、元素恰 4 键）。 */
+  if (input.dry_run) {
+    const samples = targets.slice(0, 5).map((target) => ({
+      row_id: target.rowId,
+      query: target.queryRaw,
+      person_id: target.personId,
+      score: target.score
+    }))
+    return { ok: true, scanned, eligible, matched, samples }
+  }
+  /* ⑥ 真写：逐行一次 `persist`（`update` ＋ `match:{_id}` ＋ `expectAtLeast:1`）；
+     单行失败不中断整批。**读数以整窗读回为准**（persist 回报 ≠ 行的终态）。 */
+  const attempted = []
+  for (const target of targets) {
+    attempted.push(target)
+    try {
+      await ops.persist({
+        writes: [
+          {
+            kind: 'update',
+            collection: ops.COLLECTIONS.faces,
+            match: { _id: target.rowId },
+            doc: {
+              author_person_id: target.personId,
+              author_match: {
+                field: target.field,
+                score: target.score,
+                query: target.queryRaw,
+                normalized: target.normalized,
+                at
+              }
+            },
+            expectAtLeast: 1
+          }
+        ]
+      })
+    } catch (error) {
+      /* **此处不下真伪结论**：回报失败 ≠ 没写成 ⇒ 由下方读回定。 */
+      console.warn(
+        `[xiai] repairAuthorPersonId 單行寫回報失敗（讀回定真偽；面行：${target.rowId}；不中斷整批）：`,
+        text(error && error.message)
+      )
+    }
+  }
+  let written = 0
+  const failed = []
+  const writtenTargets = []
+  try {
+    /* 整窗读回（**唯一判据**）：同一窗口语义重读 ⇒ 逐行看终态。 */
+    const after = await readOrderedWindow(db, ops.COLLECTIONS.faces, {
+      match: { kind: 'FACE' },
+      idField: '_id',
+      after: input.cursor,
+      limit: input.limit
+    })
+    const stateById = new Map()
+    for (const row of after) stateById.set(text(row._id) || text(row.id), row)
+    for (const target of attempted) {
+      const row = stateById.get(target.rowId)
+      const match = row && row.author_match
+      const confirmed =
+        row &&
+        text(row.author_person_id) === target.personId &&
+        match &&
+        text(match.field) === target.field &&
+        Number(match.score) === target.score
+      if (confirmed) {
+        written += 1
+        writtenTargets.push(target)
+      } else {
+        failed.push({ row_id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
+        console.warn(`[xiai] repairAuthorPersonId 單行未生效（讀回不符回填終態；面行：${target.rowId}）`)
+      }
+    }
+  } catch (error) {
+    /* 读回失败 ⇒ **不敢称写入**（宁报 0 不虚报；已尝试行如实进 `failed`）。 */
+    console.warn('[xiai] repairAuthorPersonId 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    written = 0
+    for (const target of attempted) {
+      failed.push({ row_id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
+    }
+  }
+  /* ⑦ 印章级补条（**幂等**）：只补**读回确认已回填**的面；同 (印章, 印人, `kind`) 已有 ⇒ 零新增。 */
+  for (const target of writtenTargets) {
+    await ensureSealLinkOf(db, target, at)
+  }
+  return { ok: true, scanned, eligible, matched, written, failed }
+}
+
+/**
+ * 印章级 `xiai_seal_links` 补条（**幂等**；行面 ＝ `importRelations` 七键 ＋
+ * `id`/`source`/`unresolved`/`created_at` ＋ 标记键 `kind:'印人'`）。
+ * 幂等判据 ＝ 同 (`source_seal_id`, `ref_id`, `kind='印人'`) 已有行 ⇒ 零新增。
+ * 单条失败**不中断整批**（面行回填是主面；补条失败如实告警）。
+ */
+async function ensureSealLinkOf(db, target, at) {
+  const ops = opsOf()
+  if (target.sealId === '' || target.personId === '') return
+  let existing = []
+  try {
+    existing = await ops.readRows(ops.COLLECTIONS.sealLinks, { source_seal_id: target.sealId }, { limit: 500 })
+  } catch (error) {
+    if (!isCollectionNotExistError(error)) {
+      console.warn(`[xiai] repairAuthorPersonId 補條預查失敗（印章：${target.sealId}）：`, text(error && error.message))
+      return
+    }
+    /* 集合尚未创建 ⇒ 视作零行（幂等预查语义：尚无行 = 尚无重复）。 */
+    existing = []
+  }
+  const duplicate = existing.some(
+    (row) => row && text(row.ref_id) === target.personId && text(row.kind) === authorMatch.SEAL_LINK_KIND
+  )
+  if (duplicate) return
+  const id =
+    authorMatch.SEAL_LINK_ID_PREFIX +
+    ops
+      .hash16(authorMatch.sealLinkIdInputOf(target.sealId, target.personId))
+      .slice(0, authorMatch.SEAL_LINK_ID_HEX_LENGTH)
+  const doc = authorMatch.sealLinkRowOf({
+    sealId: target.sealId,
+    personId: target.personId,
+    refName: target.displayName,
+    id,
+    at
+  })
+  try {
+    await ops.persist({ writes: [{ kind: 'set', collection: ops.COLLECTIONS.sealLinks, id, doc }] })
+  } catch (error) {
+    console.warn(
+      `[xiai] repairAuthorPersonId 補條失敗（印章：${target.sealId}、印人：${target.personId}；不中斷整批）：`,
+      text(error && error.message)
+    )
+  }
+}
+
+/* ---------------------------------------------------------------------------
  * 导出（公开 op 表 ＋ 冻结键面；`index.js` 只做分流与按 op 收窄透传）
  * -------------------------------------------------------------------------- */
 
 /**
  * **匿名可调的公开 op 表**（`index.js` 在令牌校验**之前**按这张表分流；
  * 表外的一切 op 仍必须验 token）。**只读**：这里的 op 一律零写。
+ * **恰 2 成员**（§3.81.5 追加注 v1.100：`listSealCards` ＋ `suggestAuthors`）。
  */
 const PUBLIC_OPS = Object.freeze({
-  listSealCards
+  listSealCards,
+  suggestAuthors
 })
 
 module.exports = {
   PUBLIC_OPS,
   listSealCards,
+  suggestAuthors,
   repairPrimaryFace,
+  repairAuthorPersonId,
   /* 冻结键面（供 `index.js` 透传与离线自检直接断言） */
   LIST_SEAL_CARDS_ALLOWED_KEYS,
   LIST_SEAL_CARDS_SUCCESS_KEYS,

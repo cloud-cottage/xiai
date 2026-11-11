@@ -52,6 +52,10 @@ const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSession
    会话 / 配置判定**之前**按它分流，只放行白名单里的 op）；`REPAIR_PRIMARY_FACE_READOUT_KEYS`
    ＝ 主印面回填 op 的读数键面真源（按 op 收窄透传 ⇒ 其余 op 回包逐字不变）。 */
 const { PUBLIC_OPS, REPAIR_PRIMARY_FACE_READOUT_KEYS } = require('./lib/sealCards.js')
+/* **作者校验（§3.82）**：`REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS` ＝ 管理员回填 op
+   `repairAuthorPersonId` 的**读数键面并集**真源（按 op 收窄、存在性驱动透传 ⇒
+   `dry_run` 轮恰 5 键、真写轮回恰 6 键；其余 op 回包逐字不变）。 */
+const { REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS } = require('./lib/authorMatch.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
 
@@ -788,6 +792,23 @@ async function handleVerify(event, config, callContext) {
      早退分支、恒 3 鍵、零讀數鍵；**本 op 不產 `plan`**（寫步在 op 內逐行走 `persist`）⇒ `plan` 零外傳。 */
   if (op === 'repairPrimaryFace') {
     for (const key of REPAIR_PRIMARY_FACE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **作者引用回填读数面（additive 透传｜**按 `op` 收窄**｜本单 `repairAuthorPersonId`）**：
+     `scanned` / `eligible` / `matched` / `samples` / `written` / `failed` 六键**仅当
+     `op === 'repairAuthorPersonId'` 且 `opResult` 确有该键时**才逐字叠进回包（键名真源 ＝
+     `lib/authorMatch.js::REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS`），且**存在性驱动** ⇒
+     `dry_run` 轮回**恰 5 键读数面**（`scanned / eligible / matched / samples`）、真写轮回
+     **恰 6 键读数面**（`scanned / eligible / matched / written / failed`），恰如该 op 的
+     封闭键面；**其余任何 op 一律不透传这 6 个键**（即使 `opResult` 意外带同名键 —— 例如
+     `repairImageStorage` / `repairOrphanEnhanceCharges` 的 `written` / `failed`、各迁移 op 的
+     `scanned`、`backfillAcceptedCorrections` 的 `samples` —— 亦一个都不外泄）⇒ 既有回包
+     **逐字不变**（序列化后亦不新增键）。**失败回包（`ok:false`）走上面的早退分支、恒 3 键、
+     零读数键**；**`plan` 是内部落盘计划（内部面）、不在白名单内 ⇒ 绝不外传**（本 op 不产
+     `plan` —— 写步在 op 内逐行走 `persist` ＋ 整窗读回）。既有字段一律不刪、不改。 */
+  if (op === 'repairAuthorPersonId') {
+    for (const key of REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
