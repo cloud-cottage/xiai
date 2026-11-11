@@ -1,6 +1,6 @@
 
 <script setup>
-import { computed, ref, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import FilterBar from '../components/FilterBar.vue'
 import SealCard from '../components/SealCard.vue'
@@ -12,7 +12,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
    編碼入口已上收**頁頭單框雙態搜索**（`HeaderSearch`）—— 本頁只按 `route.query.code` 精確查，
    不再另設獨立 OTP 控件（全站唯一入口，任何頁面可用、鏈接可分享）。 */
 import { findSealByCode } from '../services/seals.js'
-import { seals, corrections, points, imageFaces } from '../services/index.js'
+import { seals, corrections, points, imageFaces, sealCards } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn } from '../data/session.js'
 import { saveLocalBinary } from '../utils/file.js'
@@ -30,29 +30,167 @@ const style = computed(() => (typeof route.query.style === 'string' ? route.quer
 const sealClass = computed(() => (typeof route.query.sealClass === 'string' ? route.query.sealClass : ''))
 const keyword = computed(() => (typeof route.query.q === 'string' ? route.query.q.trim() : ''))
 
-/* 任何一次写入后 +1，使下面的派生读数立即重算（服务层读的是已落盘数据）。 */
+/* 任何一次写入后 +1，使下面的派生读数立即重算（服务层读的是已落盘数据）；
+   列表侧同样依赖它 ⇒ 上傳 / 清除本機資料後自動**重置到首頁**重拉。 */
 const dataVersion = ref(0)
 
 /* 管理员专属「上传印章」按钮：以服务层判定为准（普通用户 / 游客为 false ⇒ 不渲染）。 */
 const canUploadSeal = computed(() => seals.canUploadSeal())
 
-const list = computed(() => {
-  void dataVersion.value
-  /* 参数名**逐字** `content` / `style` / `sealClass`（取代旧 `sealType`）；筛选**按印面聚合**由服务层实现。 */
-  return seals.listSeals({ dynasty: dynasty.value, content: content.value, style: style.value, sealClass: sealClass.value, keyword: keyword.value })
-})
-/* **硬導航首屏（同一類終態缺陷，見 SealDetailView 的同名處理）**：直接打開 / 刷新廣場時，
-   雲端快照尚未落定 ⇒ `list` 必為空。此刻渲染「沒有符合條件的印章」等於把「還沒讀到」
-   說成「沒有」⇒ 讀數據層的數據源讀數，`pending` 時渲染**載入態**。 */
-const dataSource = computed(() => seals.dataSourceState())
-const hydrating = computed(() => !list.value.length && dataSource.value.pending)
-/* **O-1（本單）**：雲端讀取失敗 ⇒ 數據層已回落**本機示範資料**（`readCollection` 的非 ready 分支）。
-   此刻廣場照樣列出 8 行示範資料 —— **不得靜默**：顯式告知目前看的是示範資料，並給重試入口。
-   判據只讀數據層狀態（`failed`），不猜、不自造第二套狀態機。 */
-const demoFallback = computed(() => dataSource.value.failed)
+/* ============================================================================
+   **列表 ＝ 分頁消費 `listSealCards`（本單）**
+   ----------------------------------------------------------------------------
+   改前：`seals.listSeals()` 在渲染期同步全量組裝（雲端 11,800 行）⇒ 首屏實測 28〜42 秒。
+   改後：
+     · 首屏只請求 **48 枚**（`SQUARE_PAGE_SIZE`）；滾到底（`IntersectionObserver`，提前
+       400px 預取）或按「載入更多」按 **`next_cursor` 續拉**；
+     · 續拉觸發條件 ＝ `has_more === true` **且** `next_cursor` 非空 **且** 當前沒有在飛的
+       請求（`moreBusy` / `pageLoading` 皆 false）；
+     · 四維篩選（朝代 / 印面內容 / 印面風格 / 大類）**下推**為請求參數
+       （映射表真源 ＝ `sealCards.SQUARE_FILTER_PARAMS`），不再客戶端全量過濾；
+     · 篩選變化或 `dataVersion` 變 ⇒ **重置到首頁**（丟掉舊游標與累積行）；
+     · 封面圖取行上的 `thumb_key` / `display_key`（`SealCard` 負責）⇒ **不再依賴全量水合的
+       seals / faces 映射**；
+     · 無雲端 / 雲端讀失敗 ⇒ 服務層返回本機示範資料（`fallback:true`）＋ 本頁顯式提示。
+   · **關鍵詞 `?q=` 不在凍結契約內**（請求恰 6 鍵，沒有 keyword）⇒ 仍在客戶端過濾**已載入**
+     的頁，並如實上屏「已載入 N 枚中符合 M 枚」——不冒充全庫命中；契約缺口已寫進交付報告。
+   ============================================================================ */
+const PAGE_SIZE = sealCards.SQUARE_PAGE_SIZE
 
-function retryDataSource() {
-  void seals.retryDataSource()
+/** 累積的卡片行（雲端回包的 14 鍵行 / 本機降級行）。 */
+const cards = ref([])
+/** 服務端不透明游標（本層不解析、不猜測）。 */
+const nextCursor = ref('')
+/** 續拉閘門：`has_more` 為真且游標非空才可續拉。 */
+const hasMore = ref(false)
+/** `total` 取自服務端（本機降級 ⇒ 本機命中總數）。 */
+const totalCount = ref(0)
+const pageLoading = ref(true)
+const moreBusy = ref(false)
+const pageError = ref('')
+/** 本頁是否為「本機示範資料」兜底（與 `dataSource.failed` 分立：兩者都可能成立）。 */
+const fallbackPage = ref(false)
+/** 兜底原話（服務層透傳的 `message`；上屏只作補充，不替代既有提示文案）。 */
+const fallbackDetail = ref('')
+/** 請求代次：篩選連點 / 分頁並發時，**只認最後一代**的回包（丟掉過期結果）。 */
+let requestGen = 0
+
+/** 當前的四維篩選（視圖參數名；翻譯成請求參數由服務層單點負責）。 */
+function filterArgs() {
+  return { dynasty: dynasty.value, content: content.value, style: style.value, sealClass: sealClass.value }
+}
+
+/** 首屏 / 重置：清空游標與累積行，只拉第 1 頁。 */
+async function loadFirstPage() {
+  const gen = ++requestGen
+  pageLoading.value = true
+  moreBusy.value = false
+  pageError.value = ''
+  cards.value = []
+  nextCursor.value = ''
+  hasMore.value = false
+  totalCount.value = 0
+  fallbackPage.value = false
+  fallbackDetail.value = ''
+  const out = await sealCards.listSealCardPage({ ...filterArgs(), cursor: '', limit: PAGE_SIZE })
+  if (gen !== requestGen) return
+  pageLoading.value = false
+  if (!out.ok) {
+    pageError.value = out.message || '雲端藏品資料暫時未能讀取，請稍後再試。'
+    return
+  }
+  cards.value = out.rows
+  nextCursor.value = out.next_cursor
+  hasMore.value = out.has_more && out.next_cursor !== ''
+  totalCount.value = out.total
+  fallbackPage.value = out.fallback === true
+  fallbackDetail.value = out.fallback ? String(out.message || '') : ''
+}
+
+/** 續拉一頁（滾到底 / 「載入更多」同一執行點；並發去重、過期回包丟棄）。 */
+async function loadMore() {
+  if (!hasMore.value || !nextCursor.value || moreBusy.value || pageLoading.value) return
+  const gen = requestGen
+  const cursor = nextCursor.value
+  moreBusy.value = true
+  pageError.value = ''
+  const out = await sealCards.listSealCardPage({ ...filterArgs(), cursor, limit: PAGE_SIZE })
+  if (gen !== requestGen) return
+  moreBusy.value = false
+  if (!out.ok) {
+    pageError.value = out.message || '載入更多藏品時失敗，請稍後再試。'
+    return
+  }
+  /* 去重（同一 `stamp_id` 只上屏一張）：游標重疊 / 亂序時不漏不重，v-for 的 key 也不會撞。 */
+  const seen = new Set(cards.value.map((row) => row.stamp_id))
+  const fresh = out.rows.filter((row) => !seen.has(row.stamp_id))
+  cards.value = cards.value.concat(fresh)
+  nextCursor.value = out.next_cursor
+  hasMore.value = out.has_more && out.next_cursor !== ''
+  if (out.total > 0) totalCount.value = out.total
+  if (out.fallback === true) {
+    fallbackPage.value = true
+    fallbackDetail.value = String(out.message || '')
+  }
+}
+
+/* 篩選變化 / 寫入後 ⇒ 重置到首頁（**關鍵詞不重拉**：它只過濾已載入的頁，見上方註）。 */
+watch(
+  () => [dynasty.value, content.value, style.value, sealClass.value, dataVersion.value],
+  () => { void loadFirstPage() },
+  { immediate: true }
+)
+
+/* 滾到底自動續拉：哨兵元素常駐在網格之後；不支援 `IntersectionObserver` 的環境
+   仍可用「載入更多」按鈕（同一執行點）。 */
+const sentinel = ref(null)
+let sentinelObserver = null
+onMounted(() => {
+  if (typeof IntersectionObserver !== 'function') return
+  sentinelObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadMore()
+    },
+    { rootMargin: '400px 0px' }
+  )
+  if (sentinel.value) sentinelObserver.observe(sentinel.value)
+})
+watch(sentinel, (el, prev) => {
+  if (!sentinelObserver) return
+  if (prev) sentinelObserver.unobserve(prev)
+  if (el) sentinelObserver.observe(el)
+})
+onBeforeUnmount(() => {
+  if (sentinelObserver) sentinelObserver.disconnect()
+  sentinelObserver = null
+})
+
+/* **關鍵詞過濾（客戶端、僅限已載入的頁）**：命中面 ＝ 印文 / 印面內容 / 編號
+   （卡片行沒有作者欄位 ⇒ 不比對作者；契約缺口見上方註與交付報告）。 */
+const matchedCards = computed(() => {
+  const kw = keyword.value
+  if (!kw) return cards.value
+  return cards.value.filter((row) =>
+    [row.seal_name, row.category, row.stamp_id].some((value) => String(value || '').includes(kw))
+  )
+})
+
+/** 上屏用列表（已被關鍵詞過濾）。 */
+const displayCards = computed(() => matchedCards.value)
+/** 「共 N 枚」：有關鍵詞時＝已載入裡命中的枚數；否則＝服務端 total。 */
+const totalShown = computed(() => (keyword.value ? matchedCards.value.length : totalCount.value))
+
+/* **數據源狀態（只讀）**：仍用於「本機示範資料」提示與孤兒行計數，**不再驅動列表水合**。 */
+const dataSource = computed(() => seals.dataSourceState())
+const hydrating = computed(() => pageLoading.value)
+/* **O-1（本單不變）**：雲端讀取失敗已回落本機示範資料 ⇒ 顯式告知 ＋ 重試入口（不靜默）。
+   判據兩支：數據層狀態 `failed`，或本頁回包自帶 `fallback`（分頁路徑的失敗兜底）。 */
+const demoFallback = computed(() => dataSource.value.failed || fallbackPage.value)
+
+async function retryDataSource() {
+  pageError.value = ''
+  await seals.retryDataSource()
+  await loadFirstPage()
 }
 
 /* ============================================================================
@@ -400,7 +538,7 @@ async function confirmClearLocal() {
       :content="content"
       :style="style"
       :seal-class="sealClass"
-      :total="list.length"
+      :total="totalShown"
       :degraded="FILTER_DEGRADED"
       @update:dynasty="(value) => applyQuery({ dynasty: value })"
       @update:content="(value) => applyQuery({ content: value })"
@@ -412,16 +550,34 @@ async function confirmClearLocal() {
     <!-- 識別編碼入口（§5｜R-4）：**已上收頁頭單框雙態搜索**（`HeaderSearch`），本頁不再另設入口。
          本頁只按 `route.query.code` 精確查、查無即空態，不回落關鍵詞 `q`、不模糊匹配。 -->
 
-    <p v-if="keyword" class="square__keyword">當前檢索「{{ keyword }}」，共 {{ list.length }} 枚</p>
+    <!-- **關鍵詞只過濾已載入的頁**（契約無 keyword 參數）⇒ 如實報「已載入 N 枚中符合 M 枚」，
+         不把「還沒載入」說成「全庫沒有」。 -->
+    <p v-if="keyword" class="square__keyword" data-square-keyword>
+      當前檢索「{{ keyword }}」：已載入 {{ cards.length }} 枚，其中符合 {{ matchedCards.length }} 枚<template
+        v-if="hasMore"
+      >；可繼續載入更多藏品後再檢索</template>
+    </p>
 
     <!-- **O-1**：雲讀失敗已回落本機示範資料 ⇒ 顯式提示 ＋ 重試入口（不靜默；字形同全站）。 -->
-    <div v-if="demoFallback" class="notice square__notice" data-source-fallback="square">
+    <div
+      v-if="demoFallback"
+      class="notice square__notice"
+      data-source-fallback="square"
+      :data-fallback-detail="fallbackDetail || null"
+    >
       <span>雲端藏品資料暫時未能讀取，目前列出的是本機示範資料；可按「重新讀取」再試一次。</span>
       <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
     </div>
 
+    <!-- 讀取失敗（本機也沒有資料可兜底）⇒ **如實上屏原話 ＋ 重試**（不冒充「沒有符合條件的印章」）。 -->
+    <div v-if="pageError" class="notice square__notice" data-square-error>
+      <span>{{ pageError }}</span>
+      <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
+    </div>
+
     <!-- 縮略圖走**縮略面**（規範 §3.27.6：256 長邊**單件**、不經切分內核；卡片內不再按塊渲染）；
-         存量 / 非 TIFF 存儲件仍由瀏覽器原生解碼顯示（存量面不得回歸）。 -->
+         存量 / 非 TIFF 存儲件仍由瀏覽器原生解碼顯示（存量面不得回歸）。
+         **本單**：雲端分頁行的封面改取 `thumb_key` / `display_key` 對應對象（見 `SealCard`）。 -->
     <!-- 識別編碼查無 ⇒ **明確空態「查無此印」**（不回落關鍵詞、不模糊匹配；描述取自服務層讀數）。 -->
     <PlaceholderPanel
       v-if="codeMiss"
@@ -430,18 +586,17 @@ async function confirmClearLocal() {
       :desc="codeMissDesc"
     />
 
-    <div v-else-if="list.length" class="square__grid">
+    <div v-else-if="displayCards.length" class="square__grid">
       <SealCard
-        v-for="seal in list"
-        :key="seal.stamp_id"
-        :seal="seal"
+        v-for="card in displayCards"
+        :key="card.stamp_id"
+        :seal="card"
         @download="askDownload"
         @save="askSaveSeal"
       />
     </div>
 
-    <!-- **資料尚未到位 ⇒ 載入態**（水合未完成時不得顯示「沒有符合條件的印章」這類終態；
-         水合落定後本元件自動重算並渲染真實結果）。 -->
+    <!-- **資料尚未到位 ⇒ 載入態**（不得顯示「沒有符合條件的印章」這類終態）。 -->
     <PlaceholderPanel
       v-else-if="hydrating"
       glyph="候"
@@ -455,6 +610,31 @@ async function confirmClearLocal() {
       title="沒有符合條件的印章"
       desc="可調整朝代、印面內容、印面風格或大類，或清空檢索詞後再試。"
     />
+
+    <!-- **分頁尾巴**：哨兵元素 ＝ 滾到底自動續拉的觀測點；「載入更多」按鈕走同一執行點
+         （不支援 `IntersectionObserver` 時仍可用）。游標空 ⇒ 如實報「已全部載入」。 -->
+    <div
+      v-if="!codeMiss && displayCards.length"
+      ref="sentinel"
+      class="square__more"
+      data-square-pager
+      :data-square-has-more="hasMore ? '1' : '0'"
+    >
+      <span data-square-loaded>
+        已載入 {{ displayCards.length }}<template v-if="!keyword"> / 共 {{ totalShown }}</template> 枚
+      </span>
+      <button
+        v-if="hasMore"
+        class="btn btn--ghost"
+        type="button"
+        data-square-more
+        :disabled="moreBusy"
+        @click="loadMore"
+      >
+        {{ moreBusy ? '載入中…' : '載入更多' }}
+      </button>
+      <span v-else>已全部載入</span>
+    </div>
 
     <ConfirmDialog
       v-if="pendingSeal"
@@ -523,5 +703,16 @@ async function confirmClearLocal() {
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: var(--s-4);
   margin-top: var(--s-4);
+}
+
+/* 分頁尾巴（已載入 / 共 N 枚 ＋ 「載入更多」）：與網格同列寬、居中；滾到底自動續拉的哨兵。 */
+.square__more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  margin: var(--s-5) 0 var(--s-3);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
 }
 </style>

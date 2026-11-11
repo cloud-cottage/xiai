@@ -2,7 +2,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sealGlyph } from '../utils/format.js'
-import { seals, corrections, imageFaces } from '../services/index.js'
+import { seals, corrections, imageFaces, sealCards } from '../services/index.js'
 
 const props = defineProps({
   seal: { type: Object, required: true }
@@ -17,12 +17,32 @@ const currentText = computed(() => corrections.resolveSealDisplayName(props.seal
    卡片**不读**裸 `seal.author`（那会绕过引用型、长出第二套名表）。 */
 const authorName = computed(() => corrections.resolveAuthorDisplayName(props.seal))
 
-/* 主印面（服務層判定）：是**影像編號的來源**（不是元數據載體）。 */
-const face = computed(() => seals.primaryFaceOf(props.seal.stamp_id))
+/* ============================================================================
+   **兩種卡來源（本單｜分頁卡片 vs 本機行）**
+   ----------------------------------------------------------------------------
+   · `card` 形態 ＝ 雲端分頁回包的 14 鍵行：封面**只**用 `thumb_key` / `display_key`
+     （內容尋址對象）⇒ **不碰全量水合的 seals/faces 映射**、也不查主印面；
+   · 本機形態 ＝ 既有印章視圖模型（示範資料 / 詳情同源行）：維持原路徑
+     （主印面 ⇒ 影像行 ⇒ 縮略面 / 原生解碼）。
+   判據只看行上有沒有對象鍵，**不看登錄態 / 不猜數據源狀態**。
+   ============================================================================ */
+const cardMode = computed(() => sealCards.coverKeyOf(props.seal) !== '')
+/** 標籤取值：卡片行用 `category`（＝印面內容）；本機行沿用 `seal_type`。 */
+const contentTag = computed(() => String(props.seal.seal_type || props.seal.category || ''))
+/** 「含邊款」判據：卡片行讀 `edge_count`；本機行沿用 `hasEdge`。 */
+const hasEdge = computed(() => {
+  if (props.seal.hasEdge === true) return true
+  const edges = Number(props.seal.edge_count)
+  return Number.isFinite(edges) && edges > 0
+})
+/** 主印面（**僅本機形態**查詢**；卡片形態下不查**，避免任何全量映射依賴）。 */
+const face = computed(() => (cardMode.value ? null : seals.primaryFaceOf(props.seal.stamp_id)))
 const thumbUrl = ref('')
 const thumbError = ref('')
-/** 縮略件的來源面別（機械讀數）：`api` ＝ 縮略面（256 長邊單件、不經切分內核）；`native` ＝ 本機原生解碼。 */
+/** 縮略件的來源面別（機械讀數）：`object` ＝ 分頁行的對象鍵（thumb/display）；`api` ＝ 縮略面（256 長邊單件、不經切分內核）；`native` ＝ 本機原生解碼。 */
 const thumbVia = ref('')
+/** 封面取件中（卡片形態）：佔位字形照常顯示，不把「還沒到」說成「沒有」（不靜默成空態）。 */
+const thumbBusy = ref(false)
 
 /* ============================================================================
    縮略面（规范 §3.27.6 / §3.24.3 ②）
@@ -33,6 +53,24 @@ const thumbVia = ref('')
    （服務端來源門對非 TIFF 結構化拒絕 ⇒ 舊行必須仍由原生解碼顯示，不得回歸）。
    ============================================================================ */
 async function loadThumb() {
+  /* **卡片形態（本單）**：封面只取 `thumb_key`（缺 ⇒ `display_key`）對應的對象臨時鏈接。
+     不查主印面、不讀本機影像庫 ⇒ 與全量水合解耦（首屏 48 枚不必等 11,800 行落定）。 */
+  if (cardMode.value) {
+    revokeThumb()
+    thumbBusy.value = true
+    thumbUrl.value = ''
+    thumbError.value = ''
+    thumbVia.value = ''
+    const cover = await sealCards.cardCoverUrl(props.seal)
+    thumbBusy.value = false
+    if (cover.ok) {
+      thumbUrl.value = cover.url
+      thumbVia.value = 'object'
+      return
+    }
+    thumbError.value = cover.message || '封面影像暫時無法顯示'
+    return
+  }
   const current = face.value
   const imageId = current && current.face_image_id ? String(current.face_image_id) : ''
   if (!imageId) {
@@ -114,7 +152,8 @@ function revokeThumb() {
 }
 
 onMounted(loadThumb)
-watch(() => props.seal.stamp_id, loadThumb)
+/* 換卡（或該卡的對象鍵變了）⇒ 重取封面；`stamp_id` 只作本機形態的換卡判據。 */
+watch(() => [props.seal.stamp_id, sealCards.coverKeyOf(props.seal)], loadThumb)
 onBeforeUnmount(revokeThumb)
 </script>
 
@@ -133,15 +172,15 @@ onBeforeUnmount(revokeThumb)
       />
       <template v-else>
         <span class="seal-card__thumb-glyph">{{ glyph }}</span>
-        <span class="seal-card__thumb-cap">{{ thumbError || '印面縮略圖' }}</span>
+        <span class="seal-card__thumb-cap">{{ thumbError || (thumbBusy ? '封面載入中' : '印面縮略圖') }}</span>
       </template>
     </router-link>
 
     <div class="seal-card__body">
       <div class="seal-card__tags">
         <span class="seal-card__tag seal-card__tag--era">{{ seal.dynasty }}</span>
-        <span class="seal-card__tag">{{ seal.seal_type }}</span>
-        <span v-if="seal.hasEdge" class="seal-card__tag seal-card__tag--edge">含邊款</span>
+        <span class="seal-card__tag">{{ contentTag }}</span>
+        <span v-if="hasEdge" class="seal-card__tag seal-card__tag--edge">含邊款</span>
       </div>
 
       <h3 class="seal-card__title">

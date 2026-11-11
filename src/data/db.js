@@ -1963,20 +1963,45 @@ export function sealClassValue(faceRow) {
 }
 
 /**
- * 主印面（**R-44 冻结口径**）：给定一串印面（**原始行或视图模型皆可**，只要带 `kind`），
- * 取**存储顺序第一个** `kind = 'FACE'` 者；一个 `FACE` 都没有 ⇒ `null`。
+ * 主印面（**R-44 冻结口径 ＋ 本單 `is_primary` 优先**）：给定一串印面（**原始行或视图模型皆可**，
+ * 只要带 `kind`），取主印面；一个 `FACE` 都没有 ⇒ `null`。
  *
- * 口径：**「存储顺序第一个 FACE」**。本函数**只做这一件事**（取第一个 FACE）——
- * 调用方自行负责把序列限定在该印章范围内。收敛的就是这条规则：
- * `sealMaterialValue` / `writeFixedAttributes` / `services/seals.js::primaryFaceOf` /
- * `services/seals.js::faceLabelOf` / `services/seals.js::listSeals` 五处一律调它，
- * **不得各自再写一份 `find(kind === 'FACE')`**。
+ * 取值顺序（**逐级回落，只在有据可依时前进**）：
+ *   ① `kind = 'FACE'` 且 `is_primary === true` 的行 ⇒ **主印面**（服务端新行可能带该键）；
+ *   ② 旧行没有 `is_primary` ⇒ 取 `face_no` **最小**的 `FACE` 行（`face_no` 缺失 / 非数值的行
+ *      不参与比较）；
+ *   ③ 连 `face_no` 都没有（历史种子）⇒ 沿用「**存储顺序第一个 `FACE`**」（改前口径，行为不变）。
+ *
+ * 口径纪律：本函数**只做这一件事**（选主印面），调用方自行负责把序列限定在该印章范围内。
+ * 收敛的就是这条规则：`sealMaterialValue` / `writeFixedAttributes` /
+ * `services/seals.js::primaryFaceOf` / `services/seals.js::faceLabelOf` /
+ * `services/seals.js::listSeals` 五处一律调它，**不得各自再写一份 `find(kind === 'FACE')`**。
  * @param {Array<object>} rows 印面序列（原始行 / 视图模型）
  * @returns {object|null} 主印面（无 `FACE` 时 `null`）
  */
 export function primaryFaceIn(rows) {
   const list = Array.isArray(rows) ? rows : []
-  return list.find((row) => row && row.kind === FACE_KIND.FACE) || null
+  const faces = list.filter((row) => row && row.kind === FACE_KIND.FACE)
+  if (faces.length === 0) return null
+  /* ① 服务端显式主印面（`is_primary` 只认真值三种形态：`true` / `'true'` / `1`）。 */
+  const flagged = faces.find(
+    (row) => row.is_primary === true || row.is_primary === 'true' || row.is_primary === 1
+  )
+  if (flagged) return flagged
+  /* ② 旧行没有 `is_primary` ⇒ 按 `face_no` 最小兼容。 */
+  let best = null
+  let bestNo = Infinity
+  faces.forEach((row) => {
+    const no = Number(row.face_no)
+    if (!Number.isFinite(no)) return
+    if (no < bestNo) {
+      bestNo = no
+      best = row
+    }
+  })
+  if (best) return best
+  /* ③ 历史行无 `face_no` ⇒ 存储顺序第一个 `FACE`（**改前口径逐字不变**）。 */
+  return faces[0]
 }
 
 /**

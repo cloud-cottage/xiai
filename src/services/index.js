@@ -38,8 +38,12 @@ import * as aiAccess from './aiAccess.js'
 /* **「人工智能修復」门面（本單新增）**：印面影像 AI 修復的唯一業務入口（`aiEnhance.js`；
    op 名 / 讀數鍵面真源）。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as aiEnhance from './aiEnhance.js'
+/* **「廣場卡片分頁」门面（本單新增）**：首屏 48 枚 ＋ `next_cursor` 續拉 ＋ 四維篩選下推
+   ＋ 封面走 `thumb_key`/`display_key`（`sealCards.js`；請求鍵面 / 14 鍵行面 / 篩選映射表真源）。
+   页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
+import * as sealCards from './sealCards.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards }
 export default services
