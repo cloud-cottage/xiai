@@ -9,7 +9,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
-import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport, aiEnhance } from '../services/index.js'
+import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport, aiEnhance, authorMatch } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
@@ -988,6 +988,174 @@ async function onResubmitRejected(face, entry) {
   publishCorrectionNotice(message, face.id)
   /* 成功 ⇒ +1 让「N 人提交 / 待審覈」读数立即重算（服务层读的是已落盘数据）。 */
   if (outcome.accepted > 0) dataVersion.value += 1
+}
+
+/* ============================================================================ 
+   **校驗作者（本單）**：作者行的「校驗作者」入口 ＋ 候选弹窗
+   ---------------------------------------------------------------------------- 口径（逐条）：
+     · 入口**一律渲染**（游客也可见、可达），点击走**既有登录门**：`!canSubmit ⇒ goLogin()`
+       —— 与【勘誤】入口 `openCorrection` **同一门、同一引导**（不另造文案、不 CSS 隐藏）；
+     · 有当前作者名 ⇒ 打开即按 `face_id` 查一次；无（空 /「佚名」）⇒ 弹窗里给输入框，
+       由用户填姓名再查（只传 `name`，不替服务端猜匹配口径）；
+     · 候选来自**公开只读 op `suggestAuthors`**（服务层 `authorMatch.suggestAuthorCandidates`）：
+       失败 / 未配置云端 / 形状不可辨识 ⇒ **结构化失败原文上屏**，**不列空数组冒充「沒有合適人選」**；
+       空态「暫無合適人選」只在**查询成功且零候选**时出现；
+     · 选中一个 ⇒ **走既有勘误通道**（回填既有勘误表单 ⇒ 视图 `submitCorrection()` ⇒
+       `corrections.submitCorrection`，与【重新提交】同一处置、**零新增写口**）：
+       字段 ＝ `author`；**值 ＝ 所选 `person_id`** —— 现行口径下 `author` 是**引用型**
+       （客户端 `FIELD_VALUE_DOMAINS.author` 与服务端 `readPersonRow` 双门都按**印人 id** 判，
+       传 `display_name` 必被 `INVALID_VALUE` 拒）；`display_name` 只作上屏；
+     · 文案**逐字沿用**现有提交回包（成功 / 跳过 / 失败三态），同时落弹窗内与页面级
+       `data-correction-notice` ⇒ 成功、失败、已存在**三态都可见**，不静默。
+   ============================================================================ */
+/** 单次查询的 `limit`（契约缺省 5；1〜10 由服务层夹取）。 */
+const AUTHOR_VERIFY_LIMIT = 5
+const authorVerifyOpen = ref(false)
+/** 查询 / 提交共用的在飞闸（同一时刻只允许一发，避免回包串台）。 */
+const authorVerifyBusy = ref(false)
+/** 目标印面（关窗即清，避免残留指向）。 */
+const authorVerifyFaceId = ref('')
+/** 查询词：有当前作者名 ⇒ 预填；否则为空，由用户手填。 */
+const authorVerifyName = ref('')
+/** 当前作者名为空 /「佚名」⇒ 弹窗里给输入框。 */
+const authorVerifyNeedsName = ref(false)
+/** 已发起过查询（空态只在查过之后才出现，不谎称「查不到」）。 */
+const authorVerifySearched = ref(false)
+const authorVerifyQueryLabel = ref('')
+const authorVerifyCandidates = ref([])
+/** 提交回包文案（成功 / 跳过 / 失败三态，逐字来自既有提交入口）。 */
+const authorVerifyFeedback = ref('')
+/** 查询失败文案（服务端 / 传输层原话；与提交反馈分位，互不覆盖）。 */
+const authorVerifyError = ref('')
+/** 弹窗导语的目标印面读数（关窗时安全返回空串；**不编造**）。 */
+const authorVerifyFaceLabel = computed(() => {
+  const face = faces.value.find((item) => item.id === authorVerifyFaceId.value)
+  return face ? faceLabel(face) : ''
+})
+
+/** 目标印面的当前作者名（「佚名」按**无作者**处理 ⇒ 走输入框分支）。 */
+function authorVerifyCurrentName(face) {
+  const name = String(corrections.resolveAuthorDisplayName(face) || '').trim()
+  return name === '佚名' ? '' : name
+}
+
+/** 打开弹窗（每次打开重置候选 / 反馈 / 查询态；有当前作者名即刻按 `face_id` 查）。 */
+function openAuthorVerify(face) {
+  /* 未登录 ⇒ 与【勘誤】同一登录门（`openCorrection` 的 `!canSubmit ⇒ goLogin`）。 */
+  if (!canSubmit.value) {
+    goLogin()
+    return
+  }
+  const current = face ? authorVerifyCurrentName(face) : ''
+  authorVerifyFaceId.value = face ? String(face.id) : ''
+  authorVerifyName.value = current
+  authorVerifyNeedsName.value = current === ''
+  authorVerifyCandidates.value = []
+  authorVerifySearched.value = false
+  authorVerifyQueryLabel.value = ''
+  authorVerifyFeedback.value = ''
+  authorVerifyError.value = ''
+  authorVerifyOpen.value = true
+  if (current) void runAuthorSuggest({ faceId: authorVerifyFaceId.value })
+}
+
+/** 关闭弹窗（零写入；候选与反馈一并作废，避免下次打开残留）。 */
+function closeAuthorVerify() {
+  if (authorVerifyBusy.value) return
+  authorVerifyOpen.value = false
+  authorVerifyFaceId.value = ''
+  authorVerifyCandidates.value = []
+  authorVerifyFeedback.value = ''
+  authorVerifyError.value = ''
+  authorVerifySearched.value = false
+  authorVerifyQueryLabel.value = ''
+}
+
+/** 跑一次候选查询（**失败原文上屏**；成功才落候选）。 */
+async function runAuthorSuggest(input) {
+  if (authorVerifyBusy.value) return
+  authorVerifyBusy.value = true
+  authorVerifyError.value = ''
+  authorVerifyFeedback.value = ''
+  authorVerifyCandidates.value = []
+  authorVerifySearched.value = true
+  try {
+    const out = await authorMatch.suggestAuthorCandidates({ ...input, limit: AUTHOR_VERIFY_LIMIT })
+    if (!out || out.ok !== true) {
+      authorVerifyQueryLabel.value = ''
+      authorVerifyError.value = (out && out.message) || '作者候選查詢失敗；本次未列出任何候選。'
+      return
+    }
+    authorVerifyCandidates.value = out.candidates
+    authorVerifyQueryLabel.value = String(out.normalized || input.name || input.faceId || '').trim()
+  } catch (err) {
+    authorVerifyError.value = `作者候選查詢失敗（${(err && err.message) || '未知原因'}）；本次未列出任何候選。`
+  } finally {
+    authorVerifyBusy.value = false
+  }
+}
+
+/** 输入框分支的「查詢候選」（只按姓名查；空输入 ⇒ 可读提示，不发空查询）。 */
+function onAuthorVerifySearch() {
+  const name = String(authorVerifyName.value || '').trim()
+  if (!name) {
+    authorVerifyError.value = '請先輸入作者姓名，再查詢候選。'
+    return
+  }
+  void runAuthorSuggest({ name })
+}
+
+/** 命中字段中文名（单点取服务层真源；视图不另写第二套字段名表）。 */
+function authorVerifyFieldLabel(field) {
+  return authorMatch.matchedFieldLabel(field)
+}
+
+/** 分数上屏：有限数字**原样**（不四舍五入、不换算百分比）；取不到 ⇒ `—`（不编造 0 分）。 */
+function authorVerifyScoreText(score) {
+  return typeof score === 'number' && Number.isFinite(score) ? String(score) : '—'
+}
+
+/**
+ * 选中一个候选 ⇒ **走既有勘误通道提交**（回填既有表单后调视图 `submitCorrection()`，
+ * 与【重新提交】同一路径 ⇒ `corrections.submitCorrection`，零新增写口）。
+ * 成功 / 跳过（已存在）/ 失败三态文案**逐字沿用**既有回包，同时落弹窗内与页面级提示位。
+ */
+async function onAuthorVerifyPick(candidate) {
+  if (authorVerifyBusy.value) return
+  const face = faces.value.find((item) => item.id === authorVerifyFaceId.value) || null
+  if (!face) {
+    authorVerifyFeedback.value = '本印面已不可用，本次未提交任何內容。'
+    return
+  }
+  /* 会话在弹窗打开后失效 ⇒ 与入口同一登录门（不静默、不提交）。 */
+  if (!canSubmit.value) {
+    goLogin()
+    return
+  }
+  const personId = String((candidate && candidate.person_id) || '').trim()
+  if (!personId) {
+    authorVerifyFeedback.value = '該候選缺少印人編號（person_id），本次未提交。'
+    return
+  }
+  authorVerifyBusy.value = true
+  try {
+    /* 回填既有勘误表单：其余项一并清空 ⇒ 本单只提交「作者」这一项。 */
+    corrections.MARKABLE_FIELDS.forEach((item) => {
+      form[item.key] = ''
+    })
+    form.basis = ''
+    formFaceId.value = face.id
+    form.author = personId
+    const outcome = (await submitCorrection()) || { accepted: 0, skipped: 0, message: '' }
+    /* 回包必须有文案（提交入口三态恒给一句）；万一为空 ⇒ 如实说明「未知」，**不谎称成功、不静默**。 */
+    const message = String(outcome.message || '').trim() || '提交結果未取得回執，請到「我的勘誤記錄」確認本次是否入庫。'
+    authorVerifyFeedback.value = message
+    /* 同一份文案上屏到页面级提示位（弹窗关掉后仍可见）。 */
+    publishCorrectionNotice(message, face.id)
+    if (outcome.accepted > 0) dataVersion.value += 1
+  } finally {
+    authorVerifyBusy.value = false
+  }
 }
 
 /* ============================================================================
@@ -2915,6 +3083,20 @@ onBeforeUnmount(() => {
                 <span v-if="item.source === 'CORRECTION'" class="detail__origin">
                   原始值：{{ item.original || '未著錄' }}
                 </span>
+                <!-- **校驗作者（本單）**：作者行旁的入口（钩子 `data-author-verify`）。
+                     **一律渲染**（游客可见、可达）⇒ 点击走既有登录门（`openAuthorVerify` 的
+                     `!canSubmit ⇒ goLogin`，与【勘誤】入口同一口径、不另造文案）；
+                     不 CSS 隐藏、不用 disabled 冒充游客态。 -->
+                <button
+                  v-if="item.key === 'author'"
+                  class="btn btn--ghost"
+                  type="button"
+                  data-author-verify
+                  :disabled="authorVerifyBusy"
+                  @click="openAuthorVerify(face)"
+                >
+                  校驗作者
+                </button>
               </td>
               <td>
                 <span v-if="item.source === 'CORRECTION'" class="detail__badge detail__badge--adopted">
@@ -3747,6 +3929,104 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- **校驗作者彈窗（本單）**：候选列表（姓名 / 朝代 / 命中字段中文名 / 分数）＋ 三态反馈。
+         · 查询词：有当前作者名 ⇒ 打开即按 `face_id` 查；无 ⇒ 出输入框由用户填姓名再查；
+         · 空态「暫無合適人選」只在**查询成功且零候选**时出现（查询失败走
+           `data-author-verify-error`，**不以空列表冒充**）；
+         · 选中 ⇒ 走既有勘误提交（`data-author-verify-pick`），回包文案逐字沿用既有提交入口。 -->
+    <div v-if="authorVerifyOpen" class="correction-mask" role="dialog" aria-modal="true" aria-label="校驗作者">
+      <div class="correction-box">
+        <h3 class="correction-box__title">校驗作者</h3>
+        <p class="correction-box__lede">
+          校驗對象：{{ authorVerifyFaceLabel }}。候選來自平臺印人庫的匹配結果；選中一項後走既有【勘誤】通道提交，審覈採納後才改變對外展示的作者。
+        </p>
+
+        <div v-if="authorVerifyNeedsName" class="field">
+          <label for="author-verify-name">作者姓名</label>
+          <input
+            id="author-verify-name"
+            v-model="authorVerifyName"
+            type="text"
+            placeholder="輸入要校驗的作者姓名"
+            data-author-verify-input
+            @keyup.enter="onAuthorVerifySearch"
+          />
+        </div>
+
+        <div class="correction-box__foot">
+          <button
+            class="btn btn--primary"
+            type="button"
+            data-author-verify-search
+            :disabled="authorVerifyBusy"
+            @click="onAuthorVerifySearch"
+          >
+            {{ authorVerifyBusy ? '查詢中…' : '查詢候選' }}
+          </button>
+          <button class="btn btn--ghost" type="button" data-author-verify-close @click="closeAuthorVerify">
+            關閉
+          </button>
+        </div>
+
+        <p v-if="authorVerifyQueryLabel" class="detail__hint" data-author-verify-query>
+          查詢詞：{{ authorVerifyQueryLabel }}
+        </p>
+        <!-- 查询失败：服务端 / 传输层原话上屏（与提交反馈分位，互不覆盖）。 -->
+        <p v-if="authorVerifyError" class="correction-box__feedback" data-author-verify-error>
+          {{ authorVerifyError }}
+        </p>
+        <!-- 提交回包（成功 / 已存在跳过 / 失败三态，逐字来自既有提交入口）。 -->
+        <p v-if="authorVerifyFeedback" class="correction-box__feedback" data-author-verify-feedback>
+          {{ authorVerifyFeedback }}
+        </p>
+
+        <ul v-if="authorVerifyCandidates.length" class="author-verify__list" data-author-verify-candidates>
+          <li
+            v-for="candidate in authorVerifyCandidates"
+            :key="candidate.person_id"
+            class="author-verify__item"
+            data-author-verify-candidate
+            :data-author-verify-person="candidate.person_id"
+            :data-author-verify-current="candidate.is_current ? '1' : '0'"
+          >
+            <span class="author-verify__name" data-author-verify-candidate-name>
+              {{ candidate.display_name || '佚名' }}
+            </span>
+            <span class="author-verify__meta" data-author-verify-candidate-dynasty>
+              {{ candidate.dynasty || '—' }}
+            </span>
+            <span class="author-verify__meta" data-author-verify-candidate-field>
+              {{ authorVerifyFieldLabel(candidate.matched_field) }}
+            </span>
+            <span class="author-verify__meta" data-author-verify-candidate-value>
+              {{ candidate.matched_value || '—' }}
+            </span>
+            <span class="author-verify__meta" data-author-verify-candidate-score>
+              分數 {{ authorVerifyScoreText(candidate.score) }}
+            </span>
+            <span v-if="candidate.is_current" class="detail__hint" data-author-verify-current>當前作者</span>
+            <button
+              class="btn btn--ghost"
+              type="button"
+              data-author-verify-pick
+              :disabled="authorVerifyBusy"
+              @click="onAuthorVerifyPick(candidate)"
+            >
+              選為作者
+            </button>
+          </li>
+        </ul>
+        <!-- 空态：**仅查询成功且零候选**时出现（失败另有上面的错误位）。 -->
+        <p
+          v-else-if="authorVerifySearched && !authorVerifyBusy && !authorVerifyError"
+          class="detail__hint"
+          data-author-verify-empty
+        >
+          暫無合適人選
+        </p>
+      </div>
+    </div>
+
     <!-- 保存入口②的轻量选择器（与入口①**同一个组件**；保存必经选择器，不静默存入）。 -->
     <SealFolderPicker
       v-if="saveOpen"
@@ -4069,6 +4349,37 @@ onBeforeUnmount(() => {
 /* 简繁等价提示（§3.78）：**追加的一行**，不替换原值、不置灰、不折疊候选行。 */
 .endorse__s2t-hint {
   flex-basis: 100%;
+}
+
+/* **校驗作者（本單）**：弹窗内候选列表（与【候選值 · 可採信】列表同形，便于并排比对）。 */
+.author-verify__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.author-verify__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-sm, 4px);
+  font-size: var(--t-sm);
+}
+
+.author-verify__name {
+  color: var(--c-text);
+  font-weight: 500;
+}
+
+.author-verify__meta {
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
 }
 
 /* 同上（提交表单旁）：提示与反馈位同形，**不禁用提交、不改值**。 */

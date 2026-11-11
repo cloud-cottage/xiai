@@ -3,7 +3,7 @@
  * ============================================================================
  * 【為什麼有這一層】改前廣場靠「雲端全量水合」才能出圖：`seals.listSeals()` 要等 11,800 行
  *   `seals` / `faces` / `images` 全部落到快照裡，再在**主線程**逐印章組裝視圖模型 ⇒ 實測首屏
- *   28〜42 秒。本單把列表改成**分頁消費雲函數的匿名 action `listSealCards`**：
+ *   28〜42 秒。本單把列表改成**分頁消費雲函數的公開只讀面 `{action:'public', op:'listSealCards'}`**：
  *     · 首屏只請求 48 枚；滾到底 / 按「載入更多」按 `next_cursor` 續拉；
  *     · 四個篩選維度**下推**為請求參數（不再客戶端全量過濾）；
  *     · 封面圖直接取行上的 `thumb_key` / `display_key`（已是
@@ -42,8 +42,11 @@ export const SQUARE_PAGE_MAX_LIMIT = 96
 /** 承載 `listSealCards` 的雲函數名（**唯一真源**：雲函數側若掛到別的函數，只改這一行）。 */
 export const SEAL_CARDS_FUNCTION_NAME = 'xiai-user-token'
 
-/** 匿名 action 名（與雲函數註冊面逐字一致）。 */
-export const SEAL_CARDS_ACTION = 'listSealCards'
+/** 公開只讀通道的 `action` 字面值（雲函數 `index.js::handlePublic` 的分流判據；與 `authorMatch.js` 同寫法）。 */
+export const SEAL_CARDS_ACTION = 'public'
+
+/** 公開只讀 op 名（與雲函數 `PUBLIC_OPS` 註冊面逐字一致）。 */
+export const SEAL_CARDS_OP = 'listSealCards'
 
 /** `rows` 元素**恰 14 鍵**（順序即契約順序；取證可逐字比對）。 */
 export const SEAL_CARD_ROW_KEYS = Object.freeze([
@@ -273,7 +276,7 @@ function localPageOf(input = {}) {
  *
  * 讀序（機械可判、三支互斥）：
  *   ① **未配置雲端**（`cloudBaseConfigured() === false`）⇒ 本機示範資料（`source:'local'`）；
- *   ② 已配置 ⇒ 調匿名 action `listSealCards`：
+ *   ② 已配置 ⇒ 調公開只讀面 `{action:'public', op:'listSealCards'}`：
  *        · 回包可辨識 ⇒ 用服務端 rows / `next_cursor` / `has_more` / `total`（原樣透傳，零派生）；
  *        · 傳輸層失敗或形狀不可辨識 ⇒ **本機示範資料兜底**（`fallback:true` ＋ 服務端原話），
  *          本機也空 ⇒ 如實回 `{ok:false, reason, message}`（不假裝成功、不假裝「沒有印章」）。
@@ -290,6 +293,7 @@ export async function listSealCardPage(input = {}) {
 
   const reply = await callCloudFunction(SEAL_CARDS_FUNCTION_NAME, {
     action: SEAL_CARDS_ACTION,
+    op: SEAL_CARDS_OP,
     payload: request
   })
   if (!reply.ok) return demoFallbackOf(input, reply.reason, reply.message)
@@ -402,6 +406,7 @@ export function sealCardsSource() {
     pageSize: SQUARE_PAGE_SIZE,
     functionName: SEAL_CARDS_FUNCTION_NAME,
     action: SEAL_CARDS_ACTION,
+    op: SEAL_CARDS_OP,
     filterParams: { ...SQUARE_FILTER_PARAMS }
   }
 }

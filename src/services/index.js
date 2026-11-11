@@ -42,8 +42,12 @@ import * as aiEnhance from './aiEnhance.js'
    ＋ 封面走 `thumb_key`/`display_key`（`sealCards.js`；請求鍵面 / 14 鍵行面 / 篩選映射表真源）。
    页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as sealCards from './sealCards.js'
+/* **「校驗作者」候选匹配门面（本單新增）**：公開只讀 op `suggestAuthors` 的唯一消費點
+   （`authorMatch.js`；請求鍵面 / 候選 7 鍵面 / 命中字段中文名真源）。
+   页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
+import * as authorMatch from './authorMatch.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch }
 export default services
