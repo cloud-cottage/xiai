@@ -5182,7 +5182,12 @@ async function applyImageCorrectionAcceptance(row, at) {
  *  ＋ `faces[]` ＋ 冪等鍵 `client_request_id`；身份类键一律不在面内 ⇒ `INVALID_FIELD`。 */
 const SEAL_UPLOAD_ALLOWED_KEYS = Object.freeze([...SEAL_IMPORT_SEAL_FIELDS, 'faces', 'client_request_id'])
 
-/** 单印面**封闭键面**（必給 4 鍵 ＋ 可選 7 個自由文本鍵；其余键 ⇒ `INVALID_FIELD`）。 */
+/** 单印面**封闭键面**（必給 4 鍵 ＋ 可選 7 個自由文本鍵 ＋ **本单新增的作者引用键**
+ *  `author_person_id`**（可入面；由 `createSealUpload` 的必填门要求非空且指向既有印人）；
+ *  其余键 ⇒ `INVALID_FIELD`）。
+ *  **边界（键面不外溢）**：本键**只**加在上傳印章通道（`SEAL_UPLOAD_FACE_KEYS`）的键面上 ——
+ *  `createSealWithFaceDirect` / `reviewSealImport` / 导入通道的键面与门序一字未改
+ *  （那些路**允许**空作者 / 空印文）。 */
 const SEAL_UPLOAD_FACE_KEYS = Object.freeze([
   'kind',
   'image_sha256',
@@ -5194,6 +5199,7 @@ const SEAL_UPLOAD_FACE_KEYS = Object.freeze([
   'face_style',
   'seal_class',
   'author',
+  'author_person_id',
   'transcription'
 ])
 
@@ -8896,7 +8902,8 @@ const ADMIN_OPS = Object.freeze({
    * 提交一枚印章（1 印面 ＋ 可选边款）⇒ **服务端发号 ＋ 内容寻址影像行 ＋ `persist` 单点落盘**，
    * 客户端只落本机镜像（**本机不再发号** —— 本地号源只留给 `local-dev` 显式分支）。
    *
-   * 顺序（**全部判定在任何读 / 写之前**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 的唯一写点执行）：
+   * 顺序（**全部判定恒在任何写之前**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 的唯一写点执行；
+   *      判定面自 ⑥·新 起含**一次印人只读**（`readPersonRow`）—— 与 ⑦⑧ 的读点同族、仍恒在一切写之前）：
    *   ① 管理员门 `adminWhitelistDenial`（**任何读之前**；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝
    *      ＋ 零读零写；非白名单 ⇒ `FORBIDDEN`）；
    *   ② 载荷封闭键面 `SEAL_UPLOAD_ALLOWED_KEYS`（印章级 8 鍵 **＝ `SEAL_IMPORT_SEAL_FIELDS`
@@ -8912,6 +8919,13 @@ const ADMIN_OPS = Object.freeze({
    *      （给出即必须逐字命中，**不静默归一**）⇒ 任一不符 `INVALID_VALUE` ＋ 零写入；
    *   ⑥ 自由文本长度门 `sealTextLengthDenial` ＋ 值域门 `sealValueDomainDenial`
    *      （`dynasty` / `seal_type` / `face_style` / `seal_class`）；
+   *   ⑥·新 **必填两门 ＋ 印人引用门（本单新增；只长在本 op 上）**：印章级 `seal_name`（印文）
+   *      与**印面行上的** `author_person_id`（作者 · 印人引用）一律 `text()` **trim 后非空**；
+   *      缺任一 ⇒ `MISSING_REQUIRED`（**文案逐项点名缺哪几项**）＋零写入；`author_person_id`
+   *      须命中既有印人（`readPersonRow` ＝ `xiai_persons` 按 `id` 命中的单点读）⇒ 未命中 ⇒
+   *      `INVALID_VALUE` ＋零写入（**引用门恒在任何写之前**）。
+   *      **边界**：`createSealWithFaceDirect` / `reviewSealImport` / 导入通道**不加**此门
+   *      （那些路允许空作者 / 空印文）；
    *   ⑦ 影像引用：集合已有行 ⇒ 复用（**不改写既有行**）；无行 ⇒ 自建内容寻址登记行覆蓋層
    *      （`_id` ＝ `img-<sha 前 16 位>`，唯一构造点仍是 `buildDirectImageRow`）；
    *   ⑧ **幂等读**：同 `client_request_id` 已有正式行 ⇒ 回既有读数 ＋ `idempotent:true`、
@@ -9008,6 +9022,43 @@ const ADMIN_OPS = Object.freeze({
     if (lengthDenial) return lengthDenial
     const domainDenial = sealValueDomainDenial(payload, faces)
     if (domainDenial) return domainDenial
+    /* ⑥·新（本单）必填两门 ＋ 印人引用门 —— **只长在 `createSealUpload`（UI 新建通道）上**：
+       · 印章级 `seal_name`（印文）与**印面行上的** `author_person_id`（作者 · 印人引用）
+         一律 `text()`（＝ trim）后非空；
+       · 缺任一 ⇒ `MISSING_REQUIRED`（**文案逐项点名缺哪几项**，可一次点全）；
+       · `author_person_id` 须指向**既有印人**（`xiai_persons` 命中）⇒ 不存在 ⇒ `INVALID_VALUE`；
+       · 两者**恒在任何写之前**（本函数此刻只产 `plan`，落盘唯一写点在 `index.js`）。
+       **边界（本门不得外溢）**：`createSealWithFaceDirect` / `reviewSealImport` / 导入通道
+       （`submitSealImport` → 采纳）**一律不加**这两道门 —— 那些路**允许**空作者 / 空印文
+       （存量导入行口径）；本门只存在于本函数体内，导入侧键面与门序一字未改。 */
+    const sealName = text(payload.seal_name)
+    const missingRequired = []
+    if (sealName === '') missingRequired.push('seal_name（印文）')
+    /* 逐面收集引用（去重后再查，避免同人重复读）。 */
+    const authorRefs = []
+    for (let index = 0; index < faces.length; index += 1) {
+      const ref = text(faces[index] && faces[index].author_person_id)
+      if (ref === '') {
+        missingRequired.push(`faces[${index}].author_person_id（作者 · 印人引用）`)
+        continue
+      }
+      if (authorRefs.indexOf(ref) === -1) authorRefs.push(ref)
+    }
+    if (missingRequired.length > 0) {
+      return deny(REASONS.MISSING_REQUIRED, `新建印章缺少必要欄位：${missingRequired.join('、')}；本次零寫入。`)
+    }
+    /* 引用门（**只读、任何写之前**）：逐个去重后的 `author_person_id` 必须命中既有印人行。
+       读点复用 `readPersonRow` 单点（`xiai_persons` 按 `id` 命中；`code` / 文档 `_id` 兜底）——
+       不另立第二套印人读法；真存储故障照旧上抛，不吞成「无此人」。 */
+    for (const ref of authorRefs) {
+      const person = await readPersonRow(ref)
+      if (!person) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `作者（印人）引用不存在（author_person_id：${ref}）⇒ 請先建立該印人再上傳印章；本次零寫入。`
+        )
+      }
+    }
     /* ⑦ 影像引用：集合已有行 ⇒ 复用（不改写既有行）；无行 ⇒ 自建内容寻址登记行覆蓋層。 */
     const seconds = Number.isFinite(Number(context && context.nowSeconds))
       ? Math.floor(Number(context.nowSeconds))
