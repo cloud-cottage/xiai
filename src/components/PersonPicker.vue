@@ -15,6 +15,8 @@
  *
  * 结构：当前选中态（姓名 ＋ 字号 ＋ 清除）→ 弹层（搜索框 ＋ 分组滚动列表 ＋ 右侧 A–Z 索引条）。
  *   - 搜索是**本地过滤**（姓名 / 字 / 號 / 別名 / cbdb_id 子串匹配），命中仍按姓氏分组；
+ *     **跨字段拼接形态**：预计算里额外收「姓＋名」「姓＋字 / 號 / 別名（逐值）」直接相接串
+ *     ⇒ 整打全名（`趙之謙`，姓与名分属两字段）也能命中；单字段形态全部保留（命中面只增不减）；
  *     **简繁归一**：查询词与候选**两边同走**逐字 s2t 归一（`toTraditionalText` ＋ 小写）再比子串
  *     ⇒ 简体（赵）/ 繁体（趙）/ 混输两向互逆；ASCII（`PR0000`）不受归一影响、仍原样子串匹配；
  *     候选侧归一文本**一次性预计算**（`persons` 变更才重建），逐键只做子串匹配；
@@ -150,32 +152,87 @@ function searchPartsOf(row) {
   ]
 }
 
+/**
+ * **跨字段拼接形态**（原始文本；归一在预计算里做）：`姓＋名`（→「趙之謙」）、
+ * `姓＋字 / 號 / 別名`（**逐值**各成一串）—— 整打全名时姓与名分属两字段、
+ * 单字段子串永远匹配不上，故预计算里把它们**直接相接**（不插分隔符，
+ * 免得分隔符挡住子串）。姓或该段为空 ⇒ 跳过该形态。
+ */
+function searchJoinedOf(row) {
+  if (!row || typeof row !== 'object') return []
+  const family = row.family_name === null || row.family_name === undefined ? '' : String(row.family_name).trim()
+  if (!family) return []
+  const joined = []
+  const given = row.given_name === null || row.given_name === undefined ? '' : String(row.given_name).trim()
+  if (given) joined.push(family + given)
+  for (const key of ['courtesy_names', 'art_names', 'alias_names']) {
+    const list = Array.isArray(row[key]) ? row[key] : []
+    for (const value of list) {
+      const text = value === null || value === undefined ? '' : String(value).trim()
+      if (text) joined.push(family + text)
+    }
+  }
+  return joined
+}
+
 /** 过滤关键字（trim ＋ 归一；空 ⇒ 全量）。 */
 const keyword = computed(() => normalizeSearchText(String(query.value || '').trim()))
 
 /**
  * 候选侧归一索引（**一次性预计算**）：`persons` 变更才重建；570 行只在建一次，
- * 之后每次输入只对既有串做子串匹配（不逐键重跑 s2t）。行对象 → 归一后的检索面分片数组。
+ * 之后每次输入只对既有串做子串匹配（不逐键重跑 s2t）。行对象 →
+ * `{ parts, joined }`：`parts` ＝ **全部**检索面归一串（单字段形态 ＋ 拼接形态，
+ * 同人重复串只留一份）；`joined` ＝ 拼接形态归一串（供整串恰等时置顶排序）。
+ * 空值先跳过、其余每条原始串各过一次 `normalizeSearchText()`（不重复归一）。
  */
 const searchHaystacks = computed(() => {
   const rows = Array.isArray(props.persons) ? props.persons : []
   const map = new Map()
   for (const row of rows) {
-    map.set(row, searchPartsOf(row).map(normalizeSearchText))
+    const seen = new Set()
+    const parts = []
+    const push = (text) => {
+      if (text === null || text === undefined || text === '') return
+      const norm = normalizeSearchText(text)
+      if (!norm || seen.has(norm)) return
+      seen.add(norm)
+      parts.push(norm)
+    }
+    for (const text of searchPartsOf(row)) push(text)
+    const joined = []
+    for (const text of searchJoinedOf(row)) {
+      const norm = normalizeSearchText(text)
+      if (!norm) continue
+      if (!joined.includes(norm)) joined.push(norm)
+      if (!seen.has(norm)) {
+        seen.add(norm)
+        parts.push(norm)
+      }
+    }
+    map.set(row, { parts, joined })
   }
   return map
 })
 
-/** 过滤后的行（保持入参顺序；分组 / 排序交给 `groupPersons`）。 */
+/**
+ * 过滤后的行（**整串恰等的全名置顶**，其余保持入参顺序；分组 / 排序交给 `groupPersons`）。
+ * 置顶只动候选序、不改命中面：搜「趙之謙」时 `陸開鈞`（字「畫均似趙之謙」）仍命中，
+ * 但本尊（`姓＋名` 恰等）排第一。
+ */
 const visibleRows = computed(() => {
   const rows = Array.isArray(props.persons) ? props.persons : []
   const kw = keyword.value
   if (!kw) return rows
   const haystacks = searchHaystacks.value
-  return rows.filter((row) => {
-    const parts = haystacks.get(row)
-    return Array.isArray(parts) && parts.some((part) => part.includes(kw))
-  })
+  const exact = []
+  const rest = []
+  for (const row of rows) {
+    const entry = haystacks.get(row)
+    if (!entry || !Array.isArray(entry.parts) || !entry.parts.some((part) => part.includes(kw))) continue
+    if (Array.isArray(entry.joined) && entry.joined.includes(kw)) exact.push(row)
+    else rest.push(row)
+  }
+  return exact.length ? exact.concat(rest) : rest
 })
 
 /** 分组：`[{ initial, rows }]`，按 `GROUP_ORDER`（A…Z、`#` 最后），**只出非空组**。 */
