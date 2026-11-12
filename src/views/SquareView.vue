@@ -46,14 +46,16 @@ const canUploadSeal = computed(() => seals.canUploadSeal())
        400px 預取）或按「載入更多」按 **`next_cursor` 續拉**；
      · 續拉觸發條件 ＝ `has_more === true` **且** `next_cursor` 非空 **且** 當前沒有在飛的
        請求（`moreBusy` / `pageLoading` 皆 false）；
-     · 四維篩選（朝代 / 印面內容 / 印面風格 / 大類）**下推**為請求參數
-       （映射表真源 ＝ `sealCards.SQUARE_FILTER_PARAMS`），不再客戶端全量過濾；
-     · 篩選變化或 `dataVersion` 變 ⇒ **重置到首頁**（丟掉舊游標與累積行）；
+     · 四維篩選（朝代 / 印面內容 / 印面風格 / 大類）與**關鍵詞 `q`** 一併**下推**為請求參數
+       （映射表真源 ＝ `sealCards.SQUARE_FILTER_PARAMS`；請求恰 **7 鍵**），關鍵詞由服務端
+       **全庫**檢索，不再客戶端過濾已載入的頁；
+     · 篩選 / 關鍵詞變化或 `dataVersion` 變 ⇒ **重置到首頁**（丟掉舊游標與累積行）；
      · 封面圖取行上的 `thumb_key` / `display_key`（`SealCard` 負責）⇒ **不再依賴全量水合的
        seals / faces 映射**；
      · 無雲端 / 雲端讀失敗 ⇒ 服務層返回本機示範資料（`fallback:true`）＋ 本頁顯式提示。
-   · **關鍵詞 `?q=` 不在凍結契約內**（請求恰 6 鍵，沒有 keyword）⇒ 仍在客戶端過濾**已載入**
-     的頁，並如實上屏「已載入 N 枚中符合 M 枚」——不冒充全庫命中；契約缺口已寫進交付報告。
+   · **關鍵詞 `?q=` 仍由 URL 承載**（可分享、可後退）：`route.query.q` trim 後隨請求下推；
+     上屏「共 N 枚」一律取服務端 `total`；**不得**再上屏任何「只覆已載入頁」的降級計數
+     與其配套提示（規範 §3.81.7 / `AC-723` 判負面）。
    ============================================================================ */
 const PAGE_SIZE = sealCards.SQUARE_PAGE_SIZE
 
@@ -75,9 +77,15 @@ const fallbackDetail = ref('')
 /** 請求代次：篩選連點 / 分頁並發時，**只認最後一代**的回包（丟掉過期結果）。 */
 let requestGen = 0
 
-/** 當前的四維篩選（視圖參數名；翻譯成請求參數由服務層單點負責）。 */
+/** 當前的四維篩選 ＋ 關鍵詞（視圖參數名；翻譯成請求參數由服務層單點負責）。 */
 function filterArgs() {
-  return { dynasty: dynasty.value, content: content.value, style: style.value, sealClass: sealClass.value }
+  return {
+    dynasty: dynasty.value,
+    content: content.value,
+    style: style.value,
+    sealClass: sealClass.value,
+    q: keyword.value
+  }
 }
 
 /** 首屏 / 重置：清空游標與累積行，只拉第 1 頁。 */
@@ -134,9 +142,10 @@ async function loadMore() {
   }
 }
 
-/* 篩選變化 / 寫入後 ⇒ 重置到首頁（**關鍵詞不重拉**：它只過濾已載入的頁，見上方註）。 */
+/* 篩選 / 關鍵詞變化、寫入後 ⇒ 重置到首頁（`q` 與四維篩選**同權**：游標清空、列表清空、
+   重拉第 1 頁 —— 關鍵詞由服務端全庫檢索，**不在前端二次過濾**）。 */
 watch(
-  () => [dynasty.value, content.value, style.value, sealClass.value, dataVersion.value],
+  () => [dynasty.value, content.value, style.value, sealClass.value, keyword.value, dataVersion.value],
   () => { void loadFirstPage() },
   { immediate: true }
 )
@@ -165,20 +174,9 @@ onBeforeUnmount(() => {
   sentinelObserver = null
 })
 
-/* **關鍵詞過濾（客戶端、僅限已載入的頁）**：命中面 ＝ 印文 / 印面內容 / 編號
-   （卡片行沒有作者欄位 ⇒ 不比對作者；契約缺口見上方註與交付報告）。 */
-const matchedCards = computed(() => {
-  const kw = keyword.value
-  if (!kw) return cards.value
-  return cards.value.filter((row) =>
-    [row.seal_name, row.category, row.stamp_id].some((value) => String(value || '').includes(kw))
-  )
-})
-
-/** 上屏用列表（已被關鍵詞過濾）。 */
-const displayCards = computed(() => matchedCards.value)
-/** 「共 N 枚」：有關鍵詞時＝已載入裡命中的枚數；否則＝服務端 total。 */
-const totalShown = computed(() => (keyword.value ? matchedCards.value.length : totalCount.value))
+/* **列表 ＝ 服務端分頁 rows 原樣上屏**：關鍵詞 `q` 已下推為請求第 7 鍵（服務端全庫檢索）
+   ⇒ 本層**不再做任何關鍵詞二次過濾**（`filter` / `slice` / `sort` 一律不加），
+   「共 N 枚」一律取服務端 `total`。 */
 
 /* **數據源狀態（只讀）**：仍用於「本機示範資料」提示與孤兒行計數，**不再驅動列表水合**。 */
 const dataSource = computed(() => seals.dataSourceState())
@@ -538,7 +536,7 @@ async function confirmClearLocal() {
       :content="content"
       :style="style"
       :seal-class="sealClass"
-      :total="totalShown"
+      :total="totalCount"
       :degraded="FILTER_DEGRADED"
       @update:dynasty="(value) => applyQuery({ dynasty: value })"
       @update:content="(value) => applyQuery({ content: value })"
@@ -550,12 +548,10 @@ async function confirmClearLocal() {
     <!-- 識別編碼入口（§5｜R-4）：**已上收頁頭單框雙態搜索**（`HeaderSearch`），本頁不再另設入口。
          本頁只按 `route.query.code` 精確查、查無即空態，不回落關鍵詞 `q`、不模糊匹配。 -->
 
-    <!-- **關鍵詞只過濾已載入的頁**（契約無 keyword 參數）⇒ 如實報「已載入 N 枚中符合 M 枚」，
-         不把「還沒載入」說成「全庫沒有」。 -->
+    <!-- **關鍵詞已下推服務端全庫檢索**（請求第 7 鍵 `q`）：「共 N 枚」一律取服務端 `total`，
+         不再上屏「只覆已載入頁」的降級計數與其配套提示（規範 §3.81.7 / `AC-723`）。 -->
     <p v-if="keyword" class="square__keyword" data-square-keyword>
-      當前檢索「{{ keyword }}」：已載入 {{ cards.length }} 枚，其中符合 {{ matchedCards.length }} 枚<template
-        v-if="hasMore"
-      >；可繼續載入更多藏品後再檢索</template>
+      當前檢索「{{ keyword }}」：共 {{ totalCount }} 枚
     </p>
 
     <!-- **O-1**：雲讀失敗已回落本機示範資料 ⇒ 顯式提示 ＋ 重試入口（不靜默；字形同全站）。 -->
@@ -586,9 +582,9 @@ async function confirmClearLocal() {
       :desc="codeMissDesc"
     />
 
-    <div v-else-if="displayCards.length" class="square__grid">
+    <div v-else-if="cards.length" class="square__grid">
       <SealCard
-        v-for="card in displayCards"
+        v-for="card in cards"
         :key="card.stamp_id"
         :seal="card"
         @download="askDownload"
@@ -614,14 +610,14 @@ async function confirmClearLocal() {
     <!-- **分頁尾巴**：哨兵元素 ＝ 滾到底自動續拉的觀測點；「載入更多」按鈕走同一執行點
          （不支援 `IntersectionObserver` 時仍可用）。游標空 ⇒ 如實報「已全部載入」。 -->
     <div
-      v-if="!codeMiss && displayCards.length"
+      v-if="!codeMiss && cards.length"
       ref="sentinel"
       class="square__more"
       data-square-pager
       :data-square-has-more="hasMore ? '1' : '0'"
     >
       <span data-square-loaded>
-        已載入 {{ displayCards.length }}<template v-if="!keyword"> / 共 {{ totalShown }}</template> 枚
+        已載入 {{ cards.length }} / 共 {{ totalCount }} 枚
       </span>
       <button
         v-if="hasMore"

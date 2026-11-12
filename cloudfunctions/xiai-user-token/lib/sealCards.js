@@ -21,11 +21,20 @@
  *
  * 契约（**已冻结，一个字不得改**）：
  *   ① 公开读 action：`listSealCards`（**匿名可调**，不验 token）
- *      载荷封闭键面 `{ limit, cursor, dynasty, seal_type, face_style, category }`
+ *      载荷封闭键面 `{ limit, cursor, dynasty, seal_type, face_style, category, q }`（**恰 7 键**）
  *        · `limit` 整数 1〜60、缺省 48；越界 / 非整数 ⇒ `INVALID_VALUE`（**零读**）
  *        · `cursor` 上一页最后一枚的 `stamp_id`（升序、**不含**）；空串＝首页
  *        · 四个筛选键：空串＝不限；`dynasty` / `category` 过滤 `xiai_seals`，
  *          `seal_type` / `face_style` 过滤**主印面**（`xiai_faces`）
+ *        · `q` 关键词（**缺省 ＝ 空串 ＝ 不检索**）：字符串、trim 后长度 > 40 ⇒ `INVALID_VALUE`
+ *          （**零读**）；非字符串 ⇒ `INVALID_VALUE`。**服务端全库检索** —— 对 `xiai_seals` 做
+ *          大小写不敏感**包含**匹配，字段集**逐字 9 个**
+ *          （`stamp_id / seal_name / seal_wen / seal_wen_chs / transcription / category /
+ *          dynasty / seal_yz_person_name / author`；**印文两键为主**，`transcription` 仅 2 行有值、
+ *          一并纳入但不作依赖），正则元字符**必须转义**；查询词取
+ *          `variants = dedupe([q, s2t(q)])`（简→繁真源 ＝ `lib/authorMatch.js` 同一张逐字表），
+ *          **任一形态 × 任一字段命中即命中**（OR），再与四维筛选**叠加 AND**；
+ *          `total` ＝ **命中总数**（不是已载入数），`has_more` / `next_cursor` 按命中集分页。
  *      回包键面封闭 `{ ok:true, rows, next_cursor, has_more, total }`；`ok:false` ⇒ 恰 3 键
  *      `{ ok:false, reason, message }`（`reason` 只用 `lib/config.js::REASONS` 冻结值）。
  *      `rows` 每枚**恰 14 键**：`stamp_id / seal_name / dynasty / category / primary_face_id /
@@ -62,6 +71,8 @@
  *     与 **1 次按主印面 `image_id` 的小批量影像读**（≤ `limit` 枚；只为取摘要 / 容器 / 像素尺寸，
  *     **不读字节、不读全库**）。影像读在「每枚卡片都自带 `image_sha256` **与**
  *     `image_storage_key`」时不发生（两样都齐 ⇒ 封面键可由面行直接派生，不必读影像行）。
+ *   · **关键词 `q` 不新增任何读点**：它只是 `xiai_seals` 的 `where` 片段（`$or` 子句），
+ *     与四维筛选同沉一次窗口读 ＋ 一次 `count()`；**绝不在服务端拉全表回内存过滤**。
  *   · `has_more` **不由客户端推算**：本轮多取 1 枚卡片（`limit + 1`）作为判据；窗口耗尽且无
  *     多余枚 ⇒ `false`。
  *
@@ -99,14 +110,38 @@ function rowsOfReply(reply) {
  * 冻结键面（**唯一真源**；`index.js` 的按 op 收窄透传与离线自检都引这里）
  * -------------------------------------------------------------------------- */
 
-/** `listSealCards` 载荷封闭键面（**恰 6 键**）。 */
+/**
+ * `listSealCards` 载荷封闭键面（**恰 7 键**；`q` 为本单新增的关键词键）。
+ */
 const LIST_SEAL_CARDS_ALLOWED_KEYS = Object.freeze([
   'limit',
   'cursor',
   'dynasty',
   'seal_type',
   'face_style',
-  'category'
+  'category',
+  'q'
+])
+
+/** 关键词 `q` 的长度上界（**trim 后 > 40 ⇒ `INVALID_VALUE`（零读）**；非字符串 ⇒ `INVALID_VALUE`）。 */
+const LIST_SEAL_CARDS_MAX_QUERY_LENGTH = 40
+
+/**
+ * 关键词检索字段集（**逐字 9 个，顺序即契约顺序**）：印文繁体 `seal_wen` ＋ 简体 `seal_wen_chs`
+ * 为主键面；`transcription` 全库仅 2 行有值 ⇒ 一并纳入、**不作依赖**；其余四维同源字段
+ * （`category` / `dynasty`）与标识字段（`stamp_id` / `seal_name` / `seal_yz_person_name` / `author`）
+ * 一并可命中。**大小写不敏感**由 `options:'i'` 给出（服务端实测：`aaaab` / `AAAAB` / `AaAaB` 同命中）。
+ */
+const LIST_SEAL_CARDS_SEARCH_FIELDS = Object.freeze([
+  'stamp_id',
+  'seal_name',
+  'seal_wen',
+  'seal_wen_chs',
+  'transcription',
+  'category',
+  'dynasty',
+  'seal_yz_person_name',
+  'author'
 ])
 
 /** 卡片行封闭键面（**恰 14 键**；顺序即回包顺序）。 */
@@ -414,13 +449,50 @@ function sortedWindowOf(rows, idField, after, limit, idIn) {
 
 /**
  * 等值筛选（**只用纯值条件**；主路交给 DB，退路在内存判 —— 两条路同一张匹配表）。
+ * **本单 `q` 追加**：退路（`countRows` 的计数回落）与主路同尺 —— 也认 `$or` / `$and` / `$nor`
+ * 组与 `$regularExpression` 子句（主路把它们原样下发给 DB；不认就会把带关键词的计数
+ * **错算成 0**）。纯等值键的判定**一字未改**。
  * @param {Array<object>} rows 候选行
- * @param {object} match 等值条件
+ * @param {object} match 等值条件（可含 `$or` / `$and` / `$nor`）
  */
 function matchRows(rows, match) {
   const keys = Object.keys(match || {})
   if (keys.length === 0) return Array.isArray(rows) ? rows.slice() : []
-  return (Array.isArray(rows) ? rows : []).filter((row) => keys.every((key) => text(row && row[key]) === text(match[key])))
+  return (Array.isArray(rows) ? rows : []).filter((row) => rowMatchesQuery(row, match))
+}
+
+/** `$or` / `$and` / `$nor` 的子句集（非数组 ⇒ `[]`：`$or` 恒假、`$and` 恒真）。 */
+function queryClausesOf(value) {
+  return Array.isArray(value) ? value : []
+}
+
+/** 关键词正则的内存判（形态＝`{ pattern, options }`；构造失败 ⇒ **永不匹配**，不抛）。 */
+function searchRegExpMatcherOf(spec) {
+  const pattern = spec && spec.pattern !== undefined && spec.pattern !== null ? String(spec.pattern) : ''
+  const options = spec && spec.options !== undefined && spec.options !== null ? String(spec.options) : ''
+  try {
+    return new RegExp(pattern, options)
+  } catch (error) {
+    return /\b\B/ /* 元字符未转义等畸形形态 ⇒ 不猜、不命中（主路同样会由 DB 报错）。 */
+  }
+}
+
+/** 单行判定（`matchRows` 的唯一判定处；键集为空 ⇒ 恒真）。 */
+function rowMatchesQuery(row, query) {
+  return Object.keys(query || {}).every((key) => {
+    const expected = query[key]
+    if (key === '$or') return queryClausesOf(expected).some((clause) => rowMatchesQuery(row, clause))
+    if (key === '$and') return queryClausesOf(expected).every((clause) => rowMatchesQuery(row, clause))
+    if (key === '$nor') return queryClausesOf(expected).every((clause) => !rowMatchesQuery(row, clause))
+    if (expected && typeof expected === 'object' && !Array.isArray(expected) && expected.$regularExpression) {
+      /* 关键词子句（`db.RegExp` 实例与 wire 字面值**两形态同判** —— 两者都有 `$regularExpression`）。
+         **不 trim**：与服务端口径一致（DB 按存储原值做包含匹配；缺字段 ＝ 空串）。 */
+      const raw = row && row[key]
+      const haystack = raw === undefined || raw === null ? '' : String(raw)
+      return searchRegExpMatcherOf(expected.$regularExpression).test(haystack)
+    }
+    return text(row && row[key]) === text(expected)
+  })
 }
 
 /** 服务端计数（`total` 口径；**不传行**）。计数不可用时退路为按上限读回后计数。 */
@@ -442,6 +514,93 @@ async function countRows(db, collection, match) {
 }
 
 /* --------------------------------------------------------------------------
+ * 服务端全库关键词检索（`listSealCards.q`）：转义 → 简繁双形态 → 9 字段包含匹配
+ * --------------------------------------------------------------------------
+ * **只在服务端做**：本节产出的是 `xiai_seals` 的 `where` 片段（`$or` 子句），
+ * 与四维筛选同置一个对象 ⇒ DB 侧 AND 叠加；**绝不把全库拉回内存再过滤**。
+ * 三步（逐条与冻结契约同尺）：
+ *   ① 正则元字符**转义**（用户会输 `*` `.` `+` `(` `）` …；不转义 ⇒ 服务端
+ *      `nothing to repeat` 直接报错，或把字面量当通配符误命中全库 —— 两种都判负）；
+ *   ② 形态 ＝ `dedupe([q, s2t(q)])`，简→繁真源**只用 `lib/authorMatch.js` 已带的逐字表**
+ *      （本文件**不建第二张表**）—— 既让简体输入命中 `seal_wen_chs`，也让繁体输入命中 `seal_wen`；
+ *   ③ 每个形态 × 9 字段一条子句，**全部 OR**（任一形态、任一字段命中即命中）。
+ */
+
+/** 正则元字符转义（`* . + ? ^ $ | ( ) [ ] { }` 与反斜杠本身；其余字符原样）。 */
+function escapeSearchPattern(value) {
+  return text(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/* 简→繁逐字表（懒建；**真源 ＝ `lib/authorMatch.js` 导出的同一张逐字表**，不另造第二张）。 */
+let SEARCH_S2T_MAP = null
+
+function searchS2tMap() {
+  if (SEARCH_S2T_MAP) return SEARCH_S2T_MAP
+  const source = Array.from(authorMatch.S2T_GLYPH_SOURCE).filter((ch) => ch !== '\n' && ch !== ' ' && ch !== '\r')
+  const target = Array.from(authorMatch.S2T_GLYPH_TARGET).filter((ch) => ch !== '\n' && ch !== ' ' && ch !== '\r')
+  const size = Math.min(source.length, target.length)
+  const map = new Map()
+  for (let i = 0; i < size; i += 1) map.set(source[i], target[i])
+  SEARCH_S2T_MAP = map
+  return SEARCH_S2T_MAP
+}
+
+/** 简 → 繁（逐字；表未覆盖的字**原样保留、不猜**）。 */
+function toTraditionalGlyphs(value) {
+  const map = searchS2tMap()
+  let out = ''
+  for (const ch of text(value)) out += map.get(ch) || ch
+  return out
+}
+
+/**
+ * 查询词形态 ＝ **`dedupe([q, s2t(q)])`**（空串 ⇒ `[]` ＝ 不检索）。
+ * 两形态不同才各留一条 ⇒ 去重天然成立（不另写比对）。
+ * @param {string} query 已 trim 的关键词
+ * @returns {Array<string>} 形态列表（0 或 1〜2 条）
+ */
+function searchVariantsOf(query) {
+  const raw = text(query)
+  if (raw === '') return []
+  const variants = [raw]
+  const traditional = toTraditionalGlyphs(raw)
+  if (traditional !== raw) variants.push(traditional)
+  return variants
+}
+
+/**
+ * 单个正则条件的**服务端形态**：优先 `db.RegExp({regexp, options:'i'})`（SDK 公开面）；
+ * DB 句柄没有 `RegExp`（注入式假体）⇒ 回落等价 wire 字面值
+ * `{ $regularExpression: { pattern, options } }` —— **两者序列化后逐字相同**
+ * （真库实测：同词同命中数）。
+ */
+function searchRegExpOf(db, pattern) {
+  if (db && typeof db.RegExp === 'function') return db.RegExp({ regexp: pattern, options: 'i' })
+  return { $regularExpression: { pattern, options: 'i' } }
+}
+
+/**
+ * 关键词 ⇒ 印章侧 `where` 片段（空串 ⇒ `{}`，与加 `q` 前**逐字一致**）。
+ * 非空 ⇒ 恰一个 `$or`：`variants.length × 9` 条子句（形态 × 字段，任一命中即命中）；
+ * 与 `dynasty` / `category` 同置一对象 ⇒ **服务端 AND 叠加**。
+ * @param {object} db DB 句柄（只为取 `db.RegExp`；不读不写）
+ * @param {string} query 关键词（已 trim、已过 40 字门）
+ * @returns {object} `{}` 或 `{ $or: [...] }`
+ */
+function keywordMatchOf(db, query) {
+  const variants = searchVariantsOf(query)
+  if (variants.length === 0) return {}
+  const clauses = []
+  for (const variant of variants) {
+    const pattern = escapeSearchPattern(variant)
+    for (const field of LIST_SEAL_CARDS_SEARCH_FIELDS) {
+      clauses.push({ [field]: searchRegExpOf(db, pattern) })
+    }
+  }
+  return { $or: clauses }
+}
+
+/* --------------------------------------------------------------------------
  * 载荷门（**全部判定早于任何读**）
  * -------------------------------------------------------------------------- */
 
@@ -459,8 +618,9 @@ function payloadShapeDenial(payload, allowedKeys) {
 
 /**
  * `listSealCards` 载荷解析（缺省值见契约；**任一不合 ⇒ 结构化拒绝 ＋ 零读**）。
+ * 判定序：键面（未知 / 身份类 ⇒ `INVALID_FIELD`）→ `limit` → `cursor` → 四筛选键 → `q`。
  * @param {object} [payload] 载荷
- * @returns {{ok:true, value:{limit:number, cursor:string, dynasty:string, seal_type:string, face_style:string, category:string}}|{ok:false, reason:string, message:string}}
+ * @returns {{ok:true, value:{limit:number, cursor:string, dynasty:string, seal_type:string, face_style:string, category:string, q:string}}|{ok:false, reason:string, message:string}}
  */
 function parseListSealCardsPayload(payload) {
   const shapeDenial = payloadShapeDenial(payload, LIST_SEAL_CARDS_ALLOWED_KEYS)
@@ -489,6 +649,22 @@ function parseListSealCardsPayload(payload) {
     }
     filters[key] = input[key].trim()
   }
+  /* `q` 关键词（**缺省 ＝ 空串 ＝ 不检索**）：非字符串 ⇒ `INVALID_VALUE`；trim 后长度
+     > `LIST_SEAL_CARDS_MAX_QUERY_LENGTH` ⇒ `INVALID_VALUE`（**不静默截断、不静默夹取**）。
+     全部判定仍早于任何读。 */
+  let q = ''
+  if (Object.prototype.hasOwnProperty.call(input, 'q')) {
+    if (typeof input.q !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '`q` 必須是關鍵詞字符串（空串＝不檢索）；本次零讀取。')
+    }
+    q = input.q.trim()
+    if (q.length > LIST_SEAL_CARDS_MAX_QUERY_LENGTH) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `\`q\` trim 後長度不得超過 ${LIST_SEAL_CARDS_MAX_QUERY_LENGTH} 字（當前 ${q.length} 字）；本次零讀取。`
+      )
+    }
+  }
   return {
     ok: true,
     value: {
@@ -497,7 +673,8 @@ function parseListSealCardsPayload(payload) {
       dynasty: filters.dynasty,
       seal_type: filters.seal_type,
       face_style: filters.face_style,
-      category: filters.category
+      category: filters.category,
+      q
     }
   }
 }
@@ -643,7 +820,7 @@ async function candidateSealKeysOf(db, faceMatch, cursor) {
 
 /**
  * **首页印章卡片分页读（匿名可调｜只读｜零写入）**。
- * @param {object} [payload] 封闭 6 键（缺省值见契约）
+ * @param {object} [payload] 封闭 7 键（缺省值见契约）
  * @returns {Promise<{ok:true, rows:Array<object>, next_cursor:string, has_more:boolean, total:number}|
  *                   {ok:false, reason:string, message:string}>}
  */
@@ -656,6 +833,12 @@ async function listSealCards(payload) {
   const sealMatch = {}
   if (input.dynasty !== '') sealMatch.dynasty = input.dynasty
   if (input.category !== '') sealMatch.category = input.category
+  /* **服务端全库关键词检索（本单 `q`）**：`q` 非空 ⇒ 追加一个 `$or`（`variants × 9` 字段、
+     大小写不敏感、元字符已转义）到**同一个** `sealMatch` 对象 ⇒ 与四维筛选在 DB 侧 **AND** 叠加。
+     `q` 空 ⇒ `keywordMatchOf` 回 `{}` ⇒ `sealMatch` 与加 `q` 前**逐字一致**（零回归）。
+     本对象同时喂窗口读与 `count()` ⇒ `total` ＝ **命中总数**、`rows` ／ `has_more` ／ `next_cursor`
+     按同一命中集分页（三者同尺，不会自相矛盾）。 */
+  Object.assign(sealMatch, keywordMatchOf(db, input.q))
   const faceMatch = {}
   if (input.seal_type !== '') faceMatch.seal_type = input.seal_type
   if (input.face_style !== '') faceMatch.face_style = input.face_style
@@ -723,9 +906,9 @@ async function listSealCards(payload) {
   const hasMore = cards.length > input.limit || (!exhausted && cards.length >= input.limit)
   const pageRows = cards.slice(0, input.limit)
   const nextCursor = hasMore && pageRows.length > 0 ? pageRows[pageRows.length - 1].stamp_id : ''
-  /* `total`：命中**印章侧**筛选的印章数（服务端计数、不传行）。面维度筛选只决定 `rows` 与
-     `has_more`，不参与 `total`（0 面印章计入 `total`、不进 `rows` —— 数据层允许 0 面、
-     展示层不列；若需 `total` 与 `rows` 严格等数，须另开聚合计数单）。 */
+  /* `total`：命中**印章侧**筛选（四维 ＋ 关键词 `q`）的印章数（服务端计数、不传行）。
+     面维度筛选只决定 `rows` 与 `has_more`，不参与 `total`（0 面印章计入 `total`、不进 `rows`
+     —— 数据层允许 0 面、展示层不列；若需 `total` 与 `rows` 严格等数，须另开聚合计数单）。 */
   const total = await countRows(db, ops.COLLECTIONS.seals, sealMatch)
   return {
     ok: true,
@@ -1294,6 +1477,9 @@ module.exports = {
   CARD_ROW_KEYS,
   LIST_SEAL_CARDS_DEFAULT_LIMIT,
   LIST_SEAL_CARDS_MAX_LIMIT,
+  /* 关键词检索面（本单 `q`）：长度上界 ＋ 9 字段集（逐字断言用）。 */
+  LIST_SEAL_CARDS_MAX_QUERY_LENGTH,
+  LIST_SEAL_CARDS_SEARCH_FIELDS,
   REPAIR_PRIMARY_FACE_ALLOWED_KEYS,
   REPAIR_PRIMARY_FACE_READOUT_KEYS,
   REPAIR_PRIMARY_FACE_SAMPLE_KEYS,
@@ -1304,5 +1490,10 @@ module.exports = {
   primaryFaceOf,
   objectKeyOfDigest,
   sealKeyOf,
-  faceSealKeyOf
+  faceSealKeyOf,
+  /* 关键词检索纯函数（本单 `q`；离线自检直接断言） */
+  escapeSearchPattern,
+  searchVariantsOf,
+  keywordMatchOf,
+  matchRows
 }

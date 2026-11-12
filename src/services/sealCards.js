@@ -5,14 +5,16 @@
  *   `seals` / `faces` / `images` 全部落到快照裡，再在**主線程**逐印章組裝視圖模型 ⇒ 實測首屏
  *   28〜42 秒。本單把列表改成**分頁消費雲函數的公開只讀面 `{action:'public', op:'listSealCards'}`**：
  *     · 首屏只請求 48 枚；滾到底 / 按「載入更多」按 `next_cursor` 續拉；
- *     · 四個篩選維度**下推**為請求參數（不再客戶端全量過濾）；
+ *     · 四個篩選維度 ＋ **關鍵詞 `q`（第五個入參）** 一併**下推**為請求參數（服務端全庫檢索，
+ *       不再客戶端全量過濾 / 二次過濾）；
  *     · 封面圖直接取行上的 `thumb_key` / `display_key`（**按影像行真實 `storage_key` 派生**：
  *       `.tiff` 源件 ⇒ 派生 `.png`；`.png` / `.jpg` / `.webp` ⇒ 原樣；bundled 占位行與無引用行
  *       ⇒ 兩鍵皆空串）⇒ **不再依賴全量水合的 seals/faces 映射**；取不到對象時由本層＋
  *       `SealCard` 做**三級回落** thumb → display → 本地占位圖；
  *
  * 【凍結契約（本文件只消費，不自造字段）】
- *   請求 payload：`{ limit, cursor, dynasty, seal_type, face_style, category }`
+ *   請求 payload：`{ limit, cursor, dynasty, seal_type, face_style, category, q }`（**恰 7 鍵**；
+ *   `q` 空串 ＝ 不檢索，**仍佔一鍵** —— 與規範 §3.81.4 載荷字面 `q: ''` 逐字同形）
  *   回包：`{ ok, rows, next_cursor, has_more, total }`；`rows` 元素**恰 14 鍵**：
  *     `stamp_id, seal_name, dynasty, category, primary_face_id, face_count, edge_count,
  *      image_id, image_sha256, image_mime, width, height, thumb_key, display_key`
@@ -20,7 +22,8 @@
  *
  * 【降級路徑（必須保留）】無雲端（未配置 / 呼叫失敗）⇒ 走**本機示範資料**：用既有的
  *   `seals.listSeals()`（保留 `CLOUD_PAGE_SIZE` 等既有常量與全量讀面，其它頁面照舊）
- *   在本地做同一套四維篩選並按 offset 切片 ⇒ 廣場照樣可用，且 `fallback: true` 讓視圖
+ *   在本地做同一套四維篩選 ＋ 同一關鍵詞面（`listSeals` 既有 `keyword`）並按 offset 切片
+ *   ⇒ 廣場照樣可用，且 `fallback: true` 讓視圖
  *   顯式告知「目前列的是本機示範資料」，**不靜默**。
  *
  * 【分層紀律】本文件屬 services 層：只消費 `data/*` 與其它 services，不自碰 localStorage /
@@ -77,14 +80,16 @@ export const SEAL_CARD_ROW_KEYS = Object.freeze([
  *   ② 印面內容 `content`    → `seal_type`
  *   ③ 印面風格 `style`      → `face_style`
  *   ④ 大類 `sealClass`      → `category`
- * 視圖側的參數名沿用既有 URL query 名（`content` / `style` / `sealClass`），
+ *   ⑤ 關鍵詞 `q`            → `q`（第五個入參；同名零翻譯、**服務端全庫檢索**，規範 §3.81.4）
+ * 視圖側的參數名沿用既有 URL query 名（`content` / `style` / `sealClass` / `q`），
  * 本表是唯一翻譯點 ⇒ **不得在視圖裡各自拼參數**。
  */
 export const SQUARE_FILTER_PARAMS = Object.freeze({
   dynasty: 'dynasty',
   content: 'seal_type',
   style: 'face_style',
-  sealClass: 'category'
+  sealClass: 'category',
+  q: 'q'
 })
 
 /** 本地降級路徑的游標前綴（`off:<offset>`；雲端游標不透明，本層不解析）。 */
@@ -138,12 +143,14 @@ function intOf(value) {
  * ------------------------------------------------------------------------- */
 
 /**
- * 由視圖的四維篩選組出請求 payload（**恰 6 鍵，鍵名逐字凍結**）。
- * 空值一律傳空串（雲端按「空串 ⇒ 不篩」處理），不傳 `undefined` / `null`。
- * @param {{dynasty?:string, content?:string, style?:string, sealClass?:string,
+ * 由視圖的四維篩選 ＋ 關鍵詞組出請求 payload（**恰 7 鍵，鍵名與鍵序逐字凍結**）。
+ * 空值一律傳空串（雲端按「空串 ⇒ 不篩 / 不檢索」處理），不傳 `undefined` / `null`。
+ * `q` 由本層 `trim`（視圖也 trim 過一次，兩處同值）；**長度上限由服務端判**（> 40 ⇒ `INVALID_VALUE`），
+ * 本層不截斷、不夾取（規範 §3.81.4：不得靜默截斷）。
+ * @param {{dynasty?:string, content?:string, style?:string, sealClass?:string, q?:string,
  *          cursor?:string, limit?:number}} input
  * @returns {{limit:number, cursor:string, dynasty:string, seal_type:string,
- *            face_style:string, category:string}}
+ *            face_style:string, category:string, q:string}}
  */
 export function sealCardsRequestOf(input = {}) {
   const source = input || {}
@@ -153,7 +160,8 @@ export function sealCardsRequestOf(input = {}) {
     [SQUARE_FILTER_PARAMS.dynasty]: textOf(source.dynasty).trim(),
     [SQUARE_FILTER_PARAMS.content]: textOf(source.content).trim(),
     [SQUARE_FILTER_PARAMS.style]: textOf(source.style).trim(),
-    [SQUARE_FILTER_PARAMS.sealClass]: textOf(source.sealClass).trim()
+    [SQUARE_FILTER_PARAMS.sealClass]: textOf(source.sealClass).trim(),
+    [SQUARE_FILTER_PARAMS.q]: textOf(source.q).trim()
   }
 }
 
@@ -263,7 +271,8 @@ function cardRowOfLocalSeal(seal) {
 }
 
 /**
- * 本機降級路徑的一頁（四維篩選仍走既有 `listSeals`，只做 offset 切片）。
+ * 本機降級路徑的一頁（四維篩選與關鍵詞仍走既有 `listSeals` 的同一套面，只做 offset 切片；
+ * `total` ＝ 命中集總數，與雲端 `total` 同一口徑）。
  * @returns {{ok:true, rows:object[], next_cursor:string, has_more:boolean, total:number,
  *            source:'local', fallback:boolean}}
  */
@@ -274,7 +283,10 @@ function localPageOf(input = {}) {
     dynasty: textOf(input.dynasty),
     content: textOf(input.content),
     style: textOf(input.style),
-    sealClass: textOf(input.sealClass)
+    sealClass: textOf(input.sealClass),
+    /* 關鍵詞走 `listSeals` 既有 `keyword` 面（印文 / 作者 / 編號 …，本機全量命中集）；
+       空串 ⇒ 不篩（與雲端「空串 ＝ 不檢索」同語義）。 */
+    keyword: textOf(input.q)
   })
     .map(cardRowOfLocalSeal)
     .filter(Boolean)
@@ -306,7 +318,7 @@ function localPageOf(input = {}) {
  *        · 傳輸層失敗或形狀不可辨識 ⇒ **本機示範資料兜底**（`fallback:true` ＋ 服務端原話），
  *          本機也空 ⇒ 如實回 `{ok:false, reason, message}`（不假裝成功、不假裝「沒有印章」）。
  *
- * @param {{dynasty?:string, content?:string, style?:string, sealClass?:string,
+ * @param {{dynasty?:string, content?:string, style?:string, sealClass?:string, q?:string,
  *          cursor?:string, limit?:number}} input
  * @returns {Promise<{ok:true, rows:object[], next_cursor:string, has_more:boolean, total:number,
  *            source:'cloud'|'local', fallback:boolean, reason?:string, message?:string}
