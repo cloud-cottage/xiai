@@ -32,10 +32,13 @@
  *          `seal_type` / `face_style` 过滤**主印面**（`xiai_faces`）
  *        · `q` 关键词（**缺省 ＝ 空串 ＝ 不检索**）：字符串、trim 后长度 > 40 ⇒ `INVALID_VALUE`
  *          （**零读**）；非字符串 ⇒ `INVALID_VALUE`。**服务端全库检索** —— 对 `xiai_seals` 做
- *          大小写不敏感**包含**匹配，字段集**逐字 9 个**
+ *          大小写不敏感**包含**匹配，字段集**逐字 12 个**（§3.81.4／v1.104 由 9 扩 12）
  *          （`stamp_id / seal_name / seal_wen / seal_wen_chs / transcription / category /
- *          dynasty / seal_yz_person_name / author`；**印文两键为主**，`transcription` 仅 2 行有值、
- *          一并纳入但不作依赖），正则元字符**必须转义**；查询词取
+ *          dynasty / seal_yz / seal_yz_person_name / seal_yzzkz / seal_yzzkz_chs / author`；
+ *          **印文两键为主**，`transcription` 仅 2 行有值、一并纳入但不作依赖；
+ *          **印主原文 `seal_yz`、篆者繁简 `seal_yzzkz` / `seal_yzzkz_chs` 为补搜不到人名的三键**；
+ *          数字标志 `seal_zyz`（值恒 `1`、非人名）**不入表** —— 入表只会让含 `1` 的查询误命中），
+ *          正则元字符**必须转义**；查询词取
  *          `variants = dedupe([q, s2t(q)])`（简→繁真源 ＝ `lib/authorMatch.js` 同一张逐字表），
  *          **任一形态 × 任一字段命中即命中**（OR），再与四维筛选**叠加 AND**；
  *          `total` ＝ **命中总数**（不是已载入数；＝ 四维 ＋ 关键词命中**且 `face_count >= 1`**
@@ -142,10 +145,13 @@ const LIST_SEAL_CARDS_ALLOWED_KEYS = Object.freeze([
 const LIST_SEAL_CARDS_MAX_QUERY_LENGTH = 40
 
 /**
- * 关键词检索字段集（**逐字 9 个，顺序即契约顺序**）：印文繁体 `seal_wen` ＋ 简体 `seal_wen_chs`
- * 为主键面；`transcription` 全库仅 2 行有值 ⇒ 一并纳入、**不作依赖**；其余四维同源字段
- * （`category` / `dynasty`）与标识字段（`stamp_id` / `seal_name` / `seal_yz_person_name` / `author`）
- * 一并可命中。**大小写不敏感**由 `options:'i'` 给出（服务端实测：`aaaab` / `AAAAB` / `AaAaB` 同命中）。
+ * 关键词检索字段集（**逐字 12 个，顺序即契约顺序**；§3.81.4／v1.104 由 9 扩 12）：印文繁体 `seal_wen`
+ * ＋ 简体 `seal_wen_chs` 为主键面；`transcription` 全库仅 2 行有值 ⇒ 一并纳入、**不作依赖**；
+ * 其余四维同源字段（`category` / `dynasty`）与标识字段（`stamp_id` / `seal_name` /
+ * `seal_yz_person_name` / `author`）一并可命中。**本单补的三键**：印主原文 `seal_yz`、
+ * 篆者繁体 `seal_yzzkz` ＋ 简体 `seal_yzzkz_chs` —— 缺它们 ⇒ 「搜赵之谦 0 条」
+ * （篆者 25/26 枚、印主 381 行有值全落检索外）。数字标志 `seal_zyz`（值恒 `1`、非人名）
+ * **不入表**。**大小写不敏感**由 `options:'i'` 给出（服务端实测：`aaaab` / `AAAAB` / `AaAaB` 同命中）。
  */
 const LIST_SEAL_CARDS_SEARCH_FIELDS = Object.freeze([
   'stamp_id',
@@ -155,7 +161,10 @@ const LIST_SEAL_CARDS_SEARCH_FIELDS = Object.freeze([
   'transcription',
   'category',
   'dynasty',
+  'seal_yz',
   'seal_yz_person_name',
+  'seal_yzzkz',
+  'seal_yzzkz_chs',
   'author'
 ])
 
@@ -556,7 +565,7 @@ async function countRows(db, collection, match) {
 }
 
 /* --------------------------------------------------------------------------
- * 服务端全库关键词检索（`listSealCards.q`）：转义 → 简繁双形态 → 9 字段包含匹配
+ * 服务端全库关键词检索（`listSealCards.q`）：转义 → 简繁双形态 → 12 字段包含匹配
  * --------------------------------------------------------------------------
  * **只在服务端做**：本节产出的是 `xiai_seals` 的 `where` 片段（`$or` 子句），
  * 与四维筛选同置一个对象 ⇒ DB 侧 AND 叠加；**绝不把全库拉回内存再过滤**。
@@ -565,7 +574,7 @@ async function countRows(db, collection, match) {
  *      `nothing to repeat` 直接报错，或把字面量当通配符误命中全库 —— 两种都判负）；
  *   ② 形态 ＝ `dedupe([q, s2t(q)])`，简→繁真源**只用 `lib/authorMatch.js` 已带的逐字表**
  *      （本文件**不建第二张表**）—— 既让简体输入命中 `seal_wen_chs`，也让繁体输入命中 `seal_wen`；
- *   ③ 每个形态 × 9 字段一条子句，**全部 OR**（任一形态、任一字段命中即命中）。
+ *   ③ 每个形态 × 12 字段一条子句，**全部 OR**（任一形态、任一字段命中即命中）。
  */
 
 /** 正则元字符转义（`* . + ? ^ $ | ( ) [ ] { }` 与反斜杠本身；其余字符原样）。 */
@@ -623,7 +632,7 @@ function searchRegExpOf(db, pattern) {
 
 /**
  * 关键词 ⇒ 印章侧 `where` 片段（空串 ⇒ `{}`，与加 `q` 前**逐字一致**）。
- * 非空 ⇒ 恰一个 `$or`：`variants.length × 9` 条子句（形态 × 字段，任一命中即命中）；
+ * 非空 ⇒ 恰一个 `$or`：`variants.length × 12` 条子句（形态 × 字段，任一命中即命中）；
  * 与 `dynasty` / `category` 同置一对象 ⇒ **服务端 AND 叠加**。
  * @param {object} db DB 句柄（只为取 `db.RegExp`；不读不写）
  * @param {string} query 关键词（已 trim、已过 40 字门）
@@ -893,7 +902,7 @@ async function listSealCards(payload) {
   const sealMatch = {}
   if (input.dynasty !== '') sealMatch.dynasty = input.dynasty
   if (input.category !== '') sealMatch.category = input.category
-  /* **服务端全库关键词检索（本单 `q`）**：`q` 非空 ⇒ 追加一个 `$or`（`variants × 9` 字段、
+  /* **服务端全库关键词检索（本单 `q`）**：`q` 非空 ⇒ 追加一个 `$or`（`variants × 12` 字段、
      大小写不敏感、元字符已转义）到**同一个** `sealMatch` 对象 ⇒ 与四维筛选在 DB 侧 **AND** 叠加。
      `q` 空 ⇒ `keywordMatchOf` 回 `{}` ⇒ `sealMatch` 与加 `q` 前**逐字一致**（零回归）。
      本对象同时喂窗口读与 `count()` ⇒ `total` ＝ **命中总数**、`rows` ／ `has_more` ／ `next_cursor`
@@ -1711,7 +1720,7 @@ module.exports = {
   CARD_ROW_KEYS,
   LIST_SEAL_CARDS_DEFAULT_LIMIT,
   LIST_SEAL_CARDS_MAX_LIMIT,
-  /* 关键词检索面（本单 `q`）：长度上界 ＋ 9 字段集（逐字断言用）。 */
+  /* 关键词检索面（本单 `q`）：长度上界 ＋ 12 字段集（逐字断言用）。 */
   LIST_SEAL_CARDS_MAX_QUERY_LENGTH,
   LIST_SEAL_CARDS_SEARCH_FIELDS,
   /* 零面过滤阈值（`face_count >= 1`；窗口读与 `count()` 共用）。 */
