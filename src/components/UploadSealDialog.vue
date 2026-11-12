@@ -2,6 +2,8 @@
 <script setup>
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
+/* 【作者】单一点选入口（搜索＋按姓氏分组＋右侧 A–Z 索引）；替换旧「检索输入框 ＋ select」两件套。 */
+import PersonPicker from './PersonPicker.vue'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS, isKnownSealClass, suggestSealClass } from '../data/seed.js'
 import { seals, persons } from '../services/index.js'
 import { pipelineNotice, runUploadPipeline } from './uploadPipeline.js'
@@ -36,15 +38,14 @@ const form = reactive({
 })
 
 /* 【作者】＝**引用型**（person-model §4.1）：**必選**（本單升級） —— 必須從既有印人中**點選**
-   （不得手輸自由文本、不得留空）。檢索面＝服務層單點 `persons.searchPersons`
-   （姓 / 名 / 字 / 號 / 別名 / cbdb_id）。`form.author` 承載所選印人 id（`author_person_id`）；
+   （不得手輸自由文本、不得留空）。**單一入口 ＝ `PersonPicker`**（本地搜索 ＋ 按姓氏拼音分組
+   ＋ 右側 A–Z 索引，只點選回填）；舊「檢索輸入框 ＋ 下拉選擇框」兩件套已整體刪除，
+   其檢索詞變量與舊鉤子一併清零（本文件已無自由輸入面）。
+   印人行來源＝服務層單點 **`persons.listPersons()`**（本文件既有同源讀點，不另立第二個），
+   寫進 `computed` ⇒ 行集變化時選擇器跟著更新；顯示名直接傳服務層 **`persons.personName`**
+   （已導出，不在此新寫派生）。`form.author` 承載所選印人 id（`author_person_id`）；
    **留空 ⇒ 提交被拒**（`authorDenial()`，上屏繁體提示，不靜默丟引用）。 */
-const authorKeyword = ref('')
-const authorOptions = computed(() => {
-  const keyword = String(authorKeyword.value || '').trim()
-  const rows = keyword ? persons.searchPersons(keyword) : persons.listPersons()
-  return rows.map((row) => ({ id: String(row.id || ''), name: persons.personName(row) }))
-})
+const authorPersons = computed(() => persons.listPersons())
 
 /** 已选原图：`{ bitmap, width, height, originalBytes, originalMime, name, previewUrl }`。 */
 const source = ref(null)
@@ -131,13 +132,15 @@ function sealClassDenial() {
 /* ============================================================================
    【作者】**必選** ／ 【印文】留空 —— **提交前的兩道新門**（本單）
    ----------------------------------------------------------------------------
-   ① 【作者】＝引用型（person-model §4.1）且**必選**（人類裁定，本單升級）：`authorKeyword`
-      只是**檢索詞**，`form.author` 才是**所選印人 id**（載荷鍵 `author_person_id`）。
-      改前兩處坑：(a) 輸了名字卻**沒點選候選** ⇒ 照常提交 ⇒ 該引用被**靜默丟棄**
+   ① 【作者】＝引用型（person-model §4.1）且**必選**（人類裁定，本單升級）：入口已是
+      `PersonPicker`（**只點選、無自由輸入**），`form.author` 就是**所選印人 id**（載荷鍵
+      `author_person_id`）。改前兩處坑：(a) 輸了名字卻**沒點選候選** ⇒ 照常提交 ⇒ 該引用被**靜默丟棄**
       （線上實據 `AACQE`：印面行有 face_style、卻缺 `author_person_id`，且零提示）；
       (b) 完全沒填也照樣放行 ⇒ 印面行恒無作者引用。本門改成 **`form.author` 空即阻止提交**
-      （**與輸入框是否打了字無關**，無條件必選）＋可見繁體提示；**已點選 ⇒ 放行，行為與改前逐字一致**。
-      兩種情形共用**同一句**「請選擇作者」主提示 ⇒ 不得互相矛盾；輸了字時只**追加**補充說明。
+      （**與選擇器裡打沒打字無關**，無條件必選）＋可見繁體提示；**已點選 ⇒ 放行，行為與改前逐字一致**。
+      主句「請選擇作者」恆在、判據一字不改；舊的「已輸入「X」但尚未選擇」追加句**已刪** ——
+      入口換成只點選的選擇器後不再有任何自由輸入，該分支**永不可達**（留著即死代碼，且依賴已隨
+      兩件套移除的檢索詞變量）。
    ② 【印文】＝**硬必填**（人類裁定，本單把「可空 ⇒ 顯示佚名」的舊口徑改掉）：留空 ⇒ 阻止提交。
       理由：`seal_name` 是檢索與列表的主鍵面，留空的行在廣場 / 檢索裏是**搜不到的幽靈章**
       （線上實據 `AAADS`：`seal_name` / `seal_wen` / `author` 全空）。
@@ -145,13 +148,12 @@ function sealClassDenial() {
    本段只上屏文案，**不新增任何 reason 字面值**（`verify-endorsement` D2 純繁體）。
    ============================================================================ */
 
-/** 【作者】未點選候選 ⇒ 可讀繁體提示（空串 ＝ 放行）；主句恆含「請選擇作者」。 */
+/** 【作者】未點選候選 ⇒ 可讀繁體提示（空串 ＝ 放行）；主句恆含「請選擇作者」。
+   舊「已輸入「X」但尚未選擇」的追加句已刪：入口改成只點選的 `PersonPicker` 後不再有自由輸入，
+   該分支永不可達（見上方①）；判據一字不改 —— 仍只看 `form.author` 是否為非空串。 */
 function authorDenial() {
   if (String(form.author || '').trim()) return ''
-  const base = '請選擇作者（印人）；庫中無此人請先提交印人提案，再回來上傳。'
-  const typed = String(authorKeyword.value || '').trim()
-  /* 補充說明只**追加**、不改主句 ⇒ 兩種情形的提示同源、不矛盾。 */
-  return typed ? `${base}已輸入「${typed}」但尚未選擇；請從候選印人中點選。` : base
+  return '請選擇作者（印人）；庫中無此人請先提交印人提案，再回來上傳。'
 }
 
 /** 【印文】留空 ⇒ 可讀繁體提示（空串 ＝ 放行）。 */
@@ -620,40 +622,23 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="field">
-        <label for="upload-seal-author">作者（必填）</label>
-        <!-- 【作者】＝**引用型**（person-model §4.1）：**只能選、不能填、不可留空** —— 選項只來自既有印人
-             （`persons.listPersons` / `persons.searchPersons`）；未點選 ⇒ 提交被拒（`authorDenial()`）。
-             檢索面含姓 / 名 / 字 / 號 / 別名 / cbdb_id（服務層單點，不在此自寫第二套）。 -->
-        <input
-          id="upload-seal-author-search"
-          v-model="authorKeyword"
-          type="text"
-          placeholder="檢索印人（姓 / 名 / 字 / 號 / 別名），留空即列出全部"
-          data-author-search="upload-seal"
+        <!-- 【作者】＝**引用型**（person-model §4.1）：**只能選、不能填、不可留空** —— **單一入口**
+             ＝ `PersonPicker`（搜索 ＋ 按姓氏拼音分組 ＋ 右側 A–Z 索引；**只點選回填、無自由輸入**）。
+             行集來自 `authorPersons`（服務層 `persons.listPersons()` 的 computed 快照 ⇒ 行集變化即更新）、
+             顯示名直接傳服務層 `persons.personName`（唯一派生單點）。未點選 ⇒ 提交被拒（`authorDenial()`）；
+             `form.author` 仍只承載所選印人 id（載荷鍵 `author_person_id`），語義與必填攔判一字未改。
+             舊「檢索輸入框 ＋ 下拉選擇框」兩件套（含其檢索詞與鉤子）已整體刪除。 -->
+        <PersonPicker
+          v-model="form.author"
+          :persons="authorPersons"
+          :person-name="persons.personName"
+          label="作者（必填）"
         />
-        <select id="upload-seal-author" v-model="form.author" data-author-select="upload-seal">
-          <option value="">（未選擇）</option>
-          <option v-for="option in authorOptions" :key="option.id" :value="option.id">{{ option.name }}</option>
-        </select>
         <span class="field__hint">
-          作者必填：必須從既有印人中點選一位（本框共 {{ authorOptions.length }} 位可選），不能手輸新作者、不可留空。
+          作者必填：必須從既有印人中點選一位（本框共 {{ authorPersons.length }} 位可選），不能手輸新作者、不可留空。
         </span>
         <span v-if="!form.author" class="field__hint" data-author-unselected="upload-seal">
           尚未選擇作者（必填）；請從候選印人中點選一位後再提交。
-        </span>
-        <span
-          v-if="authorKeyword.trim() && !form.author"
-          class="field__hint"
-          data-author-typed-unselected="upload-seal"
-        >
-          已輸入「{{ authorKeyword.trim() }}」但尚未選擇；請從候選印人中點選。
-        </span>
-        <span
-          v-if="authorKeyword.trim() && !authorOptions.length"
-          class="field__hint"
-          data-author-nomatch="upload-seal"
-        >
-          庫中沒有匹配「{{ authorKeyword.trim() }}」的印人；本框只可選既有印人，不能手輸新作者。
         </span>
       </div>
 
