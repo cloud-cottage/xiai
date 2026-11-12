@@ -20,7 +20,7 @@
  *       ＋ 恰 3 键拒绝 ＋ 零读（判定早于任何读）。
  *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 14 键**。
  *   P4. `suggestAuthors` 回包**恰 4 键**、候选每元素**恰 7 键**、`matched_field` 封闭五值。
- *   P5. **0 面印章不进 `rows`**（数据层允许、展示层不列；`total` 仍计它）。
+ *   P5. **0 面印章不进 `rows`，也不计 `total`**（印章侧 where 恒带 `face_count >= 1` ⇒ 零面章在数据层即被排除）。
  *   P6. **匿名可调**（`main({action:'public', op})` 无令牌即成功）；**非 public action 仍被拦**
  *       （无令牌 ⇒ 结构化拒绝、不回读面）；全程**零写入**。
  *   P7. **关键词 `q` 门**（四发，均**零写入**、两发拒绝**零读**）：非字符串 ⇒ `INVALID_VALUE`；
@@ -121,6 +121,12 @@ function createStore(seedRows) {
         }
         if (expected.__op === 'gt') return literal(row[key]) > literal(expected.value)
         if (expected.__op === 'in') return expected.values.map((value) => String(value)).indexOf(String(row[key])) !== -1
+        if (expected.$gte !== undefined) {
+          /* 数值下界（`listSealCards` 印章侧 `face_count >= 1` 的 wire 字面值形态；
+             口径与被测件 `rowMatchesQuery` 逐字一致：缺字段 / 非数值 ⇒ 恒假）。 */
+          const num = Number(row[key])
+          return Number.isFinite(num) && num >= Number(expected.$gte)
+        }
       }
       return row[key] === expected
     })
@@ -207,8 +213,8 @@ const SEAL_ONE = 'SL000000001'
 const SEAL_ZERO_FACE = 'SL000000002'
 const FACE_SHA = 'a1'.repeat(32)
 const store = createStore([
-  { __collection: 'xiai_seals', _id: SEAL_ONE, stamp_id: SEAL_ONE, seal_name: '甲印', dynasty: '汉', category: '吉语印' },
-  { __collection: 'xiai_seals', _id: SEAL_ZERO_FACE, stamp_id: SEAL_ZERO_FACE, seal_name: '零面印', dynasty: '汉', category: '吉语印' },
+  { __collection: 'xiai_seals', _id: SEAL_ONE, stamp_id: SEAL_ONE, seal_name: '甲印', dynasty: '汉', category: '吉语印', face_count: 1 },
+  { __collection: 'xiai_seals', _id: SEAL_ZERO_FACE, stamp_id: SEAL_ZERO_FACE, seal_name: '零面印', dynasty: '汉', category: '吉语印', face_count: 0 },
   {
     __collection: 'xiai_faces',
     _id: 'fc-0001',
@@ -416,16 +422,16 @@ section('P4', 'suggestAuthors：回包恰 4 键 / 候选恰 7 键 / matched_fiel
 }
 
 /* ===========================================================================
-   P5：0 面印章不进 `rows`（数据层允许、展示层不列；`total` 仍计它）
+   P5：0 面印章不进 `rows`、也不计 `total`（where 恒带 face_count >= 1）
    =========================================================================== */
-section('P5', '0 面印章：不进 rows，但计入 total')
+section('P5', '0 面印章：不进 rows，也不计入 total')
 {
   const reply = await publicCall('listSealCards', { limit: 10 })
   const stampIds = (Array.isArray(reply.rows) ? reply.rows : []).map((row) => row.stamp_id)
-  check('P5', '0 面印章**不进 `rows`**（`total` 仍计它 ⇒ total 2 / rows 1）', {
+  check('P5', '0 面印章**不进 `rows`、也不计 `total`**（where 恒带 `face_count >= 1` ⇒ total 1 / rows 1）', {
     hasZeroFaceInRows: false,
     stampIds: [SEAL_ONE],
-    total: 2,
+    total: 1,
     rowCount: 1
   }, {
     hasZeroFaceInRows: stampIds.indexOf(SEAL_ZERO_FACE) !== -1,
@@ -526,7 +532,7 @@ section('P7', 'q 关键词门：非字符串与 trim 后 41 字 ⇒ INVALID_VALU
     check('P7d', '`q` **空白串** ⇒ **等同不检索**（回包与不带 `q` 逐字节相同）＋ **零写**', {
       identicalToNoQuery: true,
       ok: true,
-      total: 2,
+      total: 1,
       rowCount: 1,
       writes: 0
     }, {
@@ -551,11 +557,12 @@ const p8Store = createStore([
     seal_name: '元 *（a.b）印',
     dynasty: '汉',
     category: '吉语印',
+    face_count: 1,
     seal_wen: '長樂未央',
     seal_wen_chs: '长乐未央*'
   },
-  { __collection: 'xiai_seals', _id: 'SLQ000000002', stamp_id: 'SLQ000000002', seal_name: '乙印', dynasty: '汉', category: '吉语印' },
-  { __collection: 'xiai_seals', _id: 'SLQ000000003', stamp_id: 'SLQ000000003', seal_name: '丙印', dynasty: '汉', category: '吉语印' },
+  { __collection: 'xiai_seals', _id: 'SLQ000000002', stamp_id: 'SLQ000000002', seal_name: '乙印', dynasty: '汉', category: '吉语印', face_count: 1 },
+  { __collection: 'xiai_seals', _id: 'SLQ000000003', stamp_id: 'SLQ000000003', seal_name: '丙印', dynasty: '汉', category: '吉语印', face_count: 1 },
   {
     __collection: 'xiai_faces',
     _id: 'fc-q1',
@@ -637,6 +644,7 @@ for (let i = 1; i <= P9_COUNT; i += 1) {
     seal_name: `满页印${i}`,
     dynasty: '汉',
     category: '吉语印',
+    face_count: 1 /* 60 行各 1 面（`face_count >= 1` 才进命中集）。 */,
     seal_wen_chs: '长乐未央' /* 60 行**全部命中**关键词 `长乐`。 */
   })
   p9Rows.push({
