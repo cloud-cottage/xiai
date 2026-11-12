@@ -4176,6 +4176,15 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
     })
     if (!isEdge && !primaryAssigned) primaryAssigned = true
   }
+  /* **`face_count`（本单新增；落进同一个 `sealDoc`、零新增写步）**：新建章 ⇒ **本批 FACE 行数
+     即全章非 `EDGE` 面行数**（`EDGE` 永不计；判据与 `lib/sealCards.js::repairSealFaceCount`
+     与 `listSealCards` rows 侧**逐字同尺** —— `kind` 已由 `normalizeSealImportFace` 收成
+     `FACE` / `EDGE` 两值 ⇒ 「非 `EDGE`」≡ `kind='FACE'`）。
+     **必须写进这一个 `sealDoc` 对象**（构造器零新增返回字段、调用方零新增写步）：
+     `reviewSealImport` 新章支 / `repairImportAcceptance`（`verify-adopt-atomicity` E8「落盘计划
+     恰 3 条正式行 `set`」逐字不变）/ `createSealWithFaceDirect` / `createSealUpload` 四条路
+     **写步数一个都不变**。 */
+  sealDoc.face_count = faceDocs.reduce((total, doc) => (text(doc && doc.kind) === 'EDGE' ? total : total + 1), 0)
   return { ok: true, stampId, sealDoc, faceDocs }
 }
 
@@ -4211,8 +4220,12 @@ const EXISTING_FACE_SCAN_LIMIT = 1000
  * @param {object} existing 既有正式印章行（幂等键命中）
  * @param {{uid:string}} identity 服务端派生身份
  * @param {string} at ISO 时戳
- * @returns {Promise<{ok:true, faceDocs:Array<object>, imageHits:Array<object>}|{ok:false}>}
- *   `faceDocs` ＝ 本轮缺失、待补的面行（可为空数组）；`imageHits` ＝ 解析命中的影像行
+ * @returns {Promise<{ok:true, faceDocs:Array<object>, imageHits:Array<object>, faceCount:number}|
+ *                   {ok:false}>}
+ *   `faceDocs` ＝ 本轮缺失、待补的面行（可为空数组）；`imageHits` ＝ 解析命中的影像行；
+ *   `faceCount` ＝ **本章非 `EDGE` 面行数**（＝ 既有面数 ＋ 本批补入的面数；`EDGE` 永不计 ——
+ *   与 `repairSealFaceCount` / `listSealCards` rows 侧同一判据）⇒ 调用方据此把
+ *   `xiai_seals.face_count` 落到同一批写步里。
  */
 async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
   const stampId = text(existing && (existing.stamp_id || existing.sid || existing.id))
@@ -4251,6 +4264,10 @@ async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
     }
   }
   const own = [...ownByKey.values()]
+  /* **既有面数（本单新增）**：`own` 里**非 `EDGE`** 的行数 —— `kind` 已由
+     `normalizeSealImportFace` 收成 `FACE` / `EDGE` 两值 ⇒ 非 `EDGE` ≡ `kind='FACE'`
+     （判据与 `repairSealFaceCount` / `listSealCards` rows 侧逐字同尺）。 */
+  const ownFaceCount = own.reduce((total, item) => (text(item && item.kind) === 'EDGE' ? total : total + 1), 0)
   const imageIdOf = (image) => (image ? text(image._id) || text(image.id) : '')
   /* 位次：该面在导入行**同类**中的次序（与 `nextFaceIdOf` 的 `<f|e><n>` 同构）。 */
   const positionOf = new Map()
@@ -4294,7 +4311,7 @@ async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
     }
     stillMissing.push({ index, candidate })
   }
-  if (stillMissing.length === 0) return { ok: true, faceDocs: [], imageHits }
+  if (stillMissing.length === 0) return { ok: true, faceDocs: [], imageHits, faceCount: ownFaceCount }
   /* 补缺失面：行 id ＋ 面号（两者都走既有单点；`face_no` 避让**全库**已占号，与新建采纳同尺）。 */
   const sealName = text(row && row.seal_name)
   const source = text(row && row.source)
@@ -4345,7 +4362,35 @@ async function buildMissingFaceDocsOfExistingSeal(row, existing, identity, at) {
     })
     if (!isEdge && !primaryAssigned) primaryAssigned = true
   }
-  return { ok: true, faceDocs, imageHits }
+  /* **回出全章面数（本单新增）**：既有非 `EDGE` 面 ＋ 本批补入的非 `EDGE` 面（`EDGE` 不计）。 */
+  const addedFaceCount = faceDocs.reduce((total, doc) => (text(doc && doc.kind) === 'EDGE' ? total : total + 1), 0)
+  return { ok: true, faceDocs, imageHits, faceCount: ownFaceCount + addedFaceCount }
+}
+
+/**
+ * **数某章的 `FACE` 面行数（本单新增辅助｜只读零写）** —— `sealStampId` 名下**非 `EDGE`**
+ * 的面行条数（`EDGE` 边款永不计入）。
+ *
+ * · **判据单一**：＝ `repairSealFaceCount` 与 `listSealCards` rows 侧的同一把尺（非 `EDGE`）；
+ *   `kind` 在写入侧已由 `normalizeSealImportFace` 收成 `FACE` / `EDGE` 两值 ⇒ 对在册行
+ *   「非 `EDGE`」≡ `kind='FACE'`，两说法恒等、不会分叉出第二套计数。
+ * · **基于现有读面能力**：走既有 `readRows(COLLECTIONS.faces, …)`（`sealId` 为主、空集再按
+ *   `stamp_id` 兜底 —— 与 `buildMissingFaceDocsOfExistingSeal` 同一取键序；两键在建行侧
+ *   同值同写），**零新集合、零写步**。
+ * · 读不到行（未知章 / 无面）⇒ 如实回 `0`（不猜、不抛）；护栏沿既有 `EXISTING_FACE_SCAN_LIMIT`。
+ * · 供离线自检 / 质检直接断言 `xiai_seals.face_count` 与实况是否一致（本文件既有导出惯例）；
+ *   两条构造路径的 `face_count` 由各自信手算（行已在手 ⇒ 不额外读）。
+ * @param {string} sealStampId 印章键（`stamp_id` / `sid` / `id` 同值）
+ * @returns {Promise<number>} 非 `EDGE` 面行数（恒 ≥ 0）
+ */
+async function countFaceRowsOf(sealStampId) {
+  const stampId = text(sealStampId)
+  if (stampId === '') return 0
+  let rows = await readRows(COLLECTIONS.faces, { sealId: stampId }, { limit: EXISTING_FACE_SCAN_LIMIT })
+  if (rows.length === 0) rows = await readRows(COLLECTIONS.faces, { stamp_id: stampId }, { limit: EXISTING_FACE_SCAN_LIMIT })
+  let count = 0
+  for (const item of rows) if (text(item && item.kind) !== 'EDGE') count += 1
+  return count
 }
 
 /* ---------------------------------------------------------------------------
@@ -7014,6 +7059,27 @@ const ADMIN_OPS = Object.freeze({
           /* 批内缓存同步（零额外读）：后续行的避让读面看得见本轮补的面。 */
           if (facesCache !== null) facesCache.push(faceDoc)
         }
+        /* **`face_count` 落章行（本单新增）**：本分支**没有**章行写步（既有实现只补面行 ＋
+           翻导入行状态、从不碰 `xiai_seals`）⇒ 不加就无处维护该字段；**已列明：只能新增
+           恰一条章行 `update`（最小形式）**，硬口径四条：
+             ① 写体**只含 `face_count` 一个键**（不碰其它字段、不写 `updated_at` —— 与
+                `repairSealFaceCount` 的写体逐字同尺）；
+             ② **只在与实况不符时才产步**（字段缺失 / 非数值 / 值 ≠ `built.faceCount` ⇒ 才推；
+                已是正确值 ⇒ 零新增写步、重放幂等）；
+             ③ 位次 ＝ 面行 `set` **之后**、影像回填与**导入行状态翻转之前** ⇒ I-1「先落正式行、
+                后翻导入行状态」一字不破（`verify-adopt-atomicity` G1-seal 只认 `kind:'set'`、
+                G3-seal 只数 `set` ⇒ 两断言读数不变）；
+             ④ 行键 ＝ 行上 `_id`（退路 `stamp_id` / `id`），`expectAtLeast:1` 命中 0 行如实抛。 */
+        const currentFaceCount = Number(existing.face_count)
+        if (!(Number.isFinite(currentFaceCount) && currentFaceCount === built.faceCount)) {
+          writes.push({
+            kind: 'update',
+            collection: COLLECTIONS.seals,
+            match: { _id: text(existing._id) || existingStamp },
+            doc: { face_count: built.faceCount },
+            expectAtLeast: 1
+          })
+        }
         /* **回填写步插在面行写步之后**（opt-in；零命中原样零步；导行状态翻转仍在其后）。 */
         if (backfillImageStamp) {
           for (const step of await imageStampWriteStepsOf(existingStamp, built.imageHits, imageStampTakens, imageStampHandled)) {
@@ -8424,6 +8490,37 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **`face_count` 一次性回填（本单新增 op｜`repairSealFaceCount`｜管理员面）** —— 薄委派：
+   * 业务逻辑单点、载荷封闭键面与回包读数键面的真源都在 `lib/sealCards.js`（本处零第二套
+   * 逻辑；`require` 延迟以打破加载环、离线自检不需要 SDK）。**`ADMIN_OPS` 38 → 39**；
+   * **字典序位在 `repairPrimaryFace` 之后、`reviewCorrection` 之前**（源码位次 ＝ 紧随
+   * `repairPrimaryFace`、先于 `replaceFaceImage`）。
+   *
+   * 硬口径（逐条；实现真源 ＝ `lib/sealCards.js::repairSealFaceCount` 头注）：
+   * ① **第一行即管理员门**（既有 `adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋
+   *    **零读零写**）；② 载荷封闭恰三键 `{dry_run?:boolean, limit?:number, cursor?:string}`
+   *    （`dry_run` 缺省 `true`；未知键 / 身份类键 ⇒ `INVALID_FIELD`）；③ 扫 `xiai_seals`
+   *    （`_id` 升序 ＋ `command.gt(cursor)` ＋ `orderBy` ＋ `limit`，退路同游标推进），逐章数
+   *    **非 `EDGE`** 面行数写回 `xiai_seals.face_count` —— 新建 / 删除 FACE 行的各路径
+   *    （`buildSealAcceptanceFromImport` ／ `buildMissingFaceDocsOfExistingSeal` 两处构造点）
+   *    已同批维护 ⇒ 本 op 只补**历史行与漂移**；④ **幂等**：已是正确值的章一个字不写 ⇒ 同参
+   *    重放 `eligible === 0`、`written === 0`；⑤ `dry_run` **零写**（`written` 恒 0）；
+   *    ⑥ 回包**恒恰 5 键** `{ok, scanned, eligible, written, next_cursor}`（两态同形；
+   *    键名真源 ＝ `REPAIR_SEAL_FACE_COUNT_READOUT_KEYS`，`index.js` 按 `op` 收窄透传、
+   *    **存在性驱动**）、失败恒恰 3 键；⑦ **零新集合、不产 `plan`**（写步在 op 内逐行
+   *    `persist` ＋ 整窗读回定真伪 ⇒ `index.js` 无内部落盘计划可外传）、`reason` 零新增。
+   * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async repairSealFaceCount(payload, identity, context) {
+    /* 延遲 require：與 `repairPrimaryFace` 同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/sealCards.js::repairSealFaceCount` 的**第一行**（零读零写地拒）。 */
+    const { repairSealFaceCount: runRepair } = require('./sealCards.js')
+    return runRepair(payload, identity, context)
+  },
+
+  /**
    * **管理員「重新上傳印面圖」（本單新增 op｜`replaceFaceImage`｜管理員面）**：云模式下
    * 替换印面图的那一口 —— **服务端原子入册影像行 ＋ 改面行指向**（旧图一律保留）。
    *
@@ -9730,6 +9827,9 @@ module.exports = {
   SEAL_PLACEHOLDER_IMAGE_KEY,
   SEAL_PLACEHOLDER_IMAGE,
   buildSealAcceptanceFromImport,
+  /* **`face_count` 落地面（本单新增）**：两处 FACE 构造点 ＋ 计数只读辅助
+     （`countFaceRowsOf`＝ 非 `EDGE` 面行数，供离线自检 / 质检直接断言实况）。 */
+  countFaceRowsOf,
   /* **无审核直写面（本单新增｜人类口径 2026-10-28）**：两 op 的封闭键面 / 三态枚举 /
      env 与三道硬门（供离线自检直接断言与直接跑）。 */
   DIRECT_WRITE_ALLOWED_KEYS,

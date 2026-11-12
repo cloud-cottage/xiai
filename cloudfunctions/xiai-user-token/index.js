@@ -51,8 +51,10 @@ const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSession
 /* **首页卡片分页读面（本单新增）**：`PUBLIC_OPS` ＝ **匿名可调**的只读 op 表（本文件在令牌 /
    会话 / 配置判定**之前**按它分流，只放行白名单里的 op）；`REPAIR_PRIMARY_FACE_READOUT_KEYS`
    ＝ 主印面回填 op 的**回包键面真源**（恰 6 键、`dry_run` 与真写同形；按 op 收窄透传 ⇒
-   其余 op 回包逐字不变）。 */
-const { PUBLIC_OPS, REPAIR_PRIMARY_FACE_READOUT_KEYS } = require('./lib/sealCards.js')
+   其余 op 回包逐字不变）；`REPAIR_SEAL_FACE_COUNT_READOUT_KEYS` ＝ **`face_count` 回填 op**
+   （`repairSealFaceCount`，本单 `ADMIN_OPS` 38 → 39）的**回包键面真源**（恰 5 键、
+   `dry_run` 与真写同形；按 op 收窄、存在性驱动透传 ⇒ 其余 op 回包逐字不变）。 */
+const { PUBLIC_OPS, REPAIR_PRIMARY_FACE_READOUT_KEYS, REPAIR_SEAL_FACE_COUNT_READOUT_KEYS } = require('./lib/sealCards.js')
 /* **作者校验（§3.82）**：`REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS` ＝ 管理员回填 op
    `repairAuthorPersonId` 的**读数键面并集**真源（恰 7 键、按 op 收窄、存在性驱动透传 ⇒
    `dry_run` 轮恰 6 键（含 `samples`）、真写轮回恰 7 键（含 `failed`）；其余 op 回包逐字不变）。 */
@@ -795,6 +797,20 @@ async function handleVerify(event, config, callContext) {
      早退分支、恒 3 鍵、零讀數鍵；**本 op 不產 `plan`**（寫步在 op 內逐行走 `persist`）⇒ `plan` 零外傳。 */
   if (op === 'repairPrimaryFace') {
     for (const key of REPAIR_PRIMARY_FACE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **`face_count` 回填读数面（additive 透传｜**按 `op` 收窄**｜本单 `repairSealFaceCount`）**：
+     `ok` / `scanned` / `eligible` / `written` / `next_cursor` **五键**（＝ 该 op 冻结回包键面、
+     `dry_run` 与真写**同形**）**僅當 `op === 'repairSealFaceCount'` 且 `opResult` 確有該鍵時**
+     才逐字疊进回包（鍵名真源 ＝ `lib/sealCards.js::REPAIR_SEAL_FACE_COUNT_READOUT_KEYS`；
+     **存在性驱动** ⇒ 恰 5 键、不补编不丢键；`ok` 与信封同值、疊之冪等）；**其余任何 op 一律不
+     透传这 5 个读数键**（`scanned` / `eligible` / `written` / `next_cursor` 与 `repairPrimaryFace`
+     等修复 / 迁移 op 同字但**按 op 隔离**）⇒ 既有回包**逐字不变**（序列化后亦不新增键）。失败回包
+     （`ok:false`）走上面的早退分支、恒 3 鍵、零讀數鍵；**本 op 不產 `plan`**（写步在 op 内逐行走
+     `persist` ＋ 整窗读回）⇒ `plan` 零外传；既有字段一律不刪、不改。 */
+  if (op === 'repairSealFaceCount') {
+    for (const key of REPAIR_SEAL_FACE_COUNT_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }

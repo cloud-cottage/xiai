@@ -17,7 +17,11 @@
  *       - **无影像行（或行上无 `storage_key`）且面行无 `image_storage_key`** ⇒ 面行仍带
  *         `image_sha256` 时沿用既有派生 `.png`（改前口径不变），连摘要也没有 ⇒ 两键皆空串；
  *     客户端据此自行取图 ⇒ 页面不再需要全库影像行；
- *   · 0 面印章（数据层允许、展示层不列）**一律不进 `rows`**。
+ *   · 0 面印章（数据层允许、展示层不列）**一律不进 `rows`**；印章侧 `where` 恒带
+ *     **`face_count >= 1`**（＝ `xiai_seals.face_count` 字段；与 rows 侧零面过滤**同一判据**
+ *     ＝「非 `EDGE` 面行数 ≥ 1」）⇒ `total` / `has_more` / `next_cursor` / `rows`
+ *     **同一命中集**（「共 1251 枚」与实际可加载数不再分叉）。`face_count` 由新建 / 删除
+ *     FACE 行的各路径**同批维护**、历史行由管理员 op `repairSealFaceCount` 一次性回填。
  *
  * 契约（**已冻结，一个字不得改**）：
  *   ① 公开读 action：`listSealCards`（**匿名可调**，不验 token）
@@ -34,7 +38,8 @@
  *          一并纳入但不作依赖），正则元字符**必须转义**；查询词取
  *          `variants = dedupe([q, s2t(q)])`（简→繁真源 ＝ `lib/authorMatch.js` 同一张逐字表），
  *          **任一形态 × 任一字段命中即命中**（OR），再与四维筛选**叠加 AND**；
- *          `total` ＝ **命中总数**（不是已载入数），`has_more` / `next_cursor` 按命中集分页。
+ *          `total` ＝ **命中总数**（不是已载入数；＝ 四维 ＋ 关键词命中**且 `face_count >= 1`**
+ *          的章数 —— 零面章不计），`has_more` / `next_cursor` 按同一命中集分页。
  *      回包键面封闭 `{ ok:true, rows, next_cursor, has_more, total }`；`ok:false` ⇒ 恰 3 键
  *      `{ ok:false, reason, message }`（`reason` 只用 `lib/config.js::REASONS` 冻结值）。
  *      `rows` 每枚**恰 14 键**：`stamp_id / seal_name / dynasty / category / primary_face_id /
@@ -62,6 +67,16 @@
  *      真写恰 7 键 `{ok, scanned, eligible, matched, written, failed, next_cursor}`
  *      （`samples` ≤ 5 条、元素恰 4 键 `{row_id, query, person_id, score}`；
  *      `failed` 元素恰 2 键 `{_id, reason}`）；**不产 `plan`**。
+ *   ⑤ 管理员 op：`repairSealFaceCount`（落 `ADMIN_OPS`；`ADMIN_OPS` 38 → 39）—— **一次性回填
+ *      `xiai_seals.face_count`**（＝ 该章**非 `EDGE`** 面行数；新建 / 删除 FACE 行的各路径已同批
+ *      维护，本 op 只补历史行与漂移）。载荷封闭**恰 3 键** `{ dry_run, limit, cursor }`
+ *      （缺省 `{dry_run:true, limit:200, cursor:''}`；`cursor` **必须随载荷回传** ⇒ 双向分页，
+ *      不得只在回包里给 `next_cursor`）；窗口 ＝ `xiai_seals` 按 **`_id` 升序、严格大于 `cursor`**
+ *      的前 `limit` 行；**回包恒恰 5 键** `{ ok, scanned, eligible, written, next_cursor }`
+ *      （`dry_run` 与真写**同形**、`dry_run` 时 `written` 恒 0）：`scanned` ＝ 本窗口扫到的章数、
+ *      `eligible` ＝ 其中「`face_count` 与实况不符」的章数（**已是正确值 ⇒ 不写**，幂等）、
+ *      `written` ＝ **整窗读回**确认已落的章数、`next_cursor` ＝ **本窗口最后一条被扫描行的 `_id`**
+ *      （不是最后一条被写的；窗口扫空 ⇒ 空串）。**零新集合、不产 `plan`、`reason` 零新增**。
  *
  * 性能口径（**本模块的硬约束**）：
  *   · **零全表扫描做分页** —— 分页一律交给 DB（`cursor` ＋ 升序 ＋ `limit`），服务端只在内存里
@@ -190,6 +205,26 @@ const REPAIR_PRIMARY_FACE_READOUT_KEYS = Object.freeze([
 ])
 /** `repairPrimaryFace` 回包 `samples` 元素封闭键面（**恰 3 键**、最多 5 条）。 */
 const REPAIR_PRIMARY_FACE_SAMPLE_KEYS = Object.freeze(['row_id', 'face_id', 'face_no'])
+
+/**
+ * 印章侧零面过滤的**唯一阈值**（`face_count >= 1`）：`listSealCards` 的窗口读与 `count()`
+ * 共用这一个条件 ⇒ `total` / `has_more` / `next_cursor` / `rows` 同一命中集。
+ * **不写第二套**：rows 侧仍按面行实况算（`faceCount < 1 ⇒ continue`，双保险）。
+ */
+const LIST_SEAL_CARDS_MIN_FACE_COUNT = 1
+
+/** `repairSealFaceCount` 载荷封闭键面（**恰 3 键**：`dry_run` / `limit` / `cursor`）。 */
+const REPAIR_SEAL_FACE_COUNT_ALLOWED_KEYS = Object.freeze(['dry_run', 'limit', 'cursor'])
+const REPAIR_SEAL_FACE_COUNT_DEFAULT_LIMIT = 200
+const REPAIR_SEAL_FACE_COUNT_MAX_LIMIT = 500
+/** `cursor` 长度上界（非空串 1〜64；空串 ＝ 从头、与缺省同义；越界 ⇒ `INVALID_VALUE`）。 */
+const REPAIR_SEAL_FACE_COUNT_MAX_CURSOR_LENGTH = 64
+/**
+ * `repairSealFaceCount` **回包键面（恰 5 键，`dry_run` 与真写同形）**：
+ * `{ok, scanned, eligible, written, next_cursor}` —— 本常量**逐字即该 5 键**（含 `ok`；
+ * `ok` 与信封同值、`index.js` 叠之幂等）。`index.js` 按 op 收窄透传引这里。
+ */
+const REPAIR_SEAL_FACE_COUNT_READOUT_KEYS = Object.freeze(['ok', 'scanned', 'eligible', 'written', 'next_cursor'])
 
 /** 一页印章的读取窗口：`limit + 1` 枚卡片之外再留缓冲（0 面印章 / 面筛选不中的会被跳过）。 */
 const CARD_SEAL_WINDOW_FACTOR = 3
@@ -491,6 +526,13 @@ function rowMatchesQuery(row, query) {
       const haystack = raw === undefined || raw === null ? '' : String(raw)
       return searchRegExpMatcherOf(expected.$regularExpression).test(haystack)
     }
+    if (expected && typeof expected === 'object' && !Array.isArray(expected) && expected.$gte !== undefined) {
+      /* 数值下界子句（**本单 `face_count >= 1`**；主路 `db.command.gte(1)`、退路 wire 字面值
+         `{ $gte: 1 }` 两形态同判）。**缺字段 / 非数值 ⇒ 恒假**（`NaN` 不过门 ⇒ 零面章与未回填
+         的历史章一律不计入 `total`，与 rows 侧 `faceCount < 1 ⇒ continue` 同尺）。 */
+      const num = Number(row && row[key])
+      return Number.isFinite(num) && num >= Number(expected.$gte)
+    }
     return text(row && row[key]) === text(expected)
   })
 }
@@ -598,6 +640,24 @@ function keywordMatchOf(db, query) {
     }
   }
   return { $or: clauses }
+}
+
+/**
+ * **印章侧零面条件（唯一一处）**：`face_count >= 1`。
+ *   · 主路：`db.command.gte(1)`（`@cloudbase` / `wx-server-sdk` 公开算子，与既有
+ *     `command.gt` / `command.in` 同一张算子表）；
+ *   · DB 句柄没有 `gte`（注入式假体）⇒ 回落 wire 字面值 `{ $gte: 1 }` —— 与
+ *     `searchRegExpOf` 的回落法逐字同构；退路计数（`matchRows`）已认这一形态。
+ * 与四维筛选、关键词 `q` 同置一个 `sealMatch` 对象 ⇒ 窗口读与 `count()` **同一命中集**。
+ * @param {object} db DB 句柄（只取 `db.command`；不读不写）
+ * @returns {{face_count:object}}
+ */
+function faceCountMatchOf(db) {
+  const command = db && db.command
+  if (command && typeof command.gte === 'function') {
+    return { face_count: command.gte(LIST_SEAL_CARDS_MIN_FACE_COUNT) }
+  }
+  return { face_count: { $gte: LIST_SEAL_CARDS_MIN_FACE_COUNT } }
 }
 
 /* --------------------------------------------------------------------------
@@ -839,6 +899,11 @@ async function listSealCards(payload) {
      本对象同时喂窗口读与 `count()` ⇒ `total` ＝ **命中总数**、`rows` ／ `has_more` ／ `next_cursor`
      按同一命中集分页（三者同尺，不会自相矛盾）。 */
   Object.assign(sealMatch, keywordMatchOf(db, input.q))
+  /* **零面章过滤（本单）**：印章侧 `where` 恒追加 `face_count >= 1`（**唯一一处**，与四维 /
+     关键词同置一个对象 ⇒ 窗口读与 `count()` 同尺）。零面章与未回填的历史章一律不进
+     `total` / `has_more` / `next_cursor` / `rows` —— 「共 N 枚」与实际可加载数**同一命中集**；
+     rows 侧既有的 `faceCount < 1 ⇒ continue` 保留为**双保险**（按面行实况判，不读字段）。 */
+  Object.assign(sealMatch, faceCountMatchOf(db))
   const faceMatch = {}
   if (input.seal_type !== '') faceMatch.seal_type = input.seal_type
   if (input.face_style !== '') faceMatch.face_style = input.face_style
@@ -906,9 +971,10 @@ async function listSealCards(payload) {
   const hasMore = cards.length > input.limit || (!exhausted && cards.length >= input.limit)
   const pageRows = cards.slice(0, input.limit)
   const nextCursor = hasMore && pageRows.length > 0 ? pageRows[pageRows.length - 1].stamp_id : ''
-  /* `total`：命中**印章侧**筛选（四维 ＋ 关键词 `q`）的印章数（服务端计数、不传行）。
-     面维度筛选只决定 `rows` 与 `has_more`，不参与 `total`（0 面印章计入 `total`、不进 `rows`
-     —— 数据层允许 0 面、展示层不列；若需 `total` 与 `rows` 严格等数，须另开聚合计数单）。 */
+  /* `total`：命中**印章侧**筛选（四维 ＋ 关键词 `q` ＋ **`face_count >= 1`**）的印章数
+     （服务端计数、不传行）。**零面章与未回填的历史章不计入**（本单修「共 1251 枚、只能加载
+     1042 枚」的真因：`total` 曾把不可展示的零面章也算进去）。面维度筛选（`seal_type` /
+     `face_style`）只决定 `rows` 与 `has_more`，仍不参与 `total`。 */
   const total = await countRows(db, ops.COLLECTIONS.seals, sealMatch)
   return {
     ok: true,
@@ -1096,6 +1162,173 @@ async function repairPrimaryFace(payload, identity, context) {
   }
   /* 回包恰 6 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`（不是最后一条被写的）。 */
   return { ok: true, scanned, eligible, written, samples, next_cursor: nextCursor }
+}
+
+/* --------------------------------------------------------------------------
+ * 管理员 op：`repairSealFaceCount`（一次性回填 `xiai_seals.face_count`）
+ * -------------------------------------------------------------------------- */
+
+/**
+ * **`face_count` 一次性回填（幂等管理员 op；`ADMIN_OPS` 38 → 39）**：扫 `xiai_seals`，
+ * 逐章数**非 `EDGE`** 面行数写回 `face_count`（＝ `listSealCards` 印章侧 `face_count >= 1`
+ * 筛选所读的字段）。新建 / 删除 FACE 行的各路径已同批维护该字段，本 op 只补**历史行与漂移**
+ * （上线前的存量章一律没有这个字段 ⇒ **必须先跑本 op 再验收计数**）。
+ *
+ * 计数口径**唯一**＝ 非 `EDGE` 面行数（与 rows 侧 `faceCount < 1 ⇒ continue`、ops 侧
+ * 新建面维护同一判据；`EDGE`（边款）永不计入，计数恒 ≥ 0、**不会出现负数**）。
+ *
+ * 载荷封闭 `{ dry_run?:boolean, limit?:number, cursor?:string }`（**恰 3 键**）：
+ *   · `dry_run` 缺省 `true`（给了但非布林 ⇒ `INVALID_VALUE`）；
+ *   · `limit` 1〜500 整数、缺省 200（＝ 本轮**扫描的印章数**；越界 / 非整数 ⇒ `INVALID_VALUE`）；
+ *   · `cursor` ＝ 上轮回包的 `next_cursor`（**缺省 ＝ 从头**；给了但非字符串 ⇒ `INVALID_VALUE`；
+ *     非空长度 1〜64、越界 ⇒ `INVALID_VALUE`；空串与缺省同义 ＝ 从头）—— **载荷必须收它**，
+ *     不得只在回包里给 `next_cursor`（单向分页）。
+ * 回包**恒恰 5 键** `{ ok, scanned, eligible, written, next_cursor }`（`dry_run` 与真写**同形**）：
+ *   · `scanned` ＝ 本轮扫描的印章行数；`eligible` ＝ 其中「`face_count` 与实况不符」的章数
+ *     （**已是正确值 ⇒ 不写**；字段缺失 / 非数值一律算不符）；
+ *   · `written` ＝ **整窗读回**确认已落的章数（`dry_run` 恒 0）；
+ *   · `next_cursor` ＝ **本窗口最后一条被扫描行的 `_id`**（**不是**最后一条被写的；窗口扫空 ⇒
+ *     空串）—— 下一轮原样回传即得**严格递增**的下一窗口，逐轮续扫直到 `next_cursor === ''`，
+ *     不重不漏；`scanned === 0` 时同样回空串（零读零写）。
+ * **幂等**：同参重放 ⇒ `eligible === 0`、`written === 0`。**零新集合、不产 `plan`**
+ * （写步在本 op 内逐行 `persist` ＋ 整窗读回 ⇒ `index.js` 无内部落盘计划可外传）、
+ * `reason` 零新增。
+ * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ */
+async function repairSealFaceCount(payload, identity, context) {
+  const ops = opsOf()
+  /* ① 管理员门（**第一行**；缺 env / 非白名单 ⇒ 结构化拒 ＋ 零读零写）。 */
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷门（全部判定早于任何读）。 */
+  const shapeDenial = payloadShapeDenial(payload, REPAIR_SEAL_FACE_COUNT_ALLOWED_KEYS)
+  if (shapeDenial) return shapeDenial
+  const input = payload && typeof payload === 'object' ? payload : {}
+  let dryRun = true
+  if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+    if (typeof input.dry_run !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+    }
+    dryRun = input.dry_run
+  }
+  let limit = REPAIR_SEAL_FACE_COUNT_DEFAULT_LIMIT
+  if (Object.prototype.hasOwnProperty.call(input, 'limit')) {
+    const raw = input.limit
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > REPAIR_SEAL_FACE_COUNT_MAX_LIMIT) {
+      return deny(REASONS.INVALID_VALUE, `\`limit\` 必須是 1〜${REPAIR_SEAL_FACE_COUNT_MAX_LIMIT} 的整數；本次零寫入。`)
+    }
+    limit = raw
+  }
+  /* `cursor`：字符串（上轮回包 `next_cursor`）；缺省 / 空串 ＝ 从头；非字符串 ⇒ `INVALID_VALUE`；
+     非空长度 1〜64、越界 ⇒ `INVALID_VALUE`。**全部判定仍早于任何读。** */
+  let cursor = ''
+  if (Object.prototype.hasOwnProperty.call(input, 'cursor')) {
+    const rawCursor = input.cursor
+    if (typeof rawCursor !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '`cursor` 必須是字符串（上一輪回包的 `next_cursor`）；本次零讀取。')
+    }
+    cursor = rawCursor.trim()
+    if (cursor.length > REPAIR_SEAL_FACE_COUNT_MAX_CURSOR_LENGTH) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `\`cursor\` 非空時長度必須在 1〜${REPAIR_SEAL_FACE_COUNT_MAX_CURSOR_LENGTH} 之間（空串 ＝ 從頭；上一輪回包的 \`next_cursor\`）；本次零讀取。`
+      )
+    }
+  }
+  const db = dbOf()
+  /* ③ 扫描窗口：印章行按 **`_id` 升序、严格大于 `cursor`** 的前 `limit` 行
+     （服务端 `command.gt` ＋ `orderBy('_id','asc')` ＋ `limit`；假体无 `command` ⇒ 走退路，
+      **同一游标推进式**；零全表扫描）。 */
+  const sealRows = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
+    match: {},
+    idField: '_id',
+    after: cursor,
+    limit
+  })
+  const scanned = sealRows.length
+  /* `next_cursor` ＝ **本窗口最后一条被扫描行的 `_id`**（不是最后一条被写的）；窗口扫空 ⇒ 空串。 */
+  const nextCursor = scanned > 0 ? text(sealRows[scanned - 1] && sealRows[scanned - 1]._id) : ''
+  if (scanned === 0) return { ok: true, scanned: 0, eligible: 0, written: 0, next_cursor: '' }
+  /* ④ 该窗口全部面行（**一次读**；主印面 / 计数同源 ⇒ 不会自相矛盾）。 */
+  const ids = sealRows.map(sealKeyOf).filter((id) => id !== '')
+  const faceRows = await readOrderedWindow(db, ops.COLLECTIONS.faces, {
+    match: {},
+    idField: 'sealId',
+    idIn: ids,
+    limit: Math.max(ids.length * 6, 60)
+  })
+  const facesBySeal = new Map()
+  for (const doc of faceRows) {
+    const sealId = faceSealKeyOf(doc)
+    if (sealId === '') continue
+    if (!facesBySeal.has(sealId)) facesBySeal.set(sealId, [])
+    facesBySeal.get(sealId).push(doc)
+  }
+  /* ⑤ 判定：实况（非 `EDGE` 面行数）≠ 行上 `face_count` ⇒ eligible（缺字段 / 非数值 ⇒ NaN ⇒
+     必不符 ⇒ 一次性回填历史行）。**已是正确值的章一个字不写**（幂等）。 */
+  const targets = []
+  for (const sealRow of sealRows) {
+    const sealId = sealKeyOf(sealRow)
+    const faces = facesBySeal.get(sealId) || []
+    const actual = faces.filter((doc) => doc && typeof doc === 'object' && !isEdgeFace(doc)).length
+    const current = Number(sealRow.face_count)
+    if (Number.isFinite(current) && current === actual) continue
+    const rowKey = text(sealRow._id) || sealId
+    if (rowKey === '') continue
+    targets.push({ rowKey, actual })
+  }
+  const eligible = targets.length
+  /* 预演 / 无事可做 ⇒ **零写入**（回包仍恰 5 键；`written` 恒 0，不谎报）。 */
+  if (dryRun || eligible === 0) {
+    return { ok: true, scanned, eligible, written: 0, next_cursor: nextCursor }
+  }
+  /* ⑥ 真写：逐章 `update`（只写 `face_count` 一个键 —— 不碰其它字段、不写 `updated_at`）；
+     单章失败不中断整批。 */
+  for (const target of targets) {
+    try {
+      await ops.persist({
+        writes: [
+          {
+            kind: 'update',
+            collection: ops.COLLECTIONS.seals,
+            match: { _id: target.rowKey },
+            doc: { face_count: target.actual },
+            expectAtLeast: 1
+          }
+        ]
+      })
+    } catch (error) {
+      console.warn(
+        `[xiai] repairSealFaceCount 單章寫回報失敗（讀回定真偽；印章：${target.rowKey}；不中斷整批）：`,
+        text(error && error.message)
+      )
+    }
+  }
+  /* ⑦ 读数**以整窗读回为准**（persist 回报 ≠ 行的终态）：同窗重读，只数「`face_count` 已等于
+     实况」的章；读回失败 ⇒ **不敢称写入**（宁报 0 不虚报）。 */
+  let written = 0
+  try {
+    const after = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
+      match: {},
+      idField: '_id',
+      after: cursor,
+      limit
+    })
+    const stateByKey = new Map()
+    for (const row of after) stateByKey.set(text(row._id) || sealKeyOf(row), row)
+    for (const target of targets) {
+      const row = stateByKey.get(target.rowKey)
+      if (row && Number(row.face_count) === target.actual) written += 1
+      else console.warn(`[xiai] repairSealFaceCount 單章未生效（讀回 face_count 不符實況；印章：${target.rowKey}）`)
+    }
+  } catch (error) {
+    console.warn('[xiai] repairSealFaceCount 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    written = 0
+  }
+  /* 回包恒恰 5 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`。 */
+  return { ok: true, scanned, eligible, written, next_cursor: nextCursor }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1470,6 +1703,7 @@ module.exports = {
   listSealCards,
   suggestAuthors,
   repairPrimaryFace,
+  repairSealFaceCount,
   repairAuthorPersonId,
   /* 冻结键面（供 `index.js` 透传与离线自检直接断言） */
   LIST_SEAL_CARDS_ALLOWED_KEYS,
@@ -1480,11 +1714,18 @@ module.exports = {
   /* 关键词检索面（本单 `q`）：长度上界 ＋ 9 字段集（逐字断言用）。 */
   LIST_SEAL_CARDS_MAX_QUERY_LENGTH,
   LIST_SEAL_CARDS_SEARCH_FIELDS,
+  /* 零面过滤阈值（`face_count >= 1`；窗口读与 `count()` 共用）。 */
+  LIST_SEAL_CARDS_MIN_FACE_COUNT,
   REPAIR_PRIMARY_FACE_ALLOWED_KEYS,
   REPAIR_PRIMARY_FACE_READOUT_KEYS,
   REPAIR_PRIMARY_FACE_SAMPLE_KEYS,
   REPAIR_PRIMARY_FACE_DEFAULT_LIMIT,
   REPAIR_PRIMARY_FACE_MAX_LIMIT,
+  /* `face_count` 回填面（载荷 3 键 ＋ 回包 5 键 ＋ 上下界）。 */
+  REPAIR_SEAL_FACE_COUNT_ALLOWED_KEYS,
+  REPAIR_SEAL_FACE_COUNT_READOUT_KEYS,
+  REPAIR_SEAL_FACE_COUNT_DEFAULT_LIMIT,
+  REPAIR_SEAL_FACE_COUNT_MAX_LIMIT,
   /* 纯函数（供离线自检直接断言） */
   parseListSealCardsPayload,
   primaryFaceOf,
