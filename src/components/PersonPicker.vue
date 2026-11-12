@@ -13,8 +13,13 @@
  *   emits   `update:modelValue`（点选 ⇒ id；**清除 ⇒ 空串**）
  *           `picked`（点选 ⇒ **整行**；清除不发此事件）
  *
- * 结构：当前选中态（姓名 ＋ 字号 ＋ 清除）→ 弹层（搜索框 ＋ 分组滚动列表 ＋ 右侧 A–Z 索引条）。
- *   - 搜索是**本地过滤**（姓名 / 字 / 號 / 別名 / cbdb_id 子串匹配），命中仍按姓氏分组；
+ * 结构：当前选中态（姓名 ＋ 字号 ＋ 清除）→ 弹层（搜索框 ＋ 列表 ＋ 右侧 A–Z 索引条）。
+ *   - 搜索是**本地过滤**（姓名 / 字 / 號 / 別名 / cbdb_id 子串匹配）；
+ *   - **搜索态 ＝ 扁平相关度列表**（搜索框非空时）：**无姓氏分组头、无 A–Z 索引条**，
+ *     排序三档（同档保持入参顺序，稳定）＝ ① `joined` **整串恰等**置顶（「姓＋名」或
+ *     「姓＋字 / 號 / 別名」完整相等）② 前缀命中 ③ 其余任意位置子串命中
+ *     ⇒ 搜「趙之謙」/「赵之谦」**首项即本人**（`陸開鈞` 的字「畫均似趙之謙」落第三档）；
+ *     **清空搜索 ⇒ 原姓氏分组 ＋ 索引条一字不改地回归**；
  *     **跨字段拼接形态**：预计算里额外收「姓＋名」「姓＋字 / 號 / 別名（逐值）」直接相接串
  *     ⇒ 整打全名（`趙之謙`，姓与名分属两字段）也能命中；单字段形态全部保留（命中面只增不减）；
  *     **简繁归一**：查询词与候选**两边同走**逐字 s2t 归一（`toTraditionalText` ＋ 小写）再比子串
@@ -215,9 +220,17 @@ const searchHaystacks = computed(() => {
 })
 
 /**
- * 过滤后的行（**整串恰等的全名置顶**，其余保持入参顺序；分组 / 排序交给 `groupPersons`）。
- * 置顶只动候选序、不改命中面：搜「趙之謙」时 `陸開鈞`（字「畫均似趙之謙」）仍命中，
- * 但本尊（`姓＋名` 恰等）排第一。
+ * 搜索态（搜索框非空）：**扁平相关度列表**（无分组头、无索引条）；
+ * 清空搜索 ⇒ `false` ⇒ 恢复姓氏分组 ＋ A–Z 索引条（原行为）。
+ */
+const searching = computed(() => String(query.value || '').trim() !== '')
+
+/**
+ * 过滤后的行（**搜索态三档相关度排序**，同档保持入参顺序 ⇒ 稳定）：
+ * ① `joined` **整串恰等**置顶（「姓＋名」/「姓＋字·號·別名」完整相等，即搜全名时本尊在首）；
+ * ② 前缀命中（任一检索面串以关键字开头）；③ 其余任意位置子串命中。
+ * 排序只动候选序、不改命中面：搜「趙之謙」时 `陸開鈞`（字「畫均似趙之謙」）仍命中，
+ * 但落第三档；预计算（`searchHaystacks` 的 `{parts, joined}` 归一串）复用，逐键不重算归一。
  */
 const visibleRows = computed(() => {
   const rows = Array.isArray(props.persons) ? props.persons : []
@@ -225,21 +238,35 @@ const visibleRows = computed(() => {
   if (!kw) return rows
   const haystacks = searchHaystacks.value
   const exact = []
-  const rest = []
+  const prefixed = []
+  const contained = []
   for (const row of rows) {
     const entry = haystacks.get(row)
-    if (!entry || !Array.isArray(entry.parts) || !entry.parts.some((part) => part.includes(kw))) continue
+    if (!entry || !Array.isArray(entry.parts)) continue
+    let hit = false
+    let prefix = false
+    for (const part of entry.parts) {
+      if (!part.includes(kw)) continue
+      hit = true
+      /* `startsWith` 必然 `includes` ⇒ 命中前缀即可收工；未中前缀则继续扫余下分片。 */
+      if (part.startsWith(kw)) {
+        prefix = true
+        break
+      }
+    }
+    if (!hit) continue
     if (Array.isArray(entry.joined) && entry.joined.includes(kw)) exact.push(row)
-    else rest.push(row)
+    else if (prefix) prefixed.push(row)
+    else contained.push(row)
   }
-  return exact.length ? exact.concat(rest) : rest
+  return exact.concat(prefixed, contained)
 })
 
-/** 分组：`[{ initial, rows }]`，按 `GROUP_ORDER`（A…Z、`#` 最后），**只出非空组**。 */
-const groups = computed(() => groupPersons(visibleRows.value, { personName: nameOf }))
+/** 分组：`[{ initial, rows }]`，按 `GROUP_ORDER`（A…Z、`#` 最后），**只出非空组**（清空搜索才计算）。 */
+const groups = computed(() => (searching.value ? [] : groupPersons(visibleRows.value, { personName: nameOf })))
 
-/** 扁平顺序（＝组内顺序连接）：键盘高亮与 `Enter` 选中都按它走。 */
-const flatOptions = computed(() => groups.value.flatMap((group) => group.rows))
+/** 扁平顺序（＝搜索态按相关度；清空后 ＝ 组内顺序连接）：键盘高亮与 `Enter` 选中都按它走。 */
+const flatOptions = computed(() => (searching.value ? visibleRows.value : groups.value.flatMap((group) => group.rows)))
 
 /** 行 id → 扁平下标（O(1) 判高亮，避免每行 `findIndex`）。 */
 const flatIndexById = computed(() => {
@@ -248,7 +275,7 @@ const flatIndexById = computed(() => {
   return map
 })
 
-/** 索引条按钮：只列 **A–Z 且组非空** 的字母（`#` 不收，见文件头注）。 */
+/** 索引条按钮：只列 **A–Z 且组非空** 的字母（`#` 不收，见文件头注）；**搜索态不渲染**（`groups` 空 ⇒ 空数组）。 */
 const indexLetters = computed(() =>
   groups.value.map((group) => group.initial).filter((initial) => /^[A-Z]$/.test(initial))
 )
@@ -406,7 +433,7 @@ defineExpose({ open, query, groups, activeIndex })
     <!-- 遮罩：点弹层之外关闭。 -->
     <div v-if="open" class="pp__mask" data-person-mask @click="closePicker"></div>
 
-    <!-- 弹层：搜索 ＋ 分组滚动列表 ＋ 右侧 A–Z 索引条。 -->
+    <!-- 弹层：搜索 ＋ 列表（搜索态扁平相关度 / 清空后姓氏分组）＋ 右侧 A–Z 索引条（清空后才有）。 -->
     <div
       v-if="open"
       class="pp__panel"
@@ -444,18 +471,11 @@ defineExpose({ open, query, groups, activeIndex })
           role="listbox"
           aria-label="作者清單"
         >
-          <li
-            v-for="group in groups"
-            :key="group.initial"
-            :ref="(element) => setSectionRef(group.initial, element)"
-            class="pp__group"
-            role="presentation"
-            :data-person-group="group.initial"
-          >
-            <div class="pp__group-title" aria-hidden="true">{{ group.initial }}</div>
-            <div
-              v-for="row in group.rows"
-              :id="`pp-opt-${uid}-${flatIndexById.get(idOf(row))}`"
+          <!-- 搜索态（`searching`）：**扁平相关度列表** —— 无分组头、无 `data-person-group`。 -->
+          <template v-if="searching">
+            <li
+              v-for="(row, index) in flatOptions"
+              :id="`pp-opt-${uid}-${index}`"
               :key="idOf(row)"
               :ref="(element) => setOptionRef(idOf(row), element)"
               class="pp__option"
@@ -468,8 +488,37 @@ defineExpose({ open, query, groups, activeIndex })
               <span class="pp__option-name">{{ nameOf(row) }}</span>
               <span v-if="artOf(row) && artOf(row) !== nameOf(row)" class="pp__option-art">{{ artOf(row) }}</span>
               <span v-if="dynastyOf(row)" class="pp__option-dynasty">{{ dynastyOf(row) }}</span>
-            </div>
-          </li>
+            </li>
+          </template>
+          <!-- 清空搜索：原姓氏分组（组头 ＋ 组内顺序），原行为一字不改。 -->
+          <template v-else>
+            <li
+              v-for="group in groups"
+              :key="group.initial"
+              :ref="(element) => setSectionRef(group.initial, element)"
+              class="pp__group"
+              role="presentation"
+              :data-person-group="group.initial"
+            >
+              <div class="pp__group-title" aria-hidden="true">{{ group.initial }}</div>
+              <div
+                v-for="row in group.rows"
+                :id="`pp-opt-${uid}-${flatIndexById.get(idOf(row))}`"
+                :key="idOf(row)"
+                :ref="(element) => setOptionRef(idOf(row), element)"
+                class="pp__option"
+                :class="{ 'is-active': activeId === idOf(row), 'is-selected': String(modelValue || '') === idOf(row) }"
+                role="option"
+                :aria-selected="String(modelValue || '') === idOf(row) ? 'true' : 'false'"
+                :data-person-option="idOf(row)"
+                @click="pick(row)"
+              >
+                <span class="pp__option-name">{{ nameOf(row) }}</span>
+                <span v-if="artOf(row) && artOf(row) !== nameOf(row)" class="pp__option-art">{{ artOf(row) }}</span>
+                <span v-if="dynastyOf(row)" class="pp__option-dynasty">{{ dynastyOf(row) }}</span>
+              </div>
+            </li>
+          </template>
         </ul>
         <p v-else class="pp__empty">{{ emptyText }}</p>
 
