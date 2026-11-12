@@ -25,6 +25,9 @@ import {
   listFaceRows,
   listImageRows,
   createSealWithFaceRows,
+  /* **上傳成功後的雲端快照併入（本單唯一併入點）**：`finishSealWithFace` 成功收口時把
+     服務端下發的 seal / face / image 行寫進當前內存快照 ⇒ 新章立即可開（不等下一輪水合）。 */
+  mergeCloudSnapshotRows,
   writeFaceFixedAttributes,
   writeSealFixedAttributes as dbWriteSealFixedAttributes,
   replaceFaceImage as dbReplaceFaceImage,
@@ -909,7 +912,14 @@ async function createSealWithFaceViaCloud(actor, payload = {}) {
   if (!faceKey || (edgeStored && !edgeKey)) {
     return cloudUploadFail('STORAGE_UNAVAILABLE', '上傳印章失敗：權威對象鍵缺席，無法入雲；本次未寫入任何本機行。')
   }
-  /* ③ 載荷（**封閉鍵面**：印章級 8 鍵沿用 `SEAL_IMPORT_SEAL_FIELDS` 白名单；每面 4 必給鍵 ＋ 7 可選文本鍵）。 */
+  /* ③ 載荷（**封閉鍵面**：印章級 8 鍵沿用 `SEAL_IMPORT_SEAL_FIELDS` 白名单；每面 4 必給鍵 ＋ 7 可選文本鍵）。
+     作者引用的**權威鍵是 `author_person_id`**（印面級；與本機路徑 `faceRows` 的
+     `author_person_id: clean.authorPersonId` 同源同義）—— 服務端 `createSealUpload` 硬門要求
+     **逐面 trim 非空且命中 `xiai_persons`**，缺它 ⇒ `MISSING_REQUIRED`、指向不存在 ⇒ `INVALID_VALUE`。
+     `author` 仍**保留**：它是**歷史自由文本**字段（服務端照收，作展示回落），**引用權威鍵是
+     `author_person_id`**，兩者不互為回落、不互相兜底。
+     空引用 ⇒ **本載荷不帶該鍵**（前端提交門已攔：`UploadSealDialog` 作者必選 ＋ `sealNameDenial`；
+     不靠服務端兜底，也不把空串當引用送上去）。 */
   const faceText = {
     seal_name: clean.seal_name,
     dynasty: clean.dynasty,
@@ -917,6 +927,7 @@ async function createSealWithFaceViaCloud(actor, payload = {}) {
     face_style: clean.faceStyle,
     seal_class: clean.sealClass,
     author: clean.author,
+    ...(clean.authorPersonId ? { author_person_id: clean.authorPersonId } : {}),
     transcription: clean.transcription
   }
   const faces = [
@@ -1134,6 +1145,19 @@ function failSealWithFace(written) {
 function finishSealWithFace(written) {
   const stampId = written.stampId || (written.seal && (written.seal.stamp_id || written.seal.id)) || ''
   const faceId = written.faceId || (written.face && written.face.id) || ''
+  /* **上傳成功 ⇒ 併入當前雲端快照（本單唯一併入點）**：把服務端下發的 seal / face / image 行
+     寫進內存快照 —— 否則雲端 `ready` 讀序下新章被 `withLocalOverlay` 判成**孤兒行**、不渲染
+     ⇒ 立刻點 `/seal/<新號>` 會看到「未找到這枚印章」，非得手動刷新（等下一輪水合）。
+     併入是**空操作安全**的：快照缺席（未配置 / 未落定 / 已回落）⇒ 直接返回，本地讀路徑照舊。
+     `deduped` ⇒ 本次**沒有新增任何行**（行早已在庫）⇒ **不併**：既不動快照，也避免把
+     「只有本機看得到」的行當成雲端行上屏（雲端是唯一權威，見 `withLocalOverlay` 孤兒口徑）。 */
+  if (written.deduped !== true) {
+    mergeCloudSnapshotRows({
+      seals: written.seal ? [written.seal] : [],
+      faces: Array.isArray(written.faces) ? written.faces : written.face ? [written.face] : [],
+      images: Array.isArray(written.images) ? written.images : []
+    })
+  }
   return {
     ok: true,
     deduped: written.deduped === true,

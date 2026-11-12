@@ -24,7 +24,7 @@ const PIPELINE_MISSING_MESSAGE = FACE_PIPELINE_NOTICE ||
   '圖像處理模塊未就緒（utils/image.js 的 loadImageFile 不可用），暫時無法在本機處理印面圖，請稍後重試。'
 
 const form = reactive({
-  seal_name: '', // 印文（选填）
+  seal_name: '', // 印文（**必填**，本單硬裁定；提交前由 `sealNameDenial()` 攔）
   dynasty: '',
   faceContent: '', // 【印面内容】（R-30，键名 seal_type；必填、封闭 9 值）
   faceStyle: '', // 【印面风格】（R-31，键名 face_style；选填、封闭 23 值）
@@ -35,9 +35,10 @@ const form = reactive({
   transcription: ''
 })
 
-/* 【作者】＝**引用型**（person-model §4.1）：**仍選填** —— 不選 ⇒ 空；選 ⇒ **必須從既有印人中選擇**
-   （不得手輸自由文本）。檢索面＝服務層單點 `persons.searchPersons`（姓 / 名 / 字 / 號 / 別名 / cbdb_id）。
-   `form.author` 承載所選印人 id（`author_person_id`）；留空 ⇒ 不寫引用（合規）。 */
+/* 【作者】＝**引用型**（person-model §4.1）：**必選**（本單升級） —— 必須從既有印人中**點選**
+   （不得手輸自由文本、不得留空）。檢索面＝服務層單點 `persons.searchPersons`
+   （姓 / 名 / 字 / 號 / 別名 / cbdb_id）。`form.author` 承載所選印人 id（`author_person_id`）；
+   **留空 ⇒ 提交被拒**（`authorDenial()`，上屏繁體提示，不靜默丟引用）。 */
 const authorKeyword = ref('')
 const authorOptions = computed(() => {
   const keyword = String(authorKeyword.value || '').trim()
@@ -125,6 +126,38 @@ function sealClassDenial() {
     return `大類「${value}」不在允許的 ${SEAL_CLASS_OPTIONS.length} 類之內（${SEAL_CLASS_OPTIONS.join('、')}），請重新選擇後再提交。`
   }
   return ''
+}
+
+/* ============================================================================
+   【作者】**必選** ／ 【印文】留空 —— **提交前的兩道新門**（本單）
+   ----------------------------------------------------------------------------
+   ① 【作者】＝引用型（person-model §4.1）且**必選**（人類裁定，本單升級）：`authorKeyword`
+      只是**檢索詞**，`form.author` 才是**所選印人 id**（載荷鍵 `author_person_id`）。
+      改前兩處坑：(a) 輸了名字卻**沒點選候選** ⇒ 照常提交 ⇒ 該引用被**靜默丟棄**
+      （線上實據 `AACQE`：印面行有 face_style、卻缺 `author_person_id`，且零提示）；
+      (b) 完全沒填也照樣放行 ⇒ 印面行恒無作者引用。本門改成 **`form.author` 空即阻止提交**
+      （**與輸入框是否打了字無關**，無條件必選）＋可見繁體提示；**已點選 ⇒ 放行，行為與改前逐字一致**。
+      兩種情形共用**同一句**「請選擇作者」主提示 ⇒ 不得互相矛盾；輸了字時只**追加**補充說明。
+   ② 【印文】＝**硬必填**（人類裁定，本單把「可空 ⇒ 顯示佚名」的舊口徑改掉）：留空 ⇒ 阻止提交。
+      理由：`seal_name` 是檢索與列表的主鍵面，留空的行在廣場 / 檢索裏是**搜不到的幽靈章**
+      （線上實據 `AAADS`：`seal_name` / `seal_wen` / `author` 全空）。
+   兩門都在**任何影像管線與服務層調用之前**判定 ⇒ 拒絕即「不跑管線、零調用」；
+   本段只上屏文案，**不新增任何 reason 字面值**（`verify-endorsement` D2 純繁體）。
+   ============================================================================ */
+
+/** 【作者】未點選候選 ⇒ 可讀繁體提示（空串 ＝ 放行）；主句恆含「請選擇作者」。 */
+function authorDenial() {
+  if (String(form.author || '').trim()) return ''
+  const base = '請選擇作者（印人）；庫中無此人請先提交印人提案，再回來上傳。'
+  const typed = String(authorKeyword.value || '').trim()
+  /* 補充說明只**追加**、不改主句 ⇒ 兩種情形的提示同源、不矛盾。 */
+  return typed ? `${base}已輸入「${typed}」但尚未選擇；請從候選印人中點選。` : base
+}
+
+/** 【印文】留空 ⇒ 可讀繁體提示（空串 ＝ 放行）。 */
+function sealNameDenial() {
+  if (String(form.seal_name || '').trim()) return ''
+  return '請填寫印文（印章名稱）；留空會導致這枚印章在檢索與列表中無法被找到。'
 }
 
 
@@ -358,7 +391,7 @@ function resetCrop() {
 
 function buildPayload(faceBytes) {
   const payload = {
-    seal_name: form.seal_name.trim(), // 印文（可空 ⇒ 显示「佚名」）
+    seal_name: form.seal_name.trim(), // 印文（**必填**；提交前已過 `sealNameDenial()`）
     dynasty: form.dynasty,
     /* 【印面内容】（R-30）：`type` 经数据层归一为 `seal_type`（印面级＋印章行镜像）。 */
     type: form.faceContent,
@@ -370,7 +403,8 @@ function buildPayload(faceBytes) {
     material: form.material.trim(), // 材质（**印章级**固定属性，R-32；写印章行）
     shape: form.shape.trim(), // 形制（印章级固定属性；自由文本，可空）
     /* 【作者】＝**引用型**（person-model §4.1）：载荷键是**印面级** `author_person_id`。
-       值 ＝ 所选印人 id（`form.author`）；**不选 ⇒ 空**（合规：不写引用）。
+       值 ＝ 所选印人 id（`form.author`）；**必選**（本單升級）—— 提交前 `authorDenial()` 已拦下
+       空值 ⇒ 走到這裡必非空（不再有「不選 ⇒ 空 ⇒ 靜默丟引用」的口子）。
        ⚠️ **不得**写成旧 `author` 键 —— 那会把 id 灌进「历史自由文本」面
        （引用门被绕过、上屏裸 id；P1-1 缺陷根因）。旧 `author` 只作历史回落，不得被引用 id 污染。 */
     author_person_id: form.author.trim(),
@@ -386,6 +420,20 @@ async function submit() {
   submitting.value = true
   feedback.value = ''
   try {
+    /* 【作者】必選 ＋【印文】必填：`form.author` / `seal_name` 任一不達標 ⇒ **阻止提交**
+       （不跑影像管線、不調服務層）＋ 可見繁體提示；本分支只上屏文案，
+       **不新增 reason 字面值**。判定在**最前**（先於大類門與影像管線）。 */
+    const authorDenied = authorDenial()
+    if (authorDenied) {
+      feedback.value = authorDenied
+      return
+    }
+    const nameDenied = sealNameDenial()
+    if (nameDenied) {
+      feedback.value = nameDenied
+      return
+    }
+
     /* 【大類】必填（人类裁定）：未选 / 非法值 ⇒ **阻止提交**（不跑影像管线、不调服务层）
        ＋ 可见繁體提示；本分支只上屏文案，**不新增 reason 字面值**。 */
     const classDenied = sealClassDenial()
@@ -454,17 +502,20 @@ onBeforeUnmount(() => {
     <div class="upload-box">
       <h3 class="upload-box__title">上傳印章</h3>
       <p class="upload-box__lede">
-        新增一枚印章並同時新增 1 個印面與 1 張印面圖。朝代、印面內容、大類、印面圖爲必填項；
+        新增一枚印章並同時新增 1 個印面與 1 張印面圖。印文、朝代、印面內容、大類、作者、印面圖爲必填項；
         朝代、印面內容、印面風格、大類都是封閉選擇框（只可選不可填），前兩者也是璽印匯類的篩選維度。
-        印文可留空（空則顯示「佚名」）。
+        印文不可留空（留空會使這枚印章在檢索與列表中查不到）。
         形制與材質爲印章級固定屬性（自由文本，選填）。
       </p>
 
       <div class="field">
-        <label for="upload-seal-name">印文（選填）</label>
-        <input id="upload-seal-name" v-model="form.seal_name" type="text" placeholder="例：某某之印；留空即顯示「佚名」" />
+        <label for="upload-seal-name">印文（必填）</label>
+        <input id="upload-seal-name" v-model="form.seal_name" type="text" placeholder="例：某某之印（必填；留空無法檢索）" />
         <!-- 三動作轉換（R-73/R-74/R-75）：**只在點按時**轉換；提交路徑不轉（提交值＝用戶所見的當前值）。 -->
         <TextTransformButtons v-model="form.seal_name" field-key="upload:seal_name" field-label="印文" />
+        <span v-if="!form.seal_name.trim()" class="field__hint" data-seal-name-unfilled="upload-seal">
+          尚未填寫印文（必填）；留空會使這枚印章在檢索與列表中無法被找到。
+        </span>
       </div>
 
       <div class="field">
@@ -569,10 +620,10 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="field">
-        <label for="upload-seal-author">作者（選填）</label>
-        <!-- 【作者】＝**引用型**（person-model §4.1）：**只能選、不能填** —— 選項只來自既有印人
-             （`persons.listPersons` / `persons.searchPersons`）；不選 ⇒ 空（合規）。檢索面含
-             姓 / 名 / 字 / 號 / 別名 / cbdb_id（服務層單點，不在此自寫第二套）。 -->
+        <label for="upload-seal-author">作者（必填）</label>
+        <!-- 【作者】＝**引用型**（person-model §4.1）：**只能選、不能填、不可留空** —— 選項只來自既有印人
+             （`persons.listPersons` / `persons.searchPersons`）；未點選 ⇒ 提交被拒（`authorDenial()`）。
+             檢索面含姓 / 名 / 字 / 號 / 別名 / cbdb_id（服務層單點，不在此自寫第二套）。 -->
         <input
           id="upload-seal-author-search"
           v-model="authorKeyword"
@@ -581,11 +632,21 @@ onBeforeUnmount(() => {
           data-author-search="upload-seal"
         />
         <select id="upload-seal-author" v-model="form.author" data-author-select="upload-seal">
-          <option value="">（不選，留空）</option>
+          <option value="">（未選擇）</option>
           <option v-for="option in authorOptions" :key="option.id" :value="option.id">{{ option.name }}</option>
         </select>
         <span class="field__hint">
-          作者選填：不選即留空；若填，必須從既有印人中選擇（本框共 {{ authorOptions.length }} 位可選），不能手輸新作者。
+          作者必填：必須從既有印人中點選一位（本框共 {{ authorOptions.length }} 位可選），不能手輸新作者、不可留空。
+        </span>
+        <span v-if="!form.author" class="field__hint" data-author-unselected="upload-seal">
+          尚未選擇作者（必填）；請從候選印人中點選一位後再提交。
+        </span>
+        <span
+          v-if="authorKeyword.trim() && !form.author"
+          class="field__hint"
+          data-author-typed-unselected="upload-seal"
+        >
+          已輸入「{{ authorKeyword.trim() }}」但尚未選擇；請從候選印人中點選。
         </span>
         <span
           v-if="authorKeyword.trim() && !authorOptions.length"

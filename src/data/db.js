@@ -57,8 +57,10 @@ const { encodeSealCode, encodeFaceCode } = globalThis.__XIAI_CODE_ID__
 import { uidOf } from './uid.js'
 /* **CloudBase 讀取面（v1）**：雲端快照的**唯一讀入口**（同步、零網絡）。
    本文件在 `readCollection` 裏**只讀它** —— 是否接管、接管到哪一步（pending / ready / failed）
-   全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。 */
-import { cloudBaseReadOf, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS } from './cloudbase.js'
+   全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。
+   另經 `cloudBaseSnapshot()` 拿**同一份快照對象**做「上傳成功後併入」（`mergeCloudSnapshotRows`）：
+   仍是**同一個單點的讀口**，不新增判據、不發請求；併入只替換集合數組身份以失效讀緩存。 */
+import { cloudBaseReadOf, cloudBaseSnapshot, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS } from './cloudbase.js'
 /* **雲模式停寫本機鏡像行（本單）**：`writeFaceMode()` 是「寫入口形態」的**唯一判據來源**
    （`data/writeFaceMode.js` 文件頭明文：頁面 / 服務不得各自判斷）；本文件只讀它。 */
 import { writeFaceMode, WRITE_FACE_MODES } from './writeFaceMode.js'
@@ -410,6 +412,57 @@ function withLocalOverlay(key, cloudRows, localKey = key) {
   })
   if (key === ORPHAN_TRACKED_CLOUD_KEY) setOrphanSeals(orphans)
   return out
+}
+
+/* ============================================================================
+   **上傳成功後的雲端快照併入（唯一單點｜本單）**
+   ----------------------------------------------------------------------------
+   缺陷（線上實測）：雲端形態上傳成功後，本機鏡像三表已寫入，但**當前雲端快照**裏沒有這幾行
+   ⇒ `withLocalOverlay('seals', …)` 按「本機有、雲端沒有」把新章判成**孤兒行**、不再渲染
+   ⇒ 立刻點 `/seal/<新號>` 看到「未找到這枚印章」，必須手動刷新（等下一輪水合）才看得到。
+   本函數把**服務端下發的 seal / face / image 行**就地併入當前內存快照，讓新章**立即可開**。
+   純度：只改 `cloudbase.js` 交出的快照對象（**不發網絡、不改雲端、不寫 localStorage**）；
+   快照缺席（未配置 / 未落定 / 已回落）⇒ **空操作**返回（本地讀路徑本來就看得到本機行）。
+   併入後**替換集合數組身份**（`snapshot[key] = [...]`）⇒ `readCollection` 的讀緩存
+   （判 `cloudRows` 身份）自動失效，下一次讀即拿到合併後的行 —— **不另立第二套失效口**。
+   去重按行身份（`overlayIdentityOf`：`_id` ⇒ `id` ⇒ `stamp_id`）⇒ 重複調用冪等；
+   **不臆造 `_id`**（本機行本來就沒有它，讀路徑 `id` 配對已足）。
+   ============================================================================ */
+
+/**
+ * 把服務端下發的行併入當前雲端快照（**上傳成功後的唯一併入點**）。
+ * @param {{seals?:Array<object>, faces?:Array<object>, images?:Array<object>}} incoming 本次新增的行
+ * @returns {{merged:boolean, counts:object}} `merged`＝快照真的被改寫；`counts`＝逐集合新增行數
+ */
+export function mergeCloudSnapshotRows(incoming = {}) {
+  const snapshot = cloudBaseSnapshot()
+  if (!snapshot || typeof snapshot !== 'object') return { merged: false, counts: {} }
+  let merged = false
+  const counts = {}
+  for (const key of CLOUD_COLLECTION_KEYS) {
+    counts[key] = 0
+    const rows = Array.isArray(incoming[key]) ? incoming[key] : []
+    if (rows.length === 0) continue
+    const base = Array.isArray(snapshot[key]) ? snapshot[key] : []
+    const seen = new Set()
+    base.forEach((row) => {
+      const id = overlayIdentityOf(row)
+      if (id) seen.add(id)
+    })
+    const additions = []
+    rows.forEach((row) => {
+      const id = overlayIdentityOf(row)
+      if (!id || seen.has(id)) return
+      seen.add(id)
+      additions.push(row)
+    })
+    if (additions.length === 0) continue
+    /* **新數組身份** ⇒ 讀緩存（`readCollection` 的 `cloudRows` 判據）自動失效。 */
+    snapshot[key] = [...base, ...additions]
+    counts[key] = additions.length
+    merged = true
+  }
+  return { merged, counts }
 }
 
 /* ============================================================================
@@ -3136,11 +3189,19 @@ export const MANUAL_SOURCE = 'manual'
  * canonical 必填项（缺失即拒，**不产生半成品记录**；见 §4.1.1 表下注 ③ / AC-34）。
  *
  * 本单口径②：**「印章名称」概念删除，名称＝印文**。
- * ⇒ 印文（`seal_name`，与平台 `sealName` 同源）**不再必填**（可空；空则对外显示「佚名」）；
- * 必填仅剩 **朝代 / 分类**（广场筛选维度）；**印面图**的必填校验在组合写里单独做
+ * ⇒ 印文（`seal_name`，与平台 `sealName` 同源）**新建必填**（v1.105 硬口径；人类裁定「新建时
+ *    印文必选」—— 留空的行在广场 / 检索里是搜不到的幽灵章）。**读面仍允许空**：存量行 /
+ *    导入采纳行不受本表约束，空印文照旧走 `sealDisplayName` ⇒ 显示「佚名」。
+ * 必填＝ **印文 / 朝代 / 分类**（广场筛选维度）；**印面图**的必填校验在组合写里单独做
  * （`createSealWithFaceRows` / `insertFaceRow`）。
+ *
+ * **作用面只有「新建 / 上传」**：`missingSealFields` 的三个调用点（`insertSealRow` /
+ * `insertFaceRow` / `planSealWithFaceInput`）全是新建写前门；导入（`seals.submitSealImport`）
+ * 与采纳（`applySealImportDecision` → `buildAcceptedSeal`）**不复用本表**（各自自有键面与门序，
+ * 服务端同口径亦明令这两道门**不外溢**到导入通道），故无需豁免分支。
  */
 export const REQUIRED_SEAL_FIELDS = [
+  { key: 'seal_name', label: '印文', aliases: ['seal_name', 'name', 'wen'] },
   { key: 'dynasty', label: '朝代', aliases: ['dynasty'] },
   { key: 'category', label: '分類', aliases: ['type', 'category', 'seal_type'] }
 ]
