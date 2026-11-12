@@ -24,9 +24,12 @@ const authorName = computed(() => corrections.resolveAuthorDisplayName(props.sea
      （內容尋址對象）⇒ **不碰全量水合的 seals/faces 映射**、也不查主印面；
    · 本機形態 ＝ 既有印章視圖模型（示範資料 / 詳情同源行）：維持原路徑
      （主印面 ⇒ 影像行 ⇒ 縮略面 / 原生解碼）。
-   判據只看行上有沒有對象鍵，**不看登錄態 / 不猜數據源狀態**。
+   判據：**雲端分頁行標記**（`sealCards.isCloudCardRow`，符號鍵）**或**行上有對象鍵，
+   **不看登錄態 / 不猜數據源狀態**。為什麼必須認標記：bundled 占位行 ／ 無影像行的
+   `thumb_key` / `display_key` **兩鍵皆空串**（與本機行同形）—— 只看鍵會把它們誤判成本機行
+   ⇒ 走本機解碼路徑（雲端行多半查無影像 ⇒ 只剩字形，**本地占位圖出不來**）。
    ============================================================================ */
-const cardMode = computed(() => sealCards.coverKeyOf(props.seal) !== '')
+const cardMode = computed(() => sealCards.isCloudCardRow(props.seal) || sealCards.coverKeyOf(props.seal) !== '')
 /** 標籤取值：卡片行用 `category`（＝印面內容）；本機行沿用 `seal_type`。 */
 const contentTag = computed(() => String(props.seal.seal_type || props.seal.category || ''))
 /** 「含邊款」判據：卡片行讀 `edge_count`；本機行沿用 `hasEdge`。 */
@@ -39,12 +42,60 @@ const hasEdge = computed(() => {
 const face = computed(() => (cardMode.value ? null : seals.primaryFaceOf(props.seal.stamp_id)))
 const thumbUrl = ref('')
 const thumbError = ref('')
-/** 縮略件的來源面別（機械讀數）：`object` ＝ 分頁行的對象鍵（thumb/display）；`api` ＝ 縮略面（256 長邊單件、不經切分內核）；`native` ＝ 本機原生解碼。 */
+/**
+ * 縮略件的來源面別（機械讀數 `data-thumb-face`）：
+ *   · 卡片形態三級回落 —— `object` ＝ 第一級 `thumb_key` 對象；`fallback` ＝ 第二級
+ *     `display_key`（取鏈失敗 / `<img @error>` 的運行時回落）；`placeholder` ＝ 第三級
+ *     **本地占位圖**（`SEAL_PLACEHOLDER_IMAGE.asset_url`，base 感知）；
+ *   · 本機形態沿用 —— `api` ＝ 縮略面（256 長邊單件、不經切分內核）；`native` ＝ 本機原生解碼。
+ */
 const thumbVia = ref('')
 /** 封面取件中（卡片形態）：佔位字形照常顯示，不把「還沒到」說成「沒有」（不靜默成空態）。 */
 const thumbBusy = ref(false)
+/** 卡片形態封面的**回落台階**：0 ＝ thumb 級、1 ＝ display 級、2 ＝ 本地占位圖（`@error` 的判據）。 */
+const coverStage = ref(0)
 
-/* ============================================================================
+/* **卡片形態封面：三級回落**（thumb → display → 本地占位圖）。
+   第一級與第二級的「取鏈失敗」在 `cardCoverUrl` 內逐級處理；「取到鏈但字節 404 / 解碼失敗」
+   由 `<img @error>` → `onCoverImageError` 處理 —— 回落是**運行時**的，不只判空。 */
+function applyCover(cover) {
+  thumbUrl.value = cover.url
+  thumbVia.value = cover.via === 'thumb' ? 'object' : 'fallback'
+  coverStage.value = cover.via === 'thumb' ? 0 : 1
+}
+
+/** 第三級：**本地占位圖**（base 感知資產 URL，非站根絕對路徑）；資產缺損 ⇒ 退回字形空態（不造假 URL）。 */
+function toCoverPlaceholder(message) {
+  const url = sealCards.coverPlaceholderUrl()
+  thumbVia.value = url ? 'placeholder' : ''
+  thumbError.value = url ? '' : (message || '封面影像暫時無法顯示')
+  thumbUrl.value = url
+  coverStage.value = 2
+}
+
+/** `<img @error>` 的**運行時回落**：thumb 級壞 ⇒ 換 display 級；再壞 ⇒ 本地占位圖。 */
+async function onCoverImageError() {
+  if (!cardMode.value) return
+  if (coverStage.value === 0 && sealCards.coverDisplayKeyOf(props.seal)) {
+    const cover = await sealCards.cardCoverUrl(props.seal, { via: 'display' })
+    if (cover.ok) {
+      applyCover(cover)
+      return
+    }
+    toCoverPlaceholder(cover.message)
+    return
+  }
+  if (coverStage.value <= 1) {
+    toCoverPlaceholder('封面影像暫時無法顯示')
+    return
+  }
+  /* 占位圖資產本身取不到 ⇒ 如實退回字形空態（**不再重試**，避免循環）。 */
+  thumbUrl.value = ''
+  thumbVia.value = ''
+  thumbError.value = '封面影像暫時無法顯示'
+}
+
+/* ============================================================================ *
    縮略面（规范 §3.27.6 / §3.24.3 ②）
    ----------------------------------------------------------------------------
    縮略圖 ＝ **256 長邊單件**、**不經切分內核** ⇒ 卡片縮略圖走 **`POST /api/image/thumb`**
@@ -53,19 +104,28 @@ const thumbBusy = ref(false)
    （服務端來源門對非 TIFF 結構化拒絕 ⇒ 舊行必須仍由原生解碼顯示，不得回歸）。
    ============================================================================ */
 async function loadThumb() {
-  /* **卡片形態（本單）**：封面只取 `thumb_key`（缺 ⇒ `display_key`）對應的對象臨時鏈接。
-     不查主印面、不讀本機影像庫 ⇒ 與全量水合解耦（首屏 48 枚不必等 11,800 行落定）。 */
+  /* **卡片形態（本單）**：封面按 `thumb_key` → `display_key` 逐級取對象臨時鏈接，
+     兩級都取不到 ⇒ 本地占位圖；不查主印面、不讀本機影像庫 ⇒ 與全量水合解耦
+     （首屏 48 枚不必等 11,800 行落定）。 */
   if (cardMode.value) {
     revokeThumb()
     thumbBusy.value = true
     thumbUrl.value = ''
     thumbError.value = ''
     thumbVia.value = ''
+    coverStage.value = 0
     const cover = await sealCards.cardCoverUrl(props.seal)
     thumbBusy.value = false
     if (cover.ok) {
-      thumbUrl.value = cover.url
-      thumbVia.value = 'object'
+      applyCover(cover)
+      return
+    }
+    /* **內容面取不到**（兩鍵皆空 / 對象不存在 / 鍵形態不過）⇒ 第三級本地占位圖；
+       **配置 / 傳輸面失敗**（未配桶、雲端不可用）⇒ 仍走既有字形空態 ＋ 原話
+       （不把「壞了」說成「沒有圖」）。 */
+    const contentReasons = ['MISSING_REQUIRED', 'INVALID_VALUE', 'STORAGE_FILE_NOT_FOUND', 'NOT_IMAGE']
+    if (contentReasons.indexOf(cover.reason) !== -1) {
+      toCoverPlaceholder(cover.message)
       return
     }
     thumbError.value = cover.message || '封面影像暫時無法顯示'
@@ -161,14 +221,17 @@ onBeforeUnmount(revokeThumb)
   <article class="seal-card">
     <router-link class="seal-card__thumb" :to="{ name: 'seal-detail', params: { id: seal.stamp_id } }">
       <!-- 縮略圖 = **單件**（規範 §3.27.6：256 長邊單件 WebP、不經切分內核）。
-           TIFF 存儲件 ⇒ 走縮略面（`POST /api/image/thumb`）；存量 / 非 TIFF ⇒ 本機原生解碼。
-           `data-thumb-face` ＝ 本次縮略件的來源面別（`api` / `native`）機械讀數。 -->
+           卡片形態：`thumb_key` → `display_key` → 本地占位圖（三級回落，`@error` 是**運行時**那一半）；
+           本機形態：TIFF 存儲件走縮略面（`POST /api/image/thumb`）、存量 / 非 TIFF 走原生解碼。
+           `data-thumb-face` ＝ 本次縮略件的來源面別機械讀數
+           （卡片形態 `object` / `fallback` / `placeholder`；本機形態 `api` / `native`）。 -->
       <img
         v-if="thumbUrl"
         class="seal-card__thumb-img"
         :src="thumbUrl"
         :alt="`${currentText}印面縮略圖`"
         :data-thumb-face="thumbVia || null"
+        @error="onCoverImageError"
       />
       <template v-else>
         <span class="seal-card__thumb-glyph">{{ glyph }}</span>

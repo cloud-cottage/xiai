@@ -388,11 +388,14 @@ async function confirmFaceImageDelete() {
 }
 
 /* ============================================================================ *
-   **普通用戶影像勘誤（§3.77｜本單）：影像卡【勘誤】入口 ＋ 彈窗
-   ---------------------------------------------------------------------------- · 渲染条件＝**登录态**（服务层 `seals.canSubmitCorrection()` ⇒ `canSubmit`；游客 ⇒ false
-     ⇒ 不渲染，DOM 零命中；**不得** CSS 隐藏 / `disabled` 冒充）。管理员同样渲染
+   **普通用戶影像勘誤（§3.77）：并入合并弹窗的「影像」页签（本單：两个勘誤入口合一）
+   ---------------------------------------------------------------------------- · **入口合一**：页面上只留「可標記屬性」区那一枚【勘誤】（字段勘误入口）；影像卡上的
+     独立【勘誤】钮已撤，影像操作改在**同一弹窗的「影像」页签**内完成（默认停在「屬性」）。
+     登录态判定不变（服务层 `seals.canSubmitCorrection()` ⇒ `canSubmit`；游客 ⇒ 页面入口不渲染、
+     DOM 零命中；**不得** CSS 隐藏 / `disabled` 冒充）。管理员同样渲染
      （§3.77.1：普通用户【勘誤】与管理员【刪除】两条路径互不替代）。
-   · 钩子只用 `data-action="image-correction"`（**不新增 `data-admin-action` 取值**；
+   · 钩子只用 `data-action="image-correction"`（**不新增 `data-admin-action` 取值**；现挂在
+     合并弹窗的「影像」页签钮上）；页签另带 `data-correction-tab="attr" | "image"`；
      弹窗内提交 / 取消钮按 §3.12.1 派生 `image-correction-submit` / `image-correction-cancel`）。
    · 弹窗＝二选一（刪除此影像 / 重新上傳新圖替換）＋ 备注（≤200 字，超限禁用提交并提示）；
      选「替換」必选图：先 `storeArtifactBytes` → `registerFaceImage` 入册拿 `image_id`
@@ -400,7 +403,9 @@ async function confirmFaceImageDelete() {
    · 成功 ⇒ 上屏「已提交影像勘誤（待審覈）」＋ 关弹窗 ＋ `dataVersion + 1`（刷新待审读数）；
      确认前零写入、取消零写入。
    ============================================================================ */
-const imageCorrectionOpen = ref(false)
+/* **勘誤弹窗页签（本單：两入口合一）** —— 页面上只留「可標記屬性」区那一枚【勘誤】，
+   影像勘誤作为弹窗内的第二个页签；`attr` ＝ 屬性（**默认**）、`image` ＝ 影像。 */
+const correctionTab = ref('attr')
 const imageCorrectionBusy = ref(false)
 /** 待勘誤目标 `{faceId, sealId, imageId, kind, label}`（关窗即清，避免残留指向）。 */
 const imageCorrectionTarget = ref(null)
@@ -436,9 +441,10 @@ const imageCorrectionNoteLength = computed(() => imageCorrectionNote.value.trim(
 const imageCorrectionNoteOver = computed(() => imageCorrectionNoteLength.value > corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH)
 /** 已选文件名（未选 ⇒ 空串）。 */
 const imageCorrectionFileName = computed(() => (imageCorrectionFile.value ? String(imageCorrectionFile.value.name || '') : ''))
-/** 提交禁用：在飞 / 备注超限 / 选「替換」却未选图。 */
+/** 提交禁用：无目标 / 在飞 / 备注超限 / 选「替換」却未选图。 */
 const imageCorrectionSubmitDisabled = computed(
   () =>
+    !imageCorrectionTarget.value ||
     imageCorrectionBusy.value ||
     imageCorrectionNoteOver.value ||
     (imageCorrectionAction.value === 'replace' && !imageCorrectionFile.value)
@@ -453,17 +459,21 @@ const imageCorrectionLede = computed(() => {
   )
 })
 
-/** 打开弹窗（每次打开重置动作 / 备注 / 选图 / 旧反馈与旧提示）。 */
-function openImageCorrection(face, imageId, kind) {
+/**
+ * 装填影像勘誤目标（**登录门 / 空 id 判定与重置面逐字沿用**原入口，只把「开哪扇窗」
+ * 交回调用方 ⇒ 合并弹窗的「影像」页签与原影像卡入口共用同一份装填逻辑）。
+ * 成功 ⇒ 返回 `true`（目标 / 动作 / 备注 / 选图 / 旧反馈已清场）；否则返回 `false`。
+ */
+function prepareImageCorrection(face, imageId, kind) {
   const id = imageId ? String(imageId) : ''
   if (!id) {
     imageCorrectionNotice.value = '本印面沒有影像編號，無從提交影像勘誤。'
-    return
+    return false
   }
   if (!canSubmit.value) {
     /* 游客不渲染入口（真条件）；此处兜底只作登录引导，不静默失败。 */
     goLogin()
-    return
+    return false
   }
   const sealId = face && face.sealId ? String(face.sealId) : seal.value ? String(seal.value.stamp_id || '') : ''
   imageCorrectionTarget.value = {
@@ -478,13 +488,14 @@ function openImageCorrection(face, imageId, kind) {
   imageCorrectionFile.value = null
   imageCorrectionFeedback.value = ''
   imageCorrectionNotice.value = ''
-  imageCorrectionOpen.value = true
+  return true
 }
 
-/** 关闭弹窗（成功 / 取消共用；**零写入**）。 */
+/** 关闭弹窗（成功 / 取消共用；**零写入**）。合并后两页签共用同一扇窗 ⇒ 一并落回「屬性」页签。 */
 function closeImageCorrection() {
   if (imageCorrectionBusy.value) return
-  imageCorrectionOpen.value = false
+  formOpen.value = false
+  correctionTab.value = 'attr'
   imageCorrectionTarget.value = null
   imageCorrectionFeedback.value = ''
   imageCorrectionFile.value = null
@@ -574,7 +585,8 @@ async function confirmImageCorrection() {
       const node = document.querySelector('[data-correction-notice]') || document.querySelector('[data-image-correction-notice]')
       if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', behavior: 'smooth' })
     })
-    imageCorrectionOpen.value = false
+    formOpen.value = false
+    correctionTab.value = 'attr'
     imageCorrectionTarget.value = null
     imageCorrectionFile.value = null
     imageCorrectionNote.value = ''
@@ -1344,6 +1356,35 @@ const formFaceId = ref('')
 /** 勘误对象印面（用于**边款不呈现**两类封闭项的判据，R-37 / R-43）。 */
 const formFace = computed(() => faces.value.find((item) => item.id === formFaceId.value) || null)
 const formFaceIsEdge = computed(() => Boolean(formFace.value && formFace.value.isEdge))
+/* ============================================================================
+   **勘誤弹窗「影像」页签的目标面（本單：入口合一）**
+   ---------------------------------------------------------------------------- · 页面上的影像卡不再各挂一枚【勘誤】⇒ 目标影像改由**合并弹窗的影像页签**给出：
+     候选 ＝ 本印面的印面图 ＋ 其全部边款图（**逐图可达**，与原影像卡逐枚入口同一集合）。
+   · 只有多于一个候选时才上屏选择器；候选唯一 ⇒ 直接取它（不加多余控件）。
+   · 装填仍走 `prepareImageCorrection`（登录门 / 重置面逐字沿用），提交仍走
+     `confirmImageCorrection` ⇒ `corrections.submitImageCorrection`（**零新增写口**）。
+   ============================================================================ */
+/** 本印面可勘誤的影像候选 `{imageId, kind}`（印面图优先，随后边款图，顺序稳定）。 */
+function imageCandidatesOf(face) {
+  if (!face) return []
+  const out = []
+  if (face.face_image_id) out.push({ imageId: String(face.face_image_id), kind: seals.FACE_KIND.FACE })
+  const edges = Array.isArray(face.edgeImages) ? face.edgeImages : []
+  edges.forEach((image) => {
+    if (image && image.id) out.push({ imageId: String(image.id), kind: seals.FACE_KIND.EDGE })
+  })
+  return out
+}
+const correctionImageCandidates = computed(() => imageCandidatesOf(formFace.value))
+/** 影像页签当前选中的候选键 `kind:imageId`（开弹窗时按首选候选装填）。 */
+const imageCorrectionChoice = ref('')
+/** 换目标影像（选择器 `@change`）：只换目标，**不碰任何提交链路**。 */
+function retargetCorrectionImage(event) {
+  const key = String((event && event.target && event.target.value) || '') || imageCorrectionChoice.value
+  imageCorrectionChoice.value = key
+  const item = correctionImageCandidates.value.find((candidate) => `${candidate.kind}:${candidate.imageId}` === key)
+  if (item) prepareImageCorrection(formFace.value, item.imageId, item.kind)
+}
 const formFaceLabel = computed(() => {
   const face = faces.value.find((item) => item.id === formFaceId.value)
   return face ? faceLabel(face) : ''
@@ -1603,6 +1644,21 @@ function openCorrection(face) {
   proposalFeedback.value = ''
   resetProposal()
   formFaceId.value = face.id
+  /* 合并弹窗（本單）：默认停在「屬性」页签；影像页签的目标一并装填 ——
+     候选唯一 ⇒ 直取该图；多图 ⇒ 默认首图（页签内可换）；无图 ⇒ 目标留空，
+     影像页签只上屏「無從提交」提示（**不发页面级提示、零写入面不变**）。 */
+  correctionTab.value = 'attr'
+  const candidates = imageCandidatesOf(face)
+  imageCorrectionChoice.value = candidates.length ? `${candidates[0].kind}:${candidates[0].imageId}` : ''
+  if (candidates.length) {
+    prepareImageCorrection(face, candidates[0].imageId, candidates[0].kind)
+  } else {
+    imageCorrectionTarget.value = null
+    imageCorrectionAction.value = 'delete'
+    imageCorrectionNote.value = ''
+    imageCorrectionFile.value = null
+    imageCorrectionFeedback.value = ''
+  }
   formOpen.value = true
 }
 
@@ -2803,21 +2859,11 @@ onBeforeUnmount(() => {
             >
               刪除
             </button>
-            <!-- 普通用戶【勘誤】（§3.77｜本單）：**登录态真条件渲染**（`canSubmit`；游客 ⇒ 不渲染、
-                 DOM 零命中，**不得** CSS 隐藏 / `disabled` 冒充）；管理员同样渲染（两条路径互不替代）。
-                 钩子只用 `data-action="image-correction"`（**不新增 `data-admin-action` 取值**）。 -->
-            <button
-              v-if="canSubmit"
-              class="btn btn--ghost"
-              type="button"
-              data-action="image-correction"
-              :data-face-id="face.id"
-              :data-image-id="face.face_image_id"
-              :disabled="imageCorrectionBusy"
-              @click="openImageCorrection(face, face.face_image_id, seals.FACE_KIND.FACE)"
-            >
-              勘誤
-            </button>
+            <!-- 影像勘誤入口已**并入**「可標記屬性」区的**唯一**【勘誤】入口（本單：两个入口合一）：
+                 本影像卡不再单列【勘誤】钮（页面上 `/^勘誤$/` 的可见按钮因此恰 1 个）；影像操作
+                 移到合并弹窗的「影像」页签内完成，页签内保留 `data-action="image-correction"` 钩子
+                 （**不新增 `data-admin-action` 取值**）；登录门 / 提交链路逐字不变。
+                 管理员【刪除】路径（下钮）不受影响（两条路径互不替代）。 -->
             <!-- R-87 / R-88：按元数据切分（印面族 4 块）→ 前端拼接展示（按原色，无上色）。 -->
             <SliceImage
               v-if="imageReadyOf(face.face_image_id)"
@@ -2842,19 +2888,8 @@ onBeforeUnmount(() => {
           <template v-if="face.isEdge">
             <div v-for="image in face.edgeImages" :key="image.id" class="face-block__figure">
               <p class="face-block__figure-title">邊款影像 {{ image.id }}</p>
-              <!-- 普通用戶【勘誤】（邊款影像卡同一入口；判定与钩子同上，**不新增 `data-admin-action`**）。 -->
-              <button
-                v-if="canSubmit"
-                class="btn btn--ghost"
-                type="button"
-                data-action="image-correction"
-                :data-face-id="face.id"
-                :data-image-id="image.id"
-                :disabled="imageCorrectionBusy"
-                @click="openImageCorrection(face, image.id, seals.FACE_KIND.EDGE)"
-              >
-                勘誤
-              </button>
+              <!-- 影像勘誤入口已**并入**「可標記屬性」区的**唯一**【勘誤】钮（本單：两入口合一）：
+                   本邊款影像卡不再单列【勘誤】；目标影像在合并弹窗「影像」页签内选（多图时给选择器）。 -->
               <SliceImage
                 v-if="imageReadyOf(image.id)"
                 class="face-block__img"
@@ -3646,118 +3681,11 @@ onBeforeUnmount(() => {
       {{ imageCorrectionNotice }}
     </p>
 
-    <!-- **影像卡【勘誤】弹窗**（§3.77.5）：二选一（刪除此影像 / 重新上傳新圖替換）＋ 备注
-         （≤200 字，超限禁用提交并提示）＋ 选「替換」时必选新图；二次确认文案列明后果
-         （选「替換」明示「審核通過後印面改指新圖、舊圖將被刪除（舊圖仍被其它印面引用時
-         只改指向、不刪舊圖）」）；确认前零写入、取消零写入；弹窗内按钮**只用 `data-action`
-         （**不新增 `[data-admin-action]` 取值**）。 -->
-    <div
-      v-if="imageCorrectionOpen"
-      class="correction-mask"
-      role="dialog"
-      aria-modal="true"
-      aria-label="影像勘誤"
-      data-image-correction-dialog
-    >
-      <div class="correction-box">
-        <h3 class="correction-box__title">影像勘誤</h3>
-        <p class="correction-box__lede">{{ imageCorrectionLede }}</p>
-
-        <fieldset class="imgcorr">
-          <legend class="imgcorr__legend">選擇勘誤方式（二選一）</legend>
-          <label class="imgcorr__option" data-image-correction-option="delete">
-            <input
-              v-model="imageCorrectionAction"
-              type="radio"
-              name="image-correction-action"
-              value="delete"
-              data-image-correction-action="delete"
-            />
-            刪除此影像
-          </label>
-          <label class="imgcorr__option" data-image-correction-option="replace">
-            <input
-              v-model="imageCorrectionAction"
-              type="radio"
-              name="image-correction-action"
-              value="replace"
-              data-image-correction-action="replace"
-            />
-            重新上傳新圖替換
-          </label>
-        </fieldset>
-
-        <p class="imgcorr__consequences" data-image-correction-consequences>{{ imageCorrectionConsequences }}</p>
-
-        <!-- 选「替換」⇒ 必须选图（未选 ⇒ 提交禁用 ＋ 提示；上传与入册都在提交时才发生）。
-             **两条取图路径同框并列**：① 選擇本機文件（`type=file`）；② 粘貼剪貼板圖片（本区 `@paste`）。 -->
-        <div
-          v-if="imageCorrectionAction === 'replace'"
-          class="field"
-          tabindex="0"
-          data-paste-zone="image-correction-file"
-          @paste="onPasteImageCorrectionFile"
-        >
-          <label for="image-correction-file">新圖（必選）</label>
-          <input
-            id="image-correction-file"
-            type="file"
-            accept="image/*"
-            data-image-correction-file
-            @change="onImageCorrectionFileChange"
-          />
-          <!-- 剪贴板一键粘贴提示（繁體，可见）：与本框 `@paste` 同源。 -->
-          <span class="field__hint" data-paste-hint="image-correction-file">{{ PASTE_HINT }}</span>
-          <span v-if="imageCorrectionFileName" class="field__hint" data-image-correction-file-name>
-            已選：{{ imageCorrectionFileName }}（圖片已就緒，可提交）
-          </span>
-          <span v-else class="field__hint">必須先選擇一張新圖（JPG / PNG / WebP，或直接粘貼剪貼板圖片），否則不能提交。</span>
-        </div>
-
-        <div class="field">
-          <label for="image-correction-note">備註（選填，最多 {{ corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH }} 字）</label>
-          <textarea
-            id="image-correction-note"
-            v-model="imageCorrectionNote"
-            rows="3"
-            data-image-correction-note
-          ></textarea>
-          <span
-            class="field__hint"
-            :class="{ 'imgcorr__over': imageCorrectionNoteOver }"
-            data-image-correction-note-count
-          >
-            {{ imageCorrectionNoteLength }} / {{ corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH }} 字
-            <template v-if="imageCorrectionNoteOver">（超出上限，請刪減後再提交，否則不能提交）</template>
-          </span>
-        </div>
-
-        <!-- 失败文案优先、结构化失败原样上屏（**不被成功文案覆盖**）。 -->
-        <p v-if="imageCorrectionFeedback" class="correction-box__feedback" data-image-correction-feedback>
-          {{ imageCorrectionFeedback }}
-        </p>
-
-        <div class="correction-box__foot">
-          <button
-            class="btn btn--ghost"
-            type="button"
-            data-action="image-correction-cancel"
-            @click="closeImageCorrection"
-          >
-            取消
-          </button>
-          <button
-            class="btn btn--primary"
-            type="button"
-            data-action="image-correction-submit"
-            :disabled="imageCorrectionSubmitDisabled"
-            @click="confirmImageCorrection"
-          >
-            {{ imageCorrectionBusy ? '提交中…' : '提交勘誤' }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- **影像勘誤表单已并入下方「提交勘誤」合并弹窗的「影像」页签**（本單：两个勘誤入口合一）。
+         表单本体、两条取图路径（`type=file` / `data-paste-zone`）、后果文案、备注上限、
+         提交钮钩子 `data-action="image-correction-submit"` / `image-correction-cancel` 与
+         页面级提示位 `data-image-correction-notice` **逐字原样保留**，只换容器（页签面板，
+         挂 `data-image-correction-dialog`）。写链路 `confirmImageCorrection` 零改动。 -->
 
     <!-- 「清除本機資料」二次确认（**与广场页逐字同一份文案**；默认不通过）。
          确认走 `confirmClearLocal`：成功 ⇒ 强制从云端重载并回广场带一次性提示；
@@ -3772,9 +3700,46 @@ onBeforeUnmount(() => {
       @cancel="clearOpen = false"
     />
 
+    <!-- **勘誤合并弹窗（本單：两个勘誤入口合一）** —— 页面上唯一那枚【勘誤】（「可標記屬性」区）
+         打开这一扇窗；窗内用**页签**把两类操作分开呈现：「屬性」（**默认**，原字段勘误表单 ＋
+         既有 `submitCorrection` 提交链）／「影像」（原影像卡【勘誤】表单 ＋ 既有
+         `confirmImageCorrection` 提交链）。两套表单、两条提交通道**逐字沿用**（不改写库逻辑、
+         不新增写口）；页签钩子 `data-correction-tab="attr" | "image"`，影像页签内保留
+         `data-action="image-correction"`；弹窗内提交钮仍带 `data-correction="face-entry-submit"`。 -->
     <div v-if="formOpen" class="correction-mask" role="dialog" aria-modal="true" aria-label="提交勘誤">
       <div class="correction-box">
-        <h3 class="correction-box__title">提交勘誤</h3>
+        <h3 class="correction-box__title">{{ correctionTab === 'image' ? '影像勘誤' : '提交勘誤' }}</h3>
+
+        <!-- 页签（默认「屬性」）：两枚真按钮、可见可达；游客态入口与登录门仍在页面上（逐字未改）。 -->
+        <div class="correction-box__tabs" role="tablist" aria-label="勘誤類別" data-correction-tabs>
+          <button
+            class="correction-box__tab"
+            :class="{ 'is-active': correctionTab === 'attr' }"
+            type="button"
+            role="tab"
+            :aria-selected="correctionTab === 'attr'"
+            data-correction-tab="attr"
+            @click="correctionTab = 'attr'"
+          >
+            屬性
+          </button>
+          <button
+            class="correction-box__tab"
+            :class="{ 'is-active': correctionTab === 'image' }"
+            type="button"
+            role="tab"
+            :aria-selected="correctionTab === 'image'"
+            data-correction-tab="image"
+            data-action="image-correction"
+            :data-face-id="formFaceId"
+            :data-image-id="imageCorrectionTarget ? imageCorrectionTarget.imageId : ''"
+            @click="correctionTab = 'image'"
+          >
+            影像
+          </button>
+        </div>
+
+        <template v-if="correctionTab === 'attr'">
         <p class="correction-box__lede">
           勘誤對象：{{ formFaceLabel }}。只需填寫要更正的項目，留空的項目不會被提交。
         </p>
@@ -3924,8 +3889,146 @@ onBeforeUnmount(() => {
 
         <div class="correction-box__foot">
           <button class="btn btn--ghost" type="button" @click="formOpen = false">取消</button>
-          <button class="btn btn--primary" type="button" @click="submitCorrection">提交勘誤</button>
+          <button
+            class="btn btn--primary"
+            type="button"
+            data-correction="face-entry-submit"
+            @click="submitCorrection"
+          >
+            提交勘誤
+          </button>
         </div>
+        </template>
+
+        <template v-else>
+        <!-- **「影像」页签（原影像卡【勘誤】表单原样搬入）**：二选一（刪除此影像 / 重新上傳新圖替換）
+             ＋ 备注（≤200 字，超限禁用提交并提示）＋ 选「替換」时必选新图；后果文案列明
+             「審核通過後印面改指新圖、舊圖將被刪除（舊圖仍被其它印面引用時只改指向、不刪舊圖）」；
+             确认前零写入、取消零写入；面板内按钮**只用 `data-action`**（**不新增 `[data-admin-action]`
+             取值**）。容器挂 `data-image-correction-dialog`（原弹窗钩子原地迁入）。 -->
+          <div class="correction-box__panel" role="tabpanel" data-image-correction-dialog>
+            <p v-if="imageCorrectionTarget" class="correction-box__lede">{{ imageCorrectionLede }}</p>
+
+            <template v-if="imageCorrectionTarget">
+              <!-- 多图印面（印面图 ＋ 边款图）：目标影像在此换；候选唯一 ⇒ 不上屏该控件。 -->
+              <div v-if="correctionImageCandidates.length > 1" class="field">
+                <label for="cr-image-pick">勘誤對象影像</label>
+                <select
+                  id="cr-image-pick"
+                  v-model="imageCorrectionChoice"
+                  data-correction-image-pick
+                  @change="retargetCorrectionImage"
+                >
+                  <option
+                    v-for="item in correctionImageCandidates"
+                    :key="`${item.kind}:${item.imageId}`"
+                    :value="`${item.kind}:${item.imageId}`"
+                  >
+                    {{ item.kind === seals.FACE_KIND.EDGE ? `邊款圖 ${item.imageId}` : `印面圖 ${item.imageId}` }}
+                  </option>
+                </select>
+              </div>
+
+              <fieldset class="imgcorr">
+                <legend class="imgcorr__legend">選擇勘誤方式（二選一）</legend>
+                <label class="imgcorr__option" data-image-correction-option="delete">
+                  <input
+                    v-model="imageCorrectionAction"
+                    type="radio"
+                    name="image-correction-action"
+                    value="delete"
+                    data-image-correction-action="delete"
+                  />
+                  刪除此影像
+                </label>
+                <label class="imgcorr__option" data-image-correction-option="replace">
+                  <input
+                    v-model="imageCorrectionAction"
+                    type="radio"
+                    name="image-correction-action"
+                    value="replace"
+                    data-image-correction-action="replace"
+                  />
+                  重新上傳新圖替換
+                </label>
+              </fieldset>
+
+              <p class="imgcorr__consequences" data-image-correction-consequences>{{ imageCorrectionConsequences }}</p>
+
+              <!-- 选「替換」⇒ 必须选图（未选 ⇒ 提交禁用 ＋ 提示；上传与入册都在提交时才发生）。
+                   **两条取图路径同框并列**：① 選擇本機文件（`type=file`）；② 粘貼剪貼板圖片（本区 `@paste`）。 -->
+              <div
+                v-if="imageCorrectionAction === 'replace'"
+                class="field"
+                tabindex="0"
+                data-paste-zone="image-correction-file"
+                @paste="onPasteImageCorrectionFile"
+              >
+                <label for="image-correction-file">新圖（必選）</label>
+                <input
+                  id="image-correction-file"
+                  type="file"
+                  accept="image/*"
+                  data-image-correction-file
+                  @change="onImageCorrectionFileChange"
+                />
+                <!-- 剪贴板一键粘贴提示（繁體，可见）：与本框 `@paste` 同源。 -->
+                <span class="field__hint" data-paste-hint="image-correction-file">{{ PASTE_HINT }}</span>
+                <span v-if="imageCorrectionFileName" class="field__hint" data-image-correction-file-name>
+                  已選：{{ imageCorrectionFileName }}（圖片已就緒，可提交）
+                </span>
+                <span v-else class="field__hint">必須先選擇一張新圖（JPG / PNG / WebP，或直接粘貼剪貼板圖片），否則不能提交。</span>
+              </div>
+
+              <div class="field">
+                <label for="image-correction-note">備註（選填，最多 {{ corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH }} 字）</label>
+                <textarea
+                  id="image-correction-note"
+                  v-model="imageCorrectionNote"
+                  rows="3"
+                  data-image-correction-note
+                ></textarea>
+                <span
+                  class="field__hint"
+                  :class="{ 'imgcorr__over': imageCorrectionNoteOver }"
+                  data-image-correction-note-count
+                >
+                  {{ imageCorrectionNoteLength }} / {{ corrections.MAX_IMAGE_CORRECTION_NOTE_LENGTH }} 字
+                  <template v-if="imageCorrectionNoteOver">（超出上限，請刪減後再提交，否則不能提交）</template>
+                </span>
+              </div>
+
+              <!-- 失败文案优先、结构化失败原样上屏（**不被成功文案覆盖**）。 -->
+              <p v-if="imageCorrectionFeedback" class="correction-box__feedback" data-image-correction-feedback>
+                {{ imageCorrectionFeedback }}
+              </p>
+            </template>
+            <p v-else class="correction-box__feedback" data-image-correction-no-image>
+              <!-- 本印面无任何影像 ⇒ 只上屏既有那句提示（与原入口空 id 分支**逐字同一份**），零写入面不变。 -->
+              本印面沒有影像編號，無從提交影像勘誤。
+            </p>
+
+            <div class="correction-box__foot">
+              <button
+                class="btn btn--ghost"
+                type="button"
+                data-action="image-correction-cancel"
+                @click="closeImageCorrection"
+              >
+                取消
+              </button>
+              <button
+                class="btn btn--primary"
+                type="button"
+                data-action="image-correction-submit"
+                :disabled="imageCorrectionSubmitDisabled"
+                @click="confirmImageCorrection"
+              >
+                {{ imageCorrectionBusy ? '提交中…' : '提交勘誤' }}
+              </button>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -4518,6 +4621,38 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
+}
+
+/* ------------------ 勘誤合并弹窗页签（本單：两入口合一）：「屬性」默认 /「影像」 ------------------ */
+
+.correction-box__tabs {
+  display: flex;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--c-line-strong);
+}
+
+.correction-box__tab {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: var(--s-2) var(--s-3);
+  font: inherit;
+  font-size: var(--t-sm);
+  color: var(--c-text-muted);
+  cursor: pointer;
+}
+
+.correction-box__tab.is-active {
+  border-bottom-color: var(--c-text);
+  color: var(--c-text);
+  font-weight: 600;
+}
+
+.correction-box__panel {
+  display: block;
 }
 
 /* ------------------ 影像勘誤弹窗（§3.77）：二选一 ＋ 后果文案 ＋ 超限提示 ------------------ */

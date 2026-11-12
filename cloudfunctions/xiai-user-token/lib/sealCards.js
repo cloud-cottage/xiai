@@ -5,7 +5,17 @@
  * 背景（线上实测）：首页曾一次性水合全库（1,251 印章 ＋ 1,741 印面 ＋ 6,439 影像 ≈ 11,800 行）
  * ⇒ 首屏 28〜42 秒。本模块把「读面」改成**服务端分页 ＋ 聚合 DTO**：
  *   · 一页只回 ≤60 枚**卡片**（每枚恰 14 键的扁平 DTO），**不回 URL、不回字节**；
- *   · 缩略图 / 展示件键由服务端按前端既有派生规则给出（`xiai/images/<sha 前兩位>/<sha>.png`），
+ *   · 缩略图 / 展示件键由服务端**按主印面影像行的真实 `storage_key` 派生**（**不是**一律 `.png`）：
+ *       - `storage !== 'server'`（如 bundled 占位行 `placeholder/seal-no-image`）⇒
+ *         `display_key` / `thumb_key` **皆空串**（云端桶里没有这个对象 ⇒ 前端自渲染本地占位图）；
+ *       - `storage_key` 以 `.tiff` 结尾（源件行）⇒ `display_key = xiai/images/<sha 前兩位>/<sha>.png`
+ *         （既有派生规则，一字不变）；
+ *       - 其余扩展名（`.png` / `.jpg` / `.jpeg` / `.webp`）⇒ `display_key = storage_key` **原样**；
+ *       - `thumb_key = xiai/thumb/<sha 前兩位>/<sha>.webp`（**仅当 `display_key` 非空**；
+ *         该对象**允许不存在** ⇒ 前端负责三级回落 thumb → display → 本地占位图；
+ *         **无真实 `storage_key` 的派生路除外**：两键同为派生 `.png`，见 `coverKeysOf` ④）；
+ *       - **无影像行（或行上无 `storage_key`）且面行无 `image_storage_key`** ⇒ 面行仍带
+ *         `image_sha256` 时沿用既有派生 `.png`（改前口径不变），连摘要也没有 ⇒ 两键皆空串；
  *     客户端据此自行取图 ⇒ 页面不再需要全库影像行；
  *   · 0 面印章（数据层允许、展示层不列）**一律不进 `rows`**。
  *
@@ -20,7 +30,9 @@
  *      `{ ok:false, reason, message }`（`reason` 只用 `lib/config.js::REASONS` 冻结值）。
  *      `rows` 每枚**恰 14 键**：`stamp_id / seal_name / dynasty / category / primary_face_id /
  *      face_count / edge_count / image_id / image_sha256 / image_mime / width / height /
- *      thumb_key / display_key`。
+ *      thumb_key / display_key`（**键名与键数冻结**；`thumb_key` / `display_key` 的**取值规则**
+ *      见本文件头部「按影像行真实 `storage_key` 派生」五条 —— bundled 占位行与**无引用的**
+ *      无影像行两键皆空串，由前端渲染本地占位图）。
  *   ② 管理员 op：`repairPrimaryFace`（落 `ADMIN_OPS`）—— 扫「有 FACE 面但无任何
  *      `is_primary=true`」的章，把 `face_no` 最小的 FACE 行置 `is_primary:true`；`EDGE` 永不置；
  *      幂等（已有 primary 的章不碰）；`dry_run`（缺省 true）**零写**；回包恰 6 键
@@ -48,7 +60,8 @@
  *   · 单次请求的集合查询面固定且小：无面筛选 ⇒ 2 次（印章页 ＋ 该页印面）；有面筛选 ⇒ 3 次
  *     （印面候选 ＋ 印章页 ＋ 该页印面）；另有 **1 次 `count()`**（`total`，服务端计数、不传行）
  *     与 **1 次按主印面 `image_id` 的小批量影像读**（≤ `limit` 枚；只为取摘要 / 容器 / 像素尺寸，
- *     **不读字节、不读全库**）。影像读在「每枚卡片都自带 `image_sha256`」时不发生。
+ *     **不读字节、不读全库**）。影像读在「每枚卡片都自带 `image_sha256` **与**
+ *     `image_storage_key`」时不发生（两样都齐 ⇒ 封面键可由面行直接派生，不必读影像行）。
  *   · `has_more` **不由客户端推算**：本轮多取 1 枚卡片（`limit + 1`）作为判据；窗口耗尽且无
  *     多余枚 ⇒ `false`。
  *
@@ -157,6 +170,16 @@ const CARD_FALLBACK_SCAN_CAP = 5000
 
 /** 展示件 / 缩略图对象键的**唯一**派生处（形如 `xiai/images/<sha 前兩位>/<sha>.png`）。 */
 const CARD_OBJECT_KEY_PREFIX = 'xiai/images'
+/** 缩略件对象键前缀（与 `tools/display-artifacts/transcode.mjs::DEFAULT_THUMB_PREFIX` 逐字同值）。 */
+const CARD_THUMB_KEY_PREFIX = 'xiai/thumb'
+/** 缩略件扩展名（工具侧恒 webp：长边 ≤256 单件）。 */
+const CARD_THUMB_KEY_EXT = 'webp'
+/** 影像行 `storage` 的唯一真值（mapping.md §3；其它值 ⇒ 云端桶里没有这个对象）。 */
+const CARD_IMAGE_SERVER_STORAGE = 'server'
+/** 源件容器（只在源件行上出现；其余容器一律**原样回出**，不转码不改写）。 */
+const CARD_SOURCE_TIFF_EXT = /\.tiff$/i
+/** 非源件行允许原样回出的展示件扩展名族（与 `IMAGE_OBJECT_KEY_PATTERN` 末位分支同族）。 */
+const CARD_DISPLAY_EXT = /\.(png|jpe?g|webp)$/i
 
 /* --------------------------------------------------------------------------
  * 字段存取（行形态容错；**零第二套编号规则**）
@@ -207,6 +230,81 @@ function objectKeyOfDigest(sha256) {
   const sha = text(sha256)
   if (sha === '') return ''
   return `${CARD_OBJECT_KEY_PREFIX}/${sha.slice(0, 2)}/${sha}.png`
+}
+
+/** 64 位小写十六进制摘要（空 / 畸形 ⇒ `''`；**不猜、不补零**）。 */
+function digestOf(value) {
+  const sha = text(value).toLowerCase()
+  return /^[0-9a-f]{64}$/.test(sha) ? sha : ''
+}
+
+/** 摘要 ⇒ 缩略件对象键（`xiai/thumb/<sha 前兩位>/<sha>.webp`；空摘要 ⇒ 空串）。 */
+function thumbKeyOfDigest(sha256) {
+  const sha = digestOf(sha256)
+  if (sha === '') return ''
+  return `${CARD_THUMB_KEY_PREFIX}/${sha.slice(0, 2)}/${sha}.${CARD_THUMB_KEY_EXT}`
+}
+
+/**
+ * 对象键内嵌的内容寻址摘要（`xiai/images|thumb/<sha 前兩位>/<sha>.<ext>` 且前两位 ≡ 摘要 ⇒ 摘要；
+ * 其余形态（含 bundled 占位键 `placeholder/seal-no-image`）⇒ `''`，**不猜**）。
+ */
+function digestOfObjectKey(key) {
+  const matched = /^xiai\/(?:images|thumb)\/([0-9a-f]{2})\/([0-9a-f]{64})\.[a-z0-9]+$/i.exec(text(key))
+  if (!matched) return ''
+  const sha = matched[2].toLowerCase()
+  return matched[1].toLowerCase() === sha.slice(0, 2) ? sha : ''
+}
+
+/**
+ * **主印面封面两键的唯一派生处**（按影像行**真实** `storage_key`，不是一律 `.png`）。
+ *
+ * 判序（逐条互斥，任一判不过 ⇒ 两键皆空串）：
+ *   ① 影像行在场且 `storage !== 'server'`（bundled 占位行）⇒ 两键皆 `''`
+ *      （云端桶里没有这个对象；前端渲染本地占位图）；
+ *   ② `storage_key` 以 `.tiff` 结尾（源件行）⇒ `display_key` ＝ 既有派生 `.png`；
+ *   ③ 其余扩展名（`.png` / `.jpg` / `.jpeg` / `.webp`）⇒ `display_key` ＝ `storage_key` **原样**；
+ *   ④ 其它扩展名（`.gif` / 无扩展名）⇒ 两键皆 `''`（不造键）；**无行无键** ⇒ 面行自带摘要
+ *      时沿用既有派生 `.png`（改前口径，`verify-public-ops` P3 钉住；**此路两键同键**），
+ *      连摘要也没有 ⇒ 两键皆 `''`；
+ *   ⑤ 有真实 `storage_key` 且 `display_key` 非空 ⇒ `thumb_key = xiai/thumb/<sha 前兩位>/<sha>.webp`
+ *      （该对象**允许不存在** ⇒ 前端负责三级回落）；取不到摘要 ⇒ `thumb_key` 亦 `''`。
+ * 影像行缺席时回落到**面行自带的影像引用**（`image_storage_key` / `image_sha256`）；
+ * 连面行引用也没有 ⇒ `''`（**无行无摘要 ＝ 无从派生**，不编造对象键）。
+ *
+ * @param {object|null} image 主印面影像行（读到才传；缺席传 `null`）
+ * @param {object|null} face 主印面行（`image_storage_key` / `image_sha256`）
+ * @param {string} digest 卡片级摘要（`image.sha256` ／ 面行 `image_sha256` 已在调用方合并）
+ * @returns {{displayKey:string, thumbKey:string}}
+ */
+function coverKeysOf(image, face, digest) {
+  const empty = { displayKey: '', thumbKey: '' }
+  const row = image && typeof image === 'object' ? image : null
+  /* ① 非 `server` 行（bundled 占位行等）：桶里没有对象 ⇒ 两键皆空。 */
+  if (row && text(row.storage).trim().toLowerCase() !== CARD_IMAGE_SERVER_STORAGE) return empty
+  /* 键真源：影像行 `storage_key` 优先；行缺席 / 行上无键 ⇒ 面行自带引用。 */
+  const storageKey = (row && text(row.storage_key)) || text(face && face.image_storage_key)
+  const keySha = digestOfObjectKey(storageKey)
+  const rowSha = digestOf(row && row.sha256) || digestOf(digest)
+  if (keySha !== '' && rowSha !== '' && keySha !== rowSha) return empty // 键与摘要不一致 ⇒ 不猜不拼
+  const sha = keySha || rowSha
+  if (storageKey === '') {
+    /* ④ 无行无键 ⇒ 面行自带摘要时**沿用既有派生 `.png`**（本模块改前口径；`verify-public-ops` P3
+       钉住此形态）；连摘要也没有 ⇒ 两键皆 `''`（**无从派生，不编造对象键**）。
+       此路 `thumb_key` 与 `display_key` **同键**（＝派生 `.png`）：只有摘要、没有真实 `storage_key`
+       ⇒ **不足以断言** `xiai/thumb/` 产物键面（缩略件由离线转码工具上传，未必跑过这一枚）。 */
+    const derived = objectKeyOfDigest(sha)
+    return derived === '' ? empty : { displayKey: derived, thumbKey: derived }
+  }
+  if (CARD_SOURCE_TIFF_EXT.test(storageKey)) {
+    /* ② 源件行 ⇒ 派生 `.png`（既有派生规则不变）。 */
+    if (sha === '') return empty
+    const displayKey = `${CARD_OBJECT_KEY_PREFIX}/${sha.slice(0, 2)}/${sha}.png`
+    return { displayKey, thumbKey: thumbKeyOfDigest(sha) }
+  }
+  if (!CARD_DISPLAY_EXT.test(storageKey)) return empty /* ④ 非展示件族（含 bundled 占位键）。 */
+  /* ③ 展示件行 ⇒ `storage_key` 原样；⑤ 摘要在场才给 thumb（允许对象不存在）。 */
+  return { displayKey: storageKey, thumbKey: thumbKeyOfDigest(sha) }
 }
 
 /** 像素尺寸（未知 ⇒ `null`；**不假装 0**）。 */
@@ -443,13 +541,15 @@ async function cardDetailsOfSealRows(db, sealRows) {
     if (!facesBySeal.has(sealId)) facesBySeal.set(sealId, [])
     facesBySeal.get(sealId).push(doc)
   }
-  /* ② 主印面影像行（**只按 `image_id` 小批量读；不读字节**）。缺摘要时才读。 */
+  /* ② 主印面影像行（**只按 `image_id` 小批量读；不读字节**）。面行已自带
+     `image_sha256` ＋ `image_storage_key`（封面键可由面行直接派生）时才不读。 */
   const pending = []
   for (const sealRow of rows) {
     const faces = facesBySeal.get(sealKeyOf(sealRow)) || []
     const primary = primaryFaceOf(faces)
     const imageId = text(primary && primary.face_image_id)
-    if (imageId === '' || text(primary && primary.image_sha256) !== '') continue
+    if (imageId === '') continue
+    if (text(primary && primary.image_sha256) !== '' && text(primary && primary.image_storage_key) !== '') continue
     pending.push(imageId)
   }
   const imageById = new Map()
@@ -476,7 +576,8 @@ async function cardDetailsOfSealRows(db, sealRows) {
     const imageId = text(primary && primary.face_image_id)
     const image = imageId !== '' ? imageById.get(imageId) || null : null
     const sha256 = text(image && image.sha256) || text(primary && primary.image_sha256)
-    const objectKey = objectKeyOfDigest(sha256)
+    /* 封面两键：**按影像行真实 `storage_key` 派生**（唯一派生处 `coverKeysOf`）。 */
+    const cover = coverKeysOf(image, primary, sha256)
     detailed.push({
       faces,
       card: {
@@ -492,8 +593,8 @@ async function cardDetailsOfSealRows(db, sealRows) {
         image_mime: text(image && image.mime) || text(primary && primary.image_mime),
         width: dimensionOf(image && image.width),
         height: dimensionOf(image && image.height),
-        thumb_key: objectKey,
-        display_key: objectKey
+        thumb_key: cover.thumbKey,
+        display_key: cover.displayKey
       }
     })
   }
