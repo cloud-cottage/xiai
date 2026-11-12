@@ -15,6 +15,9 @@
  *
  * 结构：当前选中态（姓名 ＋ 字号 ＋ 清除）→ 弹层（搜索框 ＋ 分组滚动列表 ＋ 右侧 A–Z 索引条）。
  *   - 搜索是**本地过滤**（姓名 / 字 / 號 / 別名 / cbdb_id 子串匹配），命中仍按姓氏分组；
+ *     **简繁归一**：查询词与候选**两边同走**逐字 s2t 归一（`toTraditionalText` ＋ 小写）再比子串
+ *     ⇒ 简体（赵）/ 繁体（趙）/ 混输两向互逆；ASCII（`PR0000`）不受归一影响、仍原样子串匹配；
+ *     候选侧归一文本**一次性预计算**（`persons` 变更才重建），逐键只做子串匹配；
  *   - 索引条**只列有人的字母**（`I` / `U` / `V` 等空母不出现）；无姓氏的 `#` 组在列表里有组头，
  *     索引条按「A–Z 字母」口径不收 `#`；
  *   - 键盘：`Esc` 关闭、搜索框 `↑`/`↓` 移动高亮、`Enter` 选中高亮项（无高亮 ⇒ **第一条**）；
@@ -27,6 +30,7 @@
  */
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { groupPersons } from '../data/surnameInitials.js'
+import { toTraditionalText as s2t } from '../utils/traditional.js'
 
 const props = defineProps({
   /** 所选印人 id（字符串；空串 ＝ 未选）。 */
@@ -124,14 +128,18 @@ function togglePicker() {
 
 const query = ref('')
 
-/** 过滤关键字（trim + 小写；空 ⇒ 全量）。 */
-const keyword = computed(() => String(query.value || '').trim().toLowerCase())
+/**
+ * 归一：逐字 s2t（繁体形）＋ 小写。**查询词与候选两边同走这一条口径** ⇒
+ * 简 / 繁 / 混输互逆命中；逐字表只动简体字形、ASCII 原样 ⇒ `PR0000` 这类子串匹配不受影响。
+ */
+function normalizeSearchText(text) {
+  const value = text === null || text === undefined ? '' : String(text)
+  return s2t(value).toLowerCase()
+}
 
-/** 检索面：姓名 / 字 / 號 / 別名 / `cbdb_id`（子串、大小写不敏感）。 */
-function matches(row) {
-  const kw = keyword.value
-  if (!kw) return true
-  const parts = [
+/** 检索面字段（原始文本；归一在预计算里做）。 */
+function searchPartsOf(row) {
+  return [
     row && row.family_name,
     row && row.given_name,
     row && row.name_full,
@@ -140,13 +148,34 @@ function matches(row) {
     ...(Array.isArray(row && row.alias_names) ? row.alias_names : []),
     row && row.cbdb_id
   ]
-  return parts.some((part) => String(part === null || part === undefined ? '' : part).toLowerCase().includes(kw))
 }
+
+/** 过滤关键字（trim ＋ 归一；空 ⇒ 全量）。 */
+const keyword = computed(() => normalizeSearchText(String(query.value || '').trim()))
+
+/**
+ * 候选侧归一索引（**一次性预计算**）：`persons` 变更才重建；570 行只在建一次，
+ * 之后每次输入只对既有串做子串匹配（不逐键重跑 s2t）。行对象 → 归一后的检索面分片数组。
+ */
+const searchHaystacks = computed(() => {
+  const rows = Array.isArray(props.persons) ? props.persons : []
+  const map = new Map()
+  for (const row of rows) {
+    map.set(row, searchPartsOf(row).map(normalizeSearchText))
+  }
+  return map
+})
 
 /** 过滤后的行（保持入参顺序；分组 / 排序交给 `groupPersons`）。 */
 const visibleRows = computed(() => {
   const rows = Array.isArray(props.persons) ? props.persons : []
-  return keyword.value ? rows.filter(matches) : rows
+  const kw = keyword.value
+  if (!kw) return rows
+  const haystacks = searchHaystacks.value
+  return rows.filter((row) => {
+    const parts = haystacks.get(row)
+    return Array.isArray(parts) && parts.some((part) => part.includes(kw))
+  })
 })
 
 /** 分组：`[{ initial, rows }]`，按 `GROUP_ORDER`（A…Z、`#` 最后），**只出非空组**。 */
