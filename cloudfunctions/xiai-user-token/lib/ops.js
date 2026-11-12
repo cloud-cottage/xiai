@@ -8089,9 +8089,10 @@ const ADMIN_OPS = Object.freeze({
    * `author_match`（**恰 5 键** `{field, score, query, normalized, at}`）＋ 印章级
    * `xiai_seal_links` 补条（`kind:'印人'`、**幂等**）；**`seals` 行零写入**（P1-2：引用只活在
    * 印面行 / 关联行）；⑥ **幂等**：同参重放 ⇒ `written === 0`；⑦ `dry_run` **零写**、回包
-   * **恰 5 键** `{ok, scanned, eligible, matched, samples}`，真写 **恰 6 键**
-   * `{ok, scanned, eligible, matched, written, failed}`；`written` **以整窗读回为准**、
-   * **不拿 persist 回报冒充成功**；⑧ `reason` **零新增**、**零新集合**、**不产 `plan`**
+   * **恰 6 键** `{ok, scanned, eligible, matched, samples, next_cursor}`，真写 **恰 7 键**
+   * `{ok, scanned, eligible, matched, written, failed, next_cursor}`（`samples` ≤ 5 条、元素恰
+   * 4 键 `{row_id, query, person_id, score}`；`failed` 元素恰 2 键 `{_id, reason}`）；`written`
+   * **以整窗读回为准**、**不拿 persist 回报冒充成功**；⑧ `reason` **零新增**、**零新集合**、**不产 `plan`**
    * （写步在 op 内逐行走 `persist` ⇒ `index.js` 落盘分支不触发、`plan` 零外传）。
    * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
    * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
@@ -8401,15 +8402,17 @@ const ADMIN_OPS = Object.freeze({
    * 加载环、离线自检不需要 SDK）。
    *
    * 硬口径（逐条）：① **第一行即管理员门**（既有 `adminWhitelistDenial`；缺 env / 非白名单 ⇒
-   * 结构化拒 ＋ **零读零写**）；② 载荷封闭恰两键 `{dry_run?:boolean, limit?:number}`
-   * （`dry_run` 缺省 `true`；`limit` 1〜500 整数、缺省 200；未知键 / 身份类键 ⇒ `INVALID_FIELD`）；
+   * 结构化拒 ＋ **零读零写**）；② 载荷封闭恰三键 `{dry_run?:boolean, limit?:number, cursor?:string}`
+   * （`dry_run` 缺省 `true`；`limit` 1〜500 整数、缺省 200；`cursor` 缺省 / 空串 ＝ 从头、
+   * 非空长度 1〜64；未知键 / 身份类键 ⇒ `INVALID_FIELD`）；**回包 6 键（含 `samples` 与 `next_cursor`）**；
    * ③ 扫「**有 FACE 面但无任何 `is_primary=true`**」的章，把 `face_no` 最小的 FACE 行置
    * `is_primary:true`；**`EDGE` 永不置**；④ **幂等**：已有 primary 的章不碰 ⇒ 同参重放
-   * `written === 0`；⑤ `dry_run` **零写**（`written` 恒 0）；⑥ 成功回包**恰 5 键**
-   * `{ok, scanned, eligible, written, next_cursor}`、失败恒**恰 3 键**；`reason` **零新增**；
+   * `written === 0`；⑤ `dry_run` **零写**（`written` 恒 0）；⑥ 成功回包**恰 6 键**
+   * `{ok, scanned, eligible, written, samples, next_cursor}`（`dry_run` 与真写**同形**；
+   * `samples` ≤ 5 条、元素恰 3 键 `{row_id, face_id, face_no}`）、失败恒**恰 3 键**；`reason` **零新增**；
    * ⑦ **零新集合**（读写都在 `xiai_seals` / `xiai_faces`）、**不产 `plan`**（写步在本 op 内经
    * `persist` 逐行执行 ＋ 读回定真伪 ⇒ `index.js` 无内部落盘计划可外传）。
-   * @param {object} [payload] `{dry_run?:boolean, limit?:number}`
+   * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
    * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
    * @param {{adminPhone?:string, nowSeconds?:number}} [context]
    */

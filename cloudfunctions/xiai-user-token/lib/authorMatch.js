@@ -54,23 +54,27 @@ const REPAIR_AUTHOR_PERSON_ID_DEFAULT_LIMIT = 200
 const REPAIR_AUTHOR_PERSON_ID_MAX_LIMIT = 500
 /**
  * `repairAuthorPersonId` **读数键面并集**（**按 op 收窄、存在性驱动透传** ⇒
- * `dry_run` 轮回恰 5 键 `scanned/eligible/matched/samples`、真写轮回恰 6 键
- * `scanned/eligible/matched/written/failed`；`index.js` 的透传引这里）。
+ * `dry_run` 轮回恰 6 键 `ok/scanned/eligible/matched/samples/next_cursor`、真写轮回恰 7 键
+ * `ok/scanned/eligible/matched/written/failed/next_cursor`；`index.js` 的透传引这里）。
+ * 本常量 ＝ **两形的读数并集、恰 7 键**（`ok` 由信封给出、不入并集）：`samples` 只见
+ * `dry_run`、`failed` 只见真写 ⇒ 存在性驱动自然收成 6 / 7 两形。
+ * **诊断键 `samples` / `failed` 是排障唯一入口，不得为凑键数而牺牲**（裁定一：恢复产出）。
  */
 const REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS = Object.freeze([
   'scanned',
   'eligible',
   'matched',
-  'samples',
   'written',
-  'failed'
+  'samples',
+  'failed',
+  'next_cursor'
 ])
-/** `dry_run` 回包 `samples` 元素封闭键面（**恰 4 键**、最多 5 条）。 */
+/** `dry_run` 回包 `samples` 元素封闭键面（**恰 4 键**、最多 5 条；**实际产出**）。 */
 const REPAIR_AUTHOR_PERSON_ID_SAMPLE_KEYS = Object.freeze(['row_id', 'query', 'person_id', 'score'])
 /** 回填记录 `author_match` 封闭键面（**恰 5 键**）。 */
 const AUTHOR_MATCH_KEYS = Object.freeze(['field', 'score', 'query', 'normalized', 'at'])
-/** 真写回包 `failed[]` 元素键面（**恰 2 键**；`reason` 只用既有冻结值）。 */
-const REPAIR_AUTHOR_PERSON_ID_FAILED_KEYS = Object.freeze(['row_id', 'reason'])
+/** 真写回包 `failed[]` 元素键面（**恰 2 键** `{_id, reason}`；`reason` 只用既有冻结值；**实际产出**）。 */
+const REPAIR_AUTHOR_PERSON_ID_FAILED_KEYS = Object.freeze(['_id', 'reason'])
 
 /** 命中字段封闭五值（顺序即分数从高到低）。 */
 const MATCHED_FIELDS = Object.freeze(['name', 'alias', 'courtesy', 'art', 'contains'])
