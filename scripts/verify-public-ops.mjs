@@ -6,9 +6,10 @@
  * `cloudfunctions/xiai-user-token/index.js` 的**真实入口**（`main`）与
  * `lib/sealCards.js` / `lib/authorMatch.js` 的**真实函数体**。
  *
- * 断言面（六组；每条可机械判负）：
+ * 断言面（九组；每条可机械判负）：
  *   P0. **七张冻结常量逐字**（唯一真源，直接引用被测件导出、不重抄）：
- *       `LIST_SEAL_CARDS_ALLOWED_KEYS`(6) / `LIST_SEAL_CARDS_SUCCESS_KEYS`(5：
+ *       `LIST_SEAL_CARDS_ALLOWED_KEYS`(7：`limit,cursor,dynasty,seal_type,face_style,category,q`) /
+ *       `LIST_SEAL_CARDS_SUCCESS_KEYS`(5：
  *       ok,rows,next_cursor,has_more,total) / `CARD_ROW_KEYS`(14) /
  *       `SUGGEST_AUTHORS_ALLOWED_KEYS`(3：face_id,name,limit) /
  *       `SUGGEST_AUTHORS_SUCCESS_KEYS`(4：ok,query,normalized,candidates) /
@@ -22,6 +23,13 @@
  *   P5. **0 面印章不进 `rows`**（数据层允许、展示层不列；`total` 仍计它）。
  *   P6. **匿名可调**（`main({action:'public', op})` 无令牌即成功）；**非 public action 仍被拦**
  *       （无令牌 ⇒ 结构化拒绝、不回读面）；全程**零写入**。
+ *   P7. **关键词 `q` 门**（四发，均**零写入**、两发拒绝**零读**）：非字符串 ⇒ `INVALID_VALUE`；
+ *       trim 后 41 字 ⇒ `INVALID_VALUE`；40 字 ⇒ 放行（成功回包 5 键）；空白串 ⇒ **等同不检索**
+ *       （与不带 `q` 的回包逐字节相同）。
+ *   P8. **关键词转义**（三发）：`q='*'` / `q='（'` / `q='a.b'` 皆**不抛错、不被拒**，且**只命中**
+ *       含该字面量的那一行（假 DB 3 行：一行含三字面量、两行不含 ⇒ `total===1`、`rows` 恰 1 枚）。
+ *   P9. **`total` ＝ 命中总数**（不是已载入数）：60 行命中 ＋ `limit=48` ⇒ `total===60`、
+ *       `rows.length===48`、`has_more===true`（`rows` 按命中集分页，与 `total` 同尺）。
  *
  * 纪律：不打印任何密钥 / 令牌；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
@@ -67,6 +75,10 @@ const section = (name, title) => console.log(JSON.stringify({ section: name, tit
 
 /* ---------------------------------------------------------------------------
    2. 注入式内存假 DB（`createStore` 形态：`collection(name).where(match).get()` ＋ 计数探针）
+   匹配器与**主路同尺**：认等值键、`$or` / `$and` / `$nor` 组、`$regularExpression` 关键词子句
+   与 `command.gt` / `command.in` 哨兵 —— 即 `db.command` 在场时 `readOrderedWindow` 下发给
+   DB 的 `where` 片段，假体**逐条同判**（关键词 `q` 的行级命中因此在本套件里可观测；
+   无 `command` 时被测件走退路 `readOrderedWindowFallback`，只按 idIn / 游标收口、**不判 match**）。
    --------------------------------------------------------------------------- */
 function createStore(seedRows) {
   const collections = new Map()
@@ -85,11 +97,39 @@ function createStore(seedRows) {
     return key
   }
   ;(seedRows || []).forEach(seedRow)
+  /* DB 命令面（`commandOf` 只认 `gt`；`readOrderedWindow` 另认 `in`）。哨兵形态自定 ——
+     只要假体自己的匹配器认得（与 `db.RegExp` 同法：句柄没有 ⇒ 落 wire 字面值）。 */
+  const command = {
+    gt: (value) => ({ __op: 'gt', value }),
+    in: (values) => ({ __op: 'in', values: Array.isArray(values) ? values.slice() : [] })
+  }
+  const literal = (value) => (value === undefined || value === null ? '' : String(value))
+  const matches = (row, match) =>
+    Object.keys(match || {}).every((key) => {
+      const expected = match[key]
+      if (key === '$or') return Array.isArray(expected) && expected.some((clause) => matches(row, clause))
+      if (key === '$and') return Array.isArray(expected) && expected.every((clause) => matches(row, clause))
+      if (key === '$nor') return Array.isArray(expected) && expected.every((clause) => !matches(row, clause))
+      if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
+        if (expected.$regularExpression) {
+          const spec = expected.$regularExpression
+          try {
+            return new RegExp(String(spec.pattern), String(spec.options || '')).test(literal(row[key]))
+          } catch (error) {
+            return false /* 畸形正则 ⇒ 不猜、不命中（与被测件内存判同口径）。 */
+          }
+        }
+        if (expected.__op === 'gt') return literal(row[key]) > literal(expected.value)
+        if (expected.__op === 'in') return expected.values.map((value) => String(value)).indexOf(String(row[key])) !== -1
+      }
+      return row[key] === expected
+    })
   const provider = () => ({
+    command,
     collection(name) {
       const map = mapOf(name)
       const all = () => [...map.values()].map((row) => Object.assign({}, row))
-      const hit = (match) => all().filter((row) => Object.keys(match || {}).every((k) => row[k] === match[k]))
+      const hit = (match) => all().filter((row) => matches(row, match))
       return {
         where(match) {
           let limit = 0
@@ -214,8 +254,8 @@ const publicCall = (op, payload) => fn.main({ action: 'public', op, payload })
    P0：七张冻结常量逐字（唯一真源；直接引用被测件导出）
    =========================================================================== */
 section('P0', '冻结常量逐字：载荷 / 回包 / 卡片行 / 候选行 / 命中字段七张表')
-check('P0', '七张冻结常量逐字 ＝ 契约值（6 / 5 / 14 / 3 / 4 / 7 / 5）', {
-  listAllowed: ['category', 'cursor', 'dynasty', 'face_style', 'limit', 'seal_type'],
+check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5）', {
+  listAllowed: ['category', 'cursor', 'dynasty', 'face_style', 'limit', 'q', 'seal_type'],
   listSuccess: ['has_more', 'next_cursor', 'ok', 'rows', 'total'],
   cardRow: [
     'category',
@@ -245,7 +285,7 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（6 / 5 / 14 / 3 / 4 / 7 / 5
     'score'
   ],
   matchedFields: ['alias', 'art', 'contains', 'courtesy', 'name'],
-  sizes: [6, 5, 14, 3, 4, 7, 5]
+  sizes: [7, 5, 14, 3, 4, 7, 5]
 }, {
   listAllowed: sorted(sealCards.LIST_SEAL_CARDS_ALLOWED_KEYS),
   listSuccess: sorted(sealCards.LIST_SEAL_CARDS_SUCCESS_KEYS),
@@ -424,6 +464,218 @@ section('P6', '匿名可调（无令牌即成功）/ 非 public action 仍被拦
     writes: store.stats.writes.length
   })
 }
+
+/* 换注入跑专项（跑完**必然还原主种子**：P3 / P5 的读数以主种子为准）。 */
+const withInjectedStore = async (target, run) => {
+  ops.setOpsDbProvider(target.provider)
+  try {
+    return await run()
+  } finally {
+    ops.setOpsDbProvider(store.provider)
+  }
+}
+
+/* ===========================================================================
+   P7：关键词 `q` 载荷门（非字符串 / trim>40 ⇒ INVALID_VALUE 零读；40 字放行；空白串 ＝ 不检索）
+   =========================================================================== */
+section('P7', 'q 关键词门：非字符串与 trim 后 41 字 ⇒ INVALID_VALUE（零读）、40 字放行、空白串等同不检索')
+{
+  const gates = [
+    ['P7a', '`q` **非字符串**（数字 42）⇒ `INVALID_VALUE` ＋ 恰 3 键 ＋ **零读** ＋ **零写**', { limit: 10, q: 42 }],
+    [
+      'P7b',
+      '`q` **trim 后 41 字**（越 40 字上界）⇒ `INVALID_VALUE` ＋ 恰 3 键 ＋ **零读** ＋ **零写**（不静默截断）',
+      { limit: 10, q: 'x'.repeat(41) }
+    ]
+  ]
+  for (const [id, desc, payload] of gates) {
+    const readsBefore = store.stats.reads
+    const writesBefore = store.stats.writes.length
+    const reply = await publicCall('listSealCards', payload)
+    check(id, desc, { ok: false, reason: 'INVALID_VALUE', keys: 'message,ok,reason', reads: 0, writes: 0 }, {
+      ok: reply.ok,
+      reason: reply.reason,
+      keys: shapeOf(reply),
+      reads: store.stats.reads - readsBefore,
+      writes: store.stats.writes.length - writesBefore
+    })
+  }
+  /* P7c：**40 字 ⇒ 放行**（上界内的最长关键词）：成功回包恰 5 键；关键词无命中 ⇒ total 0。 */
+  {
+    const writesBefore = store.stats.writes.length
+    const reply = await publicCall('listSealCards', { limit: 10, q: 'x'.repeat(40) })
+    check('P7c', '`q` **trim 后恰 40 字** ⇒ 放行（成功回包恰 5 键、无命中 ⇒ `total` 0）＋ **零写**', {
+      ok: true,
+      keys: 'has_more,next_cursor,ok,rows,total',
+      total: 0,
+      rowCount: 0,
+      writes: 0
+    }, {
+      ok: reply.ok,
+      keys: shapeOf(reply),
+      total: reply.total,
+      rowCount: Array.isArray(reply.rows) ? reply.rows.length : -1,
+      writes: store.stats.writes.length - writesBefore
+    })
+  }
+  /* P7d：**空白串 ＝ 不检索** ⇒ 与不带 `q` 的回包**逐字节相同**。 */
+  {
+    const writesBefore = store.stats.writes.length
+    const plain = await publicCall('listSealCards', { limit: 10 })
+    const blank = await publicCall('listSealCards', { limit: 10, q: '   ' })
+    check('P7d', '`q` **空白串** ⇒ **等同不检索**（回包与不带 `q` 逐字节相同）＋ **零写**', {
+      identicalToNoQuery: true,
+      ok: true,
+      total: 2,
+      rowCount: 1,
+      writes: 0
+    }, {
+      identicalToNoQuery: JSON.stringify(plain) === JSON.stringify(blank),
+      ok: blank.ok,
+      total: blank.total,
+      rowCount: Array.isArray(blank.rows) ? blank.rows.length : -1,
+      writes: store.stats.writes.length - writesBefore
+    })
+  }
+}
+
+/* ===========================================================================
+   P8：关键词正则转义（`*` `（` `.` 三形态）—— 假 DB 3 行造数据（首行含三字面量、其余两行不含）
+   =========================================================================== */
+const P8_HIT = 'SLQ000000001'
+const p8Store = createStore([
+  {
+    __collection: 'xiai_seals',
+    _id: P8_HIT,
+    stamp_id: P8_HIT,
+    seal_name: '元 *（a.b）印',
+    dynasty: '汉',
+    category: '吉语印',
+    seal_wen: '長樂未央',
+    seal_wen_chs: '长乐未央*'
+  },
+  { __collection: 'xiai_seals', _id: 'SLQ000000002', stamp_id: 'SLQ000000002', seal_name: '乙印', dynasty: '汉', category: '吉语印' },
+  { __collection: 'xiai_seals', _id: 'SLQ000000003', stamp_id: 'SLQ000000003', seal_name: '丙印', dynasty: '汉', category: '吉语印' },
+  {
+    __collection: 'xiai_faces',
+    _id: 'fc-q1',
+    id: 'fc-q1',
+    sealId: P8_HIT,
+    kind: 'FACE',
+    face_no: 1,
+    is_primary: true,
+    face_image_id: 'img-q1',
+    image_sha256: FACE_SHA,
+    image_mime: 'image/png'
+  },
+  {
+    __collection: 'xiai_faces',
+    _id: 'fc-q2',
+    id: 'fc-q2',
+    sealId: 'SLQ000000002',
+    kind: 'FACE',
+    face_no: 1,
+    is_primary: true,
+    face_image_id: 'img-q2',
+    image_sha256: FACE_SHA,
+    image_mime: 'image/png'
+  },
+  {
+    __collection: 'xiai_faces',
+    _id: 'fc-q3',
+    id: 'fc-q3',
+    sealId: 'SLQ000000003',
+    kind: 'FACE',
+    face_no: 1,
+    is_primary: true,
+    face_image_id: 'img-q3',
+    image_sha256: FACE_SHA,
+    image_mime: 'image/png'
+  }
+])
+section('P8', '关键词转义：q = `*` / `（` / `a.b` 不抛错、不当通配符、只命中含字面量的那 1 行')
+await withInjectedStore(p8Store, async () => {
+  const escapes = [
+    ['P8a', "`q='*'` ⇒ **不抛错**（`nothing to repeat`）**不当通配符** ⇒ 只命中含字面量 `*` 的第 1 行", '*'],
+    ['P8b', "`q='（'` ⇒ **不抛错**、**不当元字符** ⇒ 只命中含字面量 `（` 的第 1 行", '（'],
+    ['P8c', "`q='a.b'` ⇒ `.` **转义为字面量** ⇒ 只命中 `a.b` 那 1 行（`乙印`/`丙印` 不因通配误中）", 'a.b']
+  ]
+  for (const [id, desc, keyword] of escapes) {
+    const writesBefore = p8Store.stats.writes.length
+    const reply = await publicCall('listSealCards', { limit: 10, q: keyword })
+    const rows = Array.isArray(reply.rows) ? reply.rows : []
+    check(id, desc, {
+      ok: true,
+      keys: 'has_more,next_cursor,ok,rows,total',
+      total: 1,
+      stampIds: [P8_HIT],
+      has_more: false,
+      writes: 0
+    }, {
+      ok: reply.ok,
+      keys: shapeOf(reply),
+      total: reply.total,
+      stampIds: rows.map((row) => row.stamp_id),
+      has_more: reply.has_more,
+      writes: p8Store.stats.writes.length - writesBefore
+    })
+  }
+})
+
+/* ===========================================================================
+   P9：`total` ＝ **命中总数**（不是已载入数）—— 60 行命中 ＋ `limit=48`
+   =========================================================================== */
+const P9_COUNT = 60
+const P9_LIMIT = 48
+const p9Rows = []
+for (let i = 1; i <= P9_COUNT; i += 1) {
+  const stamp = `SLB${String(i).padStart(7, '0')}` /* 字典序 == 数值序 */
+  p9Rows.push({
+    __collection: 'xiai_seals',
+    _id: stamp,
+    stamp_id: stamp,
+    seal_name: `满页印${i}`,
+    dynasty: '汉',
+    category: '吉语印',
+    seal_wen_chs: '长乐未央' /* 60 行**全部命中**关键词 `长乐`。 */
+  })
+  p9Rows.push({
+    __collection: 'xiai_faces',
+    _id: `fc-b${i}`,
+    id: `fc-b${i}`,
+    sealId: stamp,
+    kind: 'FACE',
+    face_no: 1,
+    is_primary: true,
+    face_image_id: `img-b${i}`,
+    image_sha256: FACE_SHA,
+    image_mime: 'image/png'
+  })
+}
+const p9Store = createStore(p9Rows)
+section('P9', 'total ＝ 命中总数（非已载入数）：60 行命中 + limit=48 ⇒ total 60 / rows 48 / has_more true')
+await withInjectedStore(p9Store, async () => {
+  const writesBefore = p9Store.stats.writes.length
+  const reply = await publicCall('listSealCards', { limit: P9_LIMIT, q: '长乐' })
+  const rows = Array.isArray(reply.rows) ? reply.rows : []
+  check('P9', '`q` 有关键词时 `total` ＝ **命中总数 60**（**不是**已载入的 48）、`rows` 恰 48、`has_more` 为真、`next_cursor` 指向本页末枚 ＋ **零写**', {
+    ok: true,
+    keys: 'has_more,next_cursor,ok,rows,total',
+    total: 60,
+    rowCount: 48,
+    has_more: true,
+    nextCursorIsLastLoaded: true,
+    writes: 0
+  }, {
+    ok: reply.ok,
+    keys: shapeOf(reply),
+    total: reply.total,
+    rowCount: rows.length,
+    has_more: reply.has_more,
+    nextCursorIsLastLoaded: rows.length > 0 && reply.next_cursor === rows[rows.length - 1].stamp_id,
+    writes: p9Store.stats.writes.length - writesBefore
+  })
+})
 
 /* ===========================================================================
    收尾
