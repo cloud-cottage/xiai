@@ -72,6 +72,10 @@ const ledger = require('./ledger.js')
 const aiKeys = require('./aiKeys.js')
 const aiUpstream = require('./aiUpstream.js')
 const aiUsage = require('./aiUsage.js')
+/* **CARD 主庫（印人字段主存儲｜本單）**：`lib/cardApi.js` 是本文件唯一的 CARD 客戶端
+   （零集合句柄字面 ⇒ 靜態門 A8 / A8b / D4 照舊成立）。本文件只給它供**密鑰讀點**，
+   並在兩條印人採納路徑上把 CARD 寫入排在本地寫入之前（見下方接入點注釋）。 */
+const cardApi = require('./cardApi.js')
 
 /* ---------------------------------------------------------------------------
    **客户端初始化单点（2026-10-29 单；应急修单：修生产回滚根因）**：`initClientFromEnv()`
@@ -213,8 +217,59 @@ const COLLECTIONS = Object.freeze({
      实现点 `lib/importChannels.js` 零集合名字面），**不进客户端云读面**（不入 `CLOUD_COLLECTIONS`
      / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL` ⇒ 客户端零读面）、**不开放任何直写入口**。 */
   sealLinks: 'xiai_seal_links',
-  personRelations: 'xiai_person_relations'
+  personRelations: 'xiai_person_relations',
+  /* **CARD 主庫憑據（本單）**：`xiai_server_secrets`（`xiai_` 前綴；**服務端專屬私有**）——
+     本文件只**讀**其中 `card_api` 文檔的 `key` 字段（CARD API 密鑰明文，本單新建該集合，
+     客戶端權限 ＝ 全部不可讀不可寫）。**不進**客戶端雲讀面（不入 `CLOUD_COLLECTIONS` /
+     `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`）、**本文件零寫入口**（寫入由部署人一次性
+     在控制台完成）。**不寫環境變量**：`xiai-user-token` 的環境變量整表替換語義會抹掉
+     `XIAI_ADMIN_PHONE` / `XIAI_USER_TOKEN_SECRET` 等既有項 ⇒ 密鑰改走集合（人類口徑）。 */
+  serverSecrets: 'xiai_server_secrets'
 })
+
+/* ---------------------------------------------------------------------------
+   **CARD 主庫（印人字段主存儲）接入點（本單）**
+   ---------------------------------------------------------------------------
+   人類口徑：印人字段的**主存儲是 CARD**；xiai 的兩條採納寫入路徑（`reviewPersonProposal` /
+   `reviewPersonImport`）**必須先調 CARD API**，成功才允許把本地 `set` 推進落盤計劃；
+   **CARD 失敗 ⇒ 整個 op 取消（零本地寫入）** —— 絕不允許「只在 xiai 本地寫成功」。
+   實現點在 `lib/cardApi.js`（零集合句柄字面），本文件只做兩件事：① 供**密鑰讀點**
+   （本文件是唯一能取 `collection(` 句柄的地方）；② 在兩條採納路徑上把 CARD 寫入排在本地寫入之前。
+   --------------------------------------------------------------------------- */
+
+/** CARD 寫入的 `updated_by` / `sources[].system` 標記（與 CARD 種子數據同值 `xiai`）。 */
+const CARD_WRITE_SOURCE = cardApi.CARD_SYSTEM
+
+/**
+ * **CARD 憑據讀點（注入給 `lib/cardApi.js`）**：① `process.env.CARD_API_KEY`（若該函數環境
+ * 已配 —— 由 `cardApi` 自己先讀，這裡只管 ②）；② 集合 `xiai_server_secrets` 文檔 `card_api`
+ * 的 `key` 字段。**讀不到 ⇒ 空串 ⇒ `cardApi` 回 `CONFIG_MISSING` ⇒ 採納 fail-closed 拒絕**
+ * （**不靜默降級成「只寫本地」**）。本讀點**不回吐、不打印**密鑰。
+ *
+ * **基址同點供給（本單）**：同一文檔的 `base_url` 字段 —— `lib/cardApi.js` 代碼內零域名
+ * （鑑權面機械尺不允許與具體網關硬綁定），基址只走 ① `CARD_API_URL` env ② 本字段；
+ * 兩者都缺 ⇒ `CONFIG_MISSING`（fail-closed，不猜地址）。換環境只改配置，不改代碼。
+ */
+cardApi.setCardSecretProvider(async () => {
+  const reply = await resolveDb().collection(COLLECTIONS.serverSecrets).doc('card_api').get()
+  const rows = rowsOfReply(reply)
+  const row = rows.length > 0 && rows[0] && typeof rows[0] === 'object' ? rows[0] : {}
+  return { key: text(row.key), base_url: text(row.base_url), source: 'collection' }
+})
+
+/**
+ * **CARD 寫入失敗 ⇒ 整筆採納取消**（零本地寫入；`reason` 一律沿用既有凍結字面值
+ * `UPSTREAM_ERROR`，**零新增**）。文案繁體、如實、不回吐密鑰 / 內部標識。
+ * @param {{ok:false, code?:string}} cardResult `lib/cardApi.js` 的失敗回包
+ * @returns {{ok:false, reason:string, message:string}}
+ */
+function cardAdoptionDenial(cardResult) {
+  const code = text(cardResult && cardResult.code) || 'UPSTREAM_ERROR'
+  return deny(
+    REASONS.UPSTREAM_ERROR,
+    `印人主庫（CARD）寫入失敗，本次未採納；請稍後重試。（診斷：${code}）`
+  )
+}
 
 /**
  * **可选读面白名单**（`readRows` 里唯一允许把「集合不存在」降级成「零行」的集合；封闭名单）。
@@ -6724,6 +6779,15 @@ const ADMIN_OPS = Object.freeze({
           created_at: at,
           updated_at: at
         }
+        /* **CARD 主庫（本單硬口徑）**：印人字段主存儲在 CARD ⇒ **先** `upsertPerson`
+           （`lib/cardApi.js`），**成功之後**才把本地 `set` 推進落盤計劃，並把回包
+           `person_id` 回填該行 `card_id`。**失敗 ⇒ 整個 op 取消（零寫入）** —— 提案狀態
+           亦不翻轉、沒有任何本地寫步 ⇒ 不得出現「CARD 無此人、xiai 有」。
+           幂等：本地行已带 `card_id`（提案行自帶）⇒ 直接复用該 id；否則按
+           `sources[xiai=PR…]` / `sources[cbdb=…]` 在 CARD 找既有 ⇒ 不重複建人。 */
+        const cardWrite = await cardApi.cardUpsertPerson(person, CARD_WRITE_SOURCE)
+        if (!cardWrite.ok) return cardAdoptionDenial(cardWrite)
+        person.card_id = cardWrite.personId
         writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })
       }
     }
@@ -6854,6 +6918,15 @@ const ADMIN_OPS = Object.freeze({
       if (!existing) {
         const code = nextPersonCodeOf(persons)
         const person = buildPersonDocFromImport(row, identity, at, code)
+        /* **CARD 主庫（本單硬口徑）**：同提案路徑 —— **先** CARD `upsertPerson`，成功才把
+           本地 `set` 與導入行狀態翻轉推進落盤計劃；`person_id` 回填本行 `card_id`。
+           **失敗 ⇒ 整個 op 取消（零本地寫入）**：`writes` 全部丟棄、導入行保持 `PENDING`
+           （`index.js` 只在 `ok:true` 時 `persist`）⇒ 不消耗任何計數器、不落提案 / 導入狀態。
+           幂等：CARD 側按 `sources[xiai=PR…]` 命中即 `created:false` ＋ 同一 `person_id`
+           （本函數剛分配的 `code` 在重放時可復現 ⇒ 不重複建人）；CARD 部分成功後中斷亦可安全重放。 */
+        const cardWrite = await cardApi.cardUpsertPerson(person, CARD_WRITE_SOURCE)
+        if (!cardWrite.ok) return cardAdoptionDenial(cardWrite)
+        person.card_id = cardWrite.personId
         persons.push(person)
         writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })
       }
@@ -7254,6 +7327,10 @@ const ADMIN_OPS = Object.freeze({
    *     person ⇒ `buildPersonDocFromImport` ＋ `nextPersonCodeOf`；item ⇒ `itemBodyOf`；
    *     seal ⇒ `buildSealAcceptanceFromImport`（**含影像引用逐条校验**：引用解析不到 ⇒
    *     该条**不补**、**如实留在 `orphan` 计数里**）。
+   *   · **印人通道必过 CARD（本单补的缺口）**：与 `reviewPersonProposal` / `reviewPersonImport`
+   *     **同构** —— 先 `cardUpsertPerson` 拿 `person_id`，成功才把本地 `set` 推进落盘计划并
+   *     回填 `card_id`；**CARD 失败 ⇒ `UPSTREAM_ERROR` ＋ 整笔零写入**（不造「CARD 无此人、
+   *     xiai 有」的孤儿）。`dry_run` **不调 CARD**（预演零副作用）。
    *   · **预演 `dry_run:true`（缺省）** ⇒ **零写入**，只吐权威清单：逐集合 `scanned`（读到的
    *     `ACCEPTED` 行数）/ `orphan`（孤儿数）/ `samples`（≤5，含导入行号 ＋ 幂等键）。
    *   · **执行 `dry_run:false`** ⇒ 逐孤儿产出正式行 `set`（**先正式行，与采纳路径同序**）。
@@ -7323,6 +7400,15 @@ const ADMIN_OPS = Object.freeze({
         if (target.key === 'person') {
           const code = nextPersonCodeOf(formal)
           const doc = buildPersonDocFromImport(row, identity, at, code)
+          /* **CARD 主庫（本單硬口徑）**：與兩條採納路徑**同構** —— 先 `cardUpsertPerson` 拿到
+             `person_id`，成功才寫本地並回填 `card_id`；**失敗 ⇒ `UPSTREAM_ERROR`、整筆零寫入**
+             （`writes` 全部丟棄：`index.js` 只在 `ok:true` 時 `persist`）。若不先寫 CARD，
+             本 op 會造出「CARD 無此人、xiai 有」的孤兒行（雙主庫漂移）。
+             幂等：CARD 側按 `sources[xiai=PR…]` 命中即 `created:false` ＋ 同一 `person_id`
+             ⇒ 重放不重複建人，部分成功後中斷亦可安全重放。 */
+          const cardWrite = await cardApi.cardUpsertPerson(doc, CARD_WRITE_SOURCE)
+          if (!cardWrite.ok) return cardAdoptionDenial(cardWrite)
+          doc.card_id = cardWrite.personId
           formal.push(doc)
           writes.push({ kind: 'set', collection: target.formal, id: code, doc })
           changed[target.key] += 1

@@ -20,6 +20,11 @@
  *      ⇒ 同一条判据必须**转红**（`false`），并各带正对照（真源 ⇒ 绿）证明探针能分真假。
  *      注入只在 `os.tmpdir()` 下的临时副本里造，**禁改 `src/**` / `cloudfunctions/**`**。
  */
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
+
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import vm from 'node:vm'

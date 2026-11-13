@@ -99,6 +99,10 @@
  */
 
 const { REASONS, deny, isCollectionNotExistError } = require('./config.js')
+/* **CARD 主库客户端**：人物读面（`listPersonCards` / `getPersonCard`）与两个匹配面
+   （`suggestAuthors` / `repairAuthorPersonId`）的**首选源**。本文件只调它的读写封装，
+   零集合句柄、零域名（见 `lib/cardApi.js` 头注）。 */
+const cardApi = require('./cardApi.js')
 /* **作者校验（§3.82）实现单点**：归一 / 四道匹配 / 载荷与回包键面的**纯函数引擎**在
    `lib/authorMatch.js`（零 DB、零写点）；本文件只做**读写接线**（与 `repairPrimaryFace` 同法）。 */
 const authorMatch = require('./authorMatch.js')
@@ -1432,6 +1436,14 @@ async function authorTextFromFaceOf(db, face) {
  * **以上判定全部早于任何读**）。回包**恰 4 键** `{ok, query, normalized, candidates}`：
  * `query` ＝ 最终用于匹配的**原文**（入参 `name` 非空 ⇒ 其原文；只给 `face_id` ⇒ 回源取值）、
  * `normalized` ＝ §3.82.1 五步归一形；候选元素**恰 7 键**、`matched_field` 封闭五值。
+ *
+ * **候选源（本单改口径）**＝ **CARD 索引** `getIndex({include_biehao:true})`（全量索引，
+ * 进程内 60s 缓存；现盘 573 行 / 别号面 12 键），**CARD 不可用 ⇒ 本地 `xiai_persons` 降级**
+ * （`personMatchSourceOf`）。
+ * ∴ 候选的 `person_id` 是 **CARD 主库编号**（九位；本地镜像未回填 `card_id` 的行才回本地编号）。
+ * `is_current` 仍按「该印面现存的 `author_person_id`」判 —— 旧形态 `PR…` 会先经本地
+ * `card_id` 映射再比较（`cardIdOfLocalPerson`），**不因改源而恒 false**。
+ * 四道匹配、分数面（100/90/80/70/50）、回填阈值 80 **一个字不改**（只换数据来源）。
  * @param {object} [payload] 封闭 3 键
  * @returns {Promise<{ok:true, query:string, normalized:string, candidates:Array<object>}|
  *                   {ok:false, reason:string, message:string}>}
@@ -1449,16 +1461,22 @@ async function suggestAuthors(payload) {
   } else {
     const face = await readFaceRowOf(db, input.face_id)
     if (!face) return deny(REASONS.INVALID_VALUE, '該印面不存在；本次零讀取。')
-    /* `is_current` ＝ 该人是否为**当前这枚印面的作者引用**（由真源派生、不编造）。 */
+    /* `is_current` ＝ 该人是否为**当前这枚印面的作者引用**（由真源派生、不编造）。
+       旧形态 `PR…` 先经本地 `card_id` 映射（候选的 `person_id` 是 CARD 主库编号）。 */
     currentPersonId = text(face.author_person_id)
+    if (currentPersonId !== '' && !isCardPersonId(currentPersonId)) {
+      currentPersonId = (await cardIdOfLocalPerson(db, currentPersonId)) || currentPersonId
+    }
     queryRaw = await authorTextFromFaceOf(db, face)
     if (queryRaw === '') {
       return deny(REASONS.MISSING_REQUIRED, '該印面與其所屬印章皆無作者名 ⇒ 無從匹配；本次零讀取。')
     }
   }
   const normalized = authorMatch.normalizeAuthorName(queryRaw)
-  const persons = await readAllPersons(db)
-  const candidates = authorMatch.buildCandidates(normalized, persons, input.limit, currentPersonId)
+  /* **候选源 ＝ CARD 索引**（CARD 不可用 ⇒ 本地 `xiai_persons` 降级）；四道匹配 / 分数 /
+     阈值一个字不改（`personMatchSourceOf` 只换数据来源，行面归一在它内部完成）。 */
+  const source = await personMatchSourceOf(db)
+  const candidates = authorMatch.buildCandidates(normalized, source.rows, input.limit, currentPersonId)
   return { ok: true, query: queryRaw, normalized, candidates }
 }
 
@@ -1529,7 +1547,11 @@ async function repairAuthorPersonId(payload, identity, context) {
       ? { ok: true, scanned: 0, eligible: 0, matched: 0, samples: [], next_cursor: '' }
       : { ok: true, scanned: 0, eligible: 0, matched: 0, written: 0, failed: [], next_cursor: '' }
   }
-  const persons = await readAllPersons(db)
+  /* **匹配面候选源 ＝ CARD 索引**（本单改口径；CARD 不可用 ⇒ 本地 `xiai_persons` 降级）。
+     四道匹配 / 分数面 / 回填阈值 80 一个字不改；命中的 `person_id` 是 **CARD 主库编号**
+     （本地镜像未回填 `card_id` 的行才回本地编号）。 */
+  const source = await personMatchSourceOf(db)
+  const persons = source.rows
   const targets = []
   for (const row of eligibleRows) {
     const rowId = text(row._id) || text(row.id)
@@ -1697,20 +1719,351 @@ async function ensureSealLinkOf(db, target, at) {
  * 导出（公开 op 表 ＋ 冻结键面；`index.js` 只做分流与按 op 收窄透传）
  * -------------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------------
+ * 人物卡片读面（公开 op `listPersonCards` / `getPersonCard`）：**CARD 优先 ＋ 本地降级**
+ * ---------------------------------------------------------------------------
+ * 口径：前端读人物（名录 / 详情 / 作者候选）**不再依赖 `xiai_persons` 的属性字段** ——
+ * 字 / 號 / 齋號 / 朝代 / 別號的**主存储是 CARD**（`card-api`，集合 `card_persons`），
+ * 本地 `xiai_persons` 只承担镜像 ＋ 工作流（提案 / 导入 / 审核）。两个读 op 的顺序固定：
+ *   ① **CARD 可用** ⇒ 直读 CARD（`getIndex` 瘦索引 / `getPerson` 全字段），**逐行收成封闭键面**；
+ *   ② **CARD 不可用**（网络 / 超时 / 非 2xx / 未配密钥）⇒ 降级读本地 `xiai_persons` 并
+ *      投影成**同一键面**，回包**追加 `source:'local-fallback'`**（显式标记 ⇒ 前端可提示
+ *      「主庫暫不可用，以下為本地鏡像」）；
+ *   ③ 本地也没有 ⇒ `INVALID_VALUE` ＋「該印人不存在」——**云函数 `REASONS` 冻结表里没有
+ *      `NOT_FOUND`**（该字面值属客户端 / `xiai-admin-token` 面）⇒ 按规范口径落
+ *      `INVALID_VALUE`，**不新增第 14 个字面值**。
+ *
+ * 两条硬纪律：
+ *   · **绝不用空数组冒充成功** —— 降级必带 `source`；CARD 失败但本地也读不到时是
+ *     `STORAGE_UNAVAILABLE`（`index.js` 兜底），不是「0 行」；
+ *   · `count` **恒等于** `rows.length`（不采信上游的 `count`：两者分叉就是在撒谎）。
+ *
+ * 键面（冻结）：
+ *   · `listPersonCards` 载荷封闭**恰 1 键** `{include_biehao?: boolean}`（非布尔 ⇒ `INVALID_VALUE`）；
+ *     回包恰 4 键 `{ok, generated_at, count, rows}`；降级轮回**恰 5 键**（＋ `source`）；
+ *     每行**基 10 键**、`include_biehao:true` 时**12 键**（＋ `biehao_text` / `zhaihao_alts`）。
+ *   · `getPersonCard` 载荷封闭**恰 1 键** `{person_id}`（非空字符串、≤ 32 字）；
+ *     回包恰 2 键 `{ok, person}`；降级轮回**恰 3 键**（＋ `source`）。
+ *     `person` 面：CARD 可用 ⇒ **上游全字段原样**；降级 ⇒ 本地行按 CARD 可写字段面投影
+ *     （`cardApi.cardFieldsOf` 复用同一套映射，**不另写第二套**）＋ `person_id`。
+ * ------------------------------------------------------------------------ */
+
+/** 回包 `source` 字面值：CARD 不可用、本地镜像顶上。 */
+const PERSON_CARD_SOURCE_LOCAL = 'local-fallback'
+
+/** `listPersonCards` 载荷封闭键面（**恰 1 键**）。 */
+const LIST_PERSON_CARDS_ALLOWED_KEYS = Object.freeze(['include_biehao'])
+/** `listPersonCards` **CARD 路**成功回包键面（**恰 4 键**，顺序即回包顺序）。 */
+const LIST_PERSON_CARDS_SUCCESS_KEYS = Object.freeze(['ok', 'generated_at', 'count', 'rows'])
+/** 降级轮回**追加**的键（存在性驱动 ⇒ 降级轮恰 5 键、CARD 路仍恰 4 键）。 */
+const PERSON_CARD_SOURCE_KEY = 'source'
+
+/** `getPersonCard` 载荷封闭键面（**恰 1 键**）。 */
+const GET_PERSON_CARD_ALLOWED_KEYS = Object.freeze(['person_id'])
+/** `getPersonCard` **CARD 路**成功回包键面（**恰 2 键**）。 */
+const GET_PERSON_CARD_SUCCESS_KEYS = Object.freeze(['ok', 'person'])
+
+/** `person_id` 长度上界（九位数字 / `PR…` 皆远小于此；越界 ⇒ `INVALID_VALUE`，零读）。 */
+const PERSON_CARD_MAX_ID_LENGTH = 32
+
+/** 索引行的基键面 / 別號追加键面（**真源在 `lib/cardApi.js`**，此处只做转发 ⇒ 不建第二套）。 */
+const PERSON_CARD_ROW_KEYS = cardApi.CARD_INDEX_ROW_KEYS
+const PERSON_CARD_BIEHAO_KEYS = cardApi.CARD_INDEX_BIEHAO_KEYS
+
+/** CARD `person_id` 形态（九位数字串）—— 与 `cardApi` 的 `validPersonId` 同尺。 */
+const CARD_PERSON_ID_PATTERN = /^\d{1,9}$/
+
+/** 是否 CARD 主库编号（九位数字；`PR…` / 其它本地编号 ⇒ 假）。 */
+function isCardPersonId(value) {
+  return CARD_PERSON_ID_PATTERN.test(text(value))
+}
+
+/** 多行文本 ⇒ 字符串数组（CARD 的 `biehao_text` 形态：一行一个別號）。 */
+function multilineTextsOf(value) {
+  return text(value)
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter((item) => item !== '')
+}
+
+/** 字符串数组归一（缺键 / 非数组 ⇒ `[]`；逐项 trim、空值丢弃）。 */
+function textsOfValue(value) {
+  return Array.isArray(value)
+    ? value.map((item) => text(item)).filter((item) => item !== '')
+    : []
+}
+
+/**
+ * 本地 `xiai_persons` 行 ⇒ **CARD 索引同形行**（10 键；`includeBiehao` 时 12 键）。
+ *
+ * 取键顺序（**新真源优先、旧数组兼容**，与 `src/data/cloudbase.js::normalizePersonRow`
+ * 的兼容口径同向，本处只读不写）：
+ *   · `person_id` ⇐ **`card_id`** → 本地 `id` / `_id` / `code`
+ *     （本地卡没有 `card_id` 时回本地编号：`getPersonCard` 认两种形态，降级路仍可往返）；
+ *   · `name` ⇐ 姓＋名 → `name_full` → `courtesy_name` → `art_name`；
+ *   · `courtesy_name` / `art_name` / `zhaihao` / `dynasty` / `cbdb_id` ⇐ 同名单值键，
+ *     缺则回落旧数组首项（`courtesy_names[0]` / `art_names[0]`）；
+ *   · `biehao_text` ⇐ 同名键；缺则 `art_names[1..]` ＋ `alias_names` 以换行拼接（旧形态）。
+ * @param {object} row 本地印人行
+ * @param {boolean} includeBiehao 是否带別號两键
+ * @returns {object} 10 或 12 键的行（**与 CARD 路逐键同形**）
+ */
+function localPersonIndexRowOf(row, includeBiehao) {
+  const src = row && typeof row === 'object' ? row : {}
+  const courtesy = textsOfValue(src.courtesy_names)
+  const art = textsOfValue(src.art_names)
+  const alias = textsOfValue(src.alias_names)
+  const family = text(src.family_name)
+  const given = text(src.given_name)
+  const courtesyName = text(src.courtesy_name) || courtesy[0] || ''
+  const artName = text(src.art_name) || art[0] || ''
+  const zhaihao = text(src.zhaihao)
+  const out = {
+    person_id: text(src.card_id) || text(src.id) || text(src._id) || text(src.code),
+    name: `${family}${given}` || text(src.name_full) || text(src.name) || courtesyName || artName,
+    family_name: family,
+    given_name: given,
+    courtesy_name: courtesyName,
+    art_name: artName,
+    zhaihao,
+    dynasty: text(src.dynasty),
+    tags: textsOfValue(src.tags),
+    cbdb_id: text(src.cbdb_id)
+  }
+  if (includeBiehao) {
+    const biehao = text(src.biehao_text) || art.slice(1).concat(alias).join('\n')
+    out.biehao_text = biehao
+    out.zhaihao_alts = textsOfValue(src.zhaihao_alts)
+  }
+  return cardApi.cardIndexRowOf(out, includeBiehao)
+}
+
+/** 本地全量索引行（`_id` 升序分页读；有界，**只读**）。 */
+async function localPersonIndexRows(db, includeBiehao) {
+  const rows = await readAllPersons(db)
+  return rows.map((row) => localPersonIndexRowOf(row, includeBiehao)).filter((row) => row.person_id !== '')
+}
+
+/** 本地行 ⇒ 单人全字段面（降级用）：CARD 可写字段面（`cardApi.cardFieldsOf`）＋ `person_id`。 */
+function localPersonCardOf(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  const person = Object.assign({}, cardApi.cardFieldsOf(src))
+  person.person_id = text(src.card_id) || text(src.id) || text(src._id) || text(src.code)
+  /* 属性面之外的可读字段（前端详情页要用）：朝代来源 / 生卒 / 性别 / 简繁副字段。 */
+  const extras = {
+    dynasty_source: text(src.dynasty_source),
+    birth_year: Number(src.birth_year) || null,
+    death_year: Number(src.death_year) || null,
+    years_lived: Number(src.years_lived) || null,
+    gender: text(src.gender),
+    native_place_chs: text(src.native_place_chs),
+    biography_chs: text(src.biography_chs),
+    tags: textsOfValue(src.tags),
+    cbdb_id: text(src.cbdb_id)
+  }
+  Object.keys(extras).forEach((key) => {
+    const value = extras[key]
+    const empty = value === null || value === '' || (Array.isArray(value) && value.length === 0)
+    if (!empty && person[key] === undefined) person[key] = value
+  })
+  return person
+}
+
+/**
+ * 按本地编号（`PR…` / `id` / `_id` / `code`）读本地印人行（**只读**，三形态逐次试）。
+ * @returns {Promise<object|null>}
+ */
+async function readLocalPersonOf(db, localId) {
+  const ops = opsOf()
+  const id = text(localId)
+  if (id === '') return null
+  const attempts = [{ id }, { _id: id }, { code: id }, { card_id: id }]
+  for (const match of attempts) {
+    const rows = await ops.readRows(ops.COLLECTIONS.persons, match, { limit: 1 })
+    if (rows.length > 0) return rows[0]
+  }
+  return null
+}
+
+/**
+ * 本地编号 ⇒ CARD `person_id`（经本地行的 `card_id`；无本地行 / 无 `card_id` ⇒ 空串）。
+ * 用途：把**旧形态**的 `author_person_id`（`PR…`）与 CARD 编号对齐（`is_current` 判据）。
+ * @returns {Promise<string>}
+ */
+async function cardIdOfLocalPerson(db, localId) {
+  const id = text(localId)
+  if (id === '' || isCardPersonId(id)) return isCardPersonId(id) ? id : ''
+  const row = await readLocalPersonOf(db, id)
+  return text(row && row.card_id)
+}
+
+/**
+ * **公开只读 op `listPersonCards`（匿名可调｜零写）** —— 人名词录的**一屏索引**。
+ *
+ * 载荷封闭恰 1 键 `{include_biehao?}`（非布尔 ⇒ `INVALID_VALUE`，零读）。
+ * 回包：CARD 路恰 4 键 `{ok, generated_at, count, rows}`；降级路恰 5 键（＋`source`）。
+ * 行面：基 10 键（`PERSON_CARD_ROW_KEYS`）；`include_biehao:true` 再带
+ * `biehao_text` / `zhaihao_alts`（CARD 侧別號最占体积 ⇒ 按需取；名录首屏不带、搜索面才带）。
+ * @param {object} [payload] 封闭 1 键
+ * @returns {Promise<object>} 见上（失败恰 3 键 `{ok:false, reason, message}`）
+ */
+async function listPersonCards(payload) {
+  const ops = opsOf()
+  /* **整份载荷可省缺**（`payload` 缺席 ＝ 名录首屏、不带別號——本 op 唯一的载荷键
+     `include_biehao` 是 opt-in）。`undefined` / `null` 先归成空载荷 `{}` **再**跑键面门
+     —— 与同文件既有零参读面同一惯例（`payloadShapeDenial` 对缺省载荷不拦）。
+     **只放行「缺席」这一形态**，其余门一个字不松：未知键 / 身份类键 ⇒ `INVALID_FIELD`
+     （`pointsPayloadDenial` 同一条文案）、非物件载荷（数组 / 字符串 / 数字 …）⇒ 同族形态拒、
+     `include_biehao` 非布尔 ⇒ `INVALID_VALUE`（判定仍**早于任何读**）。 */
+  const input = payload === undefined || payload === null ? {} : payload
+  const denial = ops.pointsPayloadDenial(input, LIST_PERSON_CARDS_ALLOWED_KEYS)
+  if (denial) return denial
+  const hasBiehaoKey = Object.prototype.hasOwnProperty.call(input, 'include_biehao')
+  if (hasBiehaoKey && typeof input.include_biehao !== 'boolean') {
+    return deny(REASONS.INVALID_VALUE, '欄位 include_biehao 必須是布林值（true / false）；本次零讀取。')
+  }
+  const includeBiehao = input.include_biehao === true
+  const index = await cardApi.cardGetIndex({ includeBiehao })
+  if (index.ok) {
+    return { ok: true, generated_at: index.generated_at, count: index.rows.length, rows: index.rows }
+  }
+  /* 降级：CARD 不可用 ⇒ 本地镜像（**同一键面**；显式 `source` 标记，绝不冒充 CARD 结果）。 */
+  const rows = await localPersonIndexRows(dbOf(), includeBiehao)
+  return {
+    ok: true,
+    generated_at: new Date().toISOString(),
+    count: rows.length,
+    rows,
+    [PERSON_CARD_SOURCE_KEY]: PERSON_CARD_SOURCE_LOCAL
+  }
+}
+
+/**
+ * **公开只读 op `getPersonCard`（匿名可调｜零写）** —— 单人全字段读面。
+ *
+ * 载荷封闭恰 1 键 `{person_id}`：**九位数字** ⇒ 直接作 CARD `person_id`；
+ * **本地编号（`PR…`）** ⇒ 先经本地 `xiai_persons.card_id` 映射再读 CARD。
+ * 回包：CARD 路恰 2 键 `{ok, person}`；降级路恰 3 键（＋`source`）；不存在 ⇒
+ * `INVALID_VALUE`（云函数 `REASONS` 无 `NOT_FOUND`，见本节头注）。
+ * @param {object} [payload] 封闭 1 键
+ * @returns {Promise<object>}
+ */
+async function getPersonCard(payload) {
+  const ops = opsOf()
+  const denial = ops.pointsPayloadDenial(payload, GET_PERSON_CARD_ALLOWED_KEYS)
+  if (denial) return denial
+  const rawId = text(payload && payload.person_id)
+  if (rawId === '') {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷欄位（person_id）；本次零讀取。')
+  }
+  if (rawId.length > PERSON_CARD_MAX_ID_LENGTH) {
+    return deny(REASONS.INVALID_VALUE, '欄位 person_id 形態不合法；本次零讀取。')
+  }
+  const db = dbOf()
+  let localRow = null
+  let cardId = isCardPersonId(rawId) ? rawId : ''
+  if (cardId === '') {
+    localRow = await readLocalPersonOf(db, rawId)
+    cardId = text(localRow && localRow.card_id)
+    if (cardId === '') {
+      return deny(REASONS.INVALID_VALUE, `該印人不存在（編號：${rawId}）；本次零讀取。`)
+    }
+  }
+  const got = await readCardPersonOf(cardId)
+  if (got.ok) return { ok: true, person: got.person }
+  /* CARD 不可用 **或** CARD 侧已无此人 ⇒ 降级本地（先按传入编号、再按映射出的 `card_id` 找行）。 */
+  if (!localRow) localRow = await readLocalPersonOf(db, rawId)
+  if (!localRow) localRow = await readLocalPersonOf(db, cardId)
+  if (localRow) {
+    return { ok: true, person: localPersonCardOf(localRow), [PERSON_CARD_SOURCE_KEY]: PERSON_CARD_SOURCE_LOCAL }
+  }
+  return deny(REASONS.INVALID_VALUE, `該印人不存在（編號：${rawId}）；本次零讀取。`)
+}
+
+/**
+ * **单人读的降级安全壳**：`cardApi.cardGetPerson` 在「哨兵已设 ＋ 未注入假传输」时会**抛错**
+ * （写面靠那个抛错暴露漏注入）。读面有本地回落 ⇒ 这里把抛错收成结构化失败
+ * （`UPSTREAM_ERROR`，**零请求**），由 `getPersonCard` 决定降级；写路径仍直接调
+ * `cardApi.cardGetPerson`（不吞抛错）。
+ * @param {string} cardId CARD `person_id`
+ * @returns {Promise<{ok:true, person:object}|{ok:false, code:string}>}
+ */
+async function readCardPersonOf(cardId) {
+  try {
+    return await cardApi.cardGetPerson(cardId)
+  } catch (error) {
+    return { ok: false, code: 'UPSTREAM_ERROR' }
+  }
+}
+
+/**
+ * **匹配面候选源（两个 op 共用）**：CARD 索引（`includeBiehao:true`）优先；CARD 不可用
+ * ⇒ 本地 `xiai_persons`。两条路都归一到 `lib/authorMatch.js` 认的行形状
+ * （`id` / `family_name` / `given_name` / `courtesy_names` / `art_names` / `alias_names`），
+ * ⇒ 四道匹配、分数面、阈值**一个字不改**（本函数只换数据来源）。
+ *
+ * 字段落桶（**只换来源、不改分数**）：
+ *   · `name`       ⇐ `name`（`姓＋名` 亦由 `family_name` / `given_name` 自然拼出）
+ *   · `courtesy`(80) ⇐ `courtesy_name`
+ *   · `art`(70)      ⇐ `art_name` ＋ `zhaihao` ＋ `zhaihao_alts`（齋號是號的一支）
+ *   · `alias`(90)    ⇐ `biehao_text`（一行一个別號）
+ * @param {object} db DB 句柄（仅降级路用）
+ * @returns {Promise<{rows:Array<object>, source:string}>} `source` ∈ `card` / `local-fallback`
+ */
+async function personMatchSourceOf(db) {
+  const index = await cardApi.cardGetIndex({ includeBiehao: true })
+  if (index.ok) return { rows: index.rows.map((row) => personMatchRowOfIndex(row)), source: 'card' }
+  const local = await localPersonIndexRows(db, true)
+  return { rows: local.map((row) => personMatchRowOfIndex(row)), source: 'local-fallback' }
+}
+
+/** CARD 索引同形行 ⇒ `authorMatch` 认的行（四个值数组 ＋ `id` / `dynasty`）。 */
+function personMatchRowOfIndex(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  return {
+    id: text(src.person_id),
+    family_name: text(src.family_name),
+    given_name: text(src.given_name),
+    courtesy_names: [text(src.courtesy_name)].filter((item) => item !== ''),
+    art_names: [text(src.art_name), text(src.zhaihao)]
+      .concat(textsOfValue(src.zhaihao_alts))
+      .filter((item) => item !== ''),
+    alias_names: multilineTextsOf(src.biehao_text),
+    dynasty: text(src.dynasty)
+  }
+}
+
 /**
  * **匿名可调的公开 op 表**（`index.js` 在令牌校验**之前**按这张表分流；
  * 表外的一切 op 仍必须验 token）。**只读**：这里的 op 一律零写。
- * **恰 2 成员**（§3.81.5 追加注 v1.100：`listSealCards` ＋ `suggestAuthors`）。
+ * **恰 4 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
+ * ＋ `listPersonCards` / `getPersonCard`（人物读面改吃 CARD 主库；本单 `2 → 4`）。
  */
 const PUBLIC_OPS = Object.freeze({
   listSealCards,
-  suggestAuthors
+  suggestAuthors,
+  listPersonCards,
+  getPersonCard
 })
 
 module.exports = {
   PUBLIC_OPS,
   listSealCards,
   suggestAuthors,
+  /* 人物读面（本单 `PUBLIC_OPS` 2 → 4）：op 本体 ＋ 冻结键面 ＋ 降级标记。 */
+  listPersonCards,
+  getPersonCard,
+  LIST_PERSON_CARDS_ALLOWED_KEYS,
+  LIST_PERSON_CARDS_SUCCESS_KEYS,
+  GET_PERSON_CARD_ALLOWED_KEYS,
+  GET_PERSON_CARD_SUCCESS_KEYS,
+  PERSON_CARD_ROW_KEYS,
+  PERSON_CARD_BIEHAO_KEYS,
+  PERSON_CARD_SOURCE_KEY,
+  PERSON_CARD_SOURCE_LOCAL,
+  localPersonIndexRowOf,
+  localPersonCardOf,
+  personMatchSourceOf,
   repairPrimaryFace,
   repairSealFaceCount,
   repairAuthorPersonId,

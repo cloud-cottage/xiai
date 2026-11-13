@@ -27,6 +27,11 @@
  *   node scripts/verify-endorsement.mjs
  *   （可选覆盖：XIAI_USER_SMS_CODE / XIAI_USER_TOKEN_SECRET / XIAI_USER_PHONE）
  */
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
+
 
 import { createRequire } from 'node:module'
 import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
@@ -704,7 +709,7 @@ const hasSimplified = (text) => {
  * （防止该行日后被改写后，白名单反过来掩蔽真回归）。
  * ------------------------------------------------------------------------- */
 const SIMPLIFIED_ALLOWED = [
-  { file: 'cloudfunctions/xiai-user-token/lib/ops.js', line: 766, char: '巨',
+  { file: 'cloudfunctions/xiai-user-token/lib/ops.js', line: 821, char: '巨',
     mustContain: '陳巨來印風',
     why: '人名用字（陳巨來），繁體合法；詞組表把「巨万→鉅萬」誤歸簡體側，屬檢測器噪聲' }
 ]

@@ -21,6 +21,11 @@
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 用法：node scripts/verify-item-imports.mjs
  */
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
+
 
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'

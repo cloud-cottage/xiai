@@ -14,8 +14,8 @@
  *       `SUGGEST_AUTHORS_ALLOWED_KEYS`(3：face_id,name,limit) /
  *       `SUGGEST_AUTHORS_SUCCESS_KEYS`(4：ok,query,normalized,candidates) /
  *       `AUTHOR_CANDIDATE_KEYS`(7) / `MATCHED_FIELDS`(5：name,alias,courtesy,art,contains)。
- *   P1. `PUBLIC_OPS` **恰 2 成员**（`listSealCards` / `suggestAuthors`，皆函数）；
- *       表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
+ *   P1. `PUBLIC_OPS` **恰 4 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
+ *       `getPersonCard`，皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
  *   P2. **两 op 载荷封闭**：未知键 / **身份类键**（`user_id` / `phone`）⇒ `INVALID_FIELD`
  *       ＋ 恰 3 键拒绝 ＋ 零读（判定早于任何读）。
  *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 14 键**。
@@ -36,6 +36,11 @@
  * 用法：node scripts/verify-public-ops.mjs
  */
 
+
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -312,17 +317,17 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5
 })
 
 /* ===========================================================================
-   P1：`PUBLIC_OPS` 恰 2 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零读
+   P1：`PUBLIC_OPS` 恰 4 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零读
    =========================================================================== */
-section('P1', 'PUBLIC_OPS 恰 2（listSealCards / suggestAuthors）；表外 op ⇒ FORBIDDEN')
+section('P1', 'PUBLIC_OPS 恰 4（listSealCards / suggestAuthors / listPersonCards / getPersonCard）；表外 op ⇒ FORBIDDEN')
 {
   const keys = Object.keys(sealCards.PUBLIC_OPS)
   const readsBefore = store.stats.reads
   const denied = await publicCall('repairPrimaryFace', {})
-  check('P1', '`PUBLIC_OPS` **恰 2 成员**（`listSealCards` / `suggestAuthors`，皆函数）', {
-    count: 2,
-    keys: ['listSealCards', 'suggestAuthors'],
-    types: ['function', 'function']
+  check('P1', '`PUBLIC_OPS` **恰 4 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`，皆函数）', {
+    count: 4,
+    keys: ['getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function']
   }, {
     count: keys.length,
     keys: sorted(keys),

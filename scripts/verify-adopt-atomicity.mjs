@@ -28,6 +28,11 @@
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 用法：`node scripts/verify-adopt-atomicity.mjs`
  */
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
+
 
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -175,7 +180,20 @@ const ops = require(path.join(FUNCTION_DIR, 'lib/ops.js'))
 const opsSource = readFileSync(path.join(FUNCTION_DIR, 'lib/ops.js'), 'utf8')
 const indexSource = readFileSync(path.join(FUNCTION_DIR, 'index.js'), 'utf8')
 
-const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE', 'NOT_FOUND', 'DUPLICATE_VALUE', 'ALREADY_ENDORSED']
+/* ---------------------------------------------------------------------------
+   **CARD 主库夹具（收尾单）**
+   ---------------------------------------------------------------------------
+   两条印人采纳路径已接 CARD 主库且 **fail-closed**（无密钥 / 无传输 ⇒ 整体拒绝、零本地
+   写入）。本套件是**离线**套件（「零网络」是它的既有纪律）⇒ 进程内常驻假 CARD：
+   既保住原有原子性断言（CARD 成功后本地落盘的行为不变），也**绝不**真打生产 CARD
+   （宿主 shell 若导出 `CARD_API_KEY`，不注入就会把测试行写进主库）。生产代码一字未改。
+   `FROZEN_REASONS` 补 `UPSTREAM_ERROR`：它本就是 `config.js::REASONS` 的既有冻结字面值
+   （CARD 失败的唯一回吐码），不是本套件新造。
+   --------------------------------------------------------------------------- */
+const { createFakeCard, installFakeCard } = await import(path.join(HERE, 'fixtures/fake-card.mjs'))
+const fakeCard = installFakeCard(createFakeCard())
+
+const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE', 'NOT_FOUND', 'DUPLICATE_VALUE', 'ALREADY_ENDORSED', 'UPSTREAM_ERROR']
 const OBSERVED_REASONS = []
 const noteReason = (res) => {
   if (res && typeof res.reason === 'string' && res.reason !== '') OBSERVED_REASONS.push(res.reason)
@@ -316,6 +334,41 @@ console.log(JSON.stringify({ section: 'C', title: 'I-1 采纳原子性（失败�
   check('D2', 'I-1 重试：导入行翻至 `ACCEPTED`', IMPORT_STATUS.ACCEPTED, text(importRowRetried.status))
   check('D3', 'I-1 重试：**正式行数不超预期**（幂等键去重 ⇒ 仍恰 1 条，无重复行）', 1, store.rows('xiai_persons').length)
   check('D4', 'I-1 重试：本次**无**正式行 `set`（已存在 ⇒ 跳过）', 0, store.stats.writes.filter((w) => w.collection === 'xiai_persons').length)
+}
+
+/* ---------------------------------------------------------------------------
+   C'. CARD 主库 fail-closed（收尾单）：CARD 失败 ⇒ 零本地写入
+   ---------------------------------------------------------------------------
+   正对照（CARD `ok` ⇒ 回填 `card_id`）＋ 负对照（CARD `UNAUTHORIZED` ⇒ 零写、导入行仍
+   `PENDING`、无计划）＋ 复原重放（拒绝只源于 CARD，不是套件环境坏了）。原有 C/D 段
+   （半采纳原子性）断言**一字未改**。
+   --------------------------------------------------------------------------- */
+console.log(JSON.stringify({ section: 'C2', title: 'CARD fail-closed（UNAUTHORIZED ⇒ 零本地写入）' }))
+{
+  const storeOk = createStore([Object.assign({ __collection: 'xiai_person_imports' }, importRowOf({ key: 'person', idKey: 'source_person_id' }, { id: 'pi-cardok', sourceKey: 'CARDOK-1' }))])
+  ops.setOpsDbProvider(storeOk.provider)
+  fakeCard.setMode('ok')
+  fakeCard.resetCalls()
+  const okRes = noteReason(await ops.ADMIN_OPS.reviewPersonImport({ batch_id: 'B-ADOPT', decision: 'ACCEPTED' }, ADMIN_IDENTITY, CONTEXT))
+  const okDoc = ((okRes.plan && okRes.plan.writes) || []).find((w) => w.collection === 'xiai_persons').doc || {}
+  check('C7', 'CARD `ok` ⇒ 採納行 `card_id` 由 CARD 回包回填（九位數字串）', true, okRes.ok === true && /^\d{9}$/.test(text(okDoc.card_id)))
+  const okOps = fakeCard.ops()
+  check('C8', 'CARD `ok` ⇒ 假 CARD 確收到寫入（`upsertPerson` / `updatePersonFields`；索引命中即更新）', true,
+    okOps.indexOf('upsertPerson') !== -1 || okOps.indexOf('updatePersonFields') !== -1)
+
+  const store = createStore([Object.assign({ __collection: 'xiai_person_imports' }, importRowOf({ key: 'person', idKey: 'source_person_id' }, { id: 'pi-cardfail', sourceKey: 'CARDFAIL-1' }))])
+  ops.setOpsDbProvider(store.provider)
+  store.reset()
+  fakeCard.setMode('unauthorized')
+  const denied = noteReason(await ops.ADMIN_OPS.reviewPersonImport({ batch_id: 'B-ADOPT', decision: 'ACCEPTED' }, ADMIN_IDENTITY, CONTEXT))
+  fakeCard.setMode('ok')
+  const rowAfter = store.rows('xiai_person_imports').find((row) => text(row.id) === 'pi-cardfail') || {}
+  check('C9', 'CARD `UNAUTHORIZED` ⇒ 結構化拒絕 `UPSTREAM_ERROR`（**不**降級成「只寫本地」）', { ok: false, reason: 'UPSTREAM_ERROR' }, { ok: denied.ok, reason: denied.reason })
+  check('C10', 'CARD `UNAUTHORIZED` ⇒ **零本地寫入**（假體寫賬 0、導入行仍 `PENDING`、無計劃）', { writes: 0, status: 'PENDING', plan: undefined },
+    { writes: store.stats.writes.length, status: text(rowAfter.status), plan: denied.plan })
+  check('C11', 'CARD 失敗回包**不回吐密鑰**（消息面零密鑰字面）', false, String(denied.message || '').indexOf('test-card-key') !== -1)
+  check('C12', 'CARD 復原後重放 ⇒ 正常採納（拒絕只源於 CARD 失敗，非套件環境）', true,
+    await ops.ADMIN_OPS.reviewPersonImport({ batch_id: 'B-ADOPT', decision: 'ACCEPTED' }, ADMIN_IDENTITY, CONTEXT).then((r) => noteReason(r).ok === true))
 }
 
 /* ---------------------------------------------------------------------------
@@ -481,6 +534,14 @@ console.log(JSON.stringify({ section: 'J', title: '静态：待审取行（I-3�
   const stripped = opsSource.split('_IMPORT_STATUS.PENDING').join('_IMPORT_STATUS.NOPE')
   check('J7', '负对照 canary：抹掉三处状态过滤 ⇒ 同一条尺命中数 3 → 0（必报红）', 0, pendingMatches.filter((needle) => stripped.includes(needle)).length)
 }
+
+/* ---------------------------------------------------------------------------
+   K. 夹具自证（收尾单）：CARD 假传输全程在路径上 ＋ 零真网
+   --------------------------------------------------------------------------- */
+console.log(JSON.stringify({ section: 'K', title: 'CARD 夹具自证（零真网）' }))
+check('K1', 'CARD 假传输全程在路径上（`exportPersons` 索引 ＋ 写入均被假体接住）', { index: true, write: true },
+  { index: fakeCard.seenOps().indexOf('exportPersons') !== -1, write: fakeCard.seenOps().indexOf('upsertPerson') !== -1 || fakeCard.seenOps().indexOf('updatePersonFields') !== -1 })
+check('K2', '零真网：发往 `CARD_API_URL` 的真 `fetch` 被护栏拦下者恰 0 次', 0, fakeCard.blockedFetches())
 
 /* ---------------------------------------------------------------------------
    汇总

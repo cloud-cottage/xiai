@@ -14,6 +14,11 @@
  * 纪律：不打印任何密钥 / 令牌原文；不碰任何服务；任一断言失败 ⇒ 退出码非 0。
  * 用法：`node scripts/verify-person-model.mjs`
  */
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
+
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -252,6 +257,17 @@ const userOps = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/ops.
 const cloudbase = await import(path.join(ROOT, 'src/data/cloudbase.js'))
 const EXTRACTION_KEYS = ['courtesy_names_extraction', 'art_names_extraction', 'alias_names_extraction']
 
+/* ---------------------------------------------------------------------------
+   **CARD 主库夹具（收尾单）**
+   ---------------------------------------------------------------------------
+   采纳路径已接 CARD 主库且 **fail-closed**（无密钥 / 无传输 ⇒ 整体拒绝、零本地写入）。
+   本套件是**离线**套件 ⇒ 在调用采纳用例（`X6`）之前注入假 CARD（固定 `person_id`），
+   并在进程内常驻：既不会因缺密钥被 fail-closed 判红，也**绝不**真打生产 CARD
+   （宿主 shell 若导出 `CARD_API_KEY`，不注入就会写主库）。生产代码一字未改。
+   --------------------------------------------------------------------------- */
+const { createFakeCard, installFakeCard, TEST_CARD_FIRST_ID } = await import(path.join(HERE, 'fixtures/fake-card.mjs'))
+const fakeCard = installFakeCard(createFakeCard())
+
 /** 內存假 DB（形狀對齊 ops.js 的 `collection(name).where(match).get()` / `.get()` / `.doc(id).get()`）。 */
 function makeFakeDb(seed = {}) {
   const collections = new Map()
@@ -350,6 +366,7 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     alias_names: ['郭容光'], alias_names_extraction: ['manual']
   }
   userOps.setOpsDbProvider(makeFakeDb({ xiai_person_imports: [importRow] }))
+  fakeCard.resetCalls()
   const res = await userOps.ADMIN_OPS.reviewPersonImport({ batch_id: 'B-acc', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
   const personWrite = ((res.plan && res.plan.writes) || []).find((w) => w.collection === 'xiai_persons')
   check('X6', 'AC-510 採納確生成 person 行（kind=set）', true, !!personWrite && personWrite.kind === 'set')
@@ -357,6 +374,11 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
   check('X6b', 'AC-510 person 行**不含** 3 個 extraction 鍵', [], EXTRACTION_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(personDoc, k)))
   check('X6c', 'AC-510 person 行仍帶值陣列（值面不受影響）', { c: ['容光'], art: ['曉樓'], alias: ['郭容光'] },
     { c: personDoc.courtesy_names, art: personDoc.art_names, alias: personDoc.alias_names })
+  /* **CARD 口徑（收尾單；斷言不放寬）**：採納行必須帶 `card_id`，且該值**來自 CARD 回包**
+     （假 CARD 首個分配 id）；同時證明假傳輸確實在路徑上、零真網。 */
+  check('X6d', 'AC-510 採納行帶 `card_id` 且來自 CARD 回包（假 CARD 首個 id）', String(TEST_CARD_FIRST_ID), String(personDoc.card_id || ''))
+  check('X6e', 'AC-510 假 CARD 傳輸確在路徑上（`exportPersons` ⇒ `upsertPerson`）且零真網', { ops: ['exportPersons', 'upsertPerson'], blocked: 0 },
+    { ops: fakeCard.ops(), blocked: fakeCard.blockedFetches() })
   /* 迴歸面：集合總數未增（仍 19）；`[data-admin-action]` 未新增由既有 N-1 段/static-check 另判。 */
   const storageKeys = await import(path.join(ROOT, 'src/data/storage.js'))
   check('X7', 'AC-510 回歸面：`STORAGE_KEYS` 集合總數（v1.61：25 → 27，本批新增 items / itemImports）', 27, Object.keys(storageKeys.STORAGE_KEYS).length)

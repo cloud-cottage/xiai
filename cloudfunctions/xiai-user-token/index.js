@@ -48,12 +48,19 @@ const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, write
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
-/* **首页卡片分页读面（本单新增）**：`PUBLIC_OPS` ＝ **匿名可调**的只读 op 表（本文件在令牌 /
-   会话 / 配置判定**之前**按它分流，只放行白名单里的 op）；`REPAIR_PRIMARY_FACE_READOUT_KEYS`
+/* **首页卡片分页读面 ＋ 人物卡片读面**：`PUBLIC_OPS` ＝ **匿名可调**的只读 op 表（本文件在令牌 /
+   会话 / 配置判定**之前**按它分流，只放行白名单里的 op；本单 `2 → 4`：
+   `listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`）；
+   `REPAIR_PRIMARY_FACE_READOUT_KEYS`
    ＝ 主印面回填 op 的**回包键面真源**（恰 6 键、`dry_run` 与真写同形；按 op 收窄透传 ⇒
    其余 op 回包逐字不变）；`REPAIR_SEAL_FACE_COUNT_READOUT_KEYS` ＝ **`face_count` 回填 op**
    （`repairSealFaceCount`，本单 `ADMIN_OPS` 38 → 39）的**回包键面真源**（恰 5 键、
-   `dry_run` 与真写同形；按 op 收窄、存在性驱动透传 ⇒ 其余 op 回包逐字不变）。 */
+   `dry_run` 与真写同形；按 op 收窄、存在性驱动透传 ⇒ 其余 op 回包逐字不变）。
+   **公开面（`action:'public'`）零收窄**：`handlePublic` 把 op 的回包**原样**返回 ——
+   两个新 op 的键面（`listPersonCards` 恰 4 键／降级恰 5 键；`getPersonCard` 恰 2 键／
+   降级恰 3 键）由 op 自己封闭（`lib/sealCards.js` 的 `LIST_PERSON_CARDS_SUCCESS_KEYS` /
+   `GET_PERSON_CARD_SUCCESS_KEYS` ＋ 存在性驱动的 `source`），因此**不需要**在信封里加
+   按 op 的透传分支；`index.js` 只负责「分流 ＋ 失败兜底」，绝不补键。 */
 const { PUBLIC_OPS, REPAIR_PRIMARY_FACE_READOUT_KEYS, REPAIR_SEAL_FACE_COUNT_READOUT_KEYS } = require('./lib/sealCards.js')
 /* **作者校验（§3.82）**：`REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS` ＝ 管理员回填 op
    `repairAuthorPersonId` 的**读数键面并集**真源（恰 7 键、按 op 收窄、存在性驱动透传 ⇒
@@ -835,16 +842,22 @@ async function handleVerify(event, config, callContext) {
 }
 
 /**
- * **匿名只读动作（本单新增｜`action:'public'`）**：**不验令牌、不读身份、零写入**。
+ * **匿名只读动作（`action:'public'`）**：**不验令牌、不读身份、零写入**。
  *
  * 硬口径（逐条）：
- *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；表外 op ⇒ `FORBIDDEN` ＋ 零读）；
+ *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；现恰 4 成员
+ *     `listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`；
+ *     表外 op ⇒ `FORBIDDEN` ＋ 零读）；
  *     `repairPrimaryFace` 等管理员 op **不在这张表上** ⇒ 匿名调不到，仍必须走 `action:'verify'`
  *     验令牌 ＋ 白名单身份；
- *   · 载荷 / 回包键面由各 op 自己封闭（本函数**零改写、零补键** ⇒ 公开面回包恰如 op 契约）；
+ *   · 载荷 / 回包键面由各 op 自己封闭（本函数**零改写、零补键** ⇒ 公开面回包恰如 op 契约；
+ *     `listPersonCards` / `getPersonCard` 的降级标记 `source` 由 op 按存在性自己加，
+ *     **不由信封决定** ⇒ 此处**无**按 op 的键收窄分支）；
  *   · 读失败 ⇒ `STORAGE_UNAVAILABLE`（内部故障**绝不伪装** `FORBIDDEN`），并带不可逆指纹摘要。
  * @param {object} event 事件（`{action:'public', op, payload}`）
- * @returns {Promise<object>} op 的原始回包（成功恰 5 键 `{ok, rows, next_cursor, has_more, total}`）
+ * @returns {Promise<object>} op 的原始回包（如 `listSealCards` 成功恰 5 键
+ *   `{ok, rows, next_cursor, has_more, total}`；`listPersonCards` 恰 4 / 降级 5 键；
+ *   `getPersonCard` 恰 2 / 降级 3 键）
  */
 async function handlePublic(event) {
   const op = typeof event.op === 'string' ? event.op.trim() : ''
@@ -877,8 +890,9 @@ async function handlePublic(event) {
 exports.main = async function main(event, context) {
   const input = event && typeof event === 'object' ? event : {}
   const action = typeof input.action === 'string' ? input.action.trim() : ''
-  /* **匿名只读面（本单新增）**：`action:'public'` 在**令牌 / 会话 / 配置判定之前**分流 ——
-     只放行 `PUBLIC_OPS` 白名单（`listSealCards`）；表外 op（含一切管理员 op）**仍必须**走
+  /* **匿名只读面**：`action:'public'` 在**令牌 / 会话 / 配置判定之前**分流 ——
+     只放行 `PUBLIC_OPS` 白名单（`listSealCards` / `suggestAuthors` / `listPersonCards` /
+     `getPersonCard`）；表外 op（含一切管理员 op）**仍必须**走
      `action:'verify'` 验令牌 ＋ 白名单身份。公开面无写面 ⇒ 与配置面（密钥 / TTL）无关，
      故**不因令牌配置缺失而拒**（读面不该被写面的配置故障连坐）。 */
   if (action === 'public') return await handlePublic(input)

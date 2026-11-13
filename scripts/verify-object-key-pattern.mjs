@@ -21,6 +21,11 @@
  *     集合**相等**（双向 ⊆ ＋ 相等，防今后任一侧单边扩展）。
  * 纪律：断言失败 ⇒ 退出码非 0。
  */
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
+
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 

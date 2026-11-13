@@ -21,6 +21,11 @@
  * 新路径的取回用**真 `fetch` 语义**：这里把 `globalThis.fetch` 换成读文件的同义实现
  * （`Response` ＋ `content-length` ＋ 流式 body），⇒ 跑的就是浏览器里那条 `loadPhraseTable()` 代码。
  */
+
+/* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
+   若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
+   跑任何套件前**不得** export 真 `CARD_API_KEY`（见 `scripts/README-test-net.md`）。 */
+process.env.XIAI_NO_REAL_CARD = '1'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
