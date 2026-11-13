@@ -196,6 +196,26 @@ const LIST_SEAL_CARDS_SUCCESS_KEYS = Object.freeze(['ok', 'rows', 'next_cursor',
 const LIST_SEAL_CARDS_DEFAULT_LIMIT = 48
 const LIST_SEAL_CARDS_MAX_LIMIT = 60
 
+/**
+ * **热度序（写死的三键，唯一真源）**：`view_count desc` → `created_at desc` → `stamp_id desc`。
+ * 第三键**只为稳定序**（同热度同创建时间时防分页重漏），不改变业务语义、不进任何回包。
+ * 键属性 `numeric: true` ⇒ 退路按数值比较（字符串数字也换算；缺失 / 非有限数按「最低档」）。
+ */
+const CARD_SEAL_SORT_KEYS = Object.freeze([
+  Object.freeze({ field: 'view_count', direction: 'desc', numeric: true }),
+  Object.freeze({ field: 'created_at', direction: 'desc', numeric: false }),
+  Object.freeze({ field: 'stamp_id', direction: 'desc', numeric: false })
+])
+
+/**
+ * 分页游标（**语义 ＝ 偏移量**，不再是「上一页末枚 `stamp_id`」）：形态 `off:<n>`，
+ * `n` 为十进制非负整数、**0〜7 位**；空串 ＝ 首页。与前端本机退路的
+ * `LOCAL_CURSOR_PREFIX = 'off:'`（`src/services/sealCards.js`）**同形** ⇒ 视图层原样透传即可。
+ */
+const LIST_SEAL_CARDS_CURSOR_PREFIX = 'off:'
+const LIST_SEAL_CARDS_CURSOR_MAX_DIGITS = 7
+const LIST_SEAL_CARDS_CURSOR_PATTERN = new RegExp(`^${LIST_SEAL_CARDS_CURSOR_PREFIX}[0-9]{1,${LIST_SEAL_CARDS_CURSOR_MAX_DIGITS}}$`)
+
 /** `repairPrimaryFace` 载荷封闭键面（**恰 3 键**：`dry_run` / `limit` / `cursor`）。 */
 const REPAIR_PRIMARY_FACE_ALLOWED_KEYS = Object.freeze(['dry_run', 'limit', 'cursor'])
 const REPAIR_PRIMARY_FACE_DEFAULT_LIMIT = 200
@@ -238,6 +258,24 @@ const REPAIR_SEAL_FACE_COUNT_MAX_CURSOR_LENGTH = 64
  * `ok` 与信封同值、`index.js` 叠之幂等）。`index.js` 按 op 收窄透传引这里。
  */
 const REPAIR_SEAL_FACE_COUNT_READOUT_KEYS = Object.freeze(['ok', 'scanned', 'eligible', 'written', 'next_cursor'])
+
+/**
+ * `repairSealViewCount` 载荷封闭键面（**恰 3 键**：`dry_run` / `limit` / `cursor`）——
+ * 与 `repairSealFaceCount` **同形同门**（同型回填 op，裁定 §5）。
+ */
+const REPAIR_SEAL_VIEW_COUNT_ALLOWED_KEYS = Object.freeze(['dry_run', 'limit', 'cursor'])
+const REPAIR_SEAL_VIEW_COUNT_DEFAULT_LIMIT = 200
+const REPAIR_SEAL_VIEW_COUNT_MAX_LIMIT = 500
+/** `cursor` 长度上界（非空串 1〜64；空串 ＝ 从头、与缺省同义；越界 ⇒ `INVALID_VALUE`）。 */
+const REPAIR_SEAL_VIEW_COUNT_MAX_CURSOR_LENGTH = 64
+/**
+ * `repairSealViewCount` **回包键面（恒恰 5 键，`dry_run` 与真写同形）**：
+ * `{ok, scanned, eligible, written, next_cursor}` —— 本常量**逐字即该 5 键**（含 `ok`；
+ * `ok` 与信封同值、`index.js` 叠之幂等）。`index.js` 按 op 收窄透传引这里。
+ */
+const REPAIR_SEAL_VIEW_COUNT_READOUT_KEYS = Object.freeze(['ok', 'scanned', 'eligible', 'written', 'next_cursor'])
+/** `view_count` 的回填值（数据契约：整数且 ≥ 0，缺省 0）。 */
+const REPAIR_SEAL_VIEW_COUNT_FILL_VALUE = 0
 
 /** 一页印章的读取窗口：`limit + 1` 枚卡片之外再留缓冲（0 面印章 / 面筛选不中的会被跳过）。 */
 const CARD_SEAL_WINDOW_FACTOR = 3
@@ -443,6 +481,12 @@ async function readAllBounded(db, collection, cap) {
  * @param {object} options `{ match, idField, after, limit, idIn }`
  */
 async function readOrderedWindow(db, collection, options) {
+  /* **多键排序 ＋ `skip` ＋ 偏移窗口通道（本单 `listSealCards` 热度序）**：调用方给了 `sortKeys`
+     ⇒ 走同节下面的 `readSortedOffsetWindow`（主路 `orderBy×N → skip → limit`，退路同一个比较器）。
+     未给 `sortKeys` ⇒ 下面既有的「单字段升序 ＋ `after` 游标」路径**逐字不变**。 */
+  if (options && Array.isArray(options.sortKeys) && options.sortKeys.length > 0) {
+    return readSortedOffsetWindow(db, collection, options)
+  }
   const match = options && options.match && typeof options.match === 'object' ? options.match : {}
   const idField = text(options && options.idField) || '_id'
   const after = text(options && options.after)
@@ -493,6 +537,136 @@ function sortedWindowOf(rows, idField, after, limit, idIn) {
     return left < right ? -1 : left > right ? 1 : 0
   })
   return filtered.slice(0, Math.max(1, Math.floor(Number(limit) || 1)))
+}
+
+/* --------------------------------------------------------------------------
+ * **多键排序 ＋ `skip` ＋ 偏移窗口通道**（`listSealCards` 热度序专用）
+ * --------------------------------------------------------------------------
+ * 与上一节的「单字段升序 ＋ `after` 游标」通道**并置**：两节共用同一套 DB 适配约定
+ * （主路交 DB 排序 / 分页；注入式假体走内存退路），但**排序语义必须一致** —— 否则离线
+ * 自检会假绿 / 假红。故内存退路与本文件主路**共用同一个比较器**（`compareBySortKeysOf`），
+ * 而不是在自检里另写一套。
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 排序键归一（`{field, direction, numeric}`）：`field` 空的项丢弃；`direction` 只认
+ * `asc` / `desc`（其余一律按 `desc`）；`numeric === true` ⇒ 该键按数值比较（字符串数字
+ * 也换算成数；非有限数 ⇒ 与缺失同档）。
+ * @param {Array<object>|undefined} value 原始排序键数组
+ * @returns {Array<{field:string, direction:string, numeric:boolean}>}
+ */
+function sortKeysOf(value) {
+  if (!Array.isArray(value)) return []
+  const keys = []
+  for (const raw of value) {
+    const field = text(raw && raw.field)
+    if (field === '') continue
+    keys.push({
+      field,
+      direction: text(raw && raw.direction).toLowerCase() === 'asc' ? 'asc' : 'desc',
+      numeric: !!(raw && raw.numeric === true)
+    })
+  }
+  return keys
+}
+
+/**
+ * 单值 ⇒ 可比值（**刻意与 Mongo 的跨类型次序同向**：`null` / 缺失 < 数值 / 日期 < 字符串）：
+ *  · 缺失 / `null` / 空串 / 非有限数 ⇒ `rank 0`（降序时排最后，与 DB 把缺失当 `null` 一致）；
+ *  · 数值 / `Date` ⇒ `rank 1`；`Date` 取毫秒数（与 ISO 字符串同向，跨形态仍可比）；
+ *  · 其余 ⇒ `rank 2`，按字符串比较。
+ * `numeric === true` 的键（本单 `view_count`）对「字符串数字」也换算成数（DB 里该字段恒数值；
+ * 退路不该因为一条脏字符串把整页顺序打乱）。
+ */
+function sortValueOf(value, numeric) {
+  if (value === undefined || value === null) return { rank: 0, value: 0 }
+  if (value instanceof Date) {
+    const time = value.getTime()
+    return Number.isFinite(time) ? { rank: 1, value: time } : { rank: 0, value: 0 }
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? { rank: 1, value } : { rank: 0, value: 0 }
+  if (numeric) {
+    const num = Number(value)
+    return Number.isFinite(num) && text(value) !== '' ? { rank: 1, value: num } : { rank: 0, value: 0 }
+  }
+  const str = String(value)
+  return str === '' ? { rank: 0, value: 0 } : { rank: 2, value: str }
+}
+
+/** 单键比较（升序语义；`desc` 由 `compareBySortKeysOf` 取反）。 */
+function compareSortFieldOf(left, right, key) {
+  const a = sortValueOf(left, key && key.numeric === true)
+  const b = sortValueOf(right, key && key.numeric === true)
+  if (a.rank !== b.rank) return a.rank - b.rank
+  if (a.value === b.value) return 0
+  return a.value < b.value ? -1 : 1
+}
+
+/** 多键比较（**唯一比较器**：主路交 DB，退路用它 ⇒ 两路同一排序语义）。 */
+function compareBySortKeysOf(left, right, keys) {
+  for (const key of keys) {
+    const cmp = compareSortFieldOf(left && left[key.field], right && right[key.field], key)
+    if (cmp !== 0) return key.direction === 'asc' ? cmp : -cmp
+  }
+  return 0
+}
+
+/**
+ * **内存收口（与主路同尺）**：`match` 筛选（含 `$or` / `$gte` / `$regularExpression`，
+ * 与 `matchRows` 同一张判定表）→ 多键排序 → `slice(skip, skip + limit)`。
+ * @param {Array<object>} rows 候选行
+ * @param {Array<{field:string, direction:string, numeric:boolean}>} keys 排序键
+ * @param {number} skip 偏移量（非负整数）
+ * @param {number} limit 窗口长度
+ * @param {object} [match] 等值 / 子句条件
+ * @returns {Array<object>}
+ */
+function sortedOffsetWindowOf(rows, keys, skip, limit, match) {
+  const source = Array.isArray(rows) ? rows : []
+  const matched = match && Object.keys(match).length > 0 ? matchRows(source, match) : source.slice()
+  matched.sort((a, b) => compareBySortKeysOf(a, b, keys))
+  const offset = Math.max(0, Math.floor(Number(skip) || 0))
+  return matched.slice(offset, offset + Math.max(1, Math.floor(Number(limit) || 1)))
+}
+
+/**
+ * **有序偏移窗口读**（唯一的新读点）：`where(match)` → `orderBy(key1) … orderBy(keyN)` →
+ * `skip(offset)` → `limit(window)`；**零全表扫描**（分页一律交给 DB）。
+ *
+ * 退路（**只服务注入式假体**）：链上没有 `orderBy` / `skip`，或主路抛错 ⇒ 有界读回后按
+ * `sortedOffsetWindowOf`（同一个比较器）在内存里排同一序、切同一窗。退路读失败仍上抛
+ * （**不把真存储故障吞成空页**）。
+ * @param {object} db DB 句柄
+ * @param {string} collection 集合名（`^xiai_`）
+ * @param {object} options `{ match, sortKeys, skip, limit }`
+ * @returns {Promise<Array<object>>}
+ */
+async function readSortedOffsetWindow(db, collection, options) {
+  const match = options && options.match && typeof options.match === 'object' ? options.match : {}
+  const keys = sortKeysOf(options && options.sortKeys)
+  const skip = Math.max(0, Math.floor(Number(options && options.skip) || 0))
+  const limit = Math.max(1, Math.floor(Number(options && options.limit) || 1))
+  if (keys.length === 0) {
+    /* 无排序键（调用方漏给）⇒ 回既有单字段升序通道，语义不外扩。 */
+    return readOrderedWindow(db, collection, { match, idField: '_id', after: '', limit })
+  }
+  try {
+    let chain = db.collection(collection).where(match)
+    const orderable = chain && typeof chain.orderBy === 'function'
+    const skippable = skip === 0 || (chain && typeof chain.skip === 'function')
+    if (orderable && skippable) {
+      for (const key of keys) chain = chain.orderBy(key.field, key.direction)
+      if (skip > 0) chain = chain.skip(skip)
+      if (typeof chain.limit === 'function') chain = chain.limit(limit)
+      return rowsOfReply(await chain.get())
+    }
+  } catch (error) {
+    /* 主路不可用（假体 / SDK 不支持多字段 `orderBy` ＋ `skip`）⇒ 落内存退路。
+       退路自身再失败会原样上抛 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`（不伪装空页）。 */
+    console.warn('[xiai] 印章頁有序窗口主路不可用（改走內存退路）：', text(error && error.message))
+  }
+  const rows = await readAllBounded(db, collection, CARD_FALLBACK_SCAN_CAP)
+  return sortedOffsetWindowOf(rows, keys, skip, limit, match)
 }
 
 /**
@@ -693,7 +867,7 @@ function payloadShapeDenial(payload, allowedKeys) {
  * `listSealCards` 载荷解析（缺省值见契约；**任一不合 ⇒ 结构化拒绝 ＋ 零读**）。
  * 判定序：键面（未知 / 身份类 ⇒ `INVALID_FIELD`）→ `limit` → `cursor` → 四筛选键 → `q`。
  * @param {object} [payload] 载荷
- * @returns {{ok:true, value:{limit:number, cursor:string, dynasty:string, seal_type:string, face_style:string, category:string, q:string}}|{ok:false, reason:string, message:string}}
+ * @returns {{ok:true, value:{limit:number, cursor:string, offset:number, dynasty:string, seal_type:string, face_style:string, category:string, q:string}}|{ok:false, reason:string, message:string}}
  */
 function parseListSealCardsPayload(payload) {
   const shapeDenial = payloadShapeDenial(payload, LIST_SEAL_CARDS_ALLOWED_KEYS)
@@ -708,11 +882,26 @@ function parseListSealCardsPayload(payload) {
     limit = raw
   }
   let cursor = ''
+  let offset = 0
   if (Object.prototype.hasOwnProperty.call(input, 'cursor')) {
     if (typeof input.cursor !== 'string') {
-      return deny(REASONS.INVALID_VALUE, '`cursor` 必須是字符串（上一頁末枚的 `stamp_id`）；本次零讀取。')
+      return deny(
+        REASONS.INVALID_VALUE,
+        '`cursor` 必須是字符串（偏移游標 `off:<非負整數>`；空串＝首頁）；本次零讀取。'
+      )
     }
     cursor = input.cursor.trim()
+    if (cursor !== '') {
+      /* **形态门（零读取）**：只认 `off:<十进制非负整数 0〜7 位>`。旧 `stamp_id` 形态、
+         负数、超长、空数字、多余字符一律 `INVALID_VALUE` ＋ **零读**（解析早于任何读）。 */
+      if (!LIST_SEAL_CARDS_CURSOR_PATTERN.test(cursor)) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          '`cursor` 形態已變更（須為 `off:<非負整數>`，0〜7 位）；請刷新頁面後重試；本次零讀取。'
+        )
+      }
+      offset = Number(cursor.slice(LIST_SEAL_CARDS_CURSOR_PREFIX.length))
+    }
   }
   const filters = { dynasty: '', seal_type: '', face_style: '', category: '' }
   for (const key of Object.keys(filters)) {
@@ -743,6 +932,9 @@ function parseListSealCardsPayload(payload) {
     value: {
       limit,
       cursor,
+      /* **偏移窗口起点**（`cursor` 的数值形态）：`listSealCards` 只用它做 `skip`，
+         与 `cursor` 同源（形态已过 `off:<n>` 门）⇒ 单点解析、零二次换算。 */
+      offset,
       dynasty: filters.dynasty,
       seal_type: filters.seal_type,
       face_style: filters.face_style,
@@ -923,67 +1115,52 @@ async function listSealCards(payload) {
   const hasFaceFilter = Object.keys(faceMatch).length > 0
   const wanted = input.limit + 1 // 多取 1 枚 ⇒ `has_more` 有判据，不靠客户端推算
   const windowSize = Math.min(CARD_SEAL_WINDOW_MAX, wanted * CARD_SEAL_WINDOW_FACTOR)
+  /* 本页起点（偏移窗口）：`cursor` 为 `off:<n>` 时由解析单点给出；空串 ⇒ 0。 */
+  const offset = Number.isFinite(Number(input.offset)) && Number(input.offset) > 0 ? Math.floor(Number(input.offset)) : 0
   const cards = []
-  let lastCursor = input.cursor
+  /* 卡片 ↔ 其在**整条热度序**上的印章位次（＝ 本页起始 `offset` ＋ 已扫行数）：`next_cursor`
+     只由位次推进（`off:<末张卡片位次 + 1>`）。**全命中的常态下**位次 ＋ 1 恒等于
+     `offset + rows.length`（一枚印章一张卡片）；面筛选 / 零面双保险**跳过的章**不会把位次
+     推多、也不会让下一页重出已发卡片（既有「三页 stamp_id 无重无漏」判据的正因）。 */
+  const positions = []
+  let scanOffset = offset
   let exhausted = false
-
-  if (hasFaceFilter) {
-    /* 面筛选路：① 面候选（`sealId` 升序、游标截断）→ ② 印章页（`in`）→ ③ 该页印面（与卡片同源）。
-       候选用完仍不足 ⇒ 再取一段（**轮数固定上限**，绝不退化成全表扫描）。
-       主印面校验只用 ③ 已读回的面行（**不为每枚卡片补读**）。 */
-    const candidates = await candidateSealKeysOf(db, faceMatch, input.cursor)
-    let candidateAt = 0
-    for (let round = 0; round < CARD_SEAL_WINDOW_ROUNDS && cards.length < wanted; round += 1) {
-      if (candidateAt >= candidates.length) {
-        exhausted = true
-        break
-      }
-      const sliceIds = candidates.slice(candidateAt, candidateAt + windowSize)
-      candidateAt += sliceIds.length
-      const sealRows = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
-        match: sealMatch,
-        idField: 'stamp_id',
-        idIn: sliceIds,
-        limit: sliceIds.length
-      })
-      if (sealRows.length === 0) continue
-      const details = await cardDetailsOfSealRows(db, sealRows)
-      for (const entry of details) {
-        if (!primaryMatches(entry.faces, faceMatch)) continue
-        if (cards.length >= wanted) break
-        cards.push(entry.card)
-      }
-      if (candidateAt >= candidates.length && cards.length < wanted) exhausted = true
+  /* **全态同一热度序**（`CARD_SEAL_SORT_KEYS`：`view_count desc → created_at desc → stamp_id desc`）
+     ＋ 印章侧偏移窗口（`skip(offset) → limit(windowSize)`）。面筛选（`seal_type` / `face_style`）
+     不再「先读面候选」，而是按裁定 §3 **反转为「先按热度读印章页 → 批量读该页 FACE 行 →
+     按主印面命中过滤」**（热度序必须由印章侧决定）。窗口因子 / 上限 / 轮数沿用现值；
+     候选未尽而轮数用尽 ⇒ `has_more` 如实为真，**绝不谎报「已到底」**。 */
+  for (let round = 0; round < CARD_SEAL_WINDOW_ROUNDS && cards.length < wanted; round += 1) {
+    const sealRows = await readSortedOffsetWindow(db, ops.COLLECTIONS.seals, {
+      match: sealMatch,
+      sortKeys: CARD_SEAL_SORT_KEYS,
+      skip: scanOffset,
+      limit: windowSize
+    })
+    if (sealRows.length === 0) {
+      exhausted = true
+      break
     }
-    if (candidateAt < candidates.length && cards.length < wanted) exhausted = false
-  } else {
-    /* 无面筛选：印章页（升序 ＋ 游标）→ 该页印面 → 卡片；窗口不足再读一轮。 */
-    for (let round = 0; round < CARD_SEAL_WINDOW_ROUNDS && cards.length < wanted; round += 1) {
-      const sealRows = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
-        match: sealMatch,
-        idField: 'stamp_id',
-        after: lastCursor,
-        limit: windowSize
-      })
-      if (sealRows.length === 0) {
-        exhausted = true
-        break
-      }
-      lastCursor = sealKeyOf(sealRows[sealRows.length - 1]) || lastCursor
-      if (sealRows.length < windowSize) exhausted = true
-      const pageCards = await cardsOfSealRows(db, sealRows)
-      for (const card of pageCards) {
-        if (cards.length >= wanted) break
-        cards.push(card)
-      }
+    /* 印章侧到底（本窗口不满）⇒ 本页凑完即止，**不再多读一轮空窗**。 */
+    if (sealRows.length < windowSize) exhausted = true
+    /* 该页印面 ＋ 卡片（**唯一一处组装**；主印面校验只用这批已读回的面行，不为每枚卡片补读）。 */
+    const details = await cardDetailsOfSealRows(db, sealRows)
+    for (let i = 0; i < details.length; i += 1) {
+      if (hasFaceFilter && !primaryMatches(details[i].faces, faceMatch)) continue
+      if (cards.length >= wanted) break
+      cards.push(details[i].card)
+      positions.push(scanOffset + i)
     }
+    scanOffset += sealRows.length
+    if (exhausted) break
   }
 
-  /* `has_more`：多取到第 `limit+1` 枚 ⇒ `true`；未取到但**窗口轮数用尽而候选未尽** ⇒ 也按 `true`
+  /* `has_more`：多取到第 `limit+1` 枚 ⇒ `true`；未取到但**窗口轮数用尽而印章侧未尽** ⇒ 也按 `true`
      如实上报（下一轮以 `next_cursor` 续取，最多出现一个空页，绝不谎报「已到底」）。 */
   const hasMore = cards.length > input.limit || (!exhausted && cards.length >= input.limit)
   const pageRows = cards.slice(0, input.limit)
-  const nextCursor = hasMore && pageRows.length > 0 ? pageRows[pageRows.length - 1].stamp_id : ''
+  /* `has_more` 为真 ⇒ `off:<末张已发卡片的位次 + 1>`；否则空串（首页）。 */
+  const nextCursor = hasMore && pageRows.length > 0 ? `${LIST_SEAL_CARDS_CURSOR_PREFIX}${positions[pageRows.length - 1] + 1}` : ''
   /* `total`：命中**印章侧**筛选（四维 ＋ 关键词 `q` ＋ **`face_count >= 1`**）的印章数
      （服务端计数、不传行）。**零面章与未回填的历史章不计入**（本单修「共 1251 枚、只能加载
      1042 枚」的真因：`total` 曾把不可展示的零面章也算进去）。面维度筛选（`seal_type` /
@@ -995,6 +1172,88 @@ async function listSealCards(payload) {
     next_cursor: nextCursor,
     has_more: hasMore,
     total
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * 公开写 op：`bumpSealView`（印章浏览量 +1；**匿名可调**）
+ * --------------------------------------------------------------------------
+ * 裁定 §6：计数 A 轻 —— 匿名也计；同一浏览器 24h 内只计一次的去重职责在**客户端**
+ * （`localStorage` 单键 `xiai.sealview.v1`）⇒ 本 op **无幂等**：每次调用都 +1。
+ * 写面**只**对命中行做 `command.inc(1)`（原子），不写流水、不计费、不产 `plan`。
+ * ------------------------------------------------------------------------ */
+
+/** `bumpSealView` 载荷封闭键面（**恰 1 键**：`stamp_id`）。 */
+const BUMP_SEAL_VIEW_ALLOWED_KEYS = Object.freeze(['stamp_id'])
+/** `stamp_id` trim 后长度上界（越界 ⇒ `INVALID_VALUE`、零读零写）。 */
+const BUMP_SEAL_VIEW_MAX_STAMP_ID_LENGTH = 64
+
+/** 写调用回包的 `updated` 数（认 `{updated}` / `{data:{updated}}`；认不出 ⇒ `null`，不猜）。 */
+function updatedCountOf(reply) {
+  if (!reply || typeof reply !== 'object') return null
+  const raw = reply.updated !== undefined ? reply.updated : reply.data && reply.data.updated
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : null
+}
+
+/**
+ * **印章浏览量 +1（公开写 op｜匿名可调）**。
+ *
+ * 载荷封闭**恰 1 键** `stamp_id`（非字符串 / trim 空 / 长度 > 64 ⇒ `INVALID_VALUE` ＋
+ * **零读**）；印章行不存在 ⇒ `INVALID_VALUE` ＋ 文案「該印章不存在」（**不用 `NOT_FOUND`** ——
+ * user-token 侧 `REASONS` 无该值）；写面 = 对命中行 `command.inc(1)`（**原子**，不写流水、
+ * 不计费、不产 `plan`）；成功回包**恰 1 键** `{ok:true}`、失败**恰 3 键**
+ * `{ok:false, reason, message}`；**无幂等**（每次调用都 +1，去重在客户端）；
+ * 存储故障 ⇒ **结构化失败**（不抛 5xx，前端 fail-open）。
+ * @param {object} [payload] `{stamp_id:string}`
+ * @returns {Promise<{ok:true}|{ok:false, reason:string, message:string}>}
+ */
+async function bumpSealView(payload) {
+  /* ① 载荷门（**全部判定早于任何读**）。 */
+  const shapeDenial = payloadShapeDenial(payload, BUMP_SEAL_VIEW_ALLOWED_KEYS)
+  if (shapeDenial) return shapeDenial
+  const input = payload && typeof payload === 'object' ? payload : {}
+  if (typeof input.stamp_id !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '`stamp_id` 必須是字符串；本次零讀取。')
+  }
+  const stampId = input.stamp_id.trim()
+  if (stampId === '') {
+    return deny(REASONS.INVALID_VALUE, '`stamp_id` 不得為空（trim 後）；本次零讀取。')
+  }
+  if (stampId.length > BUMP_SEAL_VIEW_MAX_STAMP_ID_LENGTH) {
+    return deny(
+      REASONS.INVALID_VALUE,
+      `\`stamp_id\` trim 後長度不得超過 ${BUMP_SEAL_VIEW_MAX_STAMP_ID_LENGTH} 字（當前 ${stampId.length} 字）；本次零讀取。`
+    )
+  }
+  try {
+    const ops = opsOf()
+    /* ② 读该印章行（`stamp_id` 等值；零全表扫描）。 */
+    const rows = await ops.readRows(ops.COLLECTIONS.seals, { stamp_id: stampId }, { limit: 1 })
+    const row = (Array.isArray(rows) ? rows : []).find((item) => item && sealKeyOf(item) === stampId) || null
+    if (!row) return deny(REASONS.INVALID_VALUE, '該印章不存在；本次零寫入。')
+    const rowKey = text(row._id)
+    const db = dbOf()
+    const command = db && db.command
+    const current = Number(row.view_count)
+    /* ③ **原子自增**：`db.command.inc(1)`（与 `lib/ops.js::issueCodeNumber` 同一算子表）。
+       句柄没有 `inc`（只可能是注入式假体）⇒ 按读到的值 +1 落「算好的新值」，语义同形。 */
+    const increment = command && typeof command.inc === 'function'
+      ? command.inc(1)
+      : (Number.isFinite(current) ? current : 0) + 1
+    const reply = await db
+      .collection(ops.COLLECTIONS.seals)
+      .where(rowKey !== '' ? { _id: rowKey } : { stamp_id: stampId })
+      .update({ view_count: increment })
+    /* 命中 0 行 ⇒ 行在读写之间被删（如实报「不存在」，不谎报成功）。认不出 `updated` ⇒ 不猜。 */
+    if (updatedCountOf(reply) === 0) return deny(REASONS.INVALID_VALUE, '該印章不存在；本次零寫入。')
+    return { ok: true }
+  } catch (error) {
+    /* 存储故障 ⇒ **结构化失败**（`index.js` 不再二次包装；前端 fail-open、静默跳过）。 */
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `瀏覽量計數寫入的權威存儲不可用；本次零寫入（詳情：${text(error && error.message) || 'unknown'}）。`
+    )
   }
 }
 
@@ -1338,6 +1597,148 @@ async function repairSealFaceCount(payload, identity, context) {
     }
   } catch (error) {
     console.warn('[xiai] repairSealFaceCount 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    written = 0
+  }
+  /* 回包恒恰 5 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`。 */
+  return { ok: true, scanned, eligible, written, next_cursor: nextCursor }
+}
+
+/* --------------------------------------------------------------------------
+ * 管理员 op：`repairSealViewCount`（前置一次性回填 `xiai_seals.view_count`）
+ * -------------------------------------------------------------------------- */
+
+/**
+ * **`view_count` 一次性回填（幂等管理员 op）** —— 排序上线**之前**必须先跑（裁定 §5）：
+ * 缺字段的行在热度序里与 0 同档，回填只为把「有值行数」拉齐到全量。
+ *
+ * 载荷封闭 `{ dry_run?:boolean, limit?:number, cursor?:string }`（**恰 3 键**，与
+ * `repairSealFaceCount` **同形同门**）：`dry_run` 缺省 `true`（给了但非布林 ⇒ `INVALID_VALUE`）；
+ * `limit` 1〜500 整数、缺省 200；`cursor` ＝ 上轮回包 `next_cursor`（`_id` 单向前进，
+ * **必须随载荷回传**；缺省 / 空串 ＝ 从头）。
+ *
+ * 回包**恒恰 5 键** `{ ok, scanned, eligible, written, next_cursor }`（`dry_run` 与真写同形）：
+ *   · `scanned` ＝ 本轮扫描的印章行数；
+ *   · `eligible` ＝ 其中 **`view_count` 缺失 / 非整数 / < 0** 的行数（裁定 §5 唯一判据）；
+ *   · 写入值恒 `0`（`REPAIR_SEAL_VIEW_COUNT_FILL_VALUE`），**只写 `view_count` 一个键**；
+ *   · `written` ＝ 由**整窗读回**判定（`view_count` 已为 0 的目标行数；`dry_run` 恒 0）——
+ *     不拿 `persist` 的 resolve/reject 冒充成功，读回失败 ⇒ 宁报 0 不虚报；
+ *   · `next_cursor` ＝ **本窗口最后一条被扫描行的 `_id`**（不是最后一条被写的；窗口扫空 ⇒ 空串）。
+ *   · **幂等**：已回填的行不再 `eligible` ⇒ 同参重放 `written === 0`。
+ * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ */
+async function repairSealViewCount(payload, identity, context) {
+  const ops = opsOf()
+  /* ① 管理员门（**第一行**；缺 env / 非白名单 ⇒ 结构化拒 ＋ 零读零写）。 */
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷门（全部判定早于任何读）。 */
+  const shapeDenial = payloadShapeDenial(payload, REPAIR_SEAL_VIEW_COUNT_ALLOWED_KEYS)
+  if (shapeDenial) return shapeDenial
+  const input = payload && typeof payload === 'object' ? payload : {}
+  let dryRun = true
+  if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+    if (typeof input.dry_run !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+    }
+    dryRun = input.dry_run
+  }
+  let limit = REPAIR_SEAL_VIEW_COUNT_DEFAULT_LIMIT
+  if (Object.prototype.hasOwnProperty.call(input, 'limit')) {
+    const raw = input.limit
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > REPAIR_SEAL_VIEW_COUNT_MAX_LIMIT) {
+      return deny(REASONS.INVALID_VALUE, `\`limit\` 必須是 1〜${REPAIR_SEAL_VIEW_COUNT_MAX_LIMIT} 的整數；本次零寫入。`)
+    }
+    limit = raw
+  }
+  /* `cursor`：字符串（上轮回包 `next_cursor`）；缺省 / 空串 ＝ 从头；非字符串 ⇒ `INVALID_VALUE`；
+     非空长度 1〜64、越界 ⇒ `INVALID_VALUE`。**全部判定仍早于任何读。** */
+  let cursor = ''
+  if (Object.prototype.hasOwnProperty.call(input, 'cursor')) {
+    const rawCursor = input.cursor
+    if (typeof rawCursor !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '`cursor` 必須是字符串（上一輪回包的 `next_cursor`）；本次零讀取。')
+    }
+    cursor = rawCursor.trim()
+    if (cursor.length > REPAIR_SEAL_VIEW_COUNT_MAX_CURSOR_LENGTH) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `\`cursor\` 非空時長度必須在 1〜${REPAIR_SEAL_VIEW_COUNT_MAX_CURSOR_LENGTH} 之間（空串 ＝ 從頭；上一輪回包的 \`next_cursor\`）；本次零讀取。`
+      )
+    }
+  }
+  const db = dbOf()
+  /* ③ 扫描窗口：印章行按 **`_id` 升序、严格大于 `cursor`** 的前 `limit` 行
+     （服务端 `command.gt` ＋ `orderBy('_id','asc')` ＋ `limit`；假体无 `command` ⇒ 走退路，
+      **同一游标推进式**；零全表扫描 —— 与 `repairSealFaceCount` 逐字同法）。 */
+  const sealRows = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
+    match: {},
+    idField: '_id',
+    after: cursor,
+    limit
+  })
+  const scanned = sealRows.length
+  /* `next_cursor` ＝ **本窗口最后一条被扫描行的 `_id`**（不是最后一条被写的）；窗口扫空 ⇒ 空串。 */
+  const nextCursor = scanned > 0 ? text(sealRows[scanned - 1] && sealRows[scanned - 1]._id) : ''
+  if (scanned === 0) return { ok: true, scanned: 0, eligible: 0, written: 0, next_cursor: '' }
+  /* ④ 判定：`view_count` **缺失 / 非整数 / < 0** ⇒ eligible（缺失视同 0 的行也算 eligible，
+     回填后「有值行数」才拉得齐 —— 裁定 §5）。**已是合法非负整数的行一个字不写**（幂等）。 */
+  const targets = []
+  for (const sealRow of sealRows) {
+    const raw = sealRow && sealRow.view_count
+    const isCleanInteger = typeof raw === 'number' && Number.isInteger(raw) && raw >= 0
+    if (isCleanInteger) continue
+    const rowKey = text(sealRow && sealRow._id) || sealKeyOf(sealRow)
+    if (rowKey === '') continue
+    targets.push({ rowKey })
+  }
+  const eligible = targets.length
+  /* 预演 / 无事可做 ⇒ **零写入**（回包仍恰 5 键；`written` 恒 0，不谎报）。 */
+  if (dryRun || eligible === 0) {
+    return { ok: true, scanned, eligible, written: 0, next_cursor: nextCursor }
+  }
+  /* ⑤ 真写：逐章 `update`（**只写 `view_count` 一个键** —— 不碰其它字段、不写 `updated_at`）；
+     单章失败不中断整批。 */
+  for (const target of targets) {
+    try {
+      await ops.persist({
+        writes: [
+          {
+            kind: 'update',
+            collection: ops.COLLECTIONS.seals,
+            match: { _id: target.rowKey },
+            doc: { view_count: REPAIR_SEAL_VIEW_COUNT_FILL_VALUE },
+            expectAtLeast: 1
+          }
+        ]
+      })
+    } catch (error) {
+      console.warn(
+        `[xiai] repairSealViewCount 單章寫回報失敗（讀回定真偽；印章：${target.rowKey}；不中斷整批）：`,
+        text(error && error.message)
+      )
+    }
+  }
+  /* ⑥ 读数**以整窗读回为准**（persist 回报 ≠ 行的终态）：同窗重读，只数「`view_count` 已落到
+     回填值」的章；读回失败 ⇒ **不敢称写入**（宁报 0 不虚报）。 */
+  let written = 0
+  try {
+    const after = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
+      match: {},
+      idField: '_id',
+      after: cursor,
+      limit
+    })
+    const stateByKey = new Map()
+    for (const row of after) stateByKey.set(text(row._id) || sealKeyOf(row), row)
+    for (const target of targets) {
+      const row = stateByKey.get(target.rowKey)
+      if (row && Number(row.view_count) === REPAIR_SEAL_VIEW_COUNT_FILL_VALUE) written += 1
+      else console.warn(`[xiai] repairSealViewCount 單章未生效（讀回 view_count 不符回填值；印章：${target.rowKey}）`)
+    }
+  } catch (error) {
+    console.warn('[xiai] repairSealViewCount 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
     written = 0
   }
   /* 回包恒恰 5 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`。 */
@@ -2046,8 +2447,23 @@ const PUBLIC_OPS = Object.freeze({
   getPersonCard
 })
 
+/**
+ * **匿名可调的公开写 op 表**（`index.js` 在令牌 / 会话 / 配置判定**之前**按 `action:'public-write'`
+ * 分流；与上面 `PUBLIC_OPS` **两张表分开可判负**）。**恰 1 成员**：`bumpSealView`
+ * （印章浏览量 +1；裁定 §6）。表外 op ⇒ `FORBIDDEN` ＋ 零读零写。
+ * `PUBLIC_OPS` **仍恰 4 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
+ */
+const PUBLIC_WRITE_OPS = Object.freeze({
+  bumpSealView
+})
+
 module.exports = {
   PUBLIC_OPS,
+  /* 公开写面（本单新增；与 `PUBLIC_OPS` 分表）：op 本体 ＋ 载荷封闭键面 ＋ 长度上界。 */
+  PUBLIC_WRITE_OPS,
+  bumpSealView,
+  BUMP_SEAL_VIEW_ALLOWED_KEYS,
+  BUMP_SEAL_VIEW_MAX_STAMP_ID_LENGTH,
   listSealCards,
   suggestAuthors,
   /* 人物读面（本单 `PUBLIC_OPS` 2 → 4）：op 本体 ＋ 冻结键面 ＋ 降级标记。 */
@@ -2066,6 +2482,7 @@ module.exports = {
   personMatchSourceOf,
   repairPrimaryFace,
   repairSealFaceCount,
+  repairSealViewCount,
   repairAuthorPersonId,
   /* 冻结键面（供 `index.js` 透传与离线自检直接断言） */
   LIST_SEAL_CARDS_ALLOWED_KEYS,
@@ -2076,6 +2493,14 @@ module.exports = {
   /* 关键词检索面（本单 `q`）：长度上界 ＋ 12 字段集（逐字断言用）。 */
   LIST_SEAL_CARDS_MAX_QUERY_LENGTH,
   LIST_SEAL_CARDS_SEARCH_FIELDS,
+  /* 热度序面（本单）：三键排序真源 ＋ 偏移游标形态 ＋ 有序偏移窗口读（离线自检直接断言）。 */
+  CARD_SEAL_SORT_KEYS,
+  LIST_SEAL_CARDS_CURSOR_PREFIX,
+  LIST_SEAL_CARDS_CURSOR_PATTERN,
+  sortKeysOf,
+  compareBySortKeysOf,
+  sortedOffsetWindowOf,
+  readSortedOffsetWindow,
   /* 零面过滤阈值（`face_count >= 1`；窗口读与 `count()` 共用）。 */
   LIST_SEAL_CARDS_MIN_FACE_COUNT,
   REPAIR_PRIMARY_FACE_ALLOWED_KEYS,
@@ -2088,6 +2513,12 @@ module.exports = {
   REPAIR_SEAL_FACE_COUNT_READOUT_KEYS,
   REPAIR_SEAL_FACE_COUNT_DEFAULT_LIMIT,
   REPAIR_SEAL_FACE_COUNT_MAX_LIMIT,
+  /* `view_count` 回填面（载荷 3 键 ＋ 回包 5 键 ＋ 上下界 ＋ 回填值）。 */
+  REPAIR_SEAL_VIEW_COUNT_ALLOWED_KEYS,
+  REPAIR_SEAL_VIEW_COUNT_READOUT_KEYS,
+  REPAIR_SEAL_VIEW_COUNT_DEFAULT_LIMIT,
+  REPAIR_SEAL_VIEW_COUNT_MAX_LIMIT,
+  REPAIR_SEAL_VIEW_COUNT_FILL_VALUE,
   /* 纯函数（供离线自检直接断言） */
   parseListSealCardsPayload,
   primaryFaceOf,

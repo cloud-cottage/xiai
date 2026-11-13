@@ -9,7 +9,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
-import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport, aiEnhance, authorMatch } from '../services/index.js'
+import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport, aiEnhance, authorMatch, sealCards } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
@@ -174,6 +174,29 @@ watch(
 const dataSource = computed(() => seals.dataSourceState())
 const sealLoading = computed(() => !seal.value && dataSource.value.pending)
 const sealUnavailable = computed(() => !seal.value && dataSource.value.failed)
+
+/* ============================================================================
+   **瀏覽量計數（裁定件 §6 / §7｜本單）**
+   ----------------------------------------------------------------------------
+   · 觸發點：印章**真實解析成功**（`seal` 非空且帶 `stamp_id`）後**一次** —— 熱導航 / 水合落定
+     使 `seal` 由 `null` 變有值時才觸發（這正是「打開即 +1」的時刻；硬導航首屏 `seal` 為空 ⇒ 不計）。
+   · **只發一次**：`sealViewBumpedStampId` 記住已計過的編號 ⇒ 依賴面抖動（`dataVersion` / 屬性保存 /
+     影像載入）**不會**重複發。
+   · **靜默**：不上屏、不阻塞渲染、不改既有錯誤態、不 `console.error`；去重與降級都在服務層
+     （`sealCards.bumpSealView` 永不拋出），本頁**零文案**。
+   ============================================================================ */
+let sealViewBumpedStampId = ''
+watch(
+  () => (seal.value ? String(seal.value.stamp_id || '').trim() : ''),
+  (stampId) => {
+    const id = stampId ? String(stampId) : ''
+    if (!id || id === sealViewBumpedStampId) return
+    sealViewBumpedStampId = id
+    /* 計數是副作用：不 await（不拖渲染）、不改本頁任何狀態（結果無需上屏）。 */
+    void sealCards.bumpSealView(id)
+  },
+  { immediate: true }
+)
 
 /**
  * 清掉逐影像的**一次性讀數**（終態錯誤 ＋ 未落定標記）。

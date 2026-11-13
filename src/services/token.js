@@ -41,6 +41,16 @@ export const USER_TOKEN_FUNCTION = 'xiai-user-token'
 /** 动作字面值（与两个云函数 `index.js` 的 `action` 逐字一致）。 */
 export const TOKEN_ACTIONS = Object.freeze({ ISSUE: 'issue', VERIFY: 'verify' })
 
+/**
+ * **公开写面的 `action` 字面值**（与 `xiai-user-token/index.js` 的 `action === 'public-write'`
+ * 分流逐字一致；位置与 `action === 'public'` 同级、在令牌 / 会话 / 配置判定**之前**）。
+ *
+ * 它与 `TOKEN_ACTIONS` **分开一处**：`issue` / `verify` 是**带令牌的**两态，`public-write`
+ * 是**匿名、无令牌、无 `verify` 前置**的第三态 ⇒ 不塞进同一个冻结对象（既有两个收窄分支的键集
+ * 逐字不动）。本文件**零 op 名字面值**：op 名由调用方（`services/sealCards.js`）逐字传入。
+ */
+export const PUBLIC_WRITE_ACTION = 'public-write'
+
 /** 形态标注（上屏 / 报告用）。 */
 export const TOKEN_MODES = Object.freeze({ CLOUD: 'cloud', LOCAL_DEV: 'local-dev' })
 
@@ -345,7 +355,50 @@ export function createTokenChannel(profile) {
     return shapeDenial()
   }
 
-  return { functionName, subject, snapshot, present, clear, request, ensureWriteSession, gate }
+  /**
+   * **公開寫面（`action:'public-write'`）的收窄信封**（与 `gate()` **同形**：同一套失败形态、
+   * 同一套「服务端原话透传」口径；**无令牌、无 `verify` 前置、无滑动续期**）。
+   *
+   * 为什么另立一条而不是复用 `gate()`：`gate()` 恒发 `action:'verify'` ＋ 携带 `token`，
+   * 而公开写面**匿名**（也**不得**携带任何令牌面）。硬口径逐条照搬：
+   *   · 传输层失败 ⇒ **原样**（`data/cloudbaseFn.js` 的 `STORAGE_UNAVAILABLE`），**不**伪装 `FORBIDDEN`；
+   *     令牌**不动**（未参与本次调用）；
+   *   · 服务端结构化拒绝（`ok:false` ＋ `reason`/`message` 双串）⇒ **原样透传**，一个字都不改写；
+   *   · 成功 ⇒ **按 op 收窄**：公开写面白名单只有一只 op（`bumpSealView`），其成功回包**恰 1 键**
+   *     `ok:true` ⇒ 本分支只回 `{ok, mode, op}`，**不派生任何假读数**（不编造 `value` / `row`）；
+   *   · 既非放行也非结构化拒绝 ⇒ `shapeDenial()`（与 `gate()` 同一处、**不新增文案**）。
+   *
+   * @param {string} op 公开写 op 名（须在云函数 `PUBLIC_WRITE_OPS` 白名单内；本文件零 op 名字面值）
+   * @param {object} payload 载荷（**封闭键面由 op 侧定**；本函數原樣下傳、不增删键）
+   * @returns {Promise<{ok:true, mode:string, op:string}
+   *                  |{ok:false, reason:string, message:string}>}
+   */
+  async function publicWrite(op, payload) {
+    const opName = trimmed(op)
+    const reply = await callCloudFunction(functionName, {
+      action: PUBLIC_WRITE_ACTION,
+      op: opName,
+      payload: payload === undefined ? null : payload
+    })
+    if (!reply.ok) {
+      /* 传输层失败 ⇒ `STORAGE_UNAVAILABLE`（**绝不伪装 `FORBIDDEN`**）。 */
+      state.lastReason = reply.reason
+      return reply
+    }
+    const result = reply.result
+    if (result && result.ok === true) {
+      state.lastReason = ''
+      return { ok: true, mode: TOKEN_MODES.CLOUD, op: opName }
+    }
+    if (result && result.ok === false && typeof result.reason === 'string' && typeof result.message === 'string') {
+      /* **服务端结构化拒绝原样透传**（`reason` / `message` 一个都不改写；不清令牌 —— 本次未用到令牌）。 */
+      state.lastReason = result.reason
+      return { ok: false, reason: result.reason, message: result.message }
+    }
+    return shapeDenial()
+  }
+
+  return { functionName, subject, snapshot, present, clear, request, ensureWriteSession, gate, publicWrite }
 }
 
 /* ---------------------------------------------------------------------------
@@ -438,6 +491,18 @@ export function userGate(op, payload, options) {
   /* `options`（如 `readoutKeys` 的 additive 透傳聲明）**原樣透傳**給通道 —— 漏掉第三參會讓
      調用方（`aiAccess.js`）声明的讀數面被靜默丟掉（鍵名在、值恆 undefined）。 */
   return userTokenChannel.gate(op, payload, options)
+}
+
+/**
+ * **公开写面入口（匿名）**：`{action:'public-write', op, payload}` ⇒ 收窄信封。
+ *
+ * 只走**用户侧通道**（`xiai-user-token`）—— 公开写面挂在用户云函数上，管理员云函数**没有**这条分流
+ * （越界即被服务端按未知 `action` 拒）。调用方是 `services/sealCards.js::bumpSealView`。
+ * @param {string} op 公开写 op 名（白名单内）
+ * @param {object} [payload] 载荷（封闭键面由 op 侧定）
+ */
+export function publicWrite(op, payload) {
+  return userTokenChannel.publicWrite(op, payload)
 }
 
 export function userTokenStatus() {

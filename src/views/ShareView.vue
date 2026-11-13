@@ -22,7 +22,7 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { drive, seals, corrections } from '../services/index.js'
+import { drive, seals, corrections, sealCards } from '../services/index.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -72,6 +72,34 @@ watch(
 onMounted(() => {
   version.value += 1
 })
+
+/* ============================================================================
+   **瀏覽量計數（裁定件 §6 / §7｜本單）**
+   ----------------------------------------------------------------------------
+   · 觸發點：分享頁**解析到印章編號**後**一次**（`resolveShare` 投影落定的那一刻）。
+   · 為什麼只計**清單最前那一枚**：本頁是**資料夾**分享 —— 未登錄列前 3 枚、登錄後列完整清單
+     （可能上百枚）；逐枚 +1 會在一次次瀏覽裡打出一串寫請求，與裁定件「打開即 +1、同頁一次」的
+     口徑不符 ⇒ 只取**第一枚**（引用值經 `seals.getSealById` 換成真實 `stamp_id`，換不出 ⇒ 不發）。
+   · **只發一次**：`sealViewBumped` 一次性守衛 ⇒ 投影 / 縮略圖 / 登錄態切換引起的 watch 重跑不重發。
+   · **靜默**：不上屏、不阻塞渲染、不改既有錯誤態；去重與降級都在服務層
+     （`sealCards.bumpSealView` 永不拋出），本頁**零文案**。
+   ============================================================================ */
+let sealViewBumped = false
+watch(
+  () => rows.value.map((row) => String(row.seal_id || '')).filter(Boolean).join(','),
+  (ids) => {
+    if (sealViewBumped) return
+    const ref = ids ? String(ids).split(',')[0] : ''
+    if (!ref) return
+    const target = seals.getSealById(ref)
+    const stampId = target ? String(target.stamp_id || '').trim() : ''
+    /* 換不出印章編號 ⇒ 本次不發、也不鎖守衛（等投影真正落定後再試一次）。 */
+    if (!stampId) return
+    sealViewBumped = true
+    void sealCards.bumpSealView(stampId)
+  },
+  { immediate: true }
+)
 
 /** 未登錄引导：文案逐字，且把 `redirect` 指向本分享链（登录后直达该资料夹完整页）。 */
 const GUIDE_MAIN = '登錄後查看完整清單'

@@ -28,10 +28,16 @@
  *
  * 【分層紀律】本文件屬 services 層：只消費 `data/*` 與其它 services，不自碰 localStorage /
  *   IndexedDB；視圖與組件只經 `services/index.js` 門面進來。
+ *   **唯一例外（本單｜裁定件 §6 第 58 行）**：瀏覽量計數的**客戶端 24h 去重**明文指定用
+ *   `localStorage` 單鍵 `xiai.sealview.v1`，而本單寫集不含 `data/storage.js` ⇒ 去重讀寫**就近收口**
+ *   在 §6 的兩個小函數裡（全部 `try/catch` 包住、不可用即照發），**不**把「碰存儲」的能力散給視圖。
  */
 
 import { callCloudFunction, cloudBaseApp } from '../data/cloudbaseFn.js'
 import { cloudBaseConfigured, cloudBaseFileIdDenial, cloudBaseFileIdOf, IMAGE_OBJECT_KEY_PATTERN } from '../data/cloudbase.js'
+/* **公開寫面（`action:'public-write'`）的收窄信封**：只取信封、不新增 op 名字面值以外的任何判据
+   （`bumpSealView` 这个名字面值**只**在本文件出现一次，见 §6）。 */
+import { publicWrite as publicWriteEnvelope } from './token.js'
 /* **本地占位圖（三級回落的第三級）**：字節真源在 `sealPlaceholderAsset.js`（只認登記鍵），
    這裡只取**同一真源**的 base 感知資產 URL（`SITE_BASE_URL` 拼接；**不是**站根絕對路徑）。 */
 import { SEAL_PLACEHOLDER_IMAGE } from '../data/seed.js'
@@ -520,4 +526,147 @@ export function sealCardsSource() {
     op: SEAL_CARDS_OP,
     filterParams: { ...SQUARE_FILTER_PARAMS }
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * 6. 瀏覽量計數（公開寫面 `{action:'public-write', op:'bumpSealView'}`｜裁定件 §6）
+ * ---------------------------------------------------------------------------
+ * 契約（照登裁定件 §6，本層只消費）：
+ *   · 載荷封閉**恰 1 鍵** `stamp_id`；成功回包**恰 1 鍵** `ok:true`；失敗恰 3 鍵 `ok/reason/message`。
+ *   · **服務端無冪等**（每次調用都 +1）⇒ 同一瀏覽器同一枚 **24h 內只計一次** 由本層負責。
+ *   · 去重真源：`localStorage` 單鍵 `xiai.sealview.v1`，值域 `{ 印章編號: 毫秒時間戳 }`；
+ *     24h（86,400,000 ms）內跳過；表項 > 200 按時間戳淘汰最舊；存儲不可用（隱私模式）⇒ **照發**。
+ *   · 計數是**靜默副作用**：本層**永不拋出**，呼叫方（詳情頁 / 分享頁）不必包 try/catch、
+ *     不上屏、不改任何既有錯誤態。
+ * ------------------------------------------------------------------------- */
+
+/** 白名單裡**唯一**的公開寫 op（`PUBLIC_WRITE_OPS` 恰 1 成員）。 */
+export const SEAL_VIEW_BUMP_OP = 'bumpSealView'
+
+/** 客戶端去重的單鍵（**唯一真源**；改鍵名只改這裡）。 */
+export const SEAL_VIEW_STORE_KEY = 'xiai.sealview.v1'
+
+/** 同一枚印章的計數間隔（24 小時，毫秒）。 */
+export const SEAL_VIEW_DEDUPE_MS = 86400000
+
+/** 去重表項上限（超過按時間戳淘汰最舊）。 */
+export const SEAL_VIEW_STORE_MAX = 200
+
+/**
+ * **去重判定的唯一內核（純函數｜零副作用、零 I/O）**：讀寫都在這一個函數裡完成計算，
+ * 呼叫方只負責把回傳的 `store` 落盤（不得自行改寫表項）。
+ *
+ * 判定（三種輸入的行為見報告）：
+ *   · 首次 / 表裡沒有該編號 / 上次計數距今 ≥ 24h ⇒ `send:true`，回傳表已寫入「編號 → now」；
+ *   · 上次計數距今 < 24h ⇒ `send:false`，回傳表原樣（**不刷新時間戳**：24h 從上次計數起算）；
+ *   · 時鐘回撥（存值比 now 晚）⇒ 按 `|now - 存值|` 判，仍在窗口內則跳過（不因回撥永久封死）。
+ * 表項清理：非有限數 / ≤ 0 的值一律丟棄；> 200 條按時間戳**降序保留最新 200 條**。
+ * @param {object|null} store 讀回的原始表（`null` ＝ 存儲不可用 ⇒ 視同空表、照發）
+ * @param {string} stampId 印章編號
+ * @param {number} nowMs 當前毫秒時間戳（由呼叫方注入 ⇒ 可用假時鐘斷言）
+ * @returns {{send:boolean, store:Object<string, number>}}
+ */
+export function sealViewClaimOf(store, stampId, nowMs) {
+  const id = textOf(stampId).trim()
+  const now = Number.isFinite(Number(nowMs)) ? Math.floor(Number(nowMs)) : Date.now()
+  const source = store && typeof store === 'object' && !Array.isArray(store) ? store : {}
+  const entries = []
+  for (const key of Object.keys(source)) {
+    const name = textOf(key).trim()
+    const at = Number(source[key])
+    if (!name || !Number.isFinite(at) || at <= 0) continue
+    entries.push([name, Math.floor(at)])
+  }
+  const kept = {}
+  for (const [name, at] of entries) kept[name] = at
+  /* 缺編號 ⇒ 不發（本機 fail-closed；服務端另有 `INVALID_VALUE` 判據）。 */
+  if (!id) return { send: false, store: kept }
+  const last = Number(kept[id])
+  if (Number.isFinite(last) && last > 0 && Math.abs(now - last) < SEAL_VIEW_DEDUPE_MS) {
+    return { send: false, store: kept }
+  }
+  const next = { ...kept, [id]: now }
+  const ordered = Object.keys(next)
+    .map((name) => [name, next[name]])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, SEAL_VIEW_STORE_MAX)
+  const trimmed = {}
+  for (const [name, at] of ordered) trimmed[name] = at
+  return { send: true, store: trimmed }
+}
+
+/** 讀去重表：存儲不可用（隱私模式 / 被停用 / 壞 JSON）⇒ `null`（呼叫方照發，**不阻斷**）。 */
+function sealViewStoreRead() {
+  try {
+    if (typeof localStorage === 'undefined' || !localStorage) return null
+    const raw = localStorage.getItem(SEAL_VIEW_STORE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return parsed
+  } catch (err) {
+    return null
+  }
+}
+
+/** 寫去重表：失敗只回 `false`（**不上屏、不拋**）。 */
+function sealViewStoreWrite(store) {
+  try {
+    if (typeof localStorage === 'undefined' || !localStorage) return false
+    localStorage.setItem(SEAL_VIEW_STORE_KEY, JSON.stringify(store))
+    return true
+  } catch (err) {
+    return false
+  }
+}
+
+/**
+ * **印章瀏覽量 +1（公開寫面門面｜視圖唯一消費點）**。
+ *
+ * 行為（機械可判、四支互斥）：
+ *   ① 缺編號 ⇒ 不發（`INVALID_VALUE`，載荷不合法就不出網）；
+ *   ② 雲端未配置（`cloudBaseConfigured() === false`）⇒ **靜默返回**，不偽造成功、
+ *      **不回落本機鏡像寫入**（本機沒有可寫的權威計數面）；
+ *   ③ 24h 內同一枚已計 ⇒ 不發（`deduped:true`）；
+ *   ④ 其餘 ⇒ 發 `{action:'public-write', op:'bumpSealView', payload:{stamp_id}}`：
+ *        成功 ⇒ **才**把去重表落盤（失敗不落 ⇒ 下次還有機會計數）；
+ *        失敗 ⇒ 原樣回結構化拒絕（`reason` / `message` 不改寫），**永不拋出**。
+ *
+ * @param {string} stampId 印章編號（`stamp_id`）
+ * @returns {Promise<{ok:boolean, sent:boolean, deduped:boolean, reason:string, message:string}>}
+ *   `ok` ＝ 服務端確認 +1 過（**不由請求發出與否冒充**）；`sent` ＝ 這次是否真的出了網。
+ */
+export async function bumpSealView(stampId) {
+  const id = textOf(stampId).trim()
+  if (!id) {
+    return { ok: false, sent: false, deduped: false, reason: 'INVALID_VALUE', message: '缺少印章編號，未計數。' }
+  }
+  if (!cloudBaseConfigured()) {
+    return {
+      ok: false,
+      sent: false,
+      deduped: false,
+      reason: 'NOT_CONFIGURED',
+      message: '未配置雲端資料源，未計數。'
+    }
+  }
+  const claim = sealViewClaimOf(sealViewStoreRead(), id, Date.now())
+  if (!claim.send) return { ok: true, sent: false, deduped: true, reason: '', message: '' }
+  let reply = null
+  try {
+    reply = await publicWriteEnvelope(SEAL_VIEW_BUMP_OP, { stamp_id: id })
+  } catch (err) {
+    reply = null
+  }
+  if (!reply || reply.ok !== true) {
+    return {
+      ok: false,
+      sent: true,
+      deduped: false,
+      reason: textOf(reply && reply.reason) || 'STORAGE_UNAVAILABLE',
+      message: textOf(reply && reply.message)
+    }
+  }
+  sealViewStoreWrite(claim.store)
+  return { ok: true, sent: true, deduped: false, reason: '', message: '' }
 }

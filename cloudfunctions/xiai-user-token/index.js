@@ -61,7 +61,15 @@ const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSession
    降级恰 3 键）由 op 自己封闭（`lib/sealCards.js` 的 `LIST_PERSON_CARDS_SUCCESS_KEYS` /
    `GET_PERSON_CARD_SUCCESS_KEYS` ＋ 存在性驱动的 `source`），因此**不需要**在信封里加
    按 op 的透传分支；`index.js` 只负责「分流 ＋ 失败兜底」，绝不补键。 */
-const { PUBLIC_OPS, REPAIR_PRIMARY_FACE_READOUT_KEYS, REPAIR_SEAL_FACE_COUNT_READOUT_KEYS } = require('./lib/sealCards.js')
+const {
+  PUBLIC_OPS,
+  /* **公开写面（本单新增｜`action:'public-write'`）**：`PUBLIC_WRITE_OPS` 是**另一张表**
+     （现恰 1 成员 `bumpSealView`），与 `PUBLIC_OPS`（仍恰 4 成员、恒零写）**分开可判负**。 */
+  PUBLIC_WRITE_OPS,
+  REPAIR_PRIMARY_FACE_READOUT_KEYS,
+  REPAIR_SEAL_FACE_COUNT_READOUT_KEYS,
+  REPAIR_SEAL_VIEW_COUNT_READOUT_KEYS
+} = require('./lib/sealCards.js')
 /* **作者校验（§3.82）**：`REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS` ＝ 管理员回填 op
    `repairAuthorPersonId` 的**读数键面并集**真源（恰 7 键、按 op 收窄、存在性驱动透传 ⇒
    `dry_run` 轮恰 6 键（含 `samples`）、真写轮回恰 7 键（含 `failed`）；其余 op 回包逐字不变）。 */
@@ -821,6 +829,20 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
+  /* **`view_count` 回填读数面（additive 透传｜**按 `op` 收窄**｜本单 `repairSealViewCount`）**：
+     `ok` / `scanned` / `eligible` / `written` / `next_cursor` **五键**（＝ 该 op 冻结回包键面、
+     `dry_run` 与真写**同形**）**僅當 `op === 'repairSealViewCount'` 且 `opResult` 確有該鍵時**
+     才逐字疊进回包（鍵名真源 ＝ `lib/sealCards.js::REPAIR_SEAL_VIEW_COUNT_READOUT_KEYS`；
+     **存在性驱动** ⇒ 恰 5 键、不补编不丢键；`ok` 与信封同值、疊之冪等）；**其余任何 op 一律不
+     透传这 5 个读数键**（与 `repairSealFaceCount` / `repairPrimaryFace` 同字但**按 op 隔离**）
+     ⇒ 既有回包**逐字不变**（序列化后亦不新增键）。失败回包（`ok:false`）走上面的早退分支、
+     恒 3 鍵、零讀數鍵；**本 op 不產 `plan`**（写步在 op 内逐行走 `persist` ＋ 整窗读回）⇒
+     `plan` 零外传；既有字段一律不刪、不改。 */
+  if (op === 'repairSealViewCount') {
+    for (const key of REPAIR_SEAL_VIEW_COUNT_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
   /* **作者引用回填读数面（additive 透传｜**按 `op` 收窄**｜本单 `repairAuthorPersonId`）**：
      `scanned` / `eligible` / `matched` / `written` / `samples` / `failed` / `next_cursor` **七键
      并集**（键名真源 ＝ `lib/authorMatch.js::REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS`）**仅当
@@ -883,6 +905,45 @@ async function handlePublic(event) {
 }
 
 /**
+ * **匿名写动作（`action:'public-write'`）**：**不验令牌、不读身份**，只放行
+ * `lib/sealCards.js::PUBLIC_WRITE_OPS` 白名单（**另一张表**，现恰 1 成员 `bumpSealView`）。
+ *
+ * 硬口径（逐条）：
+ *   · 与 `action:'public'` **同级**：位置在**令牌 / 会话 / 配置判定之前** ⇒ 匿名可调，
+ *     且**不因令牌配置缺失而连坐**（浏览计数不该被写面配置故障拖死）；
+ *   · 表外 op（含一切 `PUBLIC_OPS` 读 op 与管理员 op）⇒ `FORBIDDEN` ＋ **零读零写**；
+ *     `PUBLIC_OPS` 仍恰 4 成员且**恒零写** —— 两张表分开可判负；
+ *   · 载荷 / 回包键面由各 op 自己封闭（本函数**零改写、零补键** ⇒ 成功恰 1 键
+ *     `{ok:true}`、失败恰 3 键 `{ok:false, reason, message}`）；
+ *   · op 内部的存储故障已由 op 自己转成结构化失败（不得 5xx）；这里兜底**未预期异常**
+ *     ⇒ `STORAGE_UNAVAILABLE`（**不伪装** `FORBIDDEN`），前端 fail-open。
+ * @param {object} event 事件（`{action:'public-write', op, payload}`）
+ * @returns {Promise<object>} op 的原始回包（`bumpSealView` 成功恰 1 键 `{ok:true}`）
+ */
+async function handlePublicWrite(event) {
+  const op = typeof event.op === 'string' ? event.op.trim() : ''
+  if (!Object.prototype.hasOwnProperty.call(PUBLIC_WRITE_OPS, op)) {
+    return deny(REASONS.FORBIDDEN, `未知的公開寫入操作（op）：${op || '（空）'}；本次零寫入。`)
+  }
+  try {
+    return await PUBLIC_WRITE_OPS[op](event.payload)
+  } catch (error) {
+    audit({
+      action: 'public-write',
+      outcome: REASONS.STORAGE_UNAVAILABLE,
+      op,
+      stage: 'write',
+      detail: (error && error.message) || 'unknown',
+      serverNow: serverNowSeconds()
+    })
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `公開寫入服務的權威存儲不可用；本次零寫入。（診斷：${errorFingerprint(error)}）`
+    )
+  }
+}
+
+/**
  * 函数入口（CloudBase 事件型）。
  * **任何未预期异常一律转成结构化拒绝**（`STORAGE_UNAVAILABLE`）—— 不得抛未捕获异常、不得伪装 `FORBIDDEN`。
  * @param {object} event `{action:'issue'|'verify', ...}`
@@ -896,6 +957,11 @@ exports.main = async function main(event, context) {
      `action:'verify'` 验令牌 ＋ 白名单身份。公开面无写面 ⇒ 与配置面（密钥 / TTL）无关，
      故**不因令牌配置缺失而拒**（读面不该被写面的配置故障连坐）。 */
   if (action === 'public') return await handlePublic(input)
+  /* **匿名写面（本单｜`bumpSealView`）**：与 `action:'public'` **同级**、同在**令牌 / 会话 /
+     配置判定之前**分流 —— 只放行 `PUBLIC_WRITE_OPS`（现恰 1 成员 `bumpSealView`）；表外 op
+     （含全部 `PUBLIC_OPS` 读 op 与管理员 op）⇒ `FORBIDDEN` ＋ 零读写。计数面不依赖令牌配置
+     ⇒ **不因写面配置缺失而连坐**（前端 fail-open、静默跳过）。 */
+  if (action === 'public-write') return await handlePublicWrite(input)
   let config = null
   try {
     config = readConfig()

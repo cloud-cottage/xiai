@@ -8762,6 +8762,36 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **`view_count` 前置一次性回填（本单新增 op｜`repairSealViewCount`｜管理员面）** —— 薄委派：
+   * 业务逻辑单点、载荷封闭键面与回包读数键面的真源都在 `lib/sealCards.js`（本处零第二套
+   * 逻辑；`require` 延迟以打破加载环、离线自检不需要 SDK）。**`ADMIN_OPS` 39 → 40**；
+   * **字典序位在 `repairSealFaceCount` 之后、`replaceFaceImage` 之前**（源码位次 ＝ 紧随
+   * `repairSealFaceCount`）。
+   *
+   * 硬口径（逐条；实现真源 ＝ `lib/sealCards.js::repairSealViewCount` 头注）：
+   * ① **第一行即管理员门**（既有 `adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋
+   *    **零读零写**）；② 载荷封闭恰三键 `{dry_run?:boolean, limit?:number, cursor?:string}`
+   *    （`dry_run` 缺省 `true`；未知键 / 身份类键 ⇒ `INVALID_FIELD`）；③ 扫 `xiai_seals`
+   *    （`_id` 升序 ＋ `command.gt(cursor)` ＋ `orderBy` ＋ `limit`，退路同游标推进），把
+   *    **`view_count` 缺失 / 非整数 / < 0** 的历史行回填为 `0`（热度序上线前置，裁定 §5）；
+   *    ④ **幂等**：已合法非负整数的行一个字不写 ⇒ 同参重放 `eligible === 0`、
+   *    `written === 0`；⑤ `dry_run` **零写**（`written` 恒 0）；⑥ 回包**恒恰 5 键**
+   *    `{ok, scanned, eligible, written, next_cursor}`（两态同形；键名真源 ＝
+   *    `REPAIR_SEAL_VIEW_COUNT_READOUT_KEYS`，`index.js` 按 `op` 收窄透传、**存在性驱动**）、
+   *    失败恒恰 3 键；⑦ **零新集合、不产 `plan`**（写步在 op 内逐行 `persist` ＋ 整窗读回定
+   *    真伪）、`reason` 零新增。
+   * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async repairSealViewCount(payload, identity, context) {
+    /* 延遲 require：與 `repairSealFaceCount` 同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/sealCards.js::repairSealViewCount` 的**第一行**（零读零写地拒）。 */
+    const { repairSealViewCount: runRepair } = require('./sealCards.js')
+    return runRepair(payload, identity, context)
+  },
+
+  /**
    * **管理員「重新上傳印面圖」（本單新增 op｜`replaceFaceImage`｜管理員面）**：云模式下
    * 替换印面图的那一口 —— **服务端原子入册影像行 ＋ 改面行指向**（旧图一律保留）。
    *
