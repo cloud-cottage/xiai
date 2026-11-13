@@ -1261,7 +1261,7 @@ check('R11', '④ 异步失败（`status=failed`、无 `error_msg`）⇒ 502 `UP
 /* ===========================================================================
    F 段：交付面静态门
    =========================================================================== */
-section('F', '交付面：依赖落 dependencies / vercel.json functions / 路由导出 / 28 脚本')
+section('F', '交付面：依赖落 dependencies / vercel.json functions / 路由导出 / 40 脚本')
 
 const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 check('F1', '`@cloudbase/node-sdk` 已从 devDependencies 移入 dependencies（版本沿用 ^3.18.3）', { inDeps: '^3.18.3', notInDev: true }, { inDeps: (pkg.dependencies || {})['@cloudbase/node-sdk'], notInDev: !((pkg.devDependencies || {})['@cloudbase/node-sdk']) })
@@ -1272,9 +1272,10 @@ check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDu
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
 const verifyScripts = readdirSync(path.join(ROOT, 'scripts')).filter((name) => /^verify-.*\.mjs$/.test(name))
-check('F4', '本套为第 36 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕）', { count: 36, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4', '本套为第 40 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕＋ seal-view-count〔v1.110 新增：印章浏览量 view_count ＋ 首页热度排序〕；另 3 套既有套件未逐项登记，计数一律以 `scripts/` 实际目录为准）', { count: 40, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
 check('F4b', '新增套 `verify-ai-connect-page.mjs` 亦在册（脚本计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-ai-connect-page.mjs') !== -1)
 check('F4c', '新增套 `verify-correction-readonly.mjs` 亦在册（v1.84 勘误只读面；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-correction-readonly.mjs') !== -1)
+check('F4d', '新增套 `verify-seal-view-count.mjs` 亦在册（v1.110 印章浏览量 view_count ＋ 首页热度排序；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-seal-view-count.mjs') !== -1)
 
 check('F5', '核心只经四个 lib 的既有注入缝取集合（零取句柄字面）与零上游凭据字面', { seamCalls: 4, keyLiteral: 0 }, { seamCalls: ['setLedgerStoreProvider', 'setAiKeyStoreProvider', 'setUpstreamStoreProvider', 'setAiUsageStoreProvider'].filter((name) => countIn(coreSource, name) >= 1).length, keyLiteral: countIn(coreSource, UPSTREAM_KEY) })
 

@@ -29,7 +29,9 @@
  *   P8. **关键词转义**（三发）：`q='*'` / `q='（'` / `q='a.b'` 皆**不抛错、不被拒**，且**只命中**
  *       含该字面量的那一行（假 DB 3 行：一行含三字面量、两行不含 ⇒ `total===1`、`rows` 恰 1 枚）。
  *   P9. **`total` ＝ 命中总数**（不是已载入数）：60 行命中 ＋ `limit=48` ⇒ `total===60`、
- *       `rows.length===48`、`has_more===true`（`rows` 按命中集分页，与 `total` 同尺）。
+ *       `rows.length===48`、`has_more===true`（`rows` 按命中集分页，与 `total` 同尺）；
+ *       `next_cursor` **形态为 `off:<n>` 偏移量**（v1.110 起语义变更：＝ `off:` ＋（`offset` ＋
+ *       `rows.length`）＝ 本页**已发卡片数**的累进位次，**不再是**「本页末枚 `stamp_id`」）。
  *
  * 纪律：不打印任何密钥 / 令牌；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
@@ -671,13 +673,13 @@ await withInjectedStore(p9Store, async () => {
   const writesBefore = p9Store.stats.writes.length
   const reply = await publicCall('listSealCards', { limit: P9_LIMIT, q: '长乐' })
   const rows = Array.isArray(reply.rows) ? reply.rows : []
-  check('P9', '`q` 有关键词时 `total` ＝ **命中总数 60**（**不是**已载入的 48）、`rows` 恰 48、`has_more` 为真、`next_cursor` 指向本页末枚 ＋ **零写**', {
+  check('P9', '`q` 有关键词时 `total` ＝ **命中总数 60**（**不是**已载入的 48）、`rows` 恰 48、`has_more` 为真、`next_cursor` ＝ `off:(offset + rows.length)` ＝ `off:48`（**v1.110 偏移量语义**，不再是末枚 `stamp_id`）＋ **零写**', {
     ok: true,
     keys: 'has_more,next_cursor,ok,rows,total',
     total: 60,
     rowCount: 48,
     has_more: true,
-    nextCursorIsLastLoaded: true,
+    nextCursor: 'off:' + (0 + 48),
     writes: 0
   }, {
     ok: reply.ok,
@@ -685,7 +687,7 @@ await withInjectedStore(p9Store, async () => {
     total: reply.total,
     rowCount: rows.length,
     has_more: reply.has_more,
-    nextCursorIsLastLoaded: rows.length > 0 && reply.next_cursor === rows[rows.length - 1].stamp_id,
+    nextCursor: reply.next_cursor,
     writes: p9Store.stats.writes.length - writesBefore
   })
 })
