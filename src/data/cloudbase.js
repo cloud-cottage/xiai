@@ -799,7 +799,20 @@ export function normalizePersonRow(doc, options = {}) {
     years_lived: intOrNull(row.years_lived),
     birth_era_text: text(row.birth_era_text),
     death_era_text: text(row.death_era_text),
+    /* **v1.108（印人姓名字段契約）**：遷移後的**新真源 8 鍵顯式歸一** —— 不再靠 `...row` 透傳：
+       單值（`courtesy_name` / `art_name` / `biehao_text` / `zhaihao` / `dynasty` /
+       `dynasty_source`）⇒ 文本（NULL / 缺鍵 ⇒ `''`）；多值（`courtesy_alt_names` /
+       `zhaihao_alts`）⇒ 字符串數組（缺鍵 / 非數組 ⇒ `[]`，逐項 trim、空值丟棄）。
+       舊三數組（`courtesy_names` / `art_names` / `alias_names`）**原文保留、並存兼容**。
+       `dynasty` 的「空 ⇒ 待考」是**展示口徑**，不在數據層改寫值。 */
+    courtesy_name: text(row.courtesy_name),
+    courtesy_alt_names: asArray(row.courtesy_alt_names),
+    art_name: text(row.art_name),
+    biehao_text: text(row.biehao_text),
+    zhaihao: text(row.zhaihao),
+    zhaihao_alts: asArray(row.zhaihao_alts),
     dynasty: text(row.dynasty),
+    dynasty_source: text(row.dynasty_source),
     gender: text(row.gender),
     cbdb_id: text(row.cbdb_id),
     card_id: text(row.card_id),

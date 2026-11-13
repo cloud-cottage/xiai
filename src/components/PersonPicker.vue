@@ -2,9 +2,10 @@
 /**
  * 通讯录式「选印人」控件（**只可点选，不接受自由文本**）。
  * =====================================================================
- * 自包含：只 import 新建的纯数据模块 `../data/surnameInitials.js`
- * （姓氏→拼音首字母表 ＋ 分组 / 排序纯函数）；不 import 服务层 / 数据层、
- * 不读写任何浏览器存储、不发请求 ⇒ 可在任一表单里直接挂载。
+ * 数据面单点：**检索算法全部收在** `services/personSearch.js`（纯函数：`buildPersonIndex` /
+ * `searchPersons` / `groupPersonsByInitial`）—— 名录页（`views/PersonIndexView.vue`）与本控件
+ * **共用同一套**「简繁归一 ＋ 单字段 ＋ 姓+值拼接 ＋ 三档相关度」算法，本控件不再自带一份。
+ * 本组件自身不 import 服务层 / 数据层、不读写任何浏览器存储、不发请求 ⇒ 可在任一表单里直接挂载。
  *
  * 契约：
  *   props   `modelValue` 所选印人 id（字符串）｜`persons` 印人行数组
@@ -40,8 +41,7 @@
  * 上屏文案一律繁體（`s2t(x) === x`）。
  */
 import { computed, nextTick, ref, useId, watch } from 'vue'
-import { groupPersons } from '../data/surnameInitials.js'
-import { toTraditionalText as s2t } from '../utils/traditional.js'
+import { buildPersonIndex, searchPersons, groupPersonsByInitial } from '../services/personSearch.js'
 
 const props = defineProps({
   /** 所选印人 id（字符串；空串 ＝ 未选）。 */
@@ -140,147 +140,11 @@ function togglePicker() {
 const query = ref('')
 
 /**
- * 归一：逐字 s2t（繁体形）＋ 小写。**查询词与候选两边同走这一条口径** ⇒
- * 简 / 繁 / 混输互逆命中；逐字表只动简体字形、ASCII 原样 ⇒ `PR0000` 这类子串匹配不受影响。
+ * 候選側歸一索引（**一次性預計算**）：`persons` 變更才重建；570 行只建一次，之後每次輸入
+ * 只對既有串做子串匹配（不逐鍵重跑 s2t）。算法本體 ＝ `services/personSearch.js`
+ * `buildPersonIndex`（**與名錄頁共用同一份**，本控件不再自帶一套）。
  */
-function normalizeSearchText(text) {
-  const value = text === null || text === undefined ? '' : String(text)
-  return s2t(value).toLowerCase()
-}
-
-/**
- * 新口径**单值**字段（迁移后真源）：`courtesy_name`（字）/ `art_name`（號）/ `zhaihao`（齋號）。
- * 旧三数组（`courtesy_names` / `art_names` / `alias_names`）**原文保留、并存兼容**——
- * 迁移只写新字段不删旧值的地方，两边任一路径都能命中（命中面只增不减）。
- */
-const SEARCH_SINGLE_FIELDS = ['courtesy_name', 'art_name', 'zhaihao']
-/** 新口径**多值**字段：`courtesy_alt_names[]`（別字）/ `zhaihao_alts[]`（別署齋號）。 */
-const SEARCH_ARRAY_FIELDS = ['courtesy_alt_names', 'zhaihao_alts']
-/** 旧三数组（兼容并存，见文件头注；不得删减 ⇒ 旧命中面逐字保留）。 */
-const LEGACY_ARRAY_FIELDS = ['courtesy_names', 'art_names', 'alias_names']
-/** 拼接入索引的逐值字段（新 ＋ 旧，一次拼好，避免逐行建数组）。 */
-const SEARCH_VALUE_ARRAY_FIELDS = [...SEARCH_ARRAY_FIELDS, ...LEGACY_ARRAY_FIELDS]
-
-/** 单值取文本（`null` / `undefined` ⇒ `''`；其余 `String().trim()`）。 */
-function textOf(value) {
-  return value === null || value === undefined ? '' : String(value).trim()
-}
-
-/** 数组取值（非数组 / 空 ⇒ `[]`；逐项 trim、空值丢弃）。 */
-function valuesOf(row, key) {
-  const list = row && Array.isArray(row[key]) ? row[key] : []
-  const out = []
-  for (const value of list) {
-    const text = textOf(value)
-    if (text) out.push(text)
-  }
-  return out
-}
-
-/**
- * `biehao_text`（別號長文）**双拆 token**：① 按换行 ② 按全角 `／`（异写并列，如
- * `悲庵／悲盦` ⇒ 两个 token 各自可搜）。`#待核` 这类**核校标记不参与检索**
- * （脏数据里 `行 #待核` 形态 ⇒ 取 `#` 之前的部分；整段只剩标记 ⇒ 丢弃）。
- */
-function biehaoTokensOf(row) {
-  const text = textOf(row && row.biehao_text)
-  if (!text) return []
-  const out = []
-  for (const chunk of text.split(/[\r\n／]+/)) {
-    const token = chunk.split(/[#＃]/)[0].trim()
-    if (token) out.push(token)
-  }
-  return out
-}
-
-function searchPartsOf(row) {
-  if (!row || typeof row !== 'object') return []
-  const parts = [row.family_name, row.given_name, row.name_full]
-  for (const key of SEARCH_SINGLE_FIELDS) parts.push(row[key])
-  for (const key of SEARCH_ARRAY_FIELDS) parts.push(...valuesOf(row, key))
-  for (const key of LEGACY_ARRAY_FIELDS) parts.push(...valuesOf(row, key))
-  parts.push(row.cbdb_id)
-  parts.push(...biehaoTokensOf(row))
-  return parts
-}
-
-/**
- * **跨字段拼接形态的「值面」**（原始文本，**不含姓**）：`名` 与 字 / 號 / 齋號 / 別字 /
- * 齋號別署 / 舊三數組逐值 / `biehao_text` token —— 整打全名时姓与名分属两字段，
- * 单字段子串永远匹配不上，故预计算里把「姓」与该值**直接相接**（不插分隔符，
- * 免得分隔符挡住子串）。姓为空 ⇒ 调用方不出这些形态。
- * 新字段与旧三数组**都出**（旧命中面逐字保留），`biehao_text` 按 token 逐值。
- */
-function searchJoinedSourcesOf(row) {
-  if (!row || typeof row !== 'object') return []
-  const out = []
-  const given = textOf(row.given_name)
-  if (given) out.push(given)
-  for (const key of SEARCH_SINGLE_FIELDS) {
-    const text = textOf(row[key])
-    if (text) out.push(text)
-  }
-  for (const key of SEARCH_VALUE_ARRAY_FIELDS) out.push(...valuesOf(row, key))
-  out.push(...biehaoTokensOf(row))
-  return out
-}
-
-/** 过滤关键字（trim ＋ 归一；空 ⇒ 全量）。 */
-const keyword = computed(() => normalizeSearchText(String(query.value || '').trim()))
-
-/**
- * 候选侧归一索引（**一次性预计算**）：`persons` 变更才重建；570 行只在建一次，
- * 之后每次输入只对既有串做子串匹配（不逐键重跑 s2t）。行对象 →
- * `{ parts, joined, blob }`：`parts` ＝ **全部**检索面归一串（单字段形态 ＋ 拼接形态，
- * 同人重复串只留一份）；`joined` ＝ 拼接形态归一串（供整串恰等时置顶排序）；
- * `blob` ＝ `parts` 以换行相接的整体串（**逐键先做一次整串子串判定**，未中即跳过该行，
- * 免得逐片白扫；换行不是查询词里会出现的字符 ⇒ 判定与逐片 `includes` **命中面等价**）。
- *
- * 去重与省算：① 先按**原始串**去重（迁移后新字段与旧数组大量同值 ⇒ 同值只归一一次）；
- * ② 归一后**再按归一串**去重（简 / 繁异写归到同一形）；③ 拼接形态用
- * 「归一的姓前缀 ＋ 归一的该值」**直接相接** —— `normalizeSearchText()` 是**逐字**
- * 映射 ＋ 逐字小写 ⇒ 前缀归一后拼接 ≡ 整串归一（少跑一遍 s2t，口径不变）。
- * 字段缺失 / 空串 / 空数组一律静默跳过。
- */
-const searchHaystacks = computed(() => {
-  const rows = Array.isArray(props.persons) ? props.persons : []
-  const map = new Map()
-  for (const row of rows) {
-    const parts = []
-    const normByRaw = new Map()
-    const seenNorm = new Set()
-    const push = (text) => {
-      const raw = textOf(text)
-      if (!raw || normByRaw.has(raw)) return
-      const norm = normalizeSearchText(raw)
-      normByRaw.set(raw, norm)
-      if (!norm || seenNorm.has(norm)) return
-      seenNorm.add(norm)
-      parts.push(norm)
-    }
-    for (const text of searchPartsOf(row)) push(text)
-    const joined = []
-    const familyRaw = textOf(row && row.family_name)
-    const familyNorm = familyRaw ? normByRaw.get(familyRaw) || '' : ''
-    if (familyNorm) {
-      const seenJoined = new Set()
-      for (const value of searchJoinedSourcesOf(row)) {
-        const norm = normByRaw.get(textOf(value))
-        if (!norm) continue
-        const joinedNorm = familyNorm + norm
-        if (seenJoined.has(joinedNorm)) continue
-        seenJoined.add(joinedNorm)
-        joined.push(joinedNorm)
-        if (!seenNorm.has(joinedNorm)) {
-          seenNorm.add(joinedNorm)
-          parts.push(joinedNorm)
-        }
-      }
-    }
-    map.set(row, { parts, joined, blob: parts.join('\n') })
-  }
-  return map
-})
+const personIndex = computed(() => buildPersonIndex(props.persons))
 
 /**
  * 搜索态（搜索框非空）：**扁平相关度列表**（无分组头、无索引条）；
@@ -292,43 +156,14 @@ const searching = computed(() => String(query.value || '').trim() !== '')
  * 过滤后的行（**搜索态三档相关度排序**，同档保持入参顺序 ⇒ 稳定）：
  * ① `joined` **整串恰等**置顶（「姓＋名」/「姓＋字·號·別名」完整相等，即搜全名时本尊在首）；
  * ② 前缀命中（任一检索面串以关键字开头）；③ 其余任意位置子串命中。
- * 排序只动候选序、不改命中面：搜「趙之謙」时 `陸開鈞`（字「畫均似趙之謙」）仍命中，
- * 但落第三档；预计算（`searchHaystacks` 的 `{parts, joined}` 归一串）复用，逐键不重算归一。
+ * 排序只动候选序、不改命中面：搜「趙之謙」时 `陸開鈞`（字「畫均似趙之謙」）仍命中，但落第三档。
  */
-const visibleRows = computed(() => {
-  const rows = Array.isArray(props.persons) ? props.persons : []
-  const kw = keyword.value
-  if (!kw) return rows
-  const haystacks = searchHaystacks.value
-  const exact = []
-  const prefixed = []
-  const contained = []
-  for (const row of rows) {
-    const entry = haystacks.get(row)
-    if (!entry || !Array.isArray(entry.parts)) continue
-    /* 整串预判：未中即该行无命中 ⇒ 不逐片扫（口径等价，见 `blob` 注）。 */
-    if (typeof entry.blob === 'string' && !entry.blob.includes(kw)) continue
-    let hit = false
-    let prefix = false
-    for (const part of entry.parts) {
-      if (!part.includes(kw)) continue
-      hit = true
-      /* `startsWith` 必然 `includes` ⇒ 命中前缀即可收工；未中前缀则继续扫余下分片。 */
-      if (part.startsWith(kw)) {
-        prefix = true
-        break
-      }
-    }
-    if (!hit) continue
-    if (Array.isArray(entry.joined) && entry.joined.includes(kw)) exact.push(row)
-    else if (prefix) prefixed.push(row)
-    else contained.push(row)
-  }
-  return exact.concat(prefixed, contained)
-})
+const visibleRows = computed(() =>
+  searching.value ? searchPersons(personIndex.value, query.value) : Array.isArray(props.persons) ? props.persons : []
+)
 
 /** 分组：`[{ initial, rows }]`，按 `GROUP_ORDER`（A…Z、`#` 最后），**只出非空组**（清空搜索才计算）。 */
-const groups = computed(() => (searching.value ? [] : groupPersons(visibleRows.value, { personName: nameOf })))
+const groups = computed(() => (searching.value ? [] : groupPersonsByInitial(visibleRows.value, { personName: nameOf })))
 
 /** 扁平顺序（＝搜索态按相关度；清空后 ＝ 组内顺序连接）：键盘高亮与 `Enter` 选中都按它走。 */
 const flatOptions = computed(() => (searching.value ? visibleRows.value : groups.value.flatMap((group) => group.rows)))

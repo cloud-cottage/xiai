@@ -8,6 +8,8 @@ import { isLoggedIn } from '../data/session.js'
  * 不设 `requiresAuth`）。
  * ＋ **Slice M1 新增两条**：`/styles`（【印風匯覽】，title 逐字 `印風匯覽`）与
  * `/persons`（【印家匯徵】，title 逐字 `印家匯徵`）—— 两条**均不设 `requiresAuth`（公开可达）**。
+ * ＋ **本單新增一條**：`/persons/:code`（【印人詳情】，title 逐字 `印人詳情`；由 `/persons` 行點擊進入，
+ *   **與名錄同為公開可達**，不發第二條網絡請求 —— 只按 `code` 查名錄已落定的印人快照）。
  * ＋ **本單新增一條**：`/connect`（【連接斐萃】；`meta.title` 逐字 `斐萃令牌`）—— **頁面現在兼具
  *   「斐萃令牌 ＋ 我的 API」**：斐萃令牌（管理員簽發）＋ 我的 AI 金鑰 / 餘額 / 用量（已登錄用戶）
  *   ＋ 管理員【上游配置】卡片；同样**不设 `requiresAuth`**（未登錄可直达，页内给登录引导）；
@@ -82,6 +84,12 @@ const routes = [
     name: 'persons',
     component: () => import('../views/PersonIndexView.vue'),
     meta: { title: '印家匯徵' }
+  },
+  {
+    path: '/persons/:code',
+    name: 'personDetail',
+    component: () => import('../views/PersonDetailView.vue'),
+    meta: { title: '印人詳情' }
   },
   /* **本单改造（斐萃令牌）**：`/connect` ＝ 管理员签发 HMAC 令牌页（`api/feicui/v1/*` 转发面用它确权）。
      **本單（我的 API）**：同頁增設「我的 API」用戶區（AI 金鑰 / 餘額 / 用量，已登錄用戶）
