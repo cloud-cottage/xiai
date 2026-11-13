@@ -372,8 +372,21 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
   check('X6', 'AC-510 採納確生成 person 行（kind=set）', true, !!personWrite && personWrite.kind === 'set')
   const personDoc = (personWrite && personWrite.doc) || {}
   check('X6b', 'AC-510 person 行**不含** 3 個 extraction 鍵', [], EXTRACTION_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(personDoc, k)))
-  check('X6c', 'AC-510 person 行仍帶值陣列（值面不受影響）', { c: ['容光'], art: ['曉樓'], alias: ['郭容光'] },
-    { c: personDoc.courtesy_names, art: personDoc.art_names, alias: personDoc.alias_names })
+  /* **Phase 3 口径（本单翻转，**不是放宽**）**：旧断言「person 行仍帶值陣列」按新口径**必错**
+     —— 属性面（含 `courtesy_names` / `art_names` / `alias_names`）主存储已迁 CARD，
+     `xiai_persons` 行**只允许 KEEP 11 键**。故改为三条更严的判据：
+       X6c  写入行键集 ⊆ KEEP 11 键（多一个键即红；旧断言只查 3 个值数组是否存在）；
+       X6c2 属性**确实**传给了 CARD（假件收到 `courtesy_name` / `art_name` / `biehao_text` 等）；
+       X6c3 属性面**零残留**在本地行（逐键判负，不是「查不到就算过」）。 */
+  const PERSON_KEEP_11 = ['_id', 'id', 'code', 'card_id', 'source', 'source_id', 'source_person_id', 'proposal_id', 'created_at', 'updated_at', 'created_by']
+  const PERSON_ATTR_11 = ['family_name', 'given_name', 'courtesy_names', 'art_names', 'alias_names', 'courtesy_name', 'art_name', 'biehao_text', 'dynasty', 'birth_year', 'death_year', 'native_place', 'biography', 'cbdb_id']
+  const extraKeys = Object.keys(personDoc).filter((key) => PERSON_KEEP_11.indexOf(key) === -1)
+  check('X6c', 'AC-510 採納寫入行鍵集 ⊆ KEEP 11 键（本地只承擔指針 ＋ 工作流溯源）', [], extraKeys)
+  const cardSent = ((fakeCard.state.calls.find((call) => call.op === 'upsertPerson') || {}).payload || {}).person || {}
+  check('X6c2', 'AC-510 属性面确实送 CARD（假件收到 姓 / 名 / 字 / 號 / 別號）',
+    { family_name: '郭', given_name: '照', name: '郭照', courtesy_name: '容光', art_name: '曉樓', biehao_text: '郭容光' },
+    { family_name: cardSent.family_name, given_name: cardSent.given_name, name: cardSent.name, courtesy_name: cardSent.courtesy_name, art_name: cardSent.art_name, biehao_text: cardSent.biehao_text })
+  check('X6c3', 'AC-510 本地行零属性键残留（属性面一个都不许落 `xiai_persons`）', [], PERSON_ATTR_11.filter((key) => Object.prototype.hasOwnProperty.call(personDoc, key)))
   /* **CARD 口徑（收尾單；斷言不放寬）**：採納行必須帶 `card_id`，且該值**來自 CARD 回包**
      （假 CARD 首個分配 id）；同時證明假傳輸確實在路徑上、零真網。 */
   check('X6d', 'AC-510 採納行帶 `card_id` 且來自 CARD 回包（假 CARD 首個 id）', String(TEST_CARD_FIRST_ID), String(personDoc.card_id || ''))

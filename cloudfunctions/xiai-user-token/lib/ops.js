@@ -271,6 +271,122 @@ function cardAdoptionDenial(cardResult) {
   )
 }
 
+/* --------------------------------------------------------------------------- *
+   **Phase 3（第一階段）：`xiai_persons` 本地行只允許 KEEP 鍵**
+   ----------------------------------------------------------------------------
+   口徑（人類裁定）：
+     · 印人**屬性面**（25 鍵：姓 / 名 / 字 / 號 / 別號 / 齋號 / 朝代 / 生卒 / 籍貫 / 小傳 /
+       CBDB …）的**唯一主存儲是 CARD**（`card` 庫 `card_persons`）；
+     · `xiai_persons` 行**只承擔指針 ＋ 工作流溯源** ⇒ 寫入面**只允許 KEEP 鍵**，
+       屬性一律走 `cardApi.cardUpsertPerson(...)`（**不得**再落本地行）。
+   ⇒ 三條寫路徑（`reviewPersonProposal` / `reviewPersonImport` / `repairImportAcceptance`）
+     全部改成「**屬性面送 CARD、KEEP 面落本地**」的兩件式構造。
+   --------------------------------------------------------------------------- */
+
+/**
+ * **`xiai_persons` 本地行只允許的鍵（KEEP 面，恰 11 鍵）**。
+ * 任何寫入 `xiai_persons` 的文檔必須 ⊆ 本集合（離線自檢逐鍵斷言）。
+ */
+const PERSON_LOCAL_KEEP_KEYS = Object.freeze([
+  '_id',
+  'id',
+  'code',
+  'card_id',
+  'source',
+  'source_id',
+  'source_person_id',
+  'proposal_id',
+  'created_at',
+  'updated_at',
+  'created_by'
+])
+
+/**
+ * **已遷往 CARD 的 25 個屬性鍵（MOVE 面）** —— 只允許出現在**送 CARD 的入參**裡，
+ * **永不**寫進本地 `xiai_persons` 行。清單本身也是自檢的判負尺（術語對齊派單）。
+ */
+const PERSON_CARD_ONLY_KEYS = Object.freeze([
+  'family_name',
+  'given_name',
+  'courtesy_name',
+  'courtesy_alt_names',
+  'art_name',
+  'biehao_text',
+  'zhaihao',
+  'zhaihao_alts',
+  'courtesy_names',
+  'art_names',
+  'alias_names',
+  'dynasty',
+  'dynasty_source',
+  'birth_year',
+  'death_year',
+  'native_place',
+  'native_place_chs',
+  'birth_era_text',
+  'death_era_text',
+  'years_lived',
+  'gender',
+  'biography',
+  'biography_chs',
+  'cbdb_id',
+  'legacy_name_fields'
+])
+
+/**
+ * **把任意物件投影成 `xiai_persons` 本地行（只留 KEEP 鍵）**。
+ * 只拷貝來源**確實存在**的鍵（不補空值 —— 缺鍵與空串在讀面语义不同）。
+ * @param {object} source 來源物件（構造出的行 / 既有行）
+ * @returns {object} 只含 KEEP 鍵的新物件
+ */
+function personLocalDocOf(source) {
+  const src = source && typeof source === 'object' ? source : {}
+  const out = {}
+  PERSON_LOCAL_KEEP_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = src[key]
+  })
+  return out
+}
+
+/**
+ * **印人屬性面（送 CARD 的入參）** —— 由提案行 / 導入行構造，值**原樣透傳**（零轉寫、零繁簡）。
+ *
+ * 為什麼仍要單獨造這個物件：`lib/cardApi.js::cardFieldsOf` 吃的就是 xiai 印人行的屬性面
+ * （`family_name` / `courtesy_names` / `art_names` / `alias_names` / `dynasty` / 生卒 /
+ * 籍貫 / 小傳 / `cbdb_id`）—— 本地行不再帶這些鍵之後，**必須**由這裡供給，
+ * 否則採納會靜默丟掉全部屬性（比寫錯更糟）。
+ *
+ * `id` / `code` / `card_id` 三鍵同送：`cardApi` 用它們做 `sources[xiai=PR…]` 去重與
+ * 「本地已有 `card_id` 就直接復用」的短路（都是**指針**，不是屬性）。
+ * `dynasty` 恆空串（與本輪改動前逐字同值）：提案 / 導入載荷面本就不收朝代 ⇒ 不在此擅自擴面。
+ * @param {object} row 提案行 / 導入行
+ * @param {string} code 已分配的正式編號（`PR…`）
+ * @param {string} cardId 既有 `card_id`（無 ⇒ 空串）
+ * @returns {object} CARD 入參（屬性面 ＋ 指針）
+ */
+function personCardInputOf(row, code, cardId) {
+  const src = row && typeof row === 'object' ? row : {}
+  return {
+    id: code,
+    code,
+    card_id: text(cardId),
+    family_name: text(src.family_name),
+    given_name: text(src.given_name),
+    courtesy_names: Array.isArray(src.courtesy_names) ? src.courtesy_names : [],
+    art_names: Array.isArray(src.art_names) ? src.art_names : [],
+    alias_names: Array.isArray(src.alias_names) ? src.alias_names : [],
+    birth_year: src.birth_year === undefined ? null : src.birth_year,
+    death_year: src.death_year === undefined ? null : src.death_year,
+    dynasty: '',
+    cbdb_id: text(src.cbdb_id),
+    native_place: text(src.native_place),
+    biography: text(src.biography),
+    native_place_chs: text(src.native_place_chs),
+    biography_chs: text(src.biography_chs)
+  }
+}
+
+
 /**
  * **可选读面白名单**（`readRows` 里唯一允许把「集合不存在」降级成「零行」的集合；封闭名单）。
  *
@@ -4027,40 +4143,27 @@ function nextPersonCodeOf(persons) {
 }
 
 /**
- * 由**导入行**构造正式印人行 —— `reviewPersonImport` / `repairImportAcceptance` **同一套字段面**
- * （值来自导入行，**不做任何转换改写**）。
- * @param {object} row 导入行
+ * 由**导入行**构造正式印人行的 **KEEP 面**（`reviewPersonImport` / `repairImportAcceptance`
+ * **同一套**构造）。
+ *
+ * **Phase 3（第一階段）**：本函数**只产出 KEEP 键**（`id` / `code` / 溯源 / 时间戳 / `card_id`）——
+ * 25 個屬性鍵**一律不落本地行**，属性面改由 `personCardInputOf(row, code, cardId)` 送 CARD。
+ * `card_id` 由调用方在 CARD 成功後回填（本函数先落空串，与改前形态一致）。
+ * @param {object} row 导入行（**只取溯源键**；属性面不经本函数）
  * @param {{uid:string}} identity 服务端派生身份（落 `created_by`）
  * @param {string} at ISO 时戳
  * @param {string} code 已分配的正式编号
- * @returns {object}
+ * @returns {object} 只含 KEEP 键的印人行
  */
 function buildPersonDocFromImport(row, identity, at, code) {
   return {
     id: code,
     code,
-    family_name: text(row.family_name),
-    given_name: text(row.given_name),
-    courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
-    art_names: Array.isArray(row.art_names) ? row.art_names : [],
-    alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
-    birth_year: row.birth_year === undefined ? null : row.birth_year,
-    death_year: row.death_year === undefined ? null : row.death_year,
-    years_lived: null,
-    birth_era_text: '',
-    death_era_text: '',
-    dynasty: '',
-    gender: '',
-    cbdb_id: text(row.cbdb_id),
     card_id: '',
-    /* **person 六扩字段（值来自采纳的导入行；不做任何转换改写）**。 */
-    native_place: text(row.native_place),
-    biography: text(row.biography),
-    source: text(row.source),
-    source_id: text(row.source_id),
-    native_place_chs: text(row.native_place_chs),
-    biography_chs: text(row.biography_chs),
-    source_person_id: text(row.source_person_id), // **幂等键（溯源）**
+    /* 溯源 / 幂等键（KEEP 面）：值来自导入行，**不做任何转换改写**。 */
+    source: text(row && row.source),
+    source_id: text(row && row.source_id),
+    source_person_id: text(row && row.source_person_id),
     proposal_id: '',
     created_by: identity.uid,
     created_at: at,
@@ -6749,45 +6852,28 @@ const ADMIN_OPS = Object.freeze({
         let index = max + 1
         while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
         const code = `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
-        person = {
-          id: code,
-          code,
-          family_name: text(row.family_name),
-          given_name: text(row.given_name),
-          courtesy_names: Array.isArray(row.courtesy_names) ? row.courtesy_names : [],
-          art_names: Array.isArray(row.art_names) ? row.art_names : [],
-          alias_names: Array.isArray(row.alias_names) ? row.alias_names : [],
-          birth_year: row.birth_year === undefined ? null : row.birth_year,
-          death_year: row.death_year === undefined ? null : row.death_year,
-          years_lived: null,
-          birth_era_text: '',
-          death_era_text: '',
-          dynasty: '',
-          gender: '',
-          cbdb_id: text(row.cbdb_id),
-          card_id: text(row.card_id),
-          /* **批 2（v1.54｜§3.54.13 / §4.1.16）**：采纳提案落 `xiai_persons` 行时带上六扩字段
-             （四正字段 ＋ 两繁简副字段；值来自提案行，**不做任何转换改写**）。 */
-          native_place: text(row.native_place),
-          biography: text(row.biography),
-          source: text(row.source),
-          source_id: text(row.source_id),
-          native_place_chs: text(row.native_place_chs),
-          biography_chs: text(row.biography_chs),
-          proposal_id: proposalId,
-          created_by: identity.uid,
-          created_at: at,
-          updated_at: at
-        }
+        /* **Phase 3（第一階段）：兩件式構造** —— ① 屬性面（送 CARD，值來自提案行、原樣透傳）；
+           ② 本地行（**只 KEEP 鍵**）。屬性**不得**再落本地行。 */
+        const cardInput = personCardInputOf(row, code, text(row.card_id))
         /* **CARD 主庫（本單硬口徑）**：印人字段主存儲在 CARD ⇒ **先** `upsertPerson`
            （`lib/cardApi.js`），**成功之後**才把本地 `set` 推進落盤計劃，並把回包
            `person_id` 回填該行 `card_id`。**失敗 ⇒ 整個 op 取消（零寫入）** —— 提案狀態
            亦不翻轉、沒有任何本地寫步 ⇒ 不得出現「CARD 無此人、xiai 有」。
            幂等：本地行已带 `card_id`（提案行自帶）⇒ 直接复用該 id；否則按
            `sources[xiai=PR…]` / `sources[cbdb=…]` 在 CARD 找既有 ⇒ 不重複建人。 */
-        const cardWrite = await cardApi.cardUpsertPerson(person, CARD_WRITE_SOURCE)
+        const cardWrite = await cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)
         if (!cardWrite.ok) return cardAdoptionDenial(cardWrite)
-        person.card_id = cardWrite.personId
+        person = {
+          id: code,
+          code,
+          card_id: cardWrite.personId,
+          source: text(row.source),
+          source_id: text(row.source_id),
+          proposal_id: proposalId,
+          created_by: identity.uid,
+          created_at: at,
+          updated_at: at
+        }
         writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })
       }
     }
@@ -6795,7 +6881,9 @@ const ADMIN_OPS = Object.freeze({
       ok: true,
       op: 'reviewPersonProposal',
       row: Object.assign({}, row, privatePatch),
-      person,
+      /* **回包不泄露屬性面**：本地行已只含 KEEP 鍵；幂等重放命中的**既有行**同樣過一遍投影
+         （既有行可能仍帶遷移前的屬性鍵 ⇒ 不原樣外泄）。 */
+      person: person ? personLocalDocOf(person) : person,
       plan: { op: 'reviewPersonProposal', writes }
     }
   },
@@ -6917,6 +7005,8 @@ const ADMIN_OPS = Object.freeze({
       const existing = persons.find((item) => text(item && item.source_person_id) === sourceId)
       if (!existing) {
         const code = nextPersonCodeOf(persons)
+        /* **Phase 3（第一階段）：兩件式構造** —— ① 屬性面（送 CARD）；② 本地行（只 KEEP 鍵）。 */
+        const cardInput = personCardInputOf(row, code, '')
         const person = buildPersonDocFromImport(row, identity, at, code)
         /* **CARD 主庫（本單硬口徑）**：同提案路徑 —— **先** CARD `upsertPerson`，成功才把
            本地 `set` 與導入行狀態翻轉推進落盤計劃；`person_id` 回填本行 `card_id`。
@@ -6924,7 +7014,7 @@ const ADMIN_OPS = Object.freeze({
            （`index.js` 只在 `ok:true` 時 `persist`）⇒ 不消耗任何計數器、不落提案 / 導入狀態。
            幂等：CARD 側按 `sources[xiai=PR…]` 命中即 `created:false` ＋ 同一 `person_id`
            （本函數剛分配的 `code` 在重放時可復現 ⇒ 不重複建人）；CARD 部分成功後中斷亦可安全重放。 */
-        const cardWrite = await cardApi.cardUpsertPerson(person, CARD_WRITE_SOURCE)
+        const cardWrite = await cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)
         if (!cardWrite.ok) return cardAdoptionDenial(cardWrite)
         person.card_id = cardWrite.personId
         persons.push(person)
@@ -7399,6 +7489,8 @@ const ADMIN_OPS = Object.freeze({
         if (dryRun) continue
         if (target.key === 'person') {
           const code = nextPersonCodeOf(formal)
+          /* **Phase 3（第一階段）：兩件式構造** —— ① 屬性面（送 CARD）；② 本地行（只 KEEP 鍵）。 */
+          const cardInput = personCardInputOf(row, code, '')
           const doc = buildPersonDocFromImport(row, identity, at, code)
           /* **CARD 主庫（本單硬口徑）**：與兩條採納路徑**同構** —— 先 `cardUpsertPerson` 拿到
              `person_id`，成功才寫本地並回填 `card_id`；**失敗 ⇒ `UPSTREAM_ERROR`、整筆零寫入**
@@ -7406,7 +7498,7 @@ const ADMIN_OPS = Object.freeze({
              本 op 會造出「CARD 無此人、xiai 有」的孤兒行（雙主庫漂移）。
              幂等：CARD 側按 `sources[xiai=PR…]` 命中即 `created:false` ＋ 同一 `person_id`
              ⇒ 重放不重複建人，部分成功後中斷亦可安全重放。 */
-          const cardWrite = await cardApi.cardUpsertPerson(doc, CARD_WRITE_SOURCE)
+          const cardWrite = await cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)
           if (!cardWrite.ok) return cardAdoptionDenial(cardWrite)
           doc.card_id = cardWrite.personId
           formal.push(doc)

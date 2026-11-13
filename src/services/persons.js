@@ -431,6 +431,12 @@ export function proposalSubmitterId(row) {
  * **采纳路径的幂等生成 / 更新（§3）**：`ACCEPTED` ⇒ 幂等生成 `xiai_persons` 行
  * （`proposal_id` 溯源；**重复采纳不改写既有行**）。
  *
+ * **★ 本地镜像非权威（Phase 3）**：本函数只在 **local-dev** 形态（本机镜像）里跑，产出的行
+ * 属于**本地开发镜像**，不是权威数据。服务端（`cloudfunctions/xiai-user-token/lib/ops.js`）
+ * 已改为**两件式**：属性面送 CARD 主库（`cardUpsertPerson`），`xiai_persons` **只写 KEEP 11 键**
+ * （`id` / `code` / `card_id` / 溯源键 / 时间戳 / `created_by`）。故这里带属性值是**镜像形态**，
+ * 不得据它反推「权威行也带属性」；云端采纳后属性只从 CARD 读。
+ *
  * **本期只落「新增」形态**（`target_person_id === null`）：「修改既有印人」的**字段级粒度**
  * 属 §8 待裁 `W-f` ⇒ **本期不改写既有印人行**（如实登记，不擅自发明口径）。
  * @returns {object|null} 生成 / 命中的印人行；修改型裁定未落 ⇒ `null`
@@ -647,7 +653,14 @@ function normalizeImportPayload(source) {
   return out
 }
 
-/** 导入行 → person 行（**采纳落行**：带上 person 四扩字段 ＋ 两副字段 ＋ 幂等键 `source_person_id`）。 */
+/**
+ * 导入行 → person 行（**采纳落行**：带上 person 四扩字段 ＋ 两副字段 ＋ 幂等键 `source_person_id`）。
+ *
+ * **★ 本地镜像非权威（Phase 3）**：同 `acceptPersonProposal` —— 本函数只服务 **local-dev**
+ * 本机镜像；服务端采纳已改为「属性面送 CARD ＋ 本地只写 KEEP 11 键」
+ * （`ops.js::buildPersonDocFromImport` 只产出 `id` / `code` / `card_id` / 溯源键 / 时间戳 /
+ * `created_by`）。此处带属性值属镜像形态，**不得**据此断言权威行也带属性。
+ */
 function buildPersonRowFromImport(importRow, persons, actor, at) {
   const code = nextPersonCode(persons)
   return {

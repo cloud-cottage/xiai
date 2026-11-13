@@ -234,28 +234,47 @@ check('S3', '`ADMIN_OPS` 仍恰 39 项（本单零新增 op）', 39, Object.keys
 check('S4', '`REASONS` 仍恰 13 个（复用 UPSTREAM_ERROR，零新增字面值）', { size: 13, hasUpstream: true },
   { size: Object.keys(config.REASONS).length, hasUpstream: config.REASONS.UPSTREAM_ERROR === 'UPSTREAM_ERROR' })
 {
-  const upsertCalls = (opsSrc.match(/cardApi\.cardUpsertPerson\(/g) || []).length
+  /* 计数只认**调用形态**（`const cardWrite = await cardApi.cardUpsertPerson(`）：注释里提到
+     `cardApi.cardUpsertPerson(...)` 不算调用点（否则一句文档注释就能把尺子顶红）。 */
+  const upsertCalls = (opsSrc.match(/const cardWrite = await cardApi\.cardUpsertPerson\(/g) || []).length
   const guards = (opsSrc.match(/if \(!cardWrite\.ok\) return cardAdoptionDenial\(cardWrite\)/g) || []).length
   check('S5', '三条写路径（提案 / 导入 / 修复）各有一处「先 CARD、失败即整体取消」（3 调用 ＋ 3 门）', { calls: 3, guards: 3 }, { calls: upsertCalls, guards })
-  const orderOk = opsSrc.indexOf('cardUpsertPerson(person, CARD_WRITE_SOURCE)') < opsSrc.indexOf("writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })")
+  /* **Phase 3 两件式（口径变更 ⇒ 判据同步，强度不变）**：CARD 入参不再是被落盘的本地行本体
+     （`person` / `doc`），而是 `personCardInputOf(row, code, cardId)` 产出的**属性面**入参
+     —— 本地行此时只含 KEEP 键，属性面必须由它单供给。判序仍用 `indexOf` 先后关系，**不是**
+     「只要出现过就算」，任一处次序颠倒 ⇒ 本条必红。 */
+  const orderOk = opsSrc.indexOf('cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)') < opsSrc.indexOf("writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })")
   check('S5b', 'CARD 调用位置在本地 `set` 压栈之前（提案路径）', true, orderOk)
   const importStart = opsSrc.indexOf('async reviewPersonImport(payload')
   const importBlock = opsSrc.slice(importStart, opsSrc.indexOf('async reviewSealImport(payload', importStart))
   check('S5c', '导入路径：CARD 调用 ⇒ 回填 `card_id` ⇒ 才 `persons.push` ＋ 压栈', true,
-    importBlock.indexOf('cardUpsertPerson') !== -1 &&
-    importBlock.indexOf('person.card_id = cardWrite.personId') > importBlock.indexOf('cardUpsertPerson') &&
-    importBlock.indexOf('persons.push(person)') > importBlock.indexOf('person.card_id = cardWrite.personId'))
-  /* 修复通道（本单补的缺口）：**先 CARD**（`cardUpsertPerson(doc, …)`）⇒ 回填 `doc.card_id`
+    importBlock.indexOf('personCardInputOf(row, code, \'\')') !== -1 &&
+    importBlock.indexOf('cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)') !== -1 &&
+    importBlock.indexOf('person.card_id = cardWrite.personId') > importBlock.indexOf('cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)') &&
+    importBlock.indexOf('persons.push(person)') > importBlock.indexOf('person.card_id = cardWrite.personId') &&
+    importBlock.indexOf("writes.push({ kind: 'set', collection: COLLECTIONS.persons, id: code, doc: person })") > importBlock.indexOf('persons.push(person)'))
+  /* 修复通道：**先 CARD**（`cardUpsertPerson(cardInput, …)`）⇒ 回填 `doc.card_id`
      ⇒ 才 `formal.push` ＋ 压栈。任一处次序颠倒 ⇒ 本条变红。 */
   const repairStart = opsSrc.indexOf('async repairImportAcceptance(payload')
   const repairBlock = opsSrc.slice(repairStart, opsSrc.indexOf('async migrateDynastyValues(payload', repairStart))
   check('S5d', '修复通道：CARD 调用 ⇒ 回填 `doc.card_id` ⇒ 才 `formal.push` ＋ 压栈（与两条采纳路径同构）', true,
-    repairBlock.indexOf('cardUpsertPerson(doc, CARD_WRITE_SOURCE)') !== -1 &&
-    repairBlock.indexOf('doc.card_id = cardWrite.personId') > repairBlock.indexOf('cardUpsertPerson(doc, CARD_WRITE_SOURCE)') &&
-    repairBlock.indexOf('formal.push(doc)') > repairBlock.indexOf('doc.card_id = cardWrite.personId'))
+    repairBlock.indexOf('personCardInputOf(row, code, \'\')') !== -1 &&
+    repairBlock.indexOf('cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)') !== -1 &&
+    repairBlock.indexOf('doc.card_id = cardWrite.personId') > repairBlock.indexOf('cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)') &&
+    repairBlock.indexOf('formal.push(doc)') > repairBlock.indexOf('doc.card_id = cardWrite.personId') &&
+    repairBlock.indexOf("writes.push({ kind: 'set', collection: target.formal, id: code, doc })") > repairBlock.indexOf('formal.push(doc)'))
   check('S5e', '负对照 canary：把修复通道的 CARD 门删掉 ⇒ 该尺会报红（证明判负非空转）', true,
-    repairBlock.replace(/\s*const cardWrite = await cardApi\.cardUpsertPerson\(doc, CARD_WRITE_SOURCE\)\s*\n\s*if \(!cardWrite\.ok\) return cardAdoptionDenial\(cardWrite\)\s*\n\s*doc\.card_id = cardWrite\.personId/, '')
-      .indexOf('cardUpsertPerson(doc, CARD_WRITE_SOURCE)') === -1)
+    repairBlock.replace(/\s*const cardWrite = await cardApi\.cardUpsertPerson\(cardInput, CARD_WRITE_SOURCE\)\s*\n\s*if \(!cardWrite\.ok\) return cardAdoptionDenial\(cardWrite\)\s*\n\s*doc\.card_id = cardWrite\.personId/, '')
+      .indexOf('cardApi.cardUpsertPerson(cardInput, CARD_WRITE_SOURCE)') === -1)
+  /* **S5f（Phase 3 加严，静态）**：本地行构造单点 `buildPersonDocFromImport` 内**零属性键字面**
+     —— 属性面一律经 `personCardInputOf` 送 CARD（本地行只 KEEP 键）。注入任一属性键 ⇒ 本条必红。 */
+  const buildStart = opsSrc.indexOf('function buildPersonDocFromImport(')
+  const buildBlock = opsSrc.slice(buildStart, opsSrc.indexOf('async function buildSealAcceptanceFromImport(', buildStart))
+  const localLeak = ['courtesy_names', 'art_names', 'alias_names', 'family_name', 'given_name', 'native_place', 'biography', 'cbdb_id']
+    .filter((key) => new RegExp(`${key}\\s*:`).test(buildBlock))
+  check('S5f', '本地行构造单点（`buildPersonDocFromImport`）零属性键字面（本地只 KEEP；属性经 `personCardInputOf` 送 CARD）', [], localLeak)
+  check('S5g', '负对照 canary：给该构造体注入 `courtesy_names:` ⇒ S5f 同一把尺必命中（证明判负非空转）', true,
+    new RegExp('courtesy_names\\s*:').test(buildBlock + '\n  courtesy_names: [],'))
 }
 check('S6', '`COLLECTIONS.serverSecrets` ＝ `xiai_server_secrets`（服务端专属凭据集合，`^xiai_` 前缀）', 'xiai_server_secrets', ops.COLLECTIONS.serverSecrets)
 /* S7：**D4 同尺** —— `lib/cardApi.js` 不得出现任何 `http(s)://` 字面（域名 / 网关硬绑定），
@@ -639,6 +658,96 @@ const repairImportRow = () => ({
   check('A16d', '`dry_run`（缺省）⇒ 只报 `orphan.person:1` ＋ 零写，且**零 CARD 调用**（预演零副作用）',
     { dry_run: true, orphan: 1, cardCalls: 0 },
     { dry_run: res.dry_run, orphan: res.orphan && res.orphan.person, cardCalls: card.state.calls.length })
+}
+
+/* A17：**Phase 3 两件式（本地只 KEEP 键）** —— 三条写路径（提案 / 导入 / 修复）真 persist 后
+   回读 `xiai_persons` 行，键集必须 ⊆ KEEP 11 键（属性面一个都不许落本地）。 */
+const PERSON_KEEP_11 = ['_id', 'id', 'code', 'card_id', 'source', 'source_id', 'source_person_id', 'proposal_id', 'created_at', 'updated_at', 'created_by']
+const PERSON_ATTR_KEYS = ['family_name', 'given_name', 'courtesy_names', 'art_names', 'alias_names', 'birth_year', 'death_year', 'native_place', 'biography', 'cbdb_id', 'dynasty']
+{
+  const cases = []
+  {
+    const card = makeFakeCard({ nextId: '100000920' })
+    const journal = { collections: [], writes: 0 }
+    const db = makeFakeDb({ xiai_person_proposals: [proposalRow()], xiai_persons: [], xiai_server_secrets: [secretRow] }, journal)
+    ops.setOpsDbProvider(db)
+    cardApi.resetCardSourceIndex()
+    cardApi.setCardTransport(card.transport)
+    const res = await ops.ADMIN_OPS.reviewPersonProposal({ proposal_id: 'P1', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
+    await ops.persist(res.plan)
+    const row = (await db().collection('xiai_persons').get()).data[0] || {}
+    cases.push({ path: 'proposal', keys: Object.keys(row).sort(), cardId: row.card_id })
+  }
+  {
+    const card = makeFakeCard({ nextId: '100000921' })
+    const journal = { collections: [], writes: 0 }
+    const db = makeFakeDb({ xiai_person_imports: [importRow()], xiai_persons: [], xiai_server_secrets: [secretRow] }, journal)
+    ops.setOpsDbProvider(db)
+    cardApi.resetCardSourceIndex()
+    cardApi.setCardTransport(card.transport)
+    const res = await ops.ADMIN_OPS.reviewPersonImport({ batch_id: 'B1', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
+    await ops.persist(res.plan)
+    const row = (await db().collection('xiai_persons').get()).data[0] || {}
+    cases.push({ path: 'import', keys: Object.keys(row).sort(), cardId: row.card_id })
+  }
+  {
+    const card = makeFakeCard({ nextId: '100000922' })
+    const journal = { collections: [], writes: 0 }
+    const db = makeFakeDb({ xiai_person_imports: [repairImportRow()], xiai_persons: [], xiai_server_secrets: [secretRow] }, journal)
+    ops.setOpsDbProvider(db)
+    cardApi.resetCardSourceIndex()
+    cardApi.setCardTransport(card.transport)
+    const res = await ops.ADMIN_OPS.repairImportAcceptance({ dry_run: false }, ADMIN_IDENT, ADMIN_CTX)
+    await ops.persist(res.plan)
+    const row = (await db().collection('xiai_persons').get()).data[0] || {}
+    cases.push({ path: 'repair', keys: Object.keys(row).sort(), cardId: row.card_id })
+  }
+  const leaks = cases.map((item) => ({ path: item.path, extra: item.keys.filter((key) => PERSON_KEEP_11.indexOf(key) === -1) }))
+  check('A17', '三条写路径落盘行键集 ⊆ KEEP 11 键（提案 / 导入 / 修复；真 persist 后回读）', [], leaks.filter((item) => item.extra.length > 0))
+  check('A17b', '三条写路径落盘行**零属性键**（family/given/courtesy/art/alias/生卒/籍貫/小傳/CBDB/朝代）', [], cases.map((item) => ({ path: item.path, hit: item.keys.filter((key) => PERSON_ATTR_KEYS.indexOf(key) !== -1) })).filter((item) => item.hit.length > 0))
+  check('A17c', '三条写路径落盘行均带 `card_id`（＝ CARD 回包，非空）', true, cases.every((item) => String(item.cardId || '') !== ''))
+}
+
+/* A18：**属性面确实传给了 CARD**（本地行不落属性 ≠ 属性丢失）—— 假 CARD 的 `upsertPerson`
+   入参必须带着提案 / 導入行的字、號、別號等属性值。 */
+{
+  const card = makeFakeCard({ nextId: '100000923' })
+  const journal = { collections: [], writes: 0 }
+  ops.setOpsDbProvider(makeFakeDb({ xiai_person_proposals: [proposalRow()], xiai_persons: [], xiai_server_secrets: [secretRow] }, journal))
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  await ops.ADMIN_OPS.reviewPersonProposal({ proposal_id: 'P1', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
+  const sent = ((card.state.calls.find((call) => call.op === 'upsertPerson') || {}).payload || {}).person || {}
+  check('A18', '假 CARD 收到属性字（姓 / 名 / 字 / 號 —— CARD 字段名逐字：family_name / given_name / courtesy_name / art_name）',
+    { family_name: '郭', given_name: '照', name: '郭照', courtesy_name: '容光', art_name: '曉樓' },
+    { family_name: sent.family_name, given_name: sent.given_name, name: sent.name, courtesy_name: sent.courtesy_name, art_name: sent.art_name })
+  check('A18b', '假 CARD 收到生卒 / 籍貫 / 小傳（值面不丢；本地行不落 ≠ 属性丢失）',
+    { birth_year: 1827, death_year: 1895, hasNative: true, hasBio: true },
+    { birth_year: sent.birth_year, death_year: sent.death_year, hasNative: String(sent.native_place || '') !== '', hasBio: String(sent.biography || '') !== '' })
+  check('A18c', 'CARD 入参带 `sources[xiai=PR…]` 幂等指针（本地行的 `code` 与 `card_id` 供 CARD 去重）', true,
+    (sent.sources || []).some((ref) => ref.system === 'xiai' && /^PR\d{9}$/.test(String(ref.id))))
+}
+
+/* A19：**幂等重放不重复建人**（同一批次重放 ⇒ 导入行 `skipped`、零新增印人行、CARD 只建一次）。 */
+{
+  const card = makeFakeCard({ nextId: '100000924' })
+  const journal = { collections: [], writes: 0 }
+  const db = makeFakeDb({ xiai_person_imports: [importRow()], xiai_persons: [], xiai_server_secrets: [secretRow] }, journal)
+  ops.setOpsDbProvider(db)
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  const first = await ops.ADMIN_OPS.reviewPersonImport({ batch_id: 'B1', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
+  await ops.persist(first.plan)
+  const upsertsAfterFirst = card.state.upserts
+  journal.writes = 0
+  const replay = await ops.ADMIN_OPS.reviewPersonImport({ batch_id: 'B1', decision: 'ACCEPTED' }, ADMIN_IDENT, ADMIN_CTX)
+  const personWritesOnReplay = ((replay.plan && replay.plan.writes) || []).filter((w) => w.collection === 'xiai_persons').length
+  const personsRows = (await db().collection('xiai_persons').get()).data
+  check('A19', '重放：`ok:true` ＋ 本行 `skipped`（终态不回退，不重复采纳）', { ok: true, accepted: 0, skipped: 1 },
+    { ok: replay.ok === true, accepted: (replay.accepted_ids || []).length, skipped: (replay.skipped || []).length })
+  check('A19b', '重放：零新增印人 `set` ＋ `xiai_persons` 仍恰 1 行（幂等键去重）', { personWrites: 0, rows: 1 },
+    { personWrites: personWritesOnReplay, rows: personsRows.length })
+  check('A19c', '重放：CARD `upsertPerson` 不再发生（首轮 1 次 ⇒ 重放后仍 1 次）', upsertsAfterFirst, card.state.upserts)
 }
 
 /* ---------------------------------------------------------------------------

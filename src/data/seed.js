@@ -718,6 +718,12 @@ export function formatPersonCode(serial) {
 
 /**
  * 印人属性字段清单（`xiai_persons` 行；＝**提交面**同形）。
+ *
+ * **★ 仅供本地开发（Phase 3）**：本表只服务 **local-dev** 本机镜像（`emptyPersonFields()` 起的
+ * 空行形态）。**权威形态已变**：属性面主存储迁到 CARD（`card_persons`），云端采纳后
+ * `xiai_persons` **只写 KEEP 11 键**（`id` / `code` / `card_id` / 溯源键 / 时间戳 / `created_by`）
+ * —— 属性键不进权威行（`cloudfunctions/xiai-user-token/lib/ops.js` 的
+ * `PERSON_LOCAL_KEEP_KEYS` / `PERSON_CARD_ONLY_KEYS`）。**不要**拿本表去断言云上行键面。
  *   - 姓 / 名：字符串，可空；
  *   - `字` / `号` / `别名`：**一律数组**（CBDB 别名本就是数组，**不猜分类**）；
  *   - 生卒：只存**公元整数**；「不详」＝`null`（**不设特值、不设区间字符串**）；
@@ -755,6 +761,9 @@ export const PERSON_FIELDS = [
 /**
  * 印人一行「值的默认」（**新增提案 / 采纳后生成**都以本形态起手，缺省一律空、不设特值）。
  * 数组键 ⇒ `[]`；标量键 ⇒ `''`；生卒 ⇒ `null`（「不详」＝空）。
+ *
+ * **★ 仅供本地开发（Phase 3）**：本形态属 **local-dev 本机镜像**，不是权威行形态 ——
+ * 云端采纳走 CARD（属性面）＋ `xiai_persons` 只写 KEEP 11 键（见 `PERSON_FIELDS` 注）。
  * @returns {object} 空印人字段面（**不含 `id` / `code` / 溯源 / 时间戳** —— 那些由采纳路径系统写）
  */
 export function emptyPersonFields() {
