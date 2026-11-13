@@ -49,6 +49,11 @@ import { PERSON_PROPOSAL_STATUS, emptyPersonFields, PERSON_IMPORT_STATUS, PERSON
    一律经 `userWriteGate` —— 先保证有一枚可携带的令牌（必要时静默补签），再过云端门
    （`xiai-user-token` 的 `verify`）。**身份由服务端从令牌派生**，载荷里的身份类键由服务端拒。 */
 import { userWriteGate } from './userWrite.js'
+/* **人物属性读面（CARD 主库）**：姓名 / 字 / 號 / 齋號 / 別署齋號 / 別號 / 朝代 / CBDB 的
+   **主存储已是 CARD**，本地 `xiai_persons` 降为 fallback ⇒ 本服务的只读检索面一律先经此合并。 */
+import * as personCards from './personCards.js'
+/* 別號 token 拆分（检索面口径真源；纯函数、零副作用）—— 不在此另写第二套拆法。 */
+import { biehaoTokensOf } from './personSearch.js'
 import { cloudBaseConfigured, cloudBaseStatus } from '../data/cloudbase.js'
 /* **E-4/E-5（阶段乙｜2026-10-12）**：写面形态真源（`local-dev` ⇒ 本机面 ＝ 本机权威；
    `cloud` ⇒ 只认服务端回包）。**不自造第二套判据**。 */
@@ -114,12 +119,59 @@ export function personProposalDedupeKey({ targetPersonId = null, familyName = ''
 
 /* ------------------------------ 只读检索面 ------------------------------ */
 
-/** 取正式印人行（原始行；显示名请经 `personName` / 数据层单点派生）。 */
-export function listPersons() {
-  return listPersonRows()
+/**
+ * **CARD 属性覆盖后的行**（读面单点）：本地 thin 行 ＋ `personCards.personAttributesOf(row)` 覆盖。
+ *
+ * 口径：**有 CARD 值就用 CARD 值**（逐字段非空优先），CARD 缺席才回落本地属性字段 ——
+ * 这样「本地属性字段被置空」时全站仍显示正确（Phase 3 闸门判据）。
+ * `?cardsOnly=1`（仅调试用，规范待登记）时 CARD 缺席 ⇒ **清空属性字段**（宁可不显示也不回退），
+ * 否则该闸门无法暴露「仍在偷读本地字段」的遗漏面。
+ * @param {object} row 本地印人行（thin）
+ * @returns {object} 覆盖后的新行（**不改写入参**）
+ */
+function rowWithCardAttributes(row) {
+  if (!row || typeof row !== 'object') return row
+  const attrs = personCards.personAttributesOf(row)
+  const merged = { ...row }
+  if (!attrs) {
+    if (!personCards.cardsOnlyMode()) return merged
+    /* 调试闸门：CARD 缺席 ⇒ 属性字段一律清空（九位号 / CARD 快照未就绪时暴露遗漏依赖）。 */
+    merged.family_name = ''
+    merged.given_name = ''
+    merged.courtesy_name = ''
+    merged.art_name = ''
+    merged.zhaihao = ''
+    merged.dynasty = ''
+    merged.cbdb_id = ''
+    merged.biehao_text = ''
+    merged.zhaihao_alts = []
+    return merged
+  }
+  merged.family_name = attrs.family_name
+  merged.given_name = attrs.given_name
+  merged.courtesy_name = attrs.courtesy_name
+  merged.art_name = attrs.art_name
+  merged.zhaihao = attrs.zhaihao
+  merged.dynasty = attrs.dynasty
+  merged.cbdb_id = attrs.cbdb_id
+  merged.biehao_text = attrs.biehao_text
+  merged.zhaihao_alts = attrs.zhaihao_alts
+  /* `name_full` 是旧检索面字段：用 CARD 合并名喂它（缺名 ⇒ 保留本地值，不落空）。 */
+  if (attrs.name) merged.name_full = attrs.name
+  return merged
 }
 
-/** 印人显示名（**转发数据层单点**；不另立第二套名表）。 */
+/** 取正式印人行（本地 thin 行 ＋ CARD 属性覆盖；显示名请经 `personName`）。 */
+export function listPersons() {
+  const rows = listPersonRows()
+  if (!Array.isArray(rows)) return []
+  return rows.map((row) => rowWithCardAttributes(row))
+}
+
+/**
+ * **印人显示名**（转发数据层单点 `personDisplayName`；不另立第二套名表）。
+ * 名字取合并后的 `family_name + given_name`（数据层单点自己会再经 CARD 取一次，口径一致）。
+ */
 export function personName(row) {
   return personDisplayName(row)
 }
@@ -138,20 +190,31 @@ export function personNameOfId(id) {
 /**
  * **印人检索**（供印面「作者」选人控件；§4.3）：关键字面扩到 `姓` / `名` / `字` / `号` / `别名` /
  * `cbdb_id`（子串、大小写不敏感）。空关键字 ⇒ 全量（调用方可自截断）。
+ *
+ * **匹配面 ＝ 合并后的行**（本地 thin 行 ＋ CARD 属性）：CARD 的 `courtesy_name` / `art_name` /
+ * `zhaihao` / `biehao_text`（按行与全角 `／` 双拆 token）一并入 Hay；旧三数组原文保留并存兼容。
+ * 归一（小写）与优先级（纯过滤、保持入参顺序）**不变** —— 只加命中面，不改判定口径。
  * @param {string} keyword
  * @returns {Array<object>} 命中的印人行
  */
 export function searchPersons(keyword = '') {
   const kw = String(keyword || '').trim().toLowerCase()
-  const rows = listPersonRows()
+  const rows = listPersons()
   if (!kw) return rows
   const hayOf = (row) => {
     const parts = [
       row && row.family_name,
       row && row.given_name,
+      row && row.name_full,
+      row && row.courtesy_name,
+      row && row.art_name,
+      row && row.zhaihao,
       ...(Array.isArray(row && row.courtesy_names) ? row.courtesy_names : []),
       ...(Array.isArray(row && row.art_names) ? row.art_names : []),
       ...(Array.isArray(row && row.alias_names) ? row.alias_names : []),
+      ...(Array.isArray(row && row.courtesy_alt_names) ? row.courtesy_alt_names : []),
+      ...(Array.isArray(row && row.zhaihao_alts) ? row.zhaihao_alts : []),
+      ...biehaoTokensOf(row),
       row && row.cbdb_id
     ]
     return parts

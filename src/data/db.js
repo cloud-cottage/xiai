@@ -71,6 +71,11 @@ import { STORAGE_MIME } from '../utils/image.js'
    （`POST /api/image/store`，經同源代理 ⇒ 不失為一處實現）；客戶端真源恰 1 處 ＝
    `src/services/imageAuthority.js`（本文件只調用，**不自建第二套端點 / 摘要口徑**）。 */
 import { storeArtifactBytes, AUTHORITY_STORAGE_SERVER } from '../services/imageAuthority.js'
+/* **人物属性读面切 CARD（本单）**：字 / 號 / 齋號 / 別號 / 朝代 的**主存储是 CARD**（集合
+   `card_persons`）。`personDisplayName` 因此先取 CARD 索引（服务层 `services/personCards.js`
+   的**已加载快照**，同步只读、零 `await`），CARD 缺席才回退本地属性字段。
+   注：data → services 的 import 在本文件已有先例（上一行的 `imageAuthority.js`）。 */
+import { personAttributesOf, cardsOnlyMode } from '../services/personCards.js'
 import {
   SEED_SEALS,
   SEED_FACES,
@@ -2475,15 +2480,34 @@ function firstTextOf(list) {
 
 /**
  * **印人显示名派生（单点，冻结；§2「派生不落盘」）**：
- *   `family_name + given_name` → 缺则 `courtesy_names[0]`（字）→ 缺则 `art_names[0]`（号）→
+ *   **CARD 优先**（`family_name + given_name` → 缺则 `name` → 缺则 `courtesy_name`（字）→
+ *   缺则 `art_name`（號））；CARD 未就绪 / 无此人 ⇒ **本地字段同一条链**（fallback）；
  *   皆空 ⇒ `''`（上屏一律回「佚名」）。
+ *
+ * **同步、零 `await`**（本函数在渲染路径上被每张卡调用）：只读 `services/personCards.js`
+ * 的**已加载索引快照**；快照到位时该快照是 `shallowRef` ⇒ 读它的 `computed` 自动重算重渲。
+ *
  * **落第二份显示名 ⇒ 判负**：本函数是**唯一**派生点，**不得**在 persons 行或印章行落
  * 第二份显示名 / 引用副本。
- * @param {object|null} row 印人行
+ * @param {object|null} row 印人行（带 `id` / `code` 即可定位 CARD 索引行）
  * @returns {string} 派生显示名（皆空 ⇒ `''`）
  */
 export function personDisplayName(row) {
   if (!row || typeof row !== 'object') return ''
+  /* ① CARD（主存储）：索引行按本地编号 `id` → `card_id` 映射，命中则用其姓 / 名 / 字 / 號。 */
+  const attrs = personAttributesOf(row)
+  if (attrs) {
+    const cardFull = `${hasText(attrs.family_name) ? String(attrs.family_name) : ''}${
+      hasText(attrs.given_name) ? String(attrs.given_name) : ''
+    }`
+    if (cardFull) return cardFull
+    if (hasText(attrs.name)) return String(attrs.name)
+    if (hasText(attrs.courtesy_name)) return String(attrs.courtesy_name)
+    if (hasText(attrs.art_name)) return String(attrs.art_name)
+  }
+  /* `?cardsOnly=1`（仅调试用，规范待登记）：CARD 缺席 ⇒ 不显示（不回退本地字段）。 */
+  if (cardsOnlyMode()) return ''
+  /* ② 本地 fallback（**既有口径一字未改**）。 */
   const family = hasText(row.family_name) ? String(row.family_name) : ''
   const given = hasText(row.given_name) ? String(row.given_name) : ''
   const full = `${family}${given}`

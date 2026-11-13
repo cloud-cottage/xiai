@@ -6,8 +6,9 @@
  *      → 屬性區塊（字 / 別字 / 號 / 齋號 / 別署齋號 / 別號）→ 小傳。
  *
  * 硬口徑（逐條，與名錄頁同一套）：
- *   · **數據面零新增請求**：只讀 `services/persons.js::listPersons()` 已落定的印人快照
- *     （`/persons` 用的是同一條讀入口），按 `code`（＝ `id` ＝ `PR…`）查一行本地比對。
+ *   · **數據面 ＝ CARD 主庫**（本單切換）：`services/personCards.js::loadPersonDetail(code)` ——
+ *     由雲函數公開只讀 op `getPersonCard` 取**全字段**（`PR…` 與 CARD 九位號兩種編號皆認）；
+ *     CARD 不可用時該服務回退本地行轉同形（`source:'local'`），**本頁不自行拼第二套數據面**。
  *   · **只上屏正字段**：繁體正字段（`courtesy_name` / `courtesy_alt_names` / `art_name` /
  *     `zhaihao` / `zhaihao_alts` / `biehao_text` / `biography`）。
  *     簡體副字段 `native_place_chs` / `biography_chs` **一律不上屏**；
@@ -19,9 +20,10 @@
  *     首屏水合未落定時顯示載入態（不把「還沒讀到」說成「查無此印人」）。
  *   · 上屏文案一律繁體（`s2t(x) === x`）。
  */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { persons, seals } from '../services/index.js'
+import { loadPersonDetail } from '../services/personCards.js'
 import { biehaoLinesOf } from '../services/personSearch.js'
 
 const route = useRoute()
@@ -30,10 +32,10 @@ function textOf(value) {
   return value === null || value === undefined ? '' : String(value).trim()
 }
 
-/** 行編碼（與名錄頁 `codeOf` 同一口徑）：`code` 優先，退 `id`，再退 `_id`。 */
+/** 行編碼（與名錄頁 `codeOf` 同一口徑）：`code` 優先，退 `id`，再退 `_id`，再退 CARD `person_id`。 */
 function codeOf(row) {
   if (!row || typeof row !== 'object') return ''
-  return textOf(row.code) || textOf(row.id) || textOf(row._id)
+  return textOf(row.code) || textOf(row.id) || textOf(row._id) || textOf(row.person_id)
 }
 
 function firstOf(list) {
@@ -52,20 +54,37 @@ function valuesOf(value) {
   return out
 }
 
-/** 印人快照（與 `/persons` 同一條只讀入口；讀緩存由數據層自理）。 */
-const rosterRows = computed(() => persons.listPersons())
-
 /** 數據源狀態（載入 / 失敗分流；與名錄頁同一讀數）。 */
 const source = computed(() => seals.dataSourceState())
 
 const wantedCode = computed(() => textOf(route.params && route.params.code))
 
-/** 命中行（未命中 ⇒ `null`）。 */
-const row = computed(() => {
+/* ------------------------------ 數據面（CARD 主庫） ------------------------------
+   `loadPersonDetail` 認兩種編號（`PR…` / CARD 九位號），帶 60 s 緩存、失敗回退本地行；
+   本頁只做「取到 ⇒ 上屏、取不到 ⇒ 可讀空態」的形態分流，不自行拼第二套字段面。 */
+const detail = ref(null)
+const detailLoading = ref(false)
+let detailToken = 0
+
+async function fetchDetail() {
   const code = wantedCode.value
-  if (!code) return null
-  return rosterRows.value.find((item) => codeOf(item) === code) || null
-})
+  const token = (detailToken += 1)
+  if (!code) {
+    detail.value = { ok: false, reason: 'MISSING_REQUIRED', message: '' }
+    detailLoading.value = false
+    return
+  }
+  detailLoading.value = true
+  const got = await loadPersonDetail(code)
+  if (token !== detailToken) return
+  detail.value = got
+  detailLoading.value = false
+}
+
+watch(wantedCode, fetchDetail, { immediate: true })
+
+/** 命中行（未命中 ⇒ `null`）。 */
+const row = computed(() => (detail.value && detail.value.ok === true ? detail.value.person : null))
 
 /** 生卒（兩端皆有 ⇒ `1829–1884`；只有一端 ⇒ 該端；皆無 ⇒ 空串）。 */
 function lifeOf(item) {
@@ -80,8 +99,8 @@ const person = computed(() => {
   const item = row.value
   if (!item) return null
   return {
-    code: codeOf(item),
-    name: persons.personName(item) || '',
+    code: textOf(wantedCode.value) || codeOf(item),
+    name: textOf(item.name) || persons.personName(item) || '',
     life: lifeOf(item),
     nativePlace: textOf(item.native_place),
     dynasty: textOf(item.dynasty) || '待考',
@@ -107,8 +126,16 @@ const person = computed(() => {
   }
 })
 
-const loading = computed(() => !person.value && source.value.pending)
-const unavailable = computed(() => !person.value && source.value.failed)
+const loading = computed(
+  () => !person.value && (detailLoading.value || (!detail.value && source.value.pending))
+)
+const unavailable = computed(() => {
+  if (person.value || loading.value) return false
+  const got = detail.value
+  if (!got || got.ok !== false) return false
+  /* `INVALID_VALUE` ＝ 云端「該印人不存在」；其余（传输层 / 未配置 / 未预期）⇒ 读不到，非「查无此人」。 */
+  return textOf(got.reason) !== 'INVALID_VALUE' && textOf(got.reason) !== 'NOT_FOUND'
+})
 const missing = computed(() => !person.value && !loading.value && !unavailable.value)
 
 const emptyTitle = computed(() => {
