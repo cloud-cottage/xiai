@@ -41,11 +41,15 @@ const form = reactive({
    （不得手輸自由文本、不得留空）。**單一入口 ＝ `PersonPicker`**（本地搜索 ＋ 按姓氏拼音分組
    ＋ 右側 A–Z 索引，只點選回填）；舊「檢索輸入框 ＋ 下拉選擇框」兩件套已整體刪除，
    其檢索詞變量與舊鉤子一併清零（本文件已無自由輸入面）。
-   印人行來源＝服務層單點 **`persons.listPersons()`**（本文件既有同源讀點，不另立第二個），
-   寫進 `computed` ⇒ 行集變化時選擇器跟著更新；顯示名直接傳服務層 **`persons.personName`**
-   （已導出，不在此新寫派生）。`form.author` 承載所選印人 id（`author_person_id`）；
-   **留空 ⇒ 提交被拒**（`authorDenial()`，上屏繁體提示，不靜默丟引用）。 */
-const authorPersons = computed(() => persons.listPersons())
+   印人行來源＝服務層單點 **`persons.referablePersons()`**（＝ `listPersons()` 经可引用判据
+   收敛后的行集；**本文件不另立第二套过滤**），寫進 `computed` ⇒ 行集變化時選擇器跟著更新；
+   顯示名直接傳服務層 `persons.personName`（已導出，不在此新寫派生）。`form.author` 承載所選
+   印人 id（`author_person_id`）；**留空 ⇒ 提交被拒**（`authorDenial()`，上屏繁體提示，不靜默丟引用）。
+   **为什么必须收敛候选（线上实据）**：旧路径曾在前端自己发 `PR` 号 ⇒ 本地镜像里有「云端不存在」
+   的幻影行（`PR000000571`）⇒ 用户选中 ⇒ 服务端作者引用门拒「作者（印人）引用不存在」。
+   `referablePersons()` 只列**真能引用**的行（有 `card_id` 的 CARD 已收錄行 / 来自云快照的
+   `PR` 行），`tmp-` 临时行与无 `card_id` 的本地自造行一律不列（开发期 `console.warn` 一次）。 */
+const authorPersons = computed(() => persons.referablePersons())
 
 /** 已选原图：`{ bitmap, width, height, originalBytes, originalMime, name, previewUrl }`。 */
 const source = ref(null)
@@ -624,7 +628,9 @@ onBeforeUnmount(() => {
       <div class="field">
         <!-- 【作者】＝**引用型**（person-model §4.1）：**只能選、不能填、不可留空** —— **單一入口**
              ＝ `PersonPicker`（搜索 ＋ 按姓氏拼音分組 ＋ 右側 A–Z 索引；**只點選回填、無自由輸入**）。
-             行集來自 `authorPersons`（服務層 `persons.listPersons()` 的 computed 快照 ⇒ 行集變化即更新）、
+             行集來自 `authorPersons`（服務層 `persons.referablePersons()` 的 computed 快照 ⇒ 行集變化即更新；
+             **只含可引用行**：有 `card_id` 的 CARD 已收錄行 / 來自雲快照的 `PR` 行 —— `tmp-` 臨時行與
+             無 `card_id` 的本地自造「幻影行」不列出），
              顯示名直接傳服務層 `persons.personName`（唯一派生單點）。未點選 ⇒ 提交被拒（`authorDenial()`）；
              `form.author` 仍只承載所選印人 id（載荷鍵 `author_person_id`），語義與必填攔判一字未改。
              舊「檢索輸入框 ＋ 下拉選擇框」兩件套（含其檢索詞與鉤子）已整體刪除。 -->

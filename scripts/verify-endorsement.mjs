@@ -709,9 +709,10 @@ const hasSimplified = (text) => {
  * （防止该行日后被改写后，白名单反过来掩蔽真回归）。
  * ------------------------------------------------------------------------- */
 const SIMPLIFIED_ALLOWED = [
-  /* 行号随 `ops.js` 的「Phase 3 两件式」改造漂移（原 821 → 现 937）：条目仍按
+  /* 行号随 `ops.js` 的「Phase 3 两件式」改造漂移（原 821 → 937），又随人物常量块（`tmp-` 前缀 /
+     CARD 九位号形态，insertions 后）再漂到 944：条目仍按
      **文件 ＋ 行 ＋ 字符 ＋ 行内容** 四元组精确剔除，`D2a` 逐条回读自证（行号过期 ⇒ 必红）。 */
-  { file: 'cloudfunctions/xiai-user-token/lib/ops.js', line: 937, char: '巨',
+  { file: 'cloudfunctions/xiai-user-token/lib/ops.js', line: 944, char: '巨',
     mustContain: '陳巨來印風',
     why: '人名用字（陳巨來），繁體合法；詞組表把「巨万→鉅萬」誤歸簡體側，屬檢測器噪聲' }
 ]

@@ -2542,6 +2542,17 @@ export function personExistsById(personId) {
 export function personReferenceDenial(personId) {
   const id = personId === null || personId === undefined ? '' : String(personId).trim()
   if (!id) return null
+  /* **临时 id 不可引用**（本单硬口径）：`tmp-` 前缀是前端本机镜像的暂存行编号、不是正式
+     印人号（通常也不在库中）⇒ 一律结构化拒绝，别再让它进任何引用字段。 */
+  if (id.indexOf('tmp-') === 0) {
+    return {
+      ok: false,
+      reason: 'NOT_FOUND',
+      message:
+        `作者所引用的印人（${id}）是本地暫存標識（非正式印人編號）⇒ 已拒絕寫入；` +
+        '請改選既有印人（雲端名錄中的「PR ＋ 9 位」或九位 CARD 編號）。'
+    }
+  }
   if (personExistsById(id)) return null
   return {
     ok: false,
@@ -2573,7 +2584,15 @@ export function resolveAuthorName(row) {
   return hasText(legacy) ? String(legacy) : '佚名'
 }
 
-/** 由既有印人行派生**下一个印人编号**：`PR` ＋ 9 位零填充（跳过已占用；只认 `^PR\d{9}$`）。 */
+/**
+ * 由既有印人行派生**下一个印人编号**：`PR` ＋ 9 位零填充（跳过已占用；只认 `^PR\d{9}$`）。
+ *
+ * ⚠️ **不得用于发放正式号**（本单硬口径）：前端曾用它在提案 / 导入采纳的本机镜像路径**自己
+ * 发正式 `PR` 号**，造出「本地有行、云端没有」的幻影印人 ⇒ 上传印章时被选中 ⇒ 服务端作者
+ * 引用门拒（`author_person_id：PR000000571`）。正式号只由服务端发放；前端暂存行一律
+ * `services/persons.js::nextTempPersonId`（`tmp-` 前缀，不可引用）。**本仓现无调用点**，
+ * 保留仅为形态单点 / 调试与预览用途 —— 新增调用点前先问「这是不是又在前端发正式号」。
+ */
 export function nextPersonCode(rows) {
   const list = Array.isArray(rows) ? rows : []
   let max = 0

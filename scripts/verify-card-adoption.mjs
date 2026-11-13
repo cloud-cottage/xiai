@@ -29,6 +29,15 @@
  *   A15 **修复通道（`repairImportAcceptance`）印人孤儿**：CARD 成功 ⇒ 正式行 `card_id` 来自 CARD 回包；
  *   A16 修复通道：CARD 失败 ⇒ `UPSTREAM_ERROR` ＋ 零本地写入（不造「CARD 无此人、xiai 有」孤儿）；
  *       `dry_run` ⇒ **零 CARD 调用**（预演零副作用）。
+ *   B1–B6 **`createSealUpload` 作者引用门（三支解析序）**：
+ *   B1 `PR` ＋ 9 位命中本地印人 ⇒ 直接通过（零 CARD 调用、零印人写步、面行逐字沿用原引用）；
+ *   B2 九位 CARD 号（本地无指针）⇒ 调 `getPerson` 验证后**自动建 1 行指针**（只 KEEP 键、
+ *      `source='card-ref'`、`card_id` ＝ 九位、新号 PR000000006）＋ FACE 行改指新 id；
+ *   B3 同请求两面引用同一人 ⇒ **只建 1 行**（幂等；`getPerson` 也只 1 次）；
+ *   B4 九位号 CARD 亦 `NOT_FOUND` ⇒ `INVALID_VALUE` ＋**引导式文案**（去【印家匯徵】建人 /
+ *      从名錄选既有）＋ 零写入；
+ *   B5 CARD 超时 / 不可用 ⇒ `UPSTREAM_ERROR` ＋ 零写入（**不盲建指针行**、不消耗号源）；
+ *   B6 本地已有该 `card_id` 指针行 ⇒ 复用其 `id`（零新增行、零 CARD 调用）。
  *
  * 用法：`node scripts/verify-card-adoption.mjs`（任一断言失败 ⇒ 退出码非 0）
  */
@@ -748,6 +757,181 @@ const PERSON_ATTR_KEYS = ['family_name', 'given_name', 'courtesy_names', 'art_na
   check('A19b', '重放：零新增印人 `set` ＋ `xiai_persons` 仍恰 1 行（幂等键去重）', { personWrites: 0, rows: 1 },
     { personWrites: personWritesOnReplay, rows: personsRows.length })
   check('A19c', '重放：CARD `upsertPerson` 不再发生（首轮 1 次 ⇒ 重放后仍 1 次）', upsertsAfterFirst, card.state.upserts)
+}
+
+/* ---------------------------------------------------------------------------
+   B 段（本单）：`createSealUpload` 作者引用门 —— 三支解析序（PR 命中 / CARD 九位号建指针行 /
+   都不命中引导式拒绝）＋ 幂等 ＋ CARD 不可用 fail-closed。
+   --------------------------------------------------------------------------- */
+const { createHash } = require('node:crypto')
+const PERSON_KEEP_11_KEYS = ['_id', 'id', 'code', 'card_id', 'source', 'source_id', 'source_person_id', 'proposal_id', 'created_at', 'updated_at', 'created_by']
+
+/** 上传通道单面（形态门要求：64 位小写 hex 摘要 ＋ 键内摘要 ≡ `image_sha256`）。 */
+function uploadFace(tag, authorPersonId) {
+  const sha = createHash('sha256').update(String(tag)).digest('hex')
+  return {
+    kind: 'FACE',
+    seal_name: '上傳印',
+    dynasty: '清中期',
+    seal_type: '私印',
+    author: '趙之謙',
+    author_person_id: authorPersonId,
+    image_sha256: sha,
+    image_bytes: 2048,
+    image_storage_key: `xiai/images/${sha.slice(0, 2)}/${sha}.tiff`
+  }
+}
+/** 上传通道载荷（印章级键面 ＝ 导入行 8 键 ＋ `faces[]` ＋ `client_request_id`）。 */
+function uploadPayload(requestId, faces) {
+  return {
+    seal_name: '上傳印',
+    dynasty: '清中期',
+    seal_type: '私印',
+    seal_style: '浙派',
+    material: '石',
+    shape: '方形',
+    author: '趙之謙',
+    transcription: '上傳釋文甲',
+    client_request_id: requestId,
+    faces
+  }
+}
+const uploadRun = (payload) => ops.ADMIN_OPS.createSealUpload(payload, ADMIN_IDENT, ADMIN_CTX)
+const personWriteOf = (res) => ((res.plan && res.plan.writes) || []).filter((w) => w.collection === 'xiai_persons')
+const faceWritesOf = (res) => ((res.plan && res.plan.writes) || []).filter((w) => w.collection === 'xiai_faces')
+
+/* B1：`PR` ＋ 9 位命中既有印人 ⇒ 直接通过（零 CARD 调用、零印人写步、面行沿用原引用）。 */
+{
+  const card = makeFakeCard()
+  const journal = { collections: [], writes: 0 }
+  const seed = {
+    xiai_persons: [{ _id: 'PR000000310', id: 'PR000000310', code: 'PR000000310', card_id: '100000531', source: 'seed' }],
+    xiai_server_secrets: [secretRow]
+  }
+  ops.setOpsDbProvider(makeFakeDb(seed, journal))
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  const res = await uploadRun(uploadPayload('req-b1', [uploadFace('b1-face', 'PR000000310')]))
+  check('B1', '`PR` ＋ 9 位命中本地印人 ⇒ ok:true（引用门第一支，现状不变）', { ok: true, idempotent: false },
+    { ok: res.ok === true, idempotent: res.idempotent })
+  check('B1b', '第一支：零印人 `set` 写步（不建指针行）＋ 面行 `author_person_id` 逐字沿用 PR000000310', { personWrites: 0, faceAuthor: 'PR000000310' },
+    { personWrites: personWriteOf(res).length, faceAuthor: (faceWritesOf(res)[0] || {}).doc.author_person_id })
+  check('B1c', '第一支：**零 CARD 调用**（本地命中即不再打 CARD）', 0, card.state.calls.length)
+}
+
+/* B2：九位 CARD 号存在、本地无指针行 ⇒ 自动建 1 行指针（只 KEEP 键、`source=card-ref`、
+   `card_id` 正确）且 FACE 带**新 id**；真 persist 后回读键集 ⊆ KEEP 11 键。 */
+{
+  const card = makeFakeCard({ persons: [{ person_id: '100000531', name: '趙之謙', family_name: '趙', given_name: '之謙', version: 3 }] })
+  const journal = { collections: [], writes: 0 }
+  const seed = {
+    xiai_persons: [{ _id: 'PR000000005', id: 'PR000000005', code: 'PR000000005', card_id: '100000999', source: 'seed' }],
+    xiai_server_secrets: [secretRow]
+  }
+  const db = makeFakeDb(seed, journal)
+  ops.setOpsDbProvider(db)
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  const res = await uploadRun(uploadPayload('req-b2', [uploadFace('b2-face', '100000531')]))
+  const personWrites = personWriteOf(res)
+  const pointer = (personWrites[0] || {}).doc || {}
+  check('B2', '九位 CARD 号（本地无指针）⇒ ok:true ＋ **恰 1 条印人 `set`**（自动建指针行）', { ok: true, personWrites: 1 },
+    { ok: res.ok === true, personWrites: personWrites.length })
+  check('B2b', '指针行身份面：`id` ＝ `code` ＝ 新发号（PR000000006）、`card_id` ＝ 九位号、`source` ＝ card-ref',
+    { id: 'PR000000006', code: 'PR000000006', card_id: '100000531', source: 'card-ref' },
+    { id: pointer.id, code: pointer.code, card_id: pointer.card_id, source: pointer.source })
+  check('B2c', '指针行**只写 KEEP 键**（零属性键：family_name / given_name / name … 一个都不落本地）',
+    { extra: [] },
+    { extra: Object.keys(pointer).filter((key) => ['id', 'code', 'card_id', 'source', 'source_id', 'source_person_id', 'proposal_id', 'created_by', 'created_at', 'updated_at'].indexOf(key) === -1) })
+  check('B2d', 'FACE 行 `author_person_id` 改指**新指针行 id**（不是九位号本身）', 'PR000000006',
+    (faceWritesOf(res)[0] || {}).doc.author_person_id)
+  check('B2e', 'CARD 恰好被验证一次（`getPerson` 100000531）', ['getPerson'],
+    card.state.calls.map((call) => call.op))
+  await ops.persist(res.plan)
+  const personsBack = (await db().collection('xiai_persons').get()).data
+  const created = personsBack.find((row) => row.card_id === '100000531') || {}
+  check('B2f', '真 persist 后回读：库中多 1 行（2 行）、该行键集 ⊆ KEEP 11 键',
+    { rows: 2, extra: [] },
+    { rows: personsBack.length, extra: Object.keys(created).filter((key) => PERSON_KEEP_11_KEYS.indexOf(key) === -1) })
+}
+
+/* B3：同请求内两面引用同一人 ⇒ **幂等**：只建 1 行、零重复 CARD 验证、两面同指新 id。 */
+{
+  const card = makeFakeCard({ persons: [{ person_id: '100000531', name: '趙之謙', version: 2 }] })
+  const journal = { collections: [], writes: 0 }
+  ops.setOpsDbProvider(makeFakeDb({ xiai_persons: [], xiai_server_secrets: [secretRow] }, journal))
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  const res = await uploadRun(uploadPayload('req-b3', [uploadFace('b3-face-1', '100000531'), uploadFace('b3-face-2', '100000531')]))
+  const faces = faceWritesOf(res).map((w) => w.doc)
+  check('B3', '两面同引一人 ⇒ 恰 1 条印人 `set`（本请求内按 `card_id` 去重）', { personWrites: 1, faces: 2 },
+    { personWrites: personWriteOf(res).length, faces: faces.length })
+  check('B3b', '两面 `author_person_id` **同为**那一个新 id；且 CARD `getPerson` 只发生 1 次（不重复验证）',
+    { sameId: true, newId: 'PR000000001', getPerson: 1 },
+    { sameId: faces.length === 2 && faces[0].author_person_id === faces[1].author_person_id, newId: (faces[0] || {}).author_person_id, getPerson: card.state.calls.filter((c) => c.op === 'getPerson').length })
+}
+
+/* B4：九位号在 CARD 也不存在 ⇒ 拒绝（引导文案）＋ 零写入（不建指针行）。 */
+{
+  const card = makeFakeCard({ persons: [] })
+  const journal = { collections: [], writes: 0 }
+  const db = makeFakeDb({ xiai_persons: [], xiai_server_secrets: [secretRow] }, journal)
+  ops.setOpsDbProvider(db)
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  const res = await uploadRun(uploadPayload('req-b4', [uploadFace('b4-face', '100000777')]))
+  check('B4', '九位号 CARD 回 `NOT_FOUND` ⇒ `{ok:false, reason:INVALID_VALUE}` ＋ 无 `plan`（恰 3 键）',
+    { ok: false, reason: 'INVALID_VALUE', plan: undefined, keys: 3 },
+    { ok: res.ok, reason: res.reason, plan: res.plan, keys: Object.keys(res).length })
+  check('B4b', '引导式文案：先建印人 / 从名錄选既有 ＋ 零寫入承诺（并点名 CARD 无此号）',
+    { guidance: true, zeroWrite: true, namesId: true },
+    {
+      guidance: /請先在【印家匯徵】建立該印人/.test(res.message || '') && /從名錄中選擇既有印人/.test(res.message || ''),
+      zeroWrite: /本次零寫入/.test(res.message || ''),
+      namesId: (res.message || '').indexOf('100000777') !== -1
+    })
+  const personsAfter = (await db().collection('xiai_persons').get()).data
+  check('B4c', '**零写入**：假 DB 写计数 0、`xiai_persons` 仍 0 行（未盲建指针行）', { writes: 0, persons: 0 },
+    { writes: journal.writes, persons: personsAfter.length })
+}
+
+/* B5：CARD 不可用（超时 / 网络拒绝）⇒ `UPSTREAM_ERROR` 零写入，**不得盲建指针行**。 */
+{
+  const journal = { collections: [], writes: 0 }
+  const db = makeFakeDb({ xiai_persons: [], xiai_server_secrets: [secretRow] }, journal)
+  ops.setOpsDbProvider(db)
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(async () => {
+    throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+  })
+  const res = await uploadRun(uploadPayload('req-b5', [uploadFace('b5-face', '100000531')]))
+  check('B5', 'CARD 超时 / 不可用 ⇒ `{ok:false, reason:UPSTREAM_ERROR}` ＋ 无 `plan`',
+    { ok: false, reason: 'UPSTREAM_ERROR', plan: undefined },
+    { ok: res.ok, reason: res.reason, plan: res.plan })
+  check('B5b', '文案如实（含 CARD 不可用 ＋ 承诺未建指针行 ＋ 诊断码 `UPSTREAM_ERROR`）',
+    { text: true, diagnosis: true },
+    { text: /印人主庫（CARD）不可用/.test(res.message || '') && /未建立印人指針/.test(res.message || ''), diagnosis: /UPSTREAM_ERROR/.test(res.message || '') })
+  check('B5c', '**零写入**：假 DB 写计数 0（无指针行、无印章 / 面 / 影像行）；也未消耗号源',
+    { writes: 0, counterReads: 0 },
+    { writes: journal.writes, counterReads: journal.collections.filter((name) => name === 'xiai_counters').length })
+}
+
+/* B6：本地已有该 CARD 人的指针行（`card_id` 命中）⇒ 复用其 `id`（零新增行、零 CARD 调用）。 */
+{
+  const card = makeFakeCard()
+  const journal = { collections: [], writes: 0 }
+  const db = makeFakeDb({
+    xiai_persons: [{ _id: 'PR000000310', id: 'PR000000310', code: 'PR000000310', card_id: '100000531', source: 'card-ref' }],
+    xiai_server_secrets: [secretRow]
+  }, journal)
+  ops.setOpsDbProvider(db)
+  cardApi.resetCardSourceIndex()
+  cardApi.setCardTransport(card.transport)
+  const res = await uploadRun(uploadPayload('req-b6', [uploadFace('b6-face', '100000531')]))
+  check('B6', '本地已有 `card_id` 指针行 ⇒ 复用其 `id`（PR000000310），**零印人写步**',
+    { ok: true, personWrites: 0, faceAuthor: 'PR000000310' },
+    { ok: res.ok, personWrites: personWriteOf(res).length, faceAuthor: (faceWritesOf(res)[0] || {}).doc.author_person_id })
+  check('B6b', '跨请求幂等：**零 CARD 调用**（本地镜像即命中，不重复验证）', 0, card.state.calls.length)
 }
 
 /* ---------------------------------------------------------------------------

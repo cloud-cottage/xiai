@@ -16,7 +16,9 @@
  *     `ALREADY_REVIEWED`）。
  *   · **显示名（单点）**：`display_name` **派生不落盘** —— 只读面用数据层单点
  *     `db.personDisplayName` / `db.resolveAuthorName`，**本服务不另立第二套名表**。
- *   · **编号**：`PR` ＋ 9 位零填充（真源 `seed.js::formatPersonCode` / `db.nextPersonCode`）。
+ *   · **编号**：正式号 `PR` ＋ 9 位零填充，**发放权只属服务端**（`seed.js::formatPersonCode`
+ *     只定义形态、不定义发放者）。**前端不得再发正式号**（本单硬口径，见下方
+ *     「正式印人编号的发放权只属于服务端」一节）：本机镜像里的暂存行一律 `tmp-` 临时 id。
  *
  * **写面接线（本单）**：
  *   · 两个写 op（`submitPersonProposal` / `reviewPersonProposal`）**已经 `userWriteGate` 接到既有
@@ -36,7 +38,6 @@ import {
   savePersonProposalRows,
   personById,
   personDisplayName,
-  nextPersonCode,
   /* **批 2 前置（v1.54）**：外部批量导入行的读 / 写 ＋ 幂等键 ＋ 单写者门。 */
   listPersonImportRows,
   savePersonImportRows,
@@ -101,6 +102,105 @@ function normalizeProposalStatus(status) {
 function normalizeDecision(decision) {
   const text = String(decision === null || decision === undefined ? '' : decision).trim()
   return text === PERSON_PROPOSAL_STATUS.ACCEPTED || text === PERSON_PROPOSAL_STATUS.REJECTED ? text : ''
+}
+
+/* ============================================================================
+   **正式印人编号的发放权只属于服务端**（本单硬口径）
+   ----------------------------------------------------------------------------
+   真因（线上实據）：提案采纳 / 导入采纳的**本机镜像**路径曾用 `db.nextPersonCode()`
+   **在前端自己发正式号**（`PR` ＋ 9 位）。发出来的行只活在本地镜像里、云端 `xiai_persons`
+   根本没有这行 ⇒ 上传印章时选择器把它列出来、用户一选 ⇒ 载荷带一个**云端不存在**的
+   `author_person_id` ⇒ 服务端作者引用门拒（症状：「作者（印人）引用不存在（author_person_id：
+   PR000000571）」）。Phase 3 之后本地只剩指针行、不再有属性兜底 ⇒ 该问题必现。
+
+   现口径（两条，不得破）：
+     ① 前端**不再生产**正式 `PR` 号 —— 本地暂存行一律用 `tmp-` 前缀的**临时 id**；
+     ② **临时 id 不得进入任何引用字段**（`author_person_id` / `card_id` / `face.author` …）
+        —— 数据层 `db.personReferenceDenial` 对 `tmp-` 开头的引用**结构化拒绝**，选择器
+        （`referablePersons`）也不列出这类行。
+   正式号的两个来源：① 云端采纳（`reviewPersonProposal` / `reviewPersonImport` 服务端发号）；
+   ② 上传印章时提交**九位 CARD id**（服务端 `createSealUpload` 自动建指针行并发正式号）。
+   ============================================================================ */
+
+/** 本地暂存印人行 id 前缀（**临时 id，永不可引用**）。 */
+export const TEMP_PERSON_ID_PREFIX = 'tmp-'
+
+/** 正式印人编号形态（`PR` ＋ 9 位）。 */
+const FORMAL_PERSON_ID_PATTERN = /^PR\d{9}$/
+
+/** CARD 人物编号形态（九位数字；`card_persons.person_id`）。 */
+const CARD_PERSON_ID_PATTERN = /^\d{9}$/
+
+/**
+ * 下一个**本地暂存 id**（`tmp-` 前缀）：仅用于「本机镜像里先把行摆出来」的显示用途，
+ * **不是正式编号**、**不得进入任何引用字段**（见上注）。
+ * @param {Array<object>} rows 既有印人行（含已暂存行）
+ * @returns {string}
+ */
+function nextTempPersonId(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const taken = new Set(list.map((row) => String((row && row.id) || '')))
+  let index = 1
+  while (taken.has(`${TEMP_PERSON_ID_PREFIX}${String(index).padStart(6, '0')}`)) index += 1
+  return `${TEMP_PERSON_ID_PREFIX}${String(index).padStart(6, '0')}`
+}
+
+/**
+ * **可引用的印人行**（上传弹窗选择器唯一判据；本服务单点，视图不得再写第二份）。
+ *
+ * 可引用的三条件（**逐条必要**）：
+ *   ① `id` 非空且**不是** `tmp-*` 临时 id；
+ *   ② 有 `card_id`（CARD 已收錄）⇒ 服务端 `createSealUpload` 能按九位号核到人；或
+ *   ③ `id` 是 `PR` ＋ 9 位**且该行来自云快照**（行上带云文档键 `_id`）⇒ 云端 `xiai_persons`
+ *      确有这行；本地自造的号（旧 `nextPersonCode` 路径）**没有 `_id`** ⇒ 被滤掉。
+ * @param {object} row 本机印人行（thin / 合并后均可）
+ * @returns {boolean}
+ */
+export function isReferablePersonRow(row) {
+  const id = String((row && row.id) || (row && row.code) || '').trim()
+  if (!id) return false
+  if (id.indexOf(TEMP_PERSON_ID_PREFIX) === 0) return false
+  if (String((row && row.card_id) || '').trim()) return true
+  if (!FORMAL_PERSON_ID_PATTERN.test(id)) return false
+  /* 云快照行判据：CloudBase 文档恒带 `_id`，本地自造行不带。 */
+  return String((row && row._id) || '').trim() !== ''
+}
+
+/** 开发期提示只打一次（生产构建 `DEV === false` ⇒ 一行不打、零 UI）。 */
+let referableWarned = false
+
+/** 是否开发构建（`vite dev` / 测试进程里的 `import.meta.env` 可能缺位 ⇒ 全程可选链）。 */
+function isDevBuild() {
+  try {
+    return Boolean(import.meta && import.meta.env && import.meta.env.DEV === true)
+  } catch (error) {
+    return false
+  }
+}
+
+/**
+ * **可引用的印人候选**（上传印章 / 作者选择器读面）：`listPersons()` 的行集经
+ * `isReferablePersonRow` 收敛。被滤掉的行数 > 0 时**开发期 `console.warn` 一次**
+ * （生产不弹 UI、不打断流程）—— 那是「前端曾在本地造号」的残留证据，供排查取证。
+ * @returns {Array<object>}
+ */
+export function referablePersons() {
+  const rows = listPersons()
+  const kept = rows.filter((row) => isReferablePersonRow(row))
+  const dropped = rows.length - kept.length
+  if (dropped > 0 && !referableWarned && isDevBuild()) {
+    referableWarned = true
+    console.warn(
+      `[xiai:persons] 印人候選已收斂：${dropped} 行不可引用（無 card_id 且非雲快照行 / tmp- 臨時行）已過濾；` +
+        `可選 ${kept.length} 位。`
+    )
+  }
+  return kept
+}
+
+/** 该引用是否**九位 CARD 编号**（上传印章可直接引用；服务端自动建指针行）。 */
+export function isCardPersonId(value) {
+  return CARD_PERSON_ID_PATTERN.test(String(value === null || value === undefined ? '' : value).trim())
 }
 
 /**
@@ -450,7 +550,11 @@ function acceptPersonProposal(proposal, actor, at) {
     /* 修改既有：§8 待裁 W-f（字段级 vs 整行）⇒ 本期不改写既有行。 */
     return persons.find((row) => String((row && row.id) || '') === String(proposal.target_person_id)) || null
   }
-  const code = nextPersonCode(persons)
+  /* **本机镜像不发正式号（本单硬口径）**：正式 `PR` 号只由服务端发放（云端提案采纳 /
+     导入采纳 / 上传印章时的 CARD 指针行）。此处产出的只是**本地暂存行**（`tmp-` 前缀的
+     临时 id），只用于本机镜像里先把行摆出来；**临时 id 不得进入任何引用字段**
+     （引用型字段只接受云端存在的 `PR…` 或九位 CARD id）。 */
+  const code = nextTempPersonId(persons)
   const row = {
     id: code, // 行主键（与 `code` 同值；系统生成、只读）
     code,
@@ -662,7 +766,9 @@ function normalizeImportPayload(source) {
  * `created_by`）。此处带属性值属镜像形态，**不得**据此断言权威行也带属性。
  */
 function buildPersonRowFromImport(importRow, persons, actor, at) {
-  const code = nextPersonCode(persons)
+  /* 同 `acceptPersonProposal`：本机镜像**不发正式号**，只落 `tmp-` 临时 id 的暂存行
+     （正式 `PR` 号由服务端在采纳时发放；临时 id 不得进入任何引用字段）。 */
+  const code = nextTempPersonId(persons)
   return {
     id: code,
     code,

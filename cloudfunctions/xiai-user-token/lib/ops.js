@@ -815,6 +815,13 @@ const PERSON_PROPOSAL_ID_PREFIX = 'pp-'
 /** 印人编号前缀（与 `src/data/seed.js::PERSON_CODE_PREFIX` 逐字同值）。 */
 const PERSON_CODE_PREFIX = 'PR'
 
+/** **临时印人 id 前缀**（与 `src/services/persons.js::TEMP_PERSON_ID_PREFIX` 逐字同值）：
+ *  `tmp-*` 只是本机草稿行，**永不发号、永不可被引用**（服务端亦按此前缀排除）。 */
+const TEMP_PERSON_ID_PREFIX = 'tmp-'
+
+/** **CARD 印人号形态**（CARD `person_id` ＝ 9 位纯数字；作者引用门第二支认它）。 */
+const CARD_PERSON_ID_PATTERN = /^\d{9}$/
+
 /**
  * 明令不可由载荷提供的业务键（防御性登记 ⇒ 报告里可逐字列出；不在 `ALLOWED_KEYS` 里即已拒绝，
  * 本表用于**把「身份类键」与「普通未知键」在文案上分开**，便于排障与取证）。
@@ -1566,6 +1573,29 @@ async function readPersonRow(ref) {
   }
   if (rowsByDoc.length > 0) return rowsByDoc[0]
   return null
+}
+
+/**
+ * **指针行读点（只读）**：按 `card_id`（＝ CARD `person_id` 九位号）找本地指针行。
+ *
+ * 用途：作者引用门第二支（CARD 九位号引用）先查本地是否已有该人的指针行 ——
+ * 有 ⇒ 直接复用其 `id`（**不建第二行、不调 CARD**）；无 ⇒ 才走 CARD 验证 ＋ 建指针行。
+ * 同形修（与 `readPersonRow` 同族）：每次新建集合句柄再链 `where`，不存可变链。
+ * 读失败照旧上抛（不吞成「无此行」）。
+ * @param {string} cardId CARD `person_id`（九位）
+ * @returns {Promise<object|null>}
+ */
+async function readPersonRowByCardId(cardId) {
+  const id = text(cardId)
+  if (!id) return null
+  const db = resolveDb()
+  const rows = rowsOf(await db.collection(COLLECTIONS.persons).where({ card_id: id }).get())
+  /* 只认**可引用**的指针行：`tmp-*` 临时行不是正式印人（与前端 `persons.isReferablePersonRow` 同尺）。 */
+  const usable = rows.filter((row) => {
+    const rowId = text(row && row.id) || text(row && row.code)
+    return rowId !== '' && rowId.indexOf(TEMP_PERSON_ID_PREFIX) !== 0
+  })
+  return usable.length > 0 ? usable[0] : null
 }
 
 /**
@@ -4140,6 +4170,33 @@ function nextPersonCodeOf(persons) {
   let index = max + 1
   while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
   return `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
+}
+
+/**
+ * 由 **CARD `person_id`** 构造**本地指针行**（作者引用门第二支：CARD 命中 ⇒ 建指针行）。
+ *
+ * 硬口径：**只写 KEEP 键**（`id` / `code` / `card_id` / 溯源 / 时间戳；属性面留在 CARD，
+ * 一个都不落本地 —— 与三条采纳路径的「两件式」同尺）；`source='card-ref'` 标出该行的来历
+ * （由 CARD 九位号反查建出来的指针，不是导入 / 提案产出）。
+ * @param {string} cardId CARD `person_id`（九位）
+ * @param {string} code 本服务端发号（`PR` ＋ 9 位，`nextPersonCodeOf` 单点）
+ * @param {{uid:string}} identity 服务端派生身份（落 `created_by`）
+ * @param {string} at ISO 时戳
+ * @returns {object} 只含 KEEP 键的指针行
+ */
+function buildCardRefPersonDoc(cardId, code, identity, at) {
+  return {
+    id: code,
+    code,
+    card_id: text(cardId),
+    source: 'card-ref',
+    source_id: '',
+    source_person_id: '',
+    proposal_id: '',
+    created_by: text(identity && identity.uid),
+    created_at: at,
+    updated_at: at
+  }
 }
 
 /**
@@ -9100,8 +9157,16 @@ const ADMIN_OPS = Object.freeze({
    *   ⑥·新 **必填两门 ＋ 印人引用门（本单新增；只长在本 op 上）**：印章级 `seal_name`（印文）
    *      与**印面行上的** `author_person_id`（作者 · 印人引用）一律 `text()` **trim 后非空**；
    *      缺任一 ⇒ `MISSING_REQUIRED`（**文案逐项点名缺哪几项**）＋零写入；`author_person_id`
-   *      须命中既有印人（`readPersonRow` ＝ `xiai_persons` 按 `id` 命中的单点读）⇒ 未命中 ⇒
-   *      `INVALID_VALUE` ＋零写入（**引用门恒在任何写之前**）。
+   *      按**三支解析序**判定（**引用门恒在任何写之前**）：
+   *        a. `readPersonRow` 命中（`PR` ＋ 9 位；`code` / 文档 `_id` 兜底）⇒ 直接用；
+   *        b. **9 位纯数字（CARD `person_id`）** ⇒ 先按本地 `card_id` 找指针行（有 ⇒ 用其 `id`）；
+   *           无 ⇒ `cardApi.cardGetPerson` 验证：命中 ⇒ **新建指针行**（`nextPersonCodeOf` 发号、
+   *           `card_id` ＝ 该九位、`source='card-ref'`、只 KEEP 键）并改指面行 `author_person_id`；
+   *           CARD 回 `NOT_FOUND` ⇒ `INVALID_VALUE`；CARD 不可用 ⇒ `UPSTREAM_ERROR`
+   *           （**绝不盲建指针行** —— 否则长出「CARD 无此人、xiai 有」的孤儿）；
+   *        c. 两者都不命中 ⇒ `INVALID_VALUE` ＋**引导式文案**（去【印家匯徵】建人 / 从名錄选既有）。
+   *       **幂等**：同一人多面引用 ⇒ 本请求内只建 1 行（跨请求则命中本地 `card_id` 指针行）；
+   *       零写入时亦零新增行（判定全在任何写之前）。
    *      **边界**：`createSealWithFaceDirect` / `reviewSealImport` / 导入通道**不加**此门
    *      （那些路允许空作者 / 空印文）；
    *   ⑦ 影像引用：集合已有行 ⇒ 复用（**不改写既有行**）；无行 ⇒ 自建内容寻址登记行覆蓋層
@@ -9204,44 +9269,100 @@ const ADMIN_OPS = Object.freeze({
        · 印章级 `seal_name`（印文）与**印面行上的** `author_person_id`（作者 · 印人引用）
          一律 `text()`（＝ trim）后非空；
        · 缺任一 ⇒ `MISSING_REQUIRED`（**文案逐项点名缺哪几项**，可一次点全）；
-       · `author_person_id` 须指向**既有印人**（`xiai_persons` 命中）⇒ 不存在 ⇒ `INVALID_VALUE`；
+       · `author_person_id` 走**三支解析序**（`PR…` 命中 / CARD 九位号建指针行 / 都不命中 ⇒ 引导式拒绝）；
        · 两者**恒在任何写之前**（本函数此刻只产 `plan`，落盘唯一写点在 `index.js`）。
+       · `pointerWrites` 是本门唯一可能新增的写步（只在「九位号 ＋ CARD 命中 ＋ 本地无指针」时才非空）。
        **边界（本门不得外溢）**：`createSealWithFaceDirect` / `reviewSealImport` / 导入通道
        （`submitSealImport` → 采纳）**一律不加**这两道门 —— 那些路**允许**空作者 / 空印文
        （存量导入行口径）；本门只存在于本函数体内，导入侧键面与门序一字未改。 */
     const sealName = text(payload.seal_name)
     const missingRequired = []
     if (sealName === '') missingRequired.push('seal_name（印文）')
-    /* 逐面收集引用（去重后再查，避免同人重复读）。 */
-    const authorRefs = []
+    /* 逐面收集**必填缺失**（`author_person_id` trim 后为空；可一次点全 —— 去重 / 解析交给下面引用门）。 */
     for (let index = 0; index < faces.length; index += 1) {
       const ref = text(faces[index] && faces[index].author_person_id)
-      if (ref === '') {
-        missingRequired.push(`faces[${index}].author_person_id（作者 · 印人引用）`)
-        continue
-      }
-      if (authorRefs.indexOf(ref) === -1) authorRefs.push(ref)
+      if (ref === '') missingRequired.push(`faces[${index}].author_person_id（作者 · 印人引用）`)
     }
     if (missingRequired.length > 0) {
       return deny(REASONS.MISSING_REQUIRED, `新建印章缺少必要欄位：${missingRequired.join('、')}；本次零寫入。`)
     }
-    /* 引用门（**只读、任何写之前**）：逐个去重后的 `author_person_id` 必须命中既有印人行。
-       读点复用 `readPersonRow` 单点（`xiai_persons` 按 `id` 命中；`code` / 文档 `_id` 兜底）——
-       不另立第二套印人读法；真存储故障照旧上抛，不吞成「无此人」。 */
-    for (const ref of authorRefs) {
-      const person = await readPersonRow(ref)
-      if (!person) {
-        return deny(
-          REASONS.INVALID_VALUE,
-          `作者（印人）引用不存在（author_person_id：${ref}）⇒ 請先建立該印人再上傳印章；本次零寫入。`
-        )
-      }
-    }
-    /* ⑦ 影像引用：集合已有行 ⇒ 复用（不改写既有行）；无行 ⇒ 自建内容寻址登记行覆蓋層。 */
+    /* 引用门（**只读解析 ＋ 必要时建指针行；任一步仍在一切写之前**）——三支解析序：
+       a. **`readPersonRow` 命中**（`PR` ＋ 9 位最常见；`code` / 文档 `_id` 兜底）⇒ 直接用（现状不变）；
+       b. **9 位纯数字（CARD `person_id`）** ⇒ 先按本地 `card_id` 找指针行：
+            有 ⇒ 用它的 `id`（不建第二行、不调 CARD）；
+            无 ⇒ `cardApi.cardGetPerson(九位)` 验证：命中 ⇒ **新建指针行**
+              （`nextPersonCodeOf` 发号、`card_id` ＝ 九位、`source='card-ref'`、只 KEEP 键），
+              压进 `plan.writes`（`kind:'set'`），并把面行 `author_person_id` 改指新 `id`；
+              CARD 回 `NOT_FOUND` ⇒ 拒绝；CARD 不可用（`UPSTREAM_ERROR` / `CONFIG_MISSING` …）
+              ⇒ 拒绝，**绝不盲建指针行**（否则长出「CARD 无此人、xiai 有」的孤儿）；
+       c. 两者都不命中 ⇒ 拒绝（引导式：去【印家匯徵】建人 / 从名錄选既有）。
+       **幂等**：同一人多面引用 ⇒ 本请求内按解析结果去重，恒只建 1 行（同一 `card_id` 第二次
+       直接命中 `resolvedRefs`；跨请求则命中本地 `card_id` 指针行）。
+       真存储故障照旧上抛，不吞成「无此人」。 */
     const seconds = Number.isFinite(Number(context && context.nowSeconds))
       ? Math.floor(Number(context.nowSeconds))
       : Math.floor(Date.now() / 1000)
     const at = new Date(seconds * 1000).toISOString()
+    const resolvedRefs = new Map()
+    const pointerWrites = []
+    let personsForCode = null
+    for (let index = 0; index < faces.length; index += 1) {
+      const ref = text(faces[index] && faces[index].author_person_id)
+      if (ref === '') continue
+      if (resolvedRefs.has(ref)) {
+        faces[index].author_person_id = resolvedRefs.get(ref)
+        continue
+      }
+      /* a. 直接命中既有印人行（`PR…` / `code` / 文档 `_id`）⇒ 不解析第二支。 */
+      const direct = await readPersonRow(ref)
+      if (direct) {
+        const directId = text(direct.id) || text(direct.code) || ref
+        resolvedRefs.set(ref, directId)
+        faces[index].author_person_id = directId
+        continue
+      }
+      /* c 的形态前置：既非 `PR…` 也非 CARD 九位号 ⇒ 直接引导式拒绝（零读零写）。 */
+      if (!CARD_PERSON_ID_PATTERN.test(ref)) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `作者（印人）不在名錄中：請先在【印家匯徵】建立該印人，或從名錄中選擇既有印人；本次零寫入。（author_person_id：${ref}）`
+        )
+      }
+      /* b①：本地已有该 CARD 人的指针行 ⇒ 复用其 `id`（零新增行、零 CARD 调用）。 */
+      const pointer = await readPersonRowByCardId(ref)
+      if (pointer) {
+        const pointerId = text(pointer.id) || text(pointer.code) || text(pointer._id)
+        resolvedRefs.set(ref, pointerId)
+        faces[index].author_person_id = pointerId
+        continue
+      }
+      /* b②：本地无指针 ⇒ **必须由 CARD 验证该人存在**才建指针行（fail-closed，不盲建）。 */
+      const got = await cardApi.cardGetPerson(ref)
+      if (!got.ok) {
+        const code = text(got.code) || 'UPSTREAM_ERROR'
+        if (code === 'NOT_FOUND') {
+          return deny(
+            REASONS.INVALID_VALUE,
+            `作者（印人）不在名錄中：請先在【印家匯徵】建立該印人，或從名錄中選擇既有印人；本次零寫入。（印人主庫亦無此號：${ref}）`
+          )
+        }
+        return deny(
+          REASONS.UPSTREAM_ERROR,
+          `印人主庫（CARD）不可用，作者引用無法驗證，本次未新建印章亦未建立印人指針；本次零寫入。（診斷：${code}）`
+        )
+      }
+      if (personsForCode === null) {
+        personsForCode = rowsOfReply(await resolveDb().collection(COLLECTIONS.persons).get())
+      }
+      const newCode = nextPersonCodeOf(personsForCode)
+      const pointerDoc = buildCardRefPersonDoc(ref, newCode, identity, at)
+      /* 号源去重：把新行推进本请求的号源快照 ⇒ 同请求第二枚指针行继续 +1，不撞号。 */
+      personsForCode.push(pointerDoc)
+      pointerWrites.push({ kind: 'set', collection: COLLECTIONS.persons, id: newCode, doc: pointerDoc })
+      resolvedRefs.set(ref, newCode)
+      faces[index].author_person_id = newCode
+    }
+    /* ⑦ 影像引用：集合已有行 ⇒ 复用（不改写既有行）；无行 ⇒ 自建内容寻址登记行覆蓋層。 */
     const imageRows = []
     for (const face of faces) {
       const resolved = await findSealImportImageRow(face)
@@ -9290,10 +9411,13 @@ const ADMIN_OPS = Object.freeze({
       ...readouts,
       idempotent: false,
       row: { ...readouts, idempotent: false },
-      /* ⑩ 全部判定已通过 ⇒ 此刻才交落盘计划（任一门失败都到不了这里 ⇒ 恒零写入）。 */
+      /* ⑩ 全部判定已通过 ⇒ 此刻才交落盘计划（任一门失败都到不了这里 ⇒ 恒零写入）。
+         `pointerWrites` ＝ 作者引用门第二支新建的**印人指针行**（`source='card-ref'`、只 KEEP 键）；
+         无九位号引用 ⇒ 恒空数组 ⇒ 写步与改前逐一相同。 */
       plan: {
         op: 'createSealUpload',
         writes: [
+          ...pointerWrites,
           ...imageRows.map((row) => ({ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row })),
           {
             kind: 'add',
