@@ -14,14 +14,18 @@
  *           `picked`（点选 ⇒ **整行**；清除不发此事件）
  *
  * 结构：当前选中态（姓名 ＋ 字号 ＋ 清除）→ 弹层（搜索框 ＋ 列表 ＋ 右侧 A–Z 索引条）。
- *   - 搜索是**本地过滤**（姓名 / 字 / 號 / 別名 / cbdb_id 子串匹配）；
+ *   - 搜索是**本地过滤**（姓名 / 字 / 號 / 齋號 / 別字 / 別名 / cbdb_id 子串匹配）；
  *   - **搜索态 ＝ 扁平相关度列表**（搜索框非空时）：**无姓氏分组头、无 A–Z 索引条**，
  *     排序三档（同档保持入参顺序，稳定）＝ ① `joined` **整串恰等**置顶（「姓＋名」或
- *     「姓＋字 / 號 / 別名」完整相等）② 前缀命中 ③ 其余任意位置子串命中
+ *     「姓＋字 / 號 / 齋號 / 別名」完整相等）② 前缀命中 ③ 其余任意位置子串命中
  *     ⇒ 搜「趙之謙」/「赵之谦」**首项即本人**（`陸開鈞` 的字「畫均似趙之謙」落第三档）；
  *     **清空搜索 ⇒ 原姓氏分组 ＋ 索引条一字不改地回归**；
- *     **跨字段拼接形态**：预计算里额外收「姓＋名」「姓＋字 / 號 / 別名（逐值）」直接相接串
+ *     **跨字段拼接形态**：预计算里额外收「姓＋名」「姓＋字 / 號 / 齋號 / 別名（逐值）」直接相接串
  *     ⇒ 整打全名（`趙之謙`，姓与名分属两字段）也能命中；单字段形态全部保留（命中面只增不减）；
+ *     **迁移后新字段同入索引**：`courtesy_name` / `art_name` / `zhaihao`（单值）＋
+ *     `courtesy_alt_names[]` / `zhaihao_alts[]`（逐值）＋ `biehao_text`（按换行与全角 `／`
+ *     **双拆 token**，每个异写各自可搜；`#待核` 之类核校标记不入索引）；旧三数组
+ *     （`courtesy_names` / `art_names` / `alias_names`）**原文保留、并存兼容**；
  *     **简繁归一**：查询词与候选**两边同走**逐字 s2t 归一（`toTraditionalText` ＋ 小写）再比子串
  *     ⇒ 简体（赵）/ 繁体（趙）/ 混输两向互逆；ASCII（`PR0000`）不受归一影响、仍原样子串匹配；
  *     候选侧归一文本**一次性预计算**（`persons` 变更才重建），逐键只做子串匹配；
@@ -144,40 +148,81 @@ function normalizeSearchText(text) {
   return s2t(value).toLowerCase()
 }
 
-/** 检索面字段（原始文本；归一在预计算里做）。 */
-function searchPartsOf(row) {
-  return [
-    row && row.family_name,
-    row && row.given_name,
-    row && row.name_full,
-    ...(Array.isArray(row && row.courtesy_names) ? row.courtesy_names : []),
-    ...(Array.isArray(row && row.art_names) ? row.art_names : []),
-    ...(Array.isArray(row && row.alias_names) ? row.alias_names : []),
-    row && row.cbdb_id
-  ]
+/**
+ * 新口径**单值**字段（迁移后真源）：`courtesy_name`（字）/ `art_name`（號）/ `zhaihao`（齋號）。
+ * 旧三数组（`courtesy_names` / `art_names` / `alias_names`）**原文保留、并存兼容**——
+ * 迁移只写新字段不删旧值的地方，两边任一路径都能命中（命中面只增不减）。
+ */
+const SEARCH_SINGLE_FIELDS = ['courtesy_name', 'art_name', 'zhaihao']
+/** 新口径**多值**字段：`courtesy_alt_names[]`（別字）/ `zhaihao_alts[]`（別署齋號）。 */
+const SEARCH_ARRAY_FIELDS = ['courtesy_alt_names', 'zhaihao_alts']
+/** 旧三数组（兼容并存，见文件头注；不得删减 ⇒ 旧命中面逐字保留）。 */
+const LEGACY_ARRAY_FIELDS = ['courtesy_names', 'art_names', 'alias_names']
+/** 拼接入索引的逐值字段（新 ＋ 旧，一次拼好，避免逐行建数组）。 */
+const SEARCH_VALUE_ARRAY_FIELDS = [...SEARCH_ARRAY_FIELDS, ...LEGACY_ARRAY_FIELDS]
+
+/** 单值取文本（`null` / `undefined` ⇒ `''`；其余 `String().trim()`）。 */
+function textOf(value) {
+  return value === null || value === undefined ? '' : String(value).trim()
+}
+
+/** 数组取值（非数组 / 空 ⇒ `[]`；逐项 trim、空值丢弃）。 */
+function valuesOf(row, key) {
+  const list = row && Array.isArray(row[key]) ? row[key] : []
+  const out = []
+  for (const value of list) {
+    const text = textOf(value)
+    if (text) out.push(text)
+  }
+  return out
 }
 
 /**
- * **跨字段拼接形态**（原始文本；归一在预计算里做）：`姓＋名`（→「趙之謙」）、
- * `姓＋字 / 號 / 別名`（**逐值**各成一串）—— 整打全名时姓与名分属两字段、
- * 单字段子串永远匹配不上，故预计算里把它们**直接相接**（不插分隔符，
- * 免得分隔符挡住子串）。姓或该段为空 ⇒ 跳过该形态。
+ * `biehao_text`（別號長文）**双拆 token**：① 按换行 ② 按全角 `／`（异写并列，如
+ * `悲庵／悲盦` ⇒ 两个 token 各自可搜）。`#待核` 这类**核校标记不参与检索**
+ * （脏数据里 `行 #待核` 形态 ⇒ 取 `#` 之前的部分；整段只剩标记 ⇒ 丢弃）。
  */
-function searchJoinedOf(row) {
-  if (!row || typeof row !== 'object') return []
-  const family = row.family_name === null || row.family_name === undefined ? '' : String(row.family_name).trim()
-  if (!family) return []
-  const joined = []
-  const given = row.given_name === null || row.given_name === undefined ? '' : String(row.given_name).trim()
-  if (given) joined.push(family + given)
-  for (const key of ['courtesy_names', 'art_names', 'alias_names']) {
-    const list = Array.isArray(row[key]) ? row[key] : []
-    for (const value of list) {
-      const text = value === null || value === undefined ? '' : String(value).trim()
-      if (text) joined.push(family + text)
-    }
+function biehaoTokensOf(row) {
+  const text = textOf(row && row.biehao_text)
+  if (!text) return []
+  const out = []
+  for (const chunk of text.split(/[\r\n／]+/)) {
+    const token = chunk.split(/[#＃]/)[0].trim()
+    if (token) out.push(token)
   }
-  return joined
+  return out
+}
+
+function searchPartsOf(row) {
+  if (!row || typeof row !== 'object') return []
+  const parts = [row.family_name, row.given_name, row.name_full]
+  for (const key of SEARCH_SINGLE_FIELDS) parts.push(row[key])
+  for (const key of SEARCH_ARRAY_FIELDS) parts.push(...valuesOf(row, key))
+  for (const key of LEGACY_ARRAY_FIELDS) parts.push(...valuesOf(row, key))
+  parts.push(row.cbdb_id)
+  parts.push(...biehaoTokensOf(row))
+  return parts
+}
+
+/**
+ * **跨字段拼接形态的「值面」**（原始文本，**不含姓**）：`名` 与 字 / 號 / 齋號 / 別字 /
+ * 齋號別署 / 舊三數組逐值 / `biehao_text` token —— 整打全名时姓与名分属两字段，
+ * 单字段子串永远匹配不上，故预计算里把「姓」与该值**直接相接**（不插分隔符，
+ * 免得分隔符挡住子串）。姓为空 ⇒ 调用方不出这些形态。
+ * 新字段与旧三数组**都出**（旧命中面逐字保留），`biehao_text` 按 token 逐值。
+ */
+function searchJoinedSourcesOf(row) {
+  if (!row || typeof row !== 'object') return []
+  const out = []
+  const given = textOf(row.given_name)
+  if (given) out.push(given)
+  for (const key of SEARCH_SINGLE_FIELDS) {
+    const text = textOf(row[key])
+    if (text) out.push(text)
+  }
+  for (const key of SEARCH_VALUE_ARRAY_FIELDS) out.push(...valuesOf(row, key))
+  out.push(...biehaoTokensOf(row))
+  return out
 }
 
 /** 过滤关键字（trim ＋ 归一；空 ⇒ 全量）。 */
@@ -186,35 +231,53 @@ const keyword = computed(() => normalizeSearchText(String(query.value || '').tri
 /**
  * 候选侧归一索引（**一次性预计算**）：`persons` 变更才重建；570 行只在建一次，
  * 之后每次输入只对既有串做子串匹配（不逐键重跑 s2t）。行对象 →
- * `{ parts, joined }`：`parts` ＝ **全部**检索面归一串（单字段形态 ＋ 拼接形态，
- * 同人重复串只留一份）；`joined` ＝ 拼接形态归一串（供整串恰等时置顶排序）。
- * 空值先跳过、其余每条原始串各过一次 `normalizeSearchText()`（不重复归一）。
+ * `{ parts, joined, blob }`：`parts` ＝ **全部**检索面归一串（单字段形态 ＋ 拼接形态，
+ * 同人重复串只留一份）；`joined` ＝ 拼接形态归一串（供整串恰等时置顶排序）；
+ * `blob` ＝ `parts` 以换行相接的整体串（**逐键先做一次整串子串判定**，未中即跳过该行，
+ * 免得逐片白扫；换行不是查询词里会出现的字符 ⇒ 判定与逐片 `includes` **命中面等价**）。
+ *
+ * 去重与省算：① 先按**原始串**去重（迁移后新字段与旧数组大量同值 ⇒ 同值只归一一次）；
+ * ② 归一后**再按归一串**去重（简 / 繁异写归到同一形）；③ 拼接形态用
+ * 「归一的姓前缀 ＋ 归一的该值」**直接相接** —— `normalizeSearchText()` 是**逐字**
+ * 映射 ＋ 逐字小写 ⇒ 前缀归一后拼接 ≡ 整串归一（少跑一遍 s2t，口径不变）。
+ * 字段缺失 / 空串 / 空数组一律静默跳过。
  */
 const searchHaystacks = computed(() => {
   const rows = Array.isArray(props.persons) ? props.persons : []
   const map = new Map()
   for (const row of rows) {
-    const seen = new Set()
     const parts = []
+    const normByRaw = new Map()
+    const seenNorm = new Set()
     const push = (text) => {
-      if (text === null || text === undefined || text === '') return
-      const norm = normalizeSearchText(text)
-      if (!norm || seen.has(norm)) return
-      seen.add(norm)
+      const raw = textOf(text)
+      if (!raw || normByRaw.has(raw)) return
+      const norm = normalizeSearchText(raw)
+      normByRaw.set(raw, norm)
+      if (!norm || seenNorm.has(norm)) return
+      seenNorm.add(norm)
       parts.push(norm)
     }
     for (const text of searchPartsOf(row)) push(text)
     const joined = []
-    for (const text of searchJoinedOf(row)) {
-      const norm = normalizeSearchText(text)
-      if (!norm) continue
-      if (!joined.includes(norm)) joined.push(norm)
-      if (!seen.has(norm)) {
-        seen.add(norm)
-        parts.push(norm)
+    const familyRaw = textOf(row && row.family_name)
+    const familyNorm = familyRaw ? normByRaw.get(familyRaw) || '' : ''
+    if (familyNorm) {
+      const seenJoined = new Set()
+      for (const value of searchJoinedSourcesOf(row)) {
+        const norm = normByRaw.get(textOf(value))
+        if (!norm) continue
+        const joinedNorm = familyNorm + norm
+        if (seenJoined.has(joinedNorm)) continue
+        seenJoined.add(joinedNorm)
+        joined.push(joinedNorm)
+        if (!seenNorm.has(joinedNorm)) {
+          seenNorm.add(joinedNorm)
+          parts.push(joinedNorm)
+        }
       }
     }
-    map.set(row, { parts, joined })
+    map.set(row, { parts, joined, blob: parts.join('\n') })
   }
   return map
 })
@@ -243,6 +306,8 @@ const visibleRows = computed(() => {
   for (const row of rows) {
     const entry = haystacks.get(row)
     if (!entry || !Array.isArray(entry.parts)) continue
+    /* 整串预判：未中即该行无命中 ⇒ 不逐片扫（口径等价，见 `blob` 注）。 */
+    if (typeof entry.blob === 'string' && !entry.blob.includes(kw)) continue
     let hit = false
     let prefix = false
     for (const part of entry.parts) {
