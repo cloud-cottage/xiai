@@ -1261,18 +1261,36 @@ check('R11', '④ 异步失败（`status=failed`、无 `error_msg`）⇒ 502 `UP
 /* ===========================================================================
    F 段：交付面静态门
    =========================================================================== */
-section('F', '交付面：依赖落 dependencies / vercel.json functions / 路由导出 / 43 脚本')
+section('F', '交付面：依赖落 dependencies / vercel.json functions ＋ rewrites 四条 / 路由导出 / 44 脚本')
 
 const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 check('F1', '`@cloudbase/node-sdk` 已从 devDependencies 移入 dependencies（版本沿用 ^3.18.3）', { inDeps: '^3.18.3', notInDev: true }, { inDeps: (pkg.dependencies || {})['@cloudbase/node-sdk'], notInDev: !((pkg.devDependencies || {})['@cloudbase/node-sdk']) })
 
 const vercel = JSON.parse(readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'))
-check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDuration 60）且既有 framework / installCommand / buildCommand / outputDirectory / rewrites 一字未动', { maxDuration: 60, glob: 'api/ai/v1/images/*.js', oldGlobGone: true, installCommand: 'npm install', buildCommand: 'npm run build -- --outDir dist/xiai', outputDirectory: 'dist', rewriteCount: 3, framework: 'vite' }, { maxDuration: vercel.functions && vercel.functions['api/ai/v1/images/*.js'] && vercel.functions['api/ai/v1/images/*.js'].maxDuration, glob: Object.keys(vercel.functions || {})[0], oldGlobGone: !((vercel.functions || {})['api/ai/v1/*.js']), installCommand: vercel.installCommand, buildCommand: vercel.buildCommand, outputDirectory: vercel.outputDirectory, rewriteCount: Array.isArray(vercel.rewrites) ? vercel.rewrites.length : -1, framework: vercel.framework })
+/* F2：`functions` 段改口径面。**判据更正（本单）**：`rewrites` 不再是「一字未动」——
+   f233009 追加了第 3 条 `/xiai/:path* → /xiai/index.html`（修 `/xiai/seal/<code>` 等深层
+   直接访问的 404：Vercel 静态托管只命中真实文件，深链需回退到 SPA 入口），故落 4 条；
+   前两条（`/assets/:path*` 前缀重写、`/` 根）与兜底正则的**内容**未变，只是兜底从
+   第 3 条变为**最后一条（第 4 条）**。计数 3 → 4 是判据过期、非产品漂移；逐条形态另由 F2b 钉住。 */
+check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDuration 60）且既有 framework / installCommand / buildCommand / outputDirectory 未动；`rewrites` 现为 **4** 条（既有 3 条内容未变 ＋ f233009 新增第 3 条 `/xiai/:path*` 深链回退，详见 F2b）', { maxDuration: 60, glob: 'api/ai/v1/images/*.js', oldGlobGone: true, installCommand: 'npm install', buildCommand: 'npm run build -- --outDir dist/xiai', outputDirectory: 'dist', rewriteCount: 4, framework: 'vite' }, { maxDuration: vercel.functions && vercel.functions['api/ai/v1/images/*.js'] && vercel.functions['api/ai/v1/images/*.js'].maxDuration, glob: Object.keys(vercel.functions || {})[0], oldGlobGone: !((vercel.functions || {})['api/ai/v1/*.js']), installCommand: vercel.installCommand, buildCommand: vercel.buildCommand, outputDirectory: vercel.outputDirectory, rewriteCount: Array.isArray(vercel.rewrites) ? vercel.rewrites.length : -1, framework: vercel.framework })
+
+/* F2b：`rewrites` **四条的逐条形态**（顺序敏感）——把「只数条数」升级为「钉住每一条」，
+   这样以后再加/改/挪任何一条都会被点名，而不是只报一个数字不匹配。
+   ① `/assets/:path* → /xiai/assets/:path*`（构建产物在 `dist/xiai/`，前缀重写）
+   ② `/ → /xiai/index.html`（首页）
+   ③ `/xiai/:path* → /xiai/index.html`（**f233009 新增**：SPA 深链回退，修 `/xiai/seal/<code>` 之类
+      直接访问的 404；缺它时 Vercel 静态面只认真实文件，深链落空）
+   ④ `/((?!assets/|yinyuan/|xiai/|api/).*) → /xiai/index.html`（兜底，**必须是最后一条**：
+      rewrite 按序取首个命中，兜底一旦前移会吞掉 ①〜③ 与 `/api/*`、`/yinyuan/*`） */
+const f2bRw = Array.isArray(vercel.rewrites) ? vercel.rewrites : []
+const f2bRow = (i) => ({ source: (f2bRw[i] || {}).source || null, destination: (f2bRw[i] || {}).destination || null })
+check('F2b', '`vercel.json` `rewrites` 逐条形态（顺序敏感，4 条）：① assets 前缀重写 ② `/` 首页 ③ `/xiai/:path*` 深链回退〔f233009 新增，修 `/xiai/seal/<code>` 404〕④ 兜底正则且**居末位**（兜底前移会吞掉 ①〜③ 与 `/api/*` `/yinyuan/*`）', { count: 4, row1: { source: '/assets/:path*', destination: '/xiai/assets/:path*' }, row2: { source: '/', destination: '/xiai/index.html' }, row3: { source: '/xiai/:path*', destination: '/xiai/index.html' }, row4: { source: '/((?!assets/|yinyuan/|xiai/|api/).*)', destination: '/xiai/index.html' }, catchAllIsLast: true }, { count: f2bRw.length, row1: f2bRow(0), row2: f2bRow(1), row3: f2bRow(2), row4: f2bRow(3), catchAllIsLast: f2bRw.length === 4 && (f2bRw[3] || {}).source === '/((?!assets/|yinyuan/|xiai/|api/).*)' })
 
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
 const verifyScripts = readdirSync(path.join(ROOT, 'scripts')).filter((name) => /^verify-.*\.mjs$/.test(name))
-check('F4', '本套为第 43 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕＋ seal-view-count〔v1.110 新增：印章浏览量 view_count ＋ 首页热度排序〕＋ add-seal-face〔v1.111 新增：詳情頁新增印面 addSealFace〕＋ face-layer〔v1.112 新增：base face / side face / 整枚印章圖，AC-748〜753〕＋ modal-esc〔v1.114 新增：模态框 ESC＝取消 ＋ 印人提案入口三处落点，AC-763〜771〕；另 3 套既有套件未逐项登记，计数一律以 `scripts/` 实际目录为准）', { count: 43, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4', '本套为第 44 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕＋ seal-view-count〔v1.110 新增：印章浏览量 view_count ＋ 首页热度排序〕＋ add-seal-face〔v1.111 新增：詳情頁新增印面 addSealFace〕＋ face-layer〔v1.112 新增：base face / side face / 整枚印章圖，AC-748〜753〕＋ modal-esc〔v1.114 新增：模态框 ESC＝取消 ＋ 印人提案入口三处落点，AC-763〜771〕＋ transform-toggle〔v1.115 新增：提案表單簡繁圖標開關，AC-772〜779〕；另 3 套既有套件未逐项登记，计数一律以 `scripts/` 实际目录为准）', { count: 44, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4h', '新增套 `verify-transform-toggle.mjs` 亦在册（v1.115 提案表單簡繁圖標開關：13 框 1 : 1 / 开关双向可逆 / 空值禁用 / 在途无假进度 / 失败不静默 / 舊三鈕三處未改 / 鉤子二值 / admin 12 值；F4 计数随之 43 → 44，不漏登）', true, verifyScripts.indexOf('verify-transform-toggle.mjs') !== -1)
 check('F4g', '新增套 `verify-modal-esc.mjs` 亦在册（v1.114 模态框 ESC＝取消 ＋ 提案入口三处落点，AC-763〜771；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-modal-esc.mjs') !== -1)
 check('F4f', '新增套 `verify-face-layer.mjs` 亦在册（v1.112 seal/face 層口徑 base face / side face / 整枚印章圖；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-face-layer.mjs') !== -1)
 check('F4e', '新增套 `verify-add-seal-face.mjs` 亦在册（v1.111 詳情頁新增印面 `addSealFace`；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-add-seal-face.mjs') !== -1)
