@@ -15,8 +15,9 @@
  *   空值 ⇒ 圖示禁用（轉了也沒意義）。
  *
  * 鉤子（**新名**；不併入舊三鈕那組的取值集合，亦不改動其既有取值）：
- *   - `data-transform-toggle="s2t|t2s"`：本次**實際方向**（點按後即保持該次方向，直到下一次點按；
- *     尚未點按時為**下一次**將走的方向，由同一判據算出，恆為二值之一、不空置）。
+ *   - `data-transform-toggle="s2t|t2s"`：**下一次點按將走的方向**（每次渲染都由當前值現算，
+ *     與上面的開關判據同源；不記憶上一次方向 ⇒ 連點後屬性仍然預示下一次的真實行為）。
+ *     恆為二值之一、不空置；空值時按鈕 `disabled`（屬性仍居二值，不留空串）。
  *   - `data-transform-toggle-busy`：繁忙態標記 —— 轉換在途為 `"true"`，其餘**屬性缺省**（非繁忙）。
  *   - `data-transform-toggle-message`：一行提示（僅「未變更／失敗」時出現）。
  *   **嚴禁**新增管理員動作屬性（AC-45 的取值集合不變）。
@@ -41,8 +42,6 @@ const FAILED_MESSAGE = '轉換未完成，內容保持不變；請檢查網絡�
 const NO_CHANGE_MESSAGE = '此欄內容無可轉換的字，保持原樣。'
 
 const busy = ref(false)
-/** 本次點按的**實際方向**（`''` ⇒ 尚未點按）。 */
-const lastDir = ref('')
 const message = ref('')
 const failed = ref(false)
 
@@ -51,12 +50,21 @@ const value = computed(() =>
 )
 /** 空值判據：**含僅空白 / 僅全角空格**（`trim()` 一併去 U+3000）—— 三態切換（空／非空／復空）都按此現算。 */
 const hasValue = computed(() => value.value.trim().length > 0)
+/**
+ * **開關判據（唯一一處）**：對**將被轉換的那個值**（`before`，即點按前的當前值）取逐字繁化 ——
+ * 原樣返回 ⇔ 已是繁體 ⇒ `t2s`，否則 `s2t`。
+ * 屬性渲染與點按執行**共用本函數** ⇒ 屬性永遠說出下一次點按的真實方向（不由「上一次方向」記憶推導）。
+ */
+function directionFor(before) {
+  const kind = toTraditionalText(before) === before ? 't2s' : 's2t'
+  return kind
+}
 /** **開關判據**：已是繁體 ⇔ 逐字繁化後原樣返回。 */
-const isTraditionalNow = computed(() => hasValue.value && toTraditionalText(value.value) === value.value)
-/** 下一次點按將走的方向（= 開關判據的結論）。 */
+const isTraditionalNow = computed(() => hasValue.value && directionFor(value.value) === 't2s')
+/** 下一次點按將走的方向（= 開關判據的結論；**屬性渲染的唯一來源**）。 */
 const pendingDir = computed(() => (isTraditionalNow.value ? 't2s' : 's2t'))
-/** 鉤子值：點過 ⇒ 本次實際方向；未點 ⇒ 下一次方向（恆為 `s2t|t2s`）。 */
-const direction = computed(() => lastDir.value || pendingDir.value)
+/** 鉤子值：**下一次點按將走的方向**（恆由當前值現算 ⇒ 連點後仍預示下一次的真實行為）。 */
+const direction = computed(() => pendingDir.value)
 
 const label = computed(() => props.fieldLabel || '本欄')
 const hint = computed(() => {
@@ -74,8 +82,7 @@ const hint = computed(() => {
 async function apply() {
   if (busy.value || !hasValue.value) return
   const before = value.value
-  const kind = toTraditionalText(before) === before ? 't2s' : 's2t'
-  lastDir.value = kind
+  const kind = directionFor(before)
   busy.value = true
   failed.value = false
   message.value = ''
@@ -98,7 +105,7 @@ async function apply() {
 }
 
 /** 供質檢探針讀取的穩定形狀（不參與轉換邏輯）。 */
-defineExpose({ busy, direction, lastDir, pendingDir, isTraditionalNow, hasValue, apply })
+defineExpose({ busy, direction, pendingDir, isTraditionalNow, hasValue, apply })
 </script>
 
 <template>
