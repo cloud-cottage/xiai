@@ -13,17 +13,20 @@
  * 硬口径（逐条沿用，不得放宽）：
  *   · 提交 ⇒ `persons.submitPersonProposal` ⇒ 落 `PENDING` ⇒ 管理员在 `/my/corrections`
  *     「待審印人提案」采纳 / 驳回；**不新增 op、不新增 reason 字面值、不改载荷键面**。
- *   · **四扩字段**（籍貫 / 傳記 / 來源 / 來源 id）照旧收：繁體錄入＝**软提示 ＋「一鍵轉繁」三动作钮**
- *     （`TextTransformButtons`）；**不强制、不拒收、不自动改写**（四字段全空亦可提交），
+ *   · **全部 13 个文本框都有一个简繁开关图标**（新建的开关图标组件，2026-11-14 選型）：
+ *     开关式 —— 一个图标反复点按即在简体／繁体之间来回切，**不含撤销**；
+ *     繁体录入仍是**软提示、不强制、不拒收、不自动改写**（全空亦可提交），
  *     提交值＝用户所见当前值，逐字（沿「不转用户输入」口径）。
  *   · 登录门在**入口处**（未登录点入口走登录引导，不静默失败）；本组件不再重复引导，
  *     服务层仍会独立拒一次（双保险）。
  *   · ESC ＝ 取消（单一实现 `useEscToClose`，见 `utils/useEscToClose.js`）；**提交中 ESC 不生效**。
  *   · 上屏文案一律繁體（`s2t(x) === x`）。
+ *   · 旧的三动作转换钮在本表单内**已全部替换**为开关图标；
+ *     该旧组件仍被 `UploadSealDialog` / `AddSealFaceDialog` / `SealFolderPicker` 使用，**本单不动**。
  */
 
 import { reactive, ref } from 'vue'
-import TextTransformButtons from './TextTransformButtons.vue'
+import TextTransformToggle from './TextTransformToggle.vue'
 import { persons } from '../services/index.js'
 import { useEscToClose } from '../utils/useEscToClose.js'
 
@@ -121,66 +124,102 @@ useEscToClose({ onCancel: close, isBusy: () => busy.value })
         庫中無此人時提交本提案；提交後為待審狀態，經管理員審覈通過即入印人名錄。
       </p>
 
+      <!-- 繁体录入口径：软提示（不强制、不拒收、不自动改写）；逐欄旁的开关图标由用户自行点按。 -->
+      <p class="proposal-box__trad-hint" data-person-proposal-trad-hint>
+        建議使用繁體字填寫（不強制，留空亦可提交；系統不自動轉換，可用各欄右側圖示切換簡繁）。
+      </p>
+
       <div class="field">
         <label for="pp-family">姓</label>
-        <input id="pp-family" v-model="form.familyName" type="text" data-person-proposal-family />
+        <div class="field__row">
+          <input id="pp-family" v-model="form.familyName" type="text" data-person-proposal-family />
+          <TextTransformToggle v-model="form.familyName" field-label="姓" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-given">名</label>
-        <input id="pp-given" v-model="form.givenName" type="text" data-person-proposal-given />
+        <div class="field__row">
+          <input id="pp-given" v-model="form.givenName" type="text" data-person-proposal-given />
+          <TextTransformToggle v-model="form.givenName" field-label="名" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-courtesy">字（多個以逗號分隔）</label>
-        <input id="pp-courtesy" v-model="form.courtesy" type="text" data-person-proposal-courtesy />
+        <div class="field__row">
+          <input id="pp-courtesy" v-model="form.courtesy" type="text" data-person-proposal-courtesy />
+          <TextTransformToggle v-model="form.courtesy" field-label="字" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-art">號（多個以逗號分隔）</label>
-        <input id="pp-art" v-model="form.art" type="text" data-person-proposal-art />
+        <div class="field__row">
+          <input id="pp-art" v-model="form.art" type="text" data-person-proposal-art />
+          <TextTransformToggle v-model="form.art" field-label="號" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-alias">別名（多個以逗號分隔）</label>
-        <input id="pp-alias" v-model="form.alias" type="text" data-person-proposal-alias />
+        <div class="field__row">
+          <input id="pp-alias" v-model="form.alias" type="text" data-person-proposal-alias />
+          <TextTransformToggle v-model="form.alias" field-label="別名" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-birth">生年（公元，可空）</label>
-        <input id="pp-birth" v-model="form.birthYear" type="text" data-person-proposal-birth />
+        <div class="field__row">
+          <input id="pp-birth" v-model="form.birthYear" type="text" data-person-proposal-birth />
+          <TextTransformToggle v-model="form.birthYear" field-label="生年" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-death">卒年（公元，可空）</label>
-        <input id="pp-death" v-model="form.deathYear" type="text" data-person-proposal-death />
+        <div class="field__row">
+          <input id="pp-death" v-model="form.deathYear" type="text" data-person-proposal-death />
+          <TextTransformToggle v-model="form.deathYear" field-label="卒年" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-cbdb">CBDB id（可空）</label>
-        <input id="pp-cbdb" v-model="form.cbdbId" type="text" data-person-proposal-cbdb />
+        <div class="field__row">
+          <input id="pp-cbdb" v-model="form.cbdbId" type="text" data-person-proposal-cbdb />
+          <TextTransformToggle v-model="form.cbdbId" field-label="CBDB id" />
+        </div>
       </div>
-      <!-- 四扩字段（籍貫 / 傳記 / 來源 / 來源 id）：繁體錄入 ＝ **變體 C** —— 軟提示 ＋
-           既有「一鍵轉繁」三動作鈕；不強制、不拒收、不自動改寫（不得攔截提交）。 -->
-      <p class="proposal-box__trad-hint" data-person-proposal-trad-hint>
-        建議使用繁體字填寫（不強制，留空亦可提交；系統不自動轉換）。
-      </p>
+      <!-- 四扩字段（籍貫 / 傳記 / 來源 / 來源 id）与其余各欄同一口径：逐字收、不强制。 -->
       <div class="field">
         <label for="pp-native-place">籍貫</label>
-        <input id="pp-native-place" v-model="form.nativePlace" type="text" data-person-proposal-native-place />
-        <TextTransformButtons v-model="form.nativePlace" field-key="person-proposal:native_place" field-label="籍貫" />
+        <div class="field__row">
+          <input id="pp-native-place" v-model="form.nativePlace" type="text" data-person-proposal-native-place />
+          <TextTransformToggle v-model="form.nativePlace" field-label="籍貫" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-biography">傳記</label>
-        <input id="pp-biography" v-model="form.biography" type="text" data-person-proposal-biography />
-        <TextTransformButtons v-model="form.biography" field-key="person-proposal:biography" field-label="傳記" />
+        <div class="field__row">
+          <input id="pp-biography" v-model="form.biography" type="text" data-person-proposal-biography />
+          <TextTransformToggle v-model="form.biography" field-label="傳記" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-source">來源</label>
-        <input id="pp-source" v-model="form.source" type="text" data-person-proposal-source />
-        <TextTransformButtons v-model="form.source" field-key="person-proposal:source" field-label="來源" />
+        <div class="field__row">
+          <input id="pp-source" v-model="form.source" type="text" data-person-proposal-source />
+          <TextTransformToggle v-model="form.source" field-label="來源" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-source-id">來源 id</label>
-        <input id="pp-source-id" v-model="form.sourceId" type="text" data-person-proposal-source-id />
-        <TextTransformButtons v-model="form.sourceId" field-key="person-proposal:source_id" field-label="來源 id" />
+        <div class="field__row">
+          <input id="pp-source-id" v-model="form.sourceId" type="text" data-person-proposal-source-id />
+          <TextTransformToggle v-model="form.sourceId" field-label="來源 id" />
+        </div>
       </div>
       <div class="field">
         <label for="pp-note">依據（選填）</label>
-        <input id="pp-note" v-model="form.note" type="text" data-person-proposal-note />
+        <div class="field__row">
+          <input id="pp-note" v-model="form.note" type="text" data-person-proposal-note />
+          <TextTransformToggle v-model="form.note" field-label="依據" />
+        </div>
       </div>
 
       <p v-if="feedback" class="proposal-box__feedback" data-person-proposal-feedback>{{ feedback }}</p>
@@ -259,5 +298,20 @@ useEscToClose({ onCancel: close, isBusy: () => busy.value })
   justify-content: flex-end;
   gap: var(--s-2);
   margin-top: var(--s-4);
+}
+
+/* 输入框 ＋ 开关图标**同一行**：`flex-wrap` 让图标的提示行（`flex-basis: 100%`）
+   落到下一行，窄屏（375px）下输入框仍可缩到 0、不把行撑出弹窗。 */
+.field__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.field__row > input {
+  flex: 1 1 160px;
+  min-width: 0;
 }
 </style>
