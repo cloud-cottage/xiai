@@ -456,7 +456,7 @@ console.log(JSON.stringify({ section: 'E', title: '号域：seal_no 推到 5,153
    F 段：注册面 ＋ 回包纪律 ＋ env 只登记名字
    =========================================================================== */
 console.log(JSON.stringify({ section: 'F', title: '注册面 / 回包纪律 / reason 零新增' }))
-check('F1', '`ADMIN_OPS` 恰含 41 项（addSealFace ＋ 原 12 ＋ 直写两 op ＋ AI 上游两 op ＋ §3.68 ai-enhance-face ＋ ai-enhance-discard 管理员弃候选图＋ 勘误待审只读面 listPendingCorrectionsForAdmin〔2026-11-02 v1.84：管理员白名单门、跨用户 PENDING、零写入〕；来源说明：2026-10-31 弃候选图单新增 —— 管理员可【弃】不满意的 AI 修復候选图，零计费、零新集合）；2026-11-07 云模式印面圖替換增 replaceFaceImage（管理员原子入册影像行＋改面行指向，旧图与字节保留、零新 reason）；2026-11-08 异步两段式增 ai-enhance-list / ai-enhance-status / ai-enhance-submit（三 op 均落 `ADMIN_OPS`、字典序位在 `ai-enhance-face` 之后、`backfillAcceptedCorrections` 之前；提交即预扣、四态任务行、`status` / `list` 只读零写入、`reason` 零新增）；2026-11-09 云导入增 importFaceImages / importRelations（两 op 均落 `ADMIN_OPS`、字典序位在 `getAiUpstream` 之后、`issueFeicuiToken` 之前、零新 reason）；2026-11-10 影像行 storage 修复增 repairImageStorage（落 `ADMIN_OPS`、字典序位在 `registerFaceImage` 之后、`repairImportAcceptance` 之前、零新 reason）；2026-11-10 AI 修復提交段重排增 probeAiUpstream / repairOrphanEnhanceCharges（两 op 均落 `ADMIN_OPS`、字典序位分别在 `migrateSealValueDomains` 之后、`pullImportRows` 之前与 `repairImportAcceptance` 之后、`replaceFaceImage` 之前、函数、零新 reason）；2026-11-12 修复运维两 op 增 repairAuthorPersonId / repairPrimaryFace（字典序位分别在 `repairImageStorage` 之前与 `repairOrphanEnhanceCharges` 之后、`replaceFaceImage` 之前、函数、零新 reason）；2026-11-12 印面数修复单增 repairSealFaceCount（字典序位在 `repairPrimaryFace` 之后、`replaceFaceImage` 之前、函数、零新 reason）；2026-11-14 印章瀏覽量單增 repairSealViewCount（字典序位在 `repairSealFaceCount` 之後、`replaceFaceImage` 之前、函數、零新 reason）；2026-11-14 詳情頁新增印面單增 addSealFace（**字典序位在首位 —— 先於 `ai-enhance-discard`**、函數、薄委派 `lib/addSealFace.js`、零新 reason ⇒ 40 → 41）', sorted([
+check('F1', '`ADMIN_OPS` 恰含 44 项（2026-11-14 1B/2C/3B face 層三 op `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace` 带入 41 → 44，均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason；addSealFace ＋ 原 12 ＋ 直写两 op ＋ AI 上游两 op ＋ §3.68 ai-enhance-face ＋ ai-enhance-discard 管理员弃候选图＋ 勘误待审只读面 listPendingCorrectionsForAdmin〔2026-11-02 v1.84：管理员白名单门、跨用户 PENDING、零写入〕；来源说明：2026-10-31 弃候选图单新增 —— 管理员可【弃】不满意的 AI 修復候选图，零计费、零新集合）；2026-11-07 云模式印面圖替換增 replaceFaceImage（管理员原子入册影像行＋改面行指向，旧图与字节保留、零新 reason）；2026-11-08 异步两段式增 ai-enhance-list / ai-enhance-status / ai-enhance-submit（三 op 均落 `ADMIN_OPS`、字典序位在 `ai-enhance-face` 之后、`backfillAcceptedCorrections` 之前；提交即预扣、四态任务行、`status` / `list` 只读零写入、`reason` 零新增）；2026-11-09 云导入增 importFaceImages / importRelations（两 op 均落 `ADMIN_OPS`、字典序位在 `getAiUpstream` 之后、`issueFeicuiToken` 之前、零新 reason）；2026-11-10 影像行 storage 修复增 repairImageStorage（落 `ADMIN_OPS`、字典序位在 `registerFaceImage` 之后、`repairImportAcceptance` 之前、零新 reason）；2026-11-10 AI 修復提交段重排增 probeAiUpstream / repairOrphanEnhanceCharges（两 op 均落 `ADMIN_OPS`、字典序位分别在 `migrateSealValueDomains` 之后、`pullImportRows` 之前与 `repairImportAcceptance` 之后、`replaceFaceImage` 之前、函数、零新 reason）；2026-11-12 修复运维两 op 增 repairAuthorPersonId / repairPrimaryFace（字典序位分别在 `repairImageStorage` 之前与 `repairOrphanEnhanceCharges` 之后、`replaceFaceImage` 之前、函数、零新 reason）；2026-11-12 印面数修复单增 repairSealFaceCount（字典序位在 `repairPrimaryFace` 之后、`replaceFaceImage` 之前、函数、零新 reason）；2026-11-14 印章瀏覽量單增 repairSealViewCount（字典序位在 `repairSealFaceCount` 之後、`replaceFaceImage` 之前、函數、零新 reason）；2026-11-14 詳情頁新增印面單增 addSealFace（**字典序位在首位 —— 先於 `ai-enhance-discard`**、函數、薄委派 `lib/addSealFace.js`、零新 reason ⇒ 40 → 41）', sorted([
   'addSealFace',
   'ai-enhance-discard',
   'ai-enhance-face',
@@ -468,6 +468,7 @@ check('F1', '`ADMIN_OPS` 恰含 41 项（addSealFace ＋ 原 12 ＋ 直写两 op
   'createSealWithFaceDirect',
   'deleteFaceImage',
   'deleteSeal',
+  'deleteWholeSealImage',
   'getAiUpstream',
   'importFaceImages',
   'importRelations',
@@ -475,6 +476,7 @@ check('F1', '`ADMIN_OPS` 恰含 41 项（addSealFace ＋ 原 12 ＋ 直写两 op
   'listPendingCorrectionsForAdmin',
   'migrateCodeNumbers',
   'migrateDynastyValues',
+  'migrateEdgeFaces',
   'migrateSealValueDomains',
   'probeAiUpstream',
   'pullImportRows',
@@ -495,6 +497,7 @@ check('F1', '`ADMIN_OPS` 恰含 41 项（addSealFace ＋ 原 12 ＋ 直写两 op
   'reviewSealImport',
   'revokeCorrectionAcceptance',
   'setAiUpstream',
+  'setBaseFace',
   'setInviteReward',
   'updateFaceAttributes',
   'updateSealAttributes'

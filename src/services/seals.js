@@ -357,7 +357,7 @@ function markableValue(primary, sealRow, key) {
 
 /**
  * **整枚印章圖**（裁定件 §三｜單點）：`xiai_images` 中 `stamp_id` 指向本印章、且**未被任何面行**
- * 的 `face_image_id` / `edge_image_ids` 引用的影像行 —— 按影像編號升序（穩定）。
+ * 的 `face_image_id` / `edge_image_ids` 引用的影像行 —— 按影像行 `seq` **升序**（§3.89.4 ＋ AC-751）。
  * 頁面把它排在所有面塊**之後**（無面掛載的圖排最後，裁定件 §一.3）。
  *
  * @param {Array<object>} faces 本章印面（原始行 / 視圖模型皆可）
@@ -374,10 +374,27 @@ export function wholeSealImagesOf(faces, images) {
       if (id) referenced.add(String(id))
     })
   })
+  /* **排序口徑（§3.89.4 ＋ AC-751）**：按影像行 `seq` **升序**（不是 `id` 的字典序 —— 內容尋址
+     `img-<sha16>` 與 `seq` 無關，按 `id` 排會讓 seq 2 的圖落到 seq 9 之後）。
+     · `seq` 缺失 / 非整數 ⇒ **排到最後**（不丟行 —— 不丟圖是硬要求），組內以 `id` 升序；
+     · `seq` 相同 ⇒ 以 `id` 升序作穩定次級鍵（排序結果可重現，不依賴 V8 的穩定排序實作細節）。 */
+  const seqOf = (row) => {
+    const raw = row ? row.seq : undefined
+    if (raw === null || raw === undefined) return null
+    if (typeof raw === 'string' && raw.trim() === '') return null
+    const value = typeof raw === 'number' ? raw : Number(raw)
+    return Number.isInteger(value) ? value : null
+  }
   return (Array.isArray(images) ? images : [])
     .filter((row) => row && row.id && !referenced.has(String(row.id)))
     .slice()
     .sort((a, b) => {
+      const leftSeq = seqOf(a)
+      const rightSeq = seqOf(b)
+      if (leftSeq !== null && rightSeq !== null && leftSeq !== rightSeq) return leftSeq - rightSeq
+      /* 一方缺 `seq` ⇒ 缺者靠後（非對稱判，避免兩者都缺時誤排） */
+      if (leftSeq === null && rightSeq !== null) return 1
+      if (leftSeq !== null && rightSeq === null) return -1
       const left = String(a.id)
       const right = String(b.id)
       if (left === right) return 0
