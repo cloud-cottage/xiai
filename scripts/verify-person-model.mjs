@@ -580,6 +580,82 @@ const ADMIN_CTX = { adminPhone: '13800000000', nowSeconds: 1700000000 }
     injected.filter((k) => !localMirrorValues2.has(k) && !mappedCloudKeys2.has(k)))
 }
 
+/* ===========================================================================
+   PB 段（质检新增 · 018465b 回归）：**作者引用认九位 CARD 编号（`card_id`）**
+   ---------------------------------------------------------------------------
+   真缺陷：`personById` 原只比 `row.id` / `row.code`；而 2026-11 起印人主数据在 CARD
+   （九位 `person_id`），本地行形如 `{ id:'PR000000101', code:'PR000000101',
+   card_id:'100000073' }` ⇒ 九位号永远判「不存在」⇒ 作者值域门
+   （`personReferenceDenial` ／ corrections 的 `author.accepts`）**直接拒提**。
+   判据面：命中（九位号 ＋ PR 号）／不漏面（未知号、空值、`card_id:''` 不误中）／
+           门面（`personReferenceDenial`）／端到端（`submitCorrection` 真值域门）。
+   夹具：本机 `xiai:v1:persons` 覆写为两行 —— ① `card_id:''` 空串行（**故意排首位**：
+   若实现没做空值早退，`personById('')` 会先命中它 ⇒ PB5 必红）；② 九位号行。
+   **只加断言，不改任何既有断言、不改产品代码。**
+   ========================================================================== */
+{
+  const CARD_ROW = { id: 'PR000000101', code: 'PR000000101', card_id: '100000073', family_name: '吳', given_name: '頤人' }
+  const EMPTY_CARD_ROW = { id: 'PR000000102', code: 'PR000000102', card_id: '' }
+  storage.writeKey(storage.STORAGE_KEYS.persons, [EMPTY_CARD_ROW, CARD_ROW])
+
+  const proj = (row) => (row ? { id: row.id, code: row.code, card_id: row.card_id } : null)
+  const EXPECTED = proj(CARD_ROW)
+
+  /* a. 九位 CARD 编号必须命中（本缺陷的正向判据）。 */
+  check('PB1', '018465b 回归：行 {id/code:PR000000101, card_id:100000073} ⇒ `personById("100000073")` 命中且返回该行',
+    EXPECTED, proj(db.personById('100000073')))
+  check('PB1b', '018465b 回归：同上 ⇒ `personExistsById("100000073")` 为 true（作者域门判据）',
+    true, db.personExistsById('100000073'))
+
+  /* b. 旧行为不破：PR 号（id / code）仍命中。 */
+  check('PB2', '旧行为不破：同一行传 `PR000000101`（id/code）仍命中且返回同一行',
+    EXPECTED, proj(db.personById('PR000000101')))
+
+  /* c. 不漏面：库中确无的号必须 null。 */
+  check('PB3', '不漏面：`personById("100000999")` ⇒ null（库中无此 CARD 号）', null, db.personById('100000999'))
+  check('PB4', '不漏面：`personById("PR999999999")` ⇒ null（库中无此 PR 号）', null, db.personById('PR999999999'))
+
+  /* d. 空值不误中（且 `card_id:''` 行在库中 —— 否则本条是空转）。 */
+  const emptyCardRowPresent = (storage.readKey(storage.STORAGE_KEYS.persons) || []).some((row) => row && row.card_id === '')
+  check('PB5', '空值不误中：`personById("")` / (null) / (undefined) ⇒ 一律 null；`card_id:""` 行（排首位）不被它们误中',
+    { empty: null, nul: null, undef: null, emptyCardRowPresent: true },
+    { empty: db.personById(''), nul: db.personById(null), undef: db.personById(undefined), emptyCardRowPresent })
+  check('PB5b', '空值不误中：`personExistsById("")` / (null) / (undefined) ⇒ 一律 false',
+    { empty: false, nul: false, undef: false },
+    { empty: db.personExistsById(''), nul: db.personExistsById(null), undef: db.personExistsById(undefined) })
+
+  /* e. 作者引用值域门（`corrections.js` 作者域门的上游判据）。 */
+  const denyOf = (value) => {
+    const denial = db.personReferenceDenial(value)
+    return denial === null ? null : { ok: denial.ok, reason: denial.reason }
+  }
+  check('PB6', '门面：`personReferenceDenial("100000073")` ⇒ 放行（null）', null, denyOf('100000073'))
+  check('PB6b', '门面：`personReferenceDenial("PR000000101")` ⇒ 放行（旧口径不破）', null, denyOf('PR000000101'))
+  check('PB7', '门面：`personReferenceDenial("100000999")` ⇒ {ok:false, reason:"NOT_FOUND"}',
+    { ok: false, reason: 'NOT_FOUND' }, denyOf('100000999'))
+  check('PB7b', '门面：`tmp-` 前缀仍拒（既有口径：本地暂存号不可引用）',
+    { ok: false, reason: 'NOT_FOUND' }, denyOf('tmp-100000073'))
+  check('PB8', '门面：空引用合法（作者选填）⇒ `personReferenceDenial("")` / (null) ⇒ null',
+    { empty: null, nul: null }, { empty: denyOf(''), nul: denyOf(null) })
+
+  /* f. 端到端（真缺陷现场）：`submitCorrection` 的作者值域门必须放行九位号。 */
+  const correctionsPb = await import(path.join(ROOT, 'src/services/corrections.js'))
+  const sessionPb = await import(path.join(ROOT, 'src/data/session.js'))
+  sessionPb.setUser({ id: 'u-admin', uid: 'u-admin', role: 'admin' })
+  const { faceRow: facePb } = await seedSealAndFace({})
+  const DENY_TEXT = /在庫中沒有對應的印人/
+  const accepted = await correctionsPb.submitCorrection({ faceId: facePb.id, field: 'author', value: '100000073' })
+  check('PB9', '端到端（真缺陷现场）：作者填九位 CARD 号提交勘误 ⇒ 值域门放行、受理（ok:true；无「在庫中沒有…」拒文案）',
+    { ok: true, denied: false }, { ok: accepted.ok === true, denied: DENY_TEXT.test(String(accepted.message || '')) })
+  const missing = await correctionsPb.submitCorrection({ faceId: facePb.id, field: 'author', value: '100000999' })
+  check('PB10', '端到端负对照：作者填库中不存在的号 ⇒ INVALID_VALUE ＋「在庫中沒有對應的印人」（证明 PB9 可判负）',
+    { ok: false, reason: 'INVALID_VALUE', denied: true },
+    { ok: missing.ok, reason: missing.reason, denied: DENY_TEXT.test(String(missing.message || '')) })
+  const tmpRef = await correctionsPb.submitCorrection({ faceId: facePb.id, field: 'author', value: 'tmp-abc123' })
+  check('PB11', '端到端：`tmp-` 暂存号仍被作者值域门拒（既有口径不因本修法放宽）',
+    { ok: false, reason: 'INVALID_VALUE' }, { ok: tmpRef.ok, reason: tmpRef.reason })
+}
+
 /* ---------------------------------------------------------------------------
    4. 汇总
    --------------------------------------------------------------------------- */
