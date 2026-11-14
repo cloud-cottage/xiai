@@ -3,6 +3,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AddSealFaceDialog from '../components/AddSealFaceDialog.vue'
+import AttrDetailDialog from '../components/AttrDetailDialog.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
@@ -1405,10 +1406,6 @@ function markableRegistered(key) {
   return list.some((item) => item.key === key)
 }
 
-/** 每个印面各一份草稿（按印面 id 分桶；`''` ＝ 本次不提交该项）。 */
-const faceEntryDraft = reactive({})
-const faceEntryFeedback = reactive({})
-
 /* ============================================================================
    勘误反馈的**页面级上屏位**（本单）：弹窗路径提交成功后 `formOpen = false` 把弹窗一起关掉 ⇒
    反馈文案 `formFeedback` 随弹窗消失，页面上看不到任何「已提交…待審覈」。故把**同一份文案**
@@ -1431,7 +1428,7 @@ function publishCorrectionNotice(text, faceId) {
 
 /* 切换印章（路由 id 变）/ 重新加载印面（识别码、面集合或数据源状态变）⇒ 提示随之作废，
    不把上一枚印章 / 上一次加载的反馈带到新面。
-   **按值比较（拼成字符串）而非数组引用**：`submitFaceEntry` 提交成功后会 `dataVersion + 1`，
+   **按值比较（拼成字符串）而非数组引用**：勘误提交成功后会 `dataVersion + 1`，
    数组引用每次求值都不同 ⇒ 那样写会把刚写入的提示连带清掉（用户又看不到确认）。 */
 watch(
   () =>
@@ -1446,11 +1443,6 @@ watch(
     correctionNoticeFaceId.value = ''
   }
 )
-
-function faceEntryDraftOf(face) {
-  if (!faceEntryDraft[face.id]) faceEntryDraft[face.id] = { content: '', style: '' }
-  return faceEntryDraft[face.id]
-}
 
 /** 某印面上某可标记属性的**对外展示值**（优先取采纳勘误后的展示值，否则回落到印面原值）。 */
 function faceMarkableValue(face, key, raw) {
@@ -1472,58 +1464,6 @@ function correctionFeedbackOf(accepted, skipped, reward) {
   return `${success}另有 ${skipped} 條已有相同提交（無需重複提交），本次未新增。`
 }
 
-/**
- * 提交本印面的【印面内容】/【印面风格】勘误（只提交**有选择**的项）。
- * 成功后 `dataVersion + 1` ⇒ 「待审核」计数与本块读数**不刷新即反映**。
- */
-async function submitFaceEntry(face) {
-  const draft = faceEntryDraftOf(face)
-  const pairs = []
-  if (String(draft.content || '').trim()) {
-    pairs.push({ field: FACE_CONTENT_KEY, label: '印面內容', value: draft.content })
-  }
-  if (String(draft.style || '').trim()) {
-    pairs.push({ field: FACE_STYLE_KEY, label: '印面風格', value: draft.style })
-  }
-  if (!pairs.length) {
-    faceEntryFeedback[face.id] = '請先從「印面內容」或「印面風格」中至少選擇一項，再提交勘誤。'
-    publishCorrectionNotice(faceEntryFeedback[face.id], face.id)
-    return
-  }
-  const sealId = seal.value ? seal.value.stamp_id : face.sealId || ''
-  /* 一次表单提交 ＝ 一个提交单号（R-B2）：本批 N 条共享同一 `batchId`。 */
-  const batchId = corrections.newBatchId()
-  let accepted = 0
-  /* 冻结口径（2026-11-02）：重复字段按**跳过**处理（不新增行、不报错），不计入失败。 */
-  let skipped = 0
-  let firstError = ''
-  /* OBS-1：`submitCorrection` 已改 `async`（经云函数验签后落盘）⇒ 本处由逐项并发
-     改为**串行 `await`**（逐条独立成败，与改前语义一致：一条失败不影响其余）。 */
-  for (const { field, label, value } of pairs) {
-    const result = await corrections.submitCorrection({ faceId: face.id, sealId, field, value, batchId })
-    if (result.ok) accepted += 1
-    else if (result.reason === 'DUPLICATE_VALUE') skipped += 1
-    else if (!firstError) firstError = result.message || `「${label}」提交失敗`
-  }
-  /* 口径 4：有真实失败 ⇒ 仍上屏**首个真实失败**文案（跳过不得覆盖失败）。 */
-  if (accepted === 0 && firstError) {
-    faceEntryFeedback[face.id] = firstError
-    publishCorrectionNotice(faceEntryFeedback[face.id], face.id)
-    return
-  }
-  faceEntryFeedback[face.id] =
-    accepted === 0
-      ? CORRECTION_SKIP_ALL_MESSAGE
-      : correctionFeedbackOf(accepted, skipped, points.CORRECTION_REWARD)
-  publishCorrectionNotice(faceEntryFeedback[face.id], face.id)
-  /* 口径 5：接受数 ＋ 跳过数 === 本次填写项数 ⇒ 整单完成（清空草稿）。 */
-  if (accepted + skipped === pairs.length) {
-    draft.content = ''
-    draft.style = ''
-  }
-  /* 无需刷新：服务层读的是已落盘数据，+1 让「待审核」计数与本块读数立即重算。 */
-  dataVersion.value += 1
-}
 
 const downloadCost = points.DOWNLOAD_COST
 const downloadOpen = ref(false)
@@ -1762,7 +1702,77 @@ async function runOriginalDownload(sealRow) {
   }
 }
 
-function openCorrection(face) {
+/* ============================================================================
+   **屬性列表 / 屬性詳情 / 單條勘誤（2026-11-14 裁定 §三③④）**
+   ----------------------------------------------------------------------------
+   · 列表每行 ＝ 屬性名 ＋ 當前展示值摘要；**点行本体** ⇒ 屬性詳情模态框
+     （`AttrDetailDialog`：當前展示值 / 來源 / 待覈審 —— 与旧表格单元格**逐字同一口径**，
+      不新造名表、不改取值判据）。
+   · 行尾【勘誤】与详情框内【勘誤】**同走** `openAttrCorrection`：既有勘誤弹窗里该字段
+     **已選中且鎖定**（`correctionLockedField`；其余字段不渲染 ⇒ 不可选），提交仍走
+     既有 `submitCorrection` 链路（落 `PENDING`），**零新增写口**。
+   · 印面块标题旁的【勘誤】走既有 `openCorrection(face)`（多条一次性提交，普通用户可见）。
+   ============================================================================ */
+const attrDetail = ref(null)
+
+/** 拼装属性详情三栏文案（判据与旧表格单元格**逐字一致**）。 */
+function openAttrDetail(face, item) {
+  if (!face || !item) return
+  attrDetail.value = {
+    faceId: face.id,
+    key: item.key,
+    label: item.label,
+    value: detailDisplayOf(face, item),
+    /* 旧表格「當前展示值」单元格的副行（採納勘誤时才有）：一字不改。 */
+    original: item.source === 'CORRECTION' ? `原始值：${item.original || '未著錄'}` : '',
+    source: item.source === 'CORRECTION' ? `已採納勘誤（${item.acceptedCount} 條）` : '平臺原始數據',
+    pending: `${item.pendingCount} 條`
+  }
+}
+
+function closeAttrDetail() {
+  attrDetail.value = null
+}
+
+/** 單條勘誤（行尾 / 詳情框內）⇒ 既有勘誤弹窗，且**只**針對該字段（已選中且鎖定）。 */
+function openAttrCorrection(face, item) {
+  if (!face || !item) return
+  openCorrection(face, { lockedField: item.key })
+}
+
+/** 從屬性詳情框進單條勘誤：先關詳情框，再開（字段已鎖定的）勘誤弹窗。 */
+function openAttrCorrectionFromDetail() {
+  const detail = attrDetail.value
+  if (!detail) return
+  const face = faces.value.find((row) => row.id === detail.faceId)
+  if (!face) {
+    closeAttrDetail()
+    return
+  }
+  const item = markableOf(face).find((row) => row.key === detail.key)
+  closeAttrDetail()
+  if (item) openAttrCorrection(face, item)
+}
+
+/** 單條勘誤鎖定的字段鍵（`''` ＝ 一般多欄勘誤）；弹窗字段可见性据此收窄。 */
+const correctionLockedField = ref('')
+const correctionLockedLabel = computed(() => {
+  const item = corrections.MARKABLE_FIELDS.find((row) => row.key === correctionLockedField.value)
+  return item ? item.label : ''
+})
+const correctionLockedCurrent = computed(() => {
+  const face = formFace.value
+  if (!face || !correctionLockedField.value) return ''
+  const item = markableOf(face).find((row) => row.key === correctionLockedField.value)
+  return item ? detailDisplayOf(face, item) : ''
+})
+
+/**
+ * 打开「提交勘誤」弹窗。
+ * @param {object} face 勘誤對象印面
+ * @param {{lockedField?: string}} [options] `lockedField` ⇒ 單條勘誤：该字段已选中且锁定
+ */
+function openCorrection(face, options = {}) {
   if (!canSubmit.value) {
     goLogin()
     return
@@ -1779,6 +1789,8 @@ function openCorrection(face) {
      提案框是本弹窗之上的**独立嵌套层**，只在点入口时开、关闭即卸载（不跨次留存）。 */
   authorKeyword.value = ''
   proposalDialogOpen.value = false
+  /* 單條勘誤 ⇒ 记录锁定字段键（`''` ＝ 多条勘誤，字段全开）。 */
+  correctionLockedField.value = (options && options.lockedField) || ''
   formFaceId.value = face.id
   /* 合并弹窗（本單）：默认停在「屬性」页签；影像页签的目标一并装填 ——
      候选唯一 ⇒ 直取该图；多图 ⇒ 默认首图（页签内可换）；无图 ⇒ 目标留空，
@@ -1803,6 +1815,8 @@ function openCorrection(face) {
  * 判据带**实体类别**，不只按容器逐块渲染（与详情页印面块的既有处置同口径）。
  */
 function correctionFieldVisible(item) {
+  /* **單條勘誤（本单）**：只呈現被鎖定的那一條 ⇒ 其余字段**不渲染**（不可选、不可改）。 */
+  if (correctionLockedField.value) return item.key === correctionLockedField.value
   const closedOnFace = item.key === FACE_CONTENT_KEY || item.key === FACE_STYLE_KEY
   return !(closedOnFace && formFaceIsEdge.value)
 }
@@ -3083,6 +3097,19 @@ onBeforeUnmount(() => {
           >
             設為 base face
           </button>
+          <!-- **普通用户可见**（2026-11-14 裁定 §三①）：多條屬性一次性提交的【勘誤】。
+               **一律渲染**，未登錄 ⇒ 走既有登录引导（`openCorrection` 的 `!canSubmit ⇒ goLogin`），
+               **不**用 CSS 隐藏 / `disabled` 冒充游客态；钩子只用 `data-action="face-correction-multi"`，
+               **不進** `[data-admin-action]` 族（该族取值集合仍恰 12 值）。 -->
+          <button
+            class="btn btn--ghost"
+            type="button"
+            data-action="face-correction-multi"
+            :data-face-id="face.id"
+            @click="openCorrection(face)"
+          >
+            勘誤
+          </button>
         </div>
       </div>
       <div class="panel__body">
@@ -3210,112 +3237,61 @@ onBeforeUnmount(() => {
         >
           {{ correctionNotice }}
         </p>
-        <div class="face-block__sub-head">
-          <button v-if="canSubmit" class="btn btn--ghost" type="button" @click="openCorrection(face)">勘誤</button>
-          <span v-else class="detail__hint">登錄後可提交勘誤，審覈通過後每條獎勵 {{ points.CORRECTION_REWARD }} 金。</span>
-          <!-- **印人提案入口已迁出本页**（2026-11-14 裁定）：详情页不再有按钮与内联表单。
-               现三处落点：作者【勘誤】弹窗（检索无命中）／首页【上傳印章】弹窗（同）／`/persons` 常驻入口；
-               表单本体＝共用组件 `components/PersonProposalDialog.vue`（本页由勘误弹窗内按钮打开）。 -->
-        </div>
-
-        <!-- 【印面内容】（R-30，9 值）/【印面风格】（R-31，23 值）：**封闭选择框**，每个印面块各一组。
-             这两项属「**可标记属性**」面 ⇒ 走**勘误路径**（提交 PENDING 勘误，审核采纳后才改对外展示值）。
-             选项**只来自真源常量**（顺序即真源顺序），**不追加任何占位项 / 库内派生值**。 -->
-        <div v-if="!face.isEdge" class="face-entry" data-face-entry>
-          <div class="field">
-            <label :for="`face-content-${face.id}`">印面內容</label>
-            <select
-              :id="`face-content-${face.id}`"
-              v-model="faceEntryDraftOf(face).content"
-              data-face-content-select
-            >
-              <option v-for="value in faceContentOptions" :key="value" :value="value">{{ value }}</option>
-            </select>
-            <span class="field__hint">
-              印面內容固定 {{ faceContentOptions.length }} 類（只可選不可填）；本印面當前展示值：{{ faceMarkableValue(face, 'seal_type', face.seal_type) || '未著錄' }}。
-            </span>
-            <span v-if="!FACE_CONTENT_READY" class="field__hint" data-face-content-degraded>
-              {{ FACE_CONTENT_MISSING_MESSAGE }}
-            </span>
-          </div>
-
-          <div class="field">
-            <label :for="`face-style-${face.id}`">印面風格</label>
-            <select
-              :id="`face-style-${face.id}`"
-              v-model="faceEntryDraftOf(face).style"
-              data-face-style-select
-            >
-              <option v-for="value in faceStyleOptions" :key="value" :value="value">{{ value }}</option>
-            </select>
-            <span class="field__hint">
-              印面風格固定 {{ faceStyleOptions.length }} 類（只可選不可填）；本印面當前展示值：{{ faceMarkableValue(face, 'face_style', face.face_style) || '未著錄' }}。
-            </span>
-            <span v-if="!FACE_STYLE_READY" class="field__hint" data-face-style-degraded>
-              {{ FACE_STYLE_MISSING_MESSAGE }}
-            </span>
-          </div>
-
-          <div class="face-entry__foot">
+        <!-- **屬性列表（2026-11-14 裁定 §三③）**：取代原属性表格（四列 `屬性/當前展示值/來源/待覈審`）的逐行呈现。
+             每条一行（屬性名 ＋ 当前展示值摘要）；行本体是**真 `button`**（Enter / Space 天然可激活）
+             ⇒ 打开「屬性詳情」模态框（當前展示值 / 來源 / 待覈審 ＋ 单条【勘誤】）。
+             行尾【勘誤】默认不可见（`opacity:0` / `visibility:hidden`，**不用 `display:none`**，
+             键盘与读屏仍可达）；鼠标悬停该行或按钮 `:focus-visible` 时浮现；触摸设备
+             （`@media (hover: none)`）**恒显**（无 hover 可用）。
+             行内按钮一律 `@click.stop`（防误触行本体）；钩子只用 `data-action`
+             （`attr-detail` / `attr-correction`），**不进** `[data-admin-action]` 族。 -->
+        <ul class="attr-list" data-attr-list :data-attr-face="face.id">
+          <li
+            v-for="item in markableOf(face)"
+            :key="`${face.id}-${item.key}`"
+            class="attr-row"
+            :data-attr-row="item.key"
+          >
             <button
-              v-if="canSubmit"
-              class="btn btn--ghost"
+              class="attr-row__main"
               type="button"
-              data-action="face-entry-submit"
-              @click="submitFaceEntry(face)"
+              data-action="attr-detail"
+              :data-face-id="face.id"
+              :data-attr-key="item.key"
+              @click="openAttrDetail(face, item)"
             >
-              提交勘誤
+              <span class="attr-row__label">{{ item.label }}</span>
+              <span class="attr-row__value">{{ detailDisplayOf(face, item) }}</span>
             </button>
-            <span v-else class="detail__hint">登錄後可提交勘誤。</span>
-            <span class="detail__hint">只提交已選擇的一項；未選擇即不提交。</span>
-          </div>
-          <p v-if="faceEntryFeedback[face.id]" class="notice detail__notice" data-face-entry-feedback>
-            {{ faceEntryFeedback[face.id] }}
-          </p>
-        </div>
-
-        <table class="detail__table">
-          <thead>
-            <tr>
-              <th>屬性</th>
-              <th>當前展示值</th>
-              <th>來源</th>
-              <th>待審覈</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in markableOf(face)" :key="`${face.id}-${item.key}`">
-              <td>{{ item.label }}</td>
-              <td>
-                <span class="detail__value">{{ detailDisplayOf(face, item) }}</span>
-                <span v-if="item.source === 'CORRECTION'" class="detail__origin">
-                  原始值：{{ item.original || '未著錄' }}
-                </span>
-                <!-- **校驗作者（本單）**：作者行旁的入口（钩子 `data-author-verify`）。
-                     **一律渲染**（游客可见、可达）⇒ 点击走既有登录门（`openAuthorVerify` 的
-                     `!canSubmit ⇒ goLogin`，与【勘誤】入口同一口径、不另造文案）；
-                     不 CSS 隐藏、不用 disabled 冒充游客态。 -->
-                <button
-                  v-if="item.key === 'author'"
-                  class="btn btn--ghost"
-                  type="button"
-                  data-author-verify
-                  :disabled="authorVerifyBusy"
-                  @click="openAuthorVerify(face)"
-                >
-                  校驗作者
-                </button>
-              </td>
-              <td>
-                <span v-if="item.source === 'CORRECTION'" class="detail__badge detail__badge--adopted">
-                  已採納勘誤（{{ item.acceptedCount }} 條）
-                </span>
-                <span v-else class="detail__badge">平臺原始數據</span>
-              </td>
-              <td>{{ item.pendingCount }} 條</td>
-            </tr>
-          </tbody>
-        </table>
+            <span class="attr-row__actions">
+              <!-- **校驗作者（原有能力，原位保留）**：作者行旁的入口（钩子 `data-author-verify`）。
+                   **一律渲染**（游客可见、可达）⇒ 点击走既有登录门（`openAuthorVerify` 的
+                   `!canSubmit ⇒ goLogin`，与【勘誤】入口同一口径、不另造文案）；
+                   不 CSS 隐藏、不用 disabled 冒充游客态。`@click.stop` ⇒ 不误触行本体。 -->
+              <button
+                v-if="item.key === 'author'"
+                class="btn btn--ghost attr-row__action"
+                type="button"
+                data-author-verify
+                :disabled="authorVerifyBusy"
+                @click.stop="openAuthorVerify(face)"
+              >
+                校驗作者
+              </button>
+              <!-- **单条勘誤（本单新功能）**：只针对当前这一条属性 ⇒ `openAttrCorrection`。 -->
+              <button
+                class="btn btn--ghost attr-row__action attr-row__fix"
+                type="button"
+                data-action="attr-correction"
+                :data-face-id="face.id"
+                :data-attr-key="item.key"
+                @click.stop="openAttrCorrection(face, item)"
+              >
+                勘誤
+              </button>
+            </span>
+          </li>
+        </ul>
 
         <!-- **採信（本单新增）**：「可標記屬性」区 —— 就地列出**候选值**
              （值 ＋「N 人提交 / M 人採信」＋ 状态）与【採信】按钮；数据源 ＝ 值级公开摘要面
@@ -3991,18 +3967,44 @@ onBeforeUnmount(() => {
       @cancel="clearOpen = false"
     />
 
+    <!-- **屬性詳情模态框（2026-11-14 裁定 §三④）**：点属性行本体打开；三栏内容与旧表格单元格
+         逐字一致（當前展示值 / 來源 / 待覈審），底部【勘誤】（单条 ⇒ 字段已锁定）＋ 关闭。 -->
+    <AttrDetailDialog
+      v-if="attrDetail"
+      :label="attrDetail.label"
+      :value="attrDetail.value"
+      :original="attrDetail.original"
+      :source="attrDetail.source"
+      :pending="attrDetail.pending"
+      @close="closeAttrDetail"
+      @correction="openAttrCorrectionFromDetail"
+    />
+
     <!-- **勘誤合并弹窗（本單：两个勘誤入口合一）** —— 页面上唯一那枚【勘誤】（「可標記屬性」区）
          打开这一扇窗；窗内用**页签**把两类操作分开呈现：「屬性」（**默认**，原字段勘误表单 ＋
          既有 `submitCorrection` 提交链）／「影像」（原影像卡【勘誤】表单 ＋ 既有
          `confirmImageCorrection` 提交链）。两套表单、两条提交通道**逐字沿用**（不改写库逻辑、
          不新增写口）；页签钩子 `data-correction-tab="attr" | "image"`，影像页签内保留
-         `data-action="image-correction"`；弹窗内提交钮仍带 `data-correction="face-entry-submit"`。 -->
-    <div v-if="formOpen" class="correction-mask" role="dialog" aria-modal="true" aria-label="提交勘誤">
+         `data-action="image-correction"`；弹窗内提交钮仍带 `data-correction="correction-submit"`。 -->
+    <div
+      v-if="formOpen"
+      class="correction-mask"
+      role="dialog"
+      aria-modal="true"
+      aria-label="提交勘誤"
+      :data-correction-locked="correctionLockedField"
+    >
       <div class="correction-box">
         <h3 class="correction-box__title">{{ correctionTab === 'image' ? '影像勘誤' : '提交勘誤' }}</h3>
 
         <!-- 页签（默认「屬性」）：两枚真按钮、可见可达；游客态入口与登录门仍在页面上（逐字未改）。 -->
-        <div class="correction-box__tabs" role="tablist" aria-label="勘誤類別" data-correction-tabs>
+        <div
+          v-if="!correctionLockedField"
+          class="correction-box__tabs"
+          role="tablist"
+          aria-label="勘誤類別"
+          data-correction-tabs
+        >
           <button
             class="correction-box__tab"
             :class="{ 'is-active': correctionTab === 'attr' }"
@@ -4035,6 +4037,12 @@ onBeforeUnmount(() => {
           勘誤對象：{{ formFaceLabel }}。只需填寫要更正的項目，留空的項目不會被提交。
         </p>
 
+        <!-- **單條勘誤（本单）**：从属性行尾 / 屬性詳情框进入 ⇒ 本弹窗**只**呈现该字段
+             （其余字段不渲染 ⇒ 不可选、不可改），提交仍走 `submitCorrection`（落 `PENDING`）。 -->
+        <p v-if="correctionLockedField" class="correction-box__locked" data-correction-locked-hint>
+          本次勘誤只針對「{{ correctionLockedLabel }}」一條（當前展示值：{{ correctionLockedCurrent || '未著錄' }}）；其餘屬性不可選。
+        </p>
+
         <!-- 可标记属性：**按字段提供按需渲染器**（R-20 / R-30 / R-31 / R-43）。
              - 朝代 ⇒ 封闭选择框（真源 `DYNASTY_OPTIONS`，15 类）；
              - 【印面内容】⇒ 封闭选择框（真源 `FACE_CONTENT_OPTIONS`，9 值）；
@@ -4044,7 +4052,12 @@ onBeforeUnmount(() => {
                其余可标记字段（印文简体字 / 印文古字 / 作者 / 印文释义）**保持现状**（自由文本）。
              - 留空 ⇒ 该项不提交。 -->
         <template v-for="item in corrections.MARKABLE_FIELDS" :key="item.key">
-          <div v-if="correctionFieldVisible(item)" class="field">
+          <div
+            v-if="correctionFieldVisible(item)"
+            class="field"
+            :data-correction-field="item.key"
+            :class="{ 'field--locked': correctionLockedField === item.key }"
+          >
             <label :for="`cr-${item.key}`">{{ item.label }}</label>
             <select
               v-if="item.key === 'dynasty'"
@@ -4184,7 +4197,7 @@ onBeforeUnmount(() => {
           <button
             class="btn btn--primary"
             type="button"
-            data-correction="face-entry-submit"
+            data-correction="correction-submit"
             @click="submitCorrection"
           >
             提交勘誤
@@ -4582,37 +4595,88 @@ onBeforeUnmount(() => {
   margin-top: 0;
 }
 
-.face-block__sub-head {
+/* **屬性列表（2026-11-14 裁定 §三③）**：每条一行；行本体是真 `button`。 */
+.attr-list {
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--c-line);
+}
+
+.attr-row {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--s-3);
-  margin-bottom: var(--s-3);
+  gap: var(--s-2);
+  border-bottom: 1px solid var(--c-line);
 }
 
-/* 【印面内容】/【印面风格】封闭选择框的容器（**仅印面块**呈现）。 */
-.face-entry {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-3) var(--s-5);
-  margin: var(--s-2) 0 var(--s-4);
-  padding: var(--s-3) var(--s-4);
-  background: var(--c-surface-sunken);
-  border: 1px solid var(--c-line);
-  border-radius: var(--r-md);
-}
-
-.face-entry .field {
-  flex: 1 1 220px;
+.attr-row__main {
+  flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.face-entry__foot {
-  flex: 1 1 100%;
+.attr-row__main:hover {
+  background: var(--c-surface-sunken);
+}
+
+.attr-row__main:focus-visible {
+  outline: 2px solid var(--c-gold);
+  outline-offset: -2px;
+}
+
+.attr-row__label {
+  flex: 0 0 92px;
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+}
+
+.attr-row__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--c-text);
+  font-size: var(--t-sm);
+  overflow-wrap: anywhere;
+}
+
+.attr-row__actions {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s-3);
+  gap: var(--s-2);
+  padding-right: var(--s-2);
+}
+
+/* 行尾【勘誤】：默认不可见（**不用 `display:none`**：键盘与读屏仍可达）；
+   悬停该行 / 按钮 `:focus-visible` 时浮现；触摸设备（无 hover）⇒ 恒显。 */
+.attr-row__fix {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease, visibility 0.12s ease;
+}
+
+.attr-row:hover .attr-row__fix,
+.attr-row:focus-within .attr-row__fix,
+.attr-row__fix:focus-visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+@media (hover: none) {
+  .attr-row__fix {
+    opacity: 1;
+    visibility: visible;
+  }
 }
 
 .face-block__media {
@@ -4686,25 +4750,6 @@ onBeforeUnmount(() => {
 .detail__hint {
   color: var(--c-text-muted);
   font-size: var(--t-xs);
-}
-
-.detail__table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--t-sm);
-}
-
-.detail__table th,
-.detail__table td {
-  padding: var(--s-2) var(--s-3);
-  border-bottom: 1px solid var(--c-line);
-  text-align: left;
-  vertical-align: top;
-}
-
-.detail__table th {
-  color: var(--c-text-muted);
-  font-weight: 500;
 }
 
 /* **採信（本单新增）**：他人提交的勘誤列表（可採信）。 */
@@ -4925,6 +4970,23 @@ onBeforeUnmount(() => {
   margin-bottom: var(--s-4);
   color: var(--c-text-muted);
   font-size: var(--t-sm);
+}
+
+/* **單條勘誤（本单）**：弹窗内「本次只針對這一條（已選中且鎖定）」的提示带。 */
+.correction-box__locked {
+  margin-bottom: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-gold-soft);
+  border: 1px solid var(--c-gold);
+  border-radius: var(--r-md);
+  color: var(--c-gold-strong);
+  font-size: var(--t-xs);
+}
+
+.field--locked {
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-gold);
+  border-radius: var(--r-md);
 }
 
 .correction-box__feedback {
