@@ -2,6 +2,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import AddSealFaceDialog from '../components/AddSealFaceDialog.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
@@ -2168,6 +2169,60 @@ async function submitReplaceFaceImage() {
 }
 
 /* ============================================================================
+   管理員：**新增印面**（「印面列表」區塊入口 ＋ 彈窗｜本單）
+   ----------------------------------------------------------------------------
+   · 入口**恰一個**，掛在「印面列表」區塊標題旁、`v-for` **之外**（不逐塊複製 ⇒ N 個印面
+     也只有 1 個按鈕）；鉤子只用 `data-action="add-seal-face"` —— **不進** `[data-admin-action]`
+     族（該族取值集合已凍結計數，擴展即撞套件）。
+   · 渲染條件＝服務層判定 `seals.canAddSealFace()`（遊客 / 普通使用者 ⇒ false ⇒ 不渲染，
+     DOM 零命中；**不得** CSS 隱藏 / `disabled` 冒充）；資料層另有獨立拒絕（繞過 UI 直調亦被拒）。
+   · 彈窗（`AddSealFaceDialog.vue`）承載**既有的同一條上傳管道**（`loadImageFile` →
+     `seals.inputDenialOf` → `runUploadPipeline` 出單頁 8bit Deflate TIFF → 服務層
+     `storeArtifactBytes` → `registerFaceImage` → `addSealFace`）與剪貼板粘貼單點；
+     本頁只負責開窗 / 關窗、成功後**重取雲端快照**與**頁面級成功提示**。
+   · 失敗文案由服務層如實給出（含「影像已入冊但印面未建立」），本頁**不改寫、不吞**。
+   ============================================================================ */
+
+/** 管理員門（與「編輯固定屬性」/「重新上傳印面圖」同一服務層判定）。 */
+const canAddSealFace = computed(() => seals.canAddSealFace())
+/** 彈窗開關（成功 / 取消即關；零 localStorage、零跨頁狀態）。 */
+const addFaceOpen = ref(false)
+/** 頁面級提示（成功 / 冪等命中寫這裡 —— 彈窗關閉後仍留在頁面上）。 */
+const addFaceFeedback = ref('')
+/** 頁面級成功提示的固定文案（繁體；`s2t(x) === x`，逐字對齊裁定件 §四）。 */
+const ADD_FACE_SUCCESS_MESSAGE = '新印面已加入，印面圖與屬性可繼續編輯。'
+
+function openAddSealFace() {
+  if (!seal.value) return
+  addFaceFeedback.value = ''
+  addFaceOpen.value = true
+}
+
+function closeAddSealFace() {
+  addFaceOpen.value = false
+}
+
+/**
+ * 建面成功的收尾：關窗 → 頁面級提示 → **重取雲端快照**（與本頁既有寫面同一刷新路徑）。
+ * 服務層已重拉一輪；此處再 `dataVersion +1` 讓派生讀數（印面塊 / 影像 / 面數）重算。
+ * 若服務層回讀**未**在快照裡看到該面（`verifiedInSnapshot === false`），本頁再拉一輪並重算
+ * —— 仍看不到時**不改寫**服務層的如實交代（面行以服務端為準）。
+ */
+async function onSealFaceAdded(result) {
+  addFaceOpen.value = false
+  addFaceFeedback.value = (result && result.message) || ADD_FACE_SUCCESS_MESSAGE
+  dataVersion.value += 1
+  if (result && result.verifiedInSnapshot === false) {
+    try {
+      await seals.retryDataSource()
+    } catch (err) {
+      /* 重取失敗不改變已成功的建面結論（文案已如實說明快照狀態）。 */
+    }
+    dataVersion.value += 1
+  }
+}
+
+/* ============================================================================
    管理员：**人工智能修復**（印面影像；本单新增）
    ----------------------------------------------------------------------------
    - 入口：印面块管理员动作区按钮（`data-admin-action="ai-enhance-face"`，仅管理员渲染；
@@ -2794,6 +2849,28 @@ onBeforeUnmount(() => {
       一枚印章可含多個印面，邊款是其中的特殊印面；下列屬性均按印面歸屬。
     </p>
 
+    <!-- **「印面列表」區塊標題 ＋ 新增入口（本單）**：入口**恰一個**，在 `v-for` 之外
+         （不逐塊複製 ⇒ N 個印面也只有 1 個按鈕）；管理員專屬，遊客 / 普通使用者 ⇒ 不渲染
+         （DOM 零命中，**不得** CSS 隱藏 / `disabled` 冒充）。鉤子只用
+         `data-action="add-seal-face"` —— **不進** `[data-admin-action]` 族（該族取值集合已凍結）。 -->
+    <div class="detail__faces-head" data-face-list-head>
+      <h2 class="detail__faces-title">印面列表</h2>
+      <button
+        v-if="canAddSealFace"
+        class="btn btn--ghost"
+        type="button"
+        data-action="add-seal-face"
+        @click="openAddSealFace"
+      >
+        新增印面
+      </button>
+    </div>
+
+    <!-- 新增印面的**頁面級**提示（成功 / 冪等命中；彈窗關閉後仍留在頁面上，繁體）。 -->
+    <p v-if="addFaceFeedback" class="notice detail__notice" data-add-face-notice>
+      {{ addFaceFeedback }}
+    </p>
+
     <section
       v-for="face in faces"
       :key="face.id"
@@ -3296,6 +3373,16 @@ onBeforeUnmount(() => {
       :seal="seal"
       @close="editingFaceId = ''"
       @saved="onFixedSaved"
+    />
+
+    <!-- 管理員專屬彈窗：**新增印面**（本單）。只由詳情頁「印面列表」入口開啟；
+         彈窗內按鈕只用 `data-action`（**不新增**任何 `[data-admin-action]` 取值）。 -->
+    <AddSealFaceDialog
+      v-if="addFaceOpen && seal"
+      :stamp-id="seal.stamp_id"
+      :seal-title="corrections.resolveSealDisplayName(seal)"
+      @close="closeAddSealFace"
+      @added="onSealFaceAdded"
     />
 
     <!-- 管理员专属弹窗：编辑**印章级**固定属性（形制）。
@@ -4241,6 +4328,21 @@ onBeforeUnmount(() => {
 
 .detail__lede {
   margin-bottom: var(--s-4);
+}
+
+/* 「印面列表」區塊標題 ＋ 新增入口（本單）：標題在左、入口在右（入口恰一個，在 v-for 之外）。 */
+.detail__faces-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.detail__faces-title {
+  margin: 0;
+  font-size: var(--t-lg);
+  color: var(--c-text);
 }
 
 .face-block__title {

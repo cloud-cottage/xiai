@@ -74,6 +74,10 @@ const {
    `repairAuthorPersonId` 的**读数键面并集**真源（恰 7 键、按 op 收窄、存在性驱动透传 ⇒
    `dry_run` 轮恰 6 键（含 `samples`）、真写轮回恰 7 键（含 `failed`）；其余 op 回包逐字不变）。 */
 const { REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS } = require('./lib/authorMatch.js')
+/* **新增印面（本單 `addSealFace`｜印章詳情頁建面入口）**：`ADD_SEAL_FACE_READOUT_KEYS`
+   ＝ 該 op 的**讀數鍵面真源**（6 鍵并集、**存在性驅動**、按 op 收窄透傳 ⇒ 建面輪與冪等輪
+   各恰如 op 契約；其餘 op 回包逐字不變）。 */
+const { ADD_SEAL_FACE_READOUT_KEYS } = require('./lib/addSealFace.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
 
@@ -860,7 +864,21 @@ async function handleVerify(event, config, callContext) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }
-  return response
+  /* **新增印面讀數面（additive 透傳｜**按 op 收窄**｜本單 `addSealFace`）**：`face_id` /
+   `face_no` / `fid` / `kind` / `face_count` / `skipped` **僅當 `op === 'addSealFace'` 且
+   `opResult` 確有該鍵時**才逐字疊進回包（**存在性驅動** ⇒ 建面輪恰 `face_id / face_no / fid /
+   kind / face_count`、冪等輪恰 `face_id / skipped / face_count`；鍵名真源 ＝
+   `lib/addSealFace.js::ADD_SEAL_FACE_READOUT_KEYS`）；**其餘任何 op 一律不透傳這 6 個鍵**
+   （即使 `opResult` 意外帶同名鍵 —— 例如 `replaceFaceImage` / `deleteFaceImage` 的 `face_id`、
+   `submitImageCorrection` 的 `skipped` —— 亦一個都不外泄）⇒ 既有回包**逐字不變**（序列化後
+   亦不新增鍵）。**本 op 不產 `plan`**（寫步在 op 內按確定序執行 ＋ 失敗即回滾）⇒ `plan` 零外传；
+   既有字段一律不刪、不改。 */
+if (op === 'addSealFace') {
+  for (const key of ADD_SEAL_FACE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+return response
 }
 
 /**

@@ -5624,6 +5624,38 @@ async function readStorageRepairWindow(after, windowSize) {
 
 const ADMIN_OPS = Object.freeze({
   /**
+   * **管理員「新增印面」（`addSealFace`｜印章詳情頁建面入口）** —— 薄委派：業務邏輯單點、
+   * 載荷封閉鍵面與回包讀數鍵面真源都在 `lib/addSealFace.js`（本處零第二套邏輯；`require`
+   * 延遲以打破加載環，照 `repairSealViewCount` 的寫法）。**`ADMIN_OPS` 40 → 41**；
+   * **字典序位在首位**（`addSealFace` 先於 `ai-enhance-discard`）。
+   *
+   * 硬口径（逐条；实现真源 ＝ `lib/addSealFace.js` 头注）：① **第一行即管理员门**（既有
+   * `adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋ **零读零写**）；② 载荷**封闭恰
+   * 7 键** `stamp_id / kind / sha256 / bytes / mime / storage_key / seal_name`（未知键 ⇒
+   * `INVALID_FIELD`）；③ 影像四道形态门与 `registerFaceImage` **同一张表、同一条文案**；
+   * ④ `sha256` 对应的影像行**必须已入册**（前端先调 `registerFaceImage`），未入册 ⇒
+   * `INVALID_VALUE`；⑤ **写序**：读章行 ＋ 现有面行 → 幂等预查 → 发面行 id（`nextFaceIdOf`）
+   * → 发 `face_no`（`issueCodeNumberAvoiding`，避让全库）→ 算 `fid` → 建面行 → 更新章行
+   * `face_count`；面行已建但章行更新失败 ⇒ **删面行回滚**、不留半成品；
+   * ⑥ **幂等**：同 `(stamp_id, kind, sha256)` 已存在 ⇒ 不建第二行，回
+   * `{ok:true, face_id, skipped:true, face_count}`（`skipped` 为 additive 键）；
+   * ⑦ `is_primary`：章已有任一 FACE 面 ⇒ `false`；章无 FACE 面且新面是 FACE ⇒ `true`；
+   * `EDGE` 永不落该键；⑧ `face_count`：FACE ⇒ `+1`、EDGE ⇒ **不变**（只数非 `EDGE`）；
+   * ⑨ 成功回包 `{ok, face_id, face_no, fid, kind, face_count}`，失败恒**恰 3 键**；
+   * `reason` **零新增**、**零新集合**、**不产 `plan`**（写步在 op 内按确定序执行）。
+   * 口径真源：`docs/add-seal-face-ruling-2026-11-14.md` §3。
+   * @param {object} payload 載荷（封閉 7 鍵）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async addSealFace(payload, identity, context) {
+    /* 延遲 require：與 `repairSealViewCount` 同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/addSealFace.js::addSealFace` 的**第一行**（零读零写地拒）。 */
+    const { addSealFace: runAdd } = require('./addSealFace.js')
+    return runAdd(payload, identity, context)
+  },
+
+  /**
    * **管理員「弃候選圖」（`ai-enhance-discard`）** —— 薄委派：業務邏輯單點在
    * `lib/aiEnhanceDiscard.js::discardCandidate`（本處零第二套邏輯；`require` 延遲以打破加載環）。
    * 硬口徑：① **管理員寫面**（`adminWhitelistDenial` 門同既有；非管理員 ⇒ `FORBIDDEN` ＋ 零刪行）；
@@ -10381,6 +10413,15 @@ module.exports = {
   opsStorageDeleteInjected,
   artifactMimeOf,
   adminWhitelistDenial,
+  /* **新增印面面（本單 `addSealFace`｜印章詳情頁建面入口）**：面行 id 发号 / 面号避让 /
+     章行读点 / 影像行按摘要读点 / 类别值域 / 本章面行扫描护栏 —— 全部为既有单点，
+     只补登记到导出面（实现零改；`lib/addSealFace.js` 经延迟 `require('./ops.js')` 复用）。 */
+  nextFaceIdOf,
+  occupiedNosOf,
+  readSealRowByAnyId,
+  readRegisteredImageByDigest,
+  FACE_IMAGE_REGISTER_KINDS,
+  EXISTING_FACE_SCAN_LIMIT,
   readCorrectionRow,
   buildProjection,
   /* **審計載體 preflight（本單新增）**：唯一建集点（`db.createCollection`）＋「已存在」判据 ——

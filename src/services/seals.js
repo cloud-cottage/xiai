@@ -2383,6 +2383,337 @@ export async function replaceFaceImage(faceId, payload = {}) {
 }
 
 /* ============================================================================
+   **管理員「新增印面」（詳情頁入口 ＋ 彈窗｜本單）**
+   ----------------------------------------------------------------------------
+   契約真源 ＝ `docs/add-seal-face-ruling-2026-11-14.md` §三 / §四。本層只做**編排 ＋ 如實回報**，
+   管道與寫面的每一段都是既有單點，本函數**不自寫第二套**：
+     ① 形參門（登錄 → 管理員 → 印章編號 → 類別 → 印文長度 → 字節非空 → 產物上限 → 真圖片容器）；
+     ② `storeArtifactBytes`（既有單點）⇒ `sha256` / `bytesLength` / `storageKey` / `mime`；
+     ③ 內容尋址 ＋ 容器自檢（對象鍵 ≡ 摘要；容器 ＝ 單頁 8bit Deflate TIFF `STORAGE_MIME`）；
+     ④ `registerFaceImage`（既有雲 op，管理員面）先入冊，拿 `image_id`；
+     ⑤ `addSealFace`（本單雲 op）載荷**封閉恰 7 鍵**
+        `stamp_id / kind / sha256 / bytes / mime / storage_key / seal_name`；
+     ⑥ **重取雲端快照**（既有讀口 `retryDataSource()`）＋ 只讀回讀（該面行是否已在快照裡）。
+   硬口徑（逐條）：
+     · **雲端模式**（`writeFaceMode() === 'cloud'`，生產即此）才走雲 op；**dev / 離線形態沒有雲端
+       建面寫面** ⇒ 結構化拒絕 ＋ 零寫入 —— 面行 id / `face_no` / `fid` 由服務端單點發號
+       （`nextFaceIdOf` / `issueCodeNumberAvoiding` / `codeId.encodeFaceCode`），本機自造就等於
+       第二套口徑，**本層一行本機都不寫**（不碰 localStorage / IndexedDB 行 / 本機鏡像）。
+     · **影像先入冊、面後建**：建面失敗時**如實**回「影像已入冊但印面未建立」，不得謊稱零寫入；
+       並點明「重試同一張圖不會重複建影像行（內容尋址）」。
+     · `reason` **零新增字面值**（只用既有集合：`UNAUTHENTICATED` / `FORBIDDEN` / `MISSING_REQUIRED` /
+       `INVALID_VALUE` / `EMPTY_CONTENT` / `NOT_IMAGE` / `ENCODE_FAILED` / `ARTIFACT_TOO_LARGE` /
+       `STORAGE_UNAVAILABLE` / `ERROR`）。
+   ============================================================================ */
+
+/** 雲端建面 op 名（與雲函數 `ADMIN_OPS` 註冊面逐字一致；本文件唯一出現處）。 */
+export const FACE_ADD_OP = 'addSealFace'
+
+/** 雲端回包讀數鍵面（`userWriteGate` 的 additive 透傳聲明；真源＝雲函數成功回包的非信封鍵）。 */
+const FACE_ADD_READOUT_KEYS = Object.freeze(['face_id', 'face_no', 'fid', 'kind', 'face_count', 'skipped'])
+
+/** 可建的面類別（缺省 `FACE`；`EDGE` ＝ 邊款，屬同章的特殊印面）。 */
+export const FACE_ADD_ALLOWED_KINDS = Object.freeze([FACE_KIND.FACE, FACE_KIND.EDGE])
+
+/** 印章編號上限（與雲 op 的 `stamp_id` 門同值：trim 後 ≤ 64）。 */
+export const FACE_ADD_STAMP_ID_MAX = 64
+
+/** 印文上限（與雲函數 `MAX_TEXT_LENGTH` 同值：≤ 500 字；**不硬截斷**，超限即拒）。 */
+export const FACE_ADD_SEAL_NAME_MAX = 500
+
+/**
+ * 建面時的影像入冊佔位面號 —— **只為過 `registerFaceImage` 的必填門**，不代表任何真實面號。
+ *
+ * 為什麼需要：`registerFaceImage` 的必填五串含 `face_id`，而本單的目標面**尚未存在**（面號由
+ * 服務端 `addSealFace` 依 `nextFaceIdOf` 發號）。該 op 只用 `face_id` 過必填 / 字符串門
+ * （行體按**內容尋址** `_id` 建、**不含**面引用），故事先給一個**顯式命名為 pending** 的佔位值，
+ * **不冒充**任何真實面號、也不落盤到面行。
+ */
+export const FACE_REGISTER_PENDING_FACE_ID = 'fc-pending-add-face'
+
+/** 當前（或指定）賬號是否可**新增印面** —— 與 `canReplaceFaceImage` / `canDeleteSeal` 同一套門。 */
+export function canAddSealFace(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/**
+ * 雲端快照裡是否已有該面行（只讀快照，**不讀本機鏡像**、不推導）。
+ * @param {string} faceId 印面編號
+ * @returns {{found:boolean, state:string, row:object|null}}
+ */
+function cloudFaceRowOf(faceId) {
+  const cloud = cloudBaseReadOf('faces')
+  const state = cloud && typeof cloud.state === 'string' ? cloud.state : 'unknown'
+  if (!cloud || cloud.state !== 'ready' || !Array.isArray(cloud.rows)) return { found: false, state, row: null }
+  const row = cloud.rows.find(
+    (item) => item && (String(item.id || '') === faceId || String(item._id || '') === faceId)
+  )
+  return { found: Boolean(row), state, row: row || null }
+}
+
+/**
+ * **新增一個印面**（管理員專屬；詳情頁「印面列表」入口的唯一業務入口）。
+ *
+ * @param {{stampId?:string, stamp_id?:string, kind?:string, sealName?:string, seal_name?:string,
+ *          bytes?:Uint8Array|ArrayBuffer, mime?:string, width?:number, height?:number}} [payload]
+ *   `bytes` ＝ 瀏覽器端處理後的**存儲件**（單頁 8bit Deflate TIFF；**不得**是原始 PNG / JPG 字節）。
+ * @returns {Promise<{ok:boolean, faceId?:string, faceNo?:number, fid?:string, kind?:string,
+ *   faceCount?:number, skipped?:boolean, imageId?:string, registered?:boolean,
+ *   verifiedInSnapshot?:boolean, snapshotState?:string, reason?:string, message:string}>}
+ *   - 成功：`faceId` / `faceNo` / `fid` / `kind` / `faceCount` 逐字取**服務端回包**；
+ *     `skipped === true` ＝ 冪等命中（同章 ＋ 同類 ＋ 同摘要的面行已存在，未建第二行）。
+ *   - 失敗：`ok:false` ＋ 既有 `reason` ＋ 可讀繁體 `message`；
+ *     `registered === true` ⇒ **影像已入冊但印面未建立**（文案如實點明，不謊稱零寫入）。
+ */
+export async function addSealFace(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {}
+  const stampId = String(source.stampId ?? source.stamp_id ?? '').trim()
+  const kindRaw = String(source.kind ?? '').trim() || FACE_KIND.FACE
+  const sealName = String(source.sealName ?? source.seal_name ?? '').trim()
+
+  /* ① 形參門 —— 全部判在任何請求 / 任何寫入之前。 */
+  const user = currentUser()
+  if (!user) {
+    return { ok: false, reason: 'UNAUTHENTICATED', message: '請先登錄管理員賬號後再新增印面（本次未提交任何內容）。' }
+  }
+  if (!canAddSealFace(user)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以新增印面（本次未提交任何內容）。' }
+  }
+  if (!stampId) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '未指定要新增印面的印章（缺少 stamp_id）；本次未提交任何內容。' }
+  }
+  if (stampId.length > FACE_ADD_STAMP_ID_MAX) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `印章編號（stamp_id）超過 ${FACE_ADD_STAMP_ID_MAX} 個字符；本次未提交任何內容。`
+    }
+  }
+  if (FACE_ADD_ALLOWED_KINDS.indexOf(kindRaw) === -1) {
+    return { ok: false, reason: 'INVALID_VALUE', message: '印面類別（kind）只能是 FACE（印面）或 EDGE（邊款）；本次未提交任何內容。' }
+  }
+  if (sealName.length > FACE_ADD_SEAL_NAME_MAX) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `印文超過 ${FACE_ADD_SEAL_NAME_MAX} 字上限（現 ${sealName.length} 字）；本次未提交任何內容。`
+    }
+  }
+  const bytes = toUint8Array(source.bytes)
+  if (!bytes || bytes.length === 0) {
+    return { ok: false, reason: 'EMPTY_CONTENT', message: '印面圖內容爲空，請先選擇本機圖片文件或粘貼剪貼板圖片；本次未提交任何內容。' }
+  }
+  /* 產物側兜底：判的是**處理後的二進制**（4 MiB），不是輸入文件的 1 MB（後者判在 `loadImageFile`）。 */
+  if (bytes.length > FACE_IMAGE_ARTIFACT_MAX_BYTES) {
+    return {
+      ok: false,
+      reason: 'ARTIFACT_TOO_LARGE',
+      message:
+        `本機影像生成失敗：印面圖存儲件 ${describeBytes(bytes.length)} 超過入庫上限 ` +
+        `${describeBytes(FACE_IMAGE_ARTIFACT_MAX_BYTES)}；本次未提交任何內容。`
+    }
+  }
+  /* 容器門（真源＝字節魔數）：入冊對象**只認單頁 8bit Deflate TIFF**；原始 PNG / JPG 直接拒。 */
+  const actualMime = sniffBytesMime(bytes)
+  if (!actualMime) {
+    return { ok: false, reason: 'NOT_IMAGE', message: '這不是可用的圖片內容（無法識別圖片格式）；本次未提交任何內容。' }
+  }
+  if (actualMime !== STORAGE_MIME) {
+    return {
+      ok: false,
+      reason: 'ENCODE_FAILED',
+      message:
+        `入庫對象必須是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${actualMime}）⇒ 已拒絕提交；` +
+        '本次未建立任何影像行、未建立印面（原始 PNG / JPG 字節不得直接入冊，請經影像管線處理後再提交）。'
+    }
+  }
+
+  /* ② 形態分流點（唯一一處）：雲端模式才走雲 op；dev / 離線形態如實拒絕，**不造本機面行**。 */
+  if (writeFaceMode() !== WRITE_FACE_MODES.CLOUD) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message:
+        '本機為 dev / 離線形態（沒有雲端建面寫面）：面號與印面編號由服務端發號，本機不自行建面；' +
+        '本次未提交任何內容、未建立任何印面。'
+    }
+  }
+
+  /* ③ 字節交權威存儲（既有單點；內容尋址、冪等）。 */
+  const stored = await storeArtifactBytes(bytes)
+  if (!stored || stored.ok !== true) {
+    return {
+      ok: false,
+      reason: (stored && stored.reason) || 'STORAGE_UNAVAILABLE',
+      message: `印面圖上傳失敗：${(stored && stored.message) || '權威存儲暫時不可用'}；本次未建立任何雲端影像行、未建立印面。`
+    }
+  }
+  const sha256 = String(stored.sha256 || '').toLowerCase()
+  const storageKey = String(stored.storageKey || stored.storage_key || '')
+  const storedBytes = Number(stored.bytesLength)
+  const storedMime = String(stored.mime || '').trim().toLowerCase()
+  if (!sha256 || !storageKey || !Number.isInteger(storedBytes) || storedBytes <= 0 || storageKey !== artifactObjectKeyOf(sha256)) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message:
+        `印面圖上傳回包缺少內容尋址讀數（sha256 / bytes / storage_key；storage_key＝${storageKey || '空'}）` +
+        '⇒ 未產生雲端內容尋址對象鍵；本次未入雲端影像行、未建立印面。'
+    }
+  }
+  if (storedMime && storedMime !== STORAGE_MIME) {
+    return {
+      ok: false,
+      reason: 'ENCODE_FAILED',
+      message:
+        `入庫對象不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${storedMime}）⇒ 已拒絕入冊；` +
+        '本次未建立任何雲端影像行、未建立印面。'
+    }
+  }
+  const mime = storedMime || STORAGE_MIME
+
+  /* ④ 先入冊（既有雲 op `registerFaceImage`；管理員面、封閉鍵面、內容尋址 `_id`、冪等）。 */
+  let registration = null
+  try {
+    registration = await userWriteGate(
+      FACE_IMAGE_REGISTER_OP,
+      {
+        seal_id: stampId,
+        /* 佔位面號：目標面尚未存在（面號由 `addSealFace` 發號）；該 op 只用它過必填門、行體不含面引用。 */
+        face_id: FACE_REGISTER_PENDING_FACE_ID,
+        sha256,
+        bytes: storedBytes,
+        mime,
+        storage_key: storageKey,
+        kind: kindRaw
+      },
+      { readoutKeys: FACE_IMAGE_REGISTER_READOUT_KEYS }
+    )
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: `影像入冊請求失敗：${(err && err.message) || '未知原因'}；本次未建立印面（面行零寫入）。`
+    }
+  }
+  if (registration && registration.dev === true) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '本機為 dev / 離線形態（沒有雲端影像入冊面）⇒ 本次未建立印面（面行零寫入）。'
+    }
+  }
+  if (!registration || registration.ok !== true) {
+    return {
+      ok: false,
+      reason: (registration && registration.reason) || 'STORAGE_UNAVAILABLE',
+      message:
+        `印面圖存儲件已就位，但影像入冊失敗：${(registration && registration.message) || '入冊服務暫時不可用'}；` +
+        '本次未建立印面（面行零寫入），可重試（同一張圖不會重複建影像行）。'
+    }
+  }
+  const registeredFromReadout = typeof registration.image_id === 'string' ? registration.image_id.trim() : ''
+  const registeredFromDocId = typeof registration.docId === 'string' ? registration.docId.trim() : ''
+  const imageId = registeredFromReadout || registeredFromDocId
+  if (!imageId.startsWith('img-')) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '影像入冊回包形狀不可辨識（未附影像編號 image_id）；本次未建立印面（面行零寫入），請稍後重試。'
+    }
+  }
+
+  /* ⑤ 建面（雲 op；載荷**封閉恰 7 鍵**，逐字對齊裁定件 §三）。 */
+  let gate = null
+  try {
+    gate = await userWriteGate(
+      FACE_ADD_OP,
+      {
+        stamp_id: stampId,
+        kind: kindRaw,
+        sha256,
+        bytes: storedBytes,
+        mime,
+        storage_key: storageKey,
+        seal_name: sealName
+      },
+      { readoutKeys: FACE_ADD_READOUT_KEYS }
+    )
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'ERROR',
+      imageId,
+      registered: true,
+      message:
+        `影像已入冊但印面未建立：建面請求異常（${(err && err.message) || '未知原因'}）；` +
+        `影像編號 ${imageId} 已入冊（內容尋址），重試同一張圖不會重複建影像行。`
+    }
+  }
+  if (!gate || gate.ok !== true) {
+    /* **如實交代**：影像行已入冊（上面那一步成功），面行零寫入 ⇒ 不得謊稱「零寫入」。 */
+    return {
+      ok: false,
+      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      imageId,
+      registered: true,
+      message:
+        `影像已入冊但印面未建立：${(gate && gate.message) || '新增印面服務暫時不可用，請稍後再試。'}` +
+        `（影像編號 ${imageId} 已入冊、內容尋址；重試同一張圖不會重複建影像行，本次未建立任何面行）`
+    }
+  }
+  /* ⑥ 回包讀數逐字取用（**不按規則自行推導**面號 / 印面編號）。 */
+  const faceId = typeof gate.face_id === 'string' ? gate.face_id.trim() : ''
+  const faceNo = Number(gate.face_no)
+  const fid = typeof gate.fid === 'string' ? gate.fid.trim() : ''
+  const kindOut = typeof gate.kind === 'string' && gate.kind.trim() ? gate.kind.trim() : kindRaw
+  const faceCount = Number.isFinite(Number(gate.face_count)) ? Number(gate.face_count) : null
+  const skipped = gate.skipped === true
+  if (!faceId) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      imageId,
+      registered: true,
+      message:
+        '雲端建面回包形狀不可辨識（未附印面編號 face_id）；面行以服務端為準，請重新整理後確認，' +
+        `影像編號 ${imageId} 已入冊。`
+    }
+  }
+
+  /* ⑦ 重取雲端快照（與本頁既有寫面同一刷新路徑）＋ 只讀回讀。 */
+  try {
+    await retryDataSource()
+  } catch (err) {
+    /* 重取失敗不改變建面結論（面行已由服務端建好）；下面的回讀讀數會如實反映快照狀態。 */
+  }
+  const readback = cloudFaceRowOf(faceId)
+  const countText = faceCount === null ? '' : `；本印章現有 ${faceCount} 個印面`
+  const kindText = faceKindLabel(kindOut)
+  const base = {
+    ok: true,
+    faceId,
+    faceNo: Number.isFinite(faceNo) && faceNo > 0 ? faceNo : 0,
+    fid,
+    kind: kindOut,
+    faceCount,
+    skipped,
+    imageId,
+    registered: true,
+    verifiedInSnapshot: readback.found,
+    snapshotState: readback.state
+  }
+  const head = skipped
+    ? `該印面已存在（同印章、同類別、同影像），未重複建立：印面編號 ${faceId}（${kindText}${base.faceNo ? `，面號 ${base.faceNo}` : ''}）`
+    : `新印面已加入：印面編號 ${faceId}（${kindText}${base.faceNo ? `，面號 ${base.faceNo}` : ''}）`
+  const tail = readback.found
+    ? `${countText}；印面圖與屬性可繼續編輯。`
+    : `${countText}；雲端快照暫未見該印面（快照狀態：${readback.state}），請稍後重新整理確認（面行以服務端為準）。`
+  return { ...base, message: `${head}${tail}` }
+}
+
+/* ============================================================================
    **R-83 〜 R-88（2026-09-21｜Kong-I2 图像管线单）**
    印面源图 = 8 级灰索引色 PNG ／ 切片窗口消费（几何全在数据层）／ 双色调导出（webp）
 
