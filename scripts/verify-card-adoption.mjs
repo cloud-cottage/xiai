@@ -7,7 +7,7 @@
  * 判据（与派单口径逐条对应；id 前缀 `S*` ＝ 静态，`A*` ＝ 行为）：
  *   S1  `lib/cardApi.js` 零 `collection(` / `database(` / `console.` 字面（静态门 A8 / D4 同尺）；
  *   S2  `collection(` 仍**只**出现在 `lib/ops.js`（本函数内唯一持久化路径）；
- *   S3  `ADMIN_OPS` 仍恰 **40** 项；S4 `REASONS` 仍恰 **13** 个（**零新增**）；
+ *   S3  `ADMIN_OPS` 仍恰 **41** 项；S4 `REASONS` 仍恰 **13** 个（**零新增**）；
  *   S5  三条写路径（提案 / 导入 / **修复**）各有一处「先 CARD、失败即整体取消」的写入门（静态 3/3 命中）；
  *   S6  `COLLECTIONS.serverSecrets` ＝ `xiai_server_secrets`（凭据集合登记且 `^xiai_` 前缀）；
  *   S7  `lib/cardApi.js` **零域名 / 网关串字面**（`verify-userwrite-pa` D4 同尺）＋ 基址为运行时配置；
@@ -239,7 +239,7 @@ check('S1b', '负对照 canary：给 cardApi 源码注入 `collection(` ⇒ 该�
 check('S2', '本单写集三件内：`collection(` 仍只出现在 `lib/ops.js`（唯一持久化路径）', ['cloudfunctions/xiai-user-token/lib/ops.js'], writeSetHits)
 check('S2b', '本单未加重既有红线：`lib/cardApi.js` 不在 `collection(` 命中列表（`lib/sealCards.js` 的命中属前单遗留、逐字未改）', { cardApiHit: false, sealCardsUnchanged: true },
   { cardApiHit: collectionHits.indexOf('cloudfunctions/xiai-user-token/lib/cardApi.js') !== -1, sealCardsUnchanged: readFileSync(path.join(FN_DIR, 'lib/sealCards.js'), 'utf8') === readFileSync(path.join(FN_DIR, 'lib/sealCards.js'), 'utf8') })
-check('S3', '`ADMIN_OPS` 仍恰 40 项（本单零新增 op；39 → 40 由 2026-11-14 印章瀏覽量單 `repairSealViewCount` 带入）', 40, Object.keys(ops.ADMIN_OPS).length)
+check('S3', '`ADMIN_OPS` 仍恰 41 项（本单零新增 op；40 → 41 由 2026-11-14 詳情頁新增印面單 `addSealFace` 带入，字典序位在首位）', 41, Object.keys(ops.ADMIN_OPS).length)
 check('S4', '`REASONS` 仍恰 13 个（复用 UPSTREAM_ERROR，零新增字面值）', { size: 13, hasUpstream: true },
   { size: Object.keys(config.REASONS).length, hasUpstream: config.REASONS.UPSTREAM_ERROR === 'UPSTREAM_ERROR' })
 {
