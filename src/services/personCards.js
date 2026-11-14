@@ -248,14 +248,22 @@ export function resetPersonCardsCache() {
    2. 本地 `xiai_persons` 行（fallback 投影，与云侧降级口径同向）
    ------------------------------------------------------------------------- */
 
-/** 按 `id` / `code` / `_id` 取本地印人行（未命中 ⇒ `null`）。 */
+/** 按 `id` / `code` / `_id` / 九位 CARD 号（`card_id`）取本地印人行（未命中 ⇒ `null`）。
+ *  **与数据层 `db.personById` 同口径**：三种编号等价；空值不匹配（不能因 `card_id` 缺省空串误中）。 */
 function localPersonRowOf(personId) {
   const id = textOf(personId)
   if (!id) return null
   const rows = listPersonRows()
   if (!Array.isArray(rows)) return null
   return (
-    rows.find((row) => row && (textOf(row.id) === id || textOf(row.code) === id || textOf(row._id) === id)) || null
+    rows.find(
+      (row) =>
+        row &&
+        (textOf(row.id) === id ||
+          textOf(row.code) === id ||
+          textOf(row._id) === id ||
+          textOf(row.card_id) === id)
+    ) || null
   )
 }
 

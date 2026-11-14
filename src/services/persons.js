@@ -547,8 +547,9 @@ function acceptPersonProposal(proposal, actor, at) {
   const existing = persons.find((row) => String((row && row.proposal_id) || '') === String((proposal && proposal.id) || ''))
   if (existing) return existing
   if (proposal && proposal.target_person_id) {
-    /* 修改既有：§8 待裁 W-f（字段级 vs 整行）⇒ 本期不改写既有行。 */
-    return persons.find((row) => String((row && row.id) || '') === String(proposal.target_person_id)) || null
+    /* 修改既有：§8 待裁 W-f（字段级 vs 整行）⇒ 本期不改写既有行。
+       目标印人**经单点 `personById`** 取（`PR…` ／ 九位 CARD 号同口径；不另写第二套匹配）。 */
+    return personById(proposal.target_person_id)
   }
   /* **本机镜像不发正式号（本单硬口径）**：正式 `PR` 号只由服务端发放（云端提案采纳 /
      导入采纳 / 上传印章时的 CARD 指针行）。此处产出的只是**本地暂存行**（`tmp-` 前缀的

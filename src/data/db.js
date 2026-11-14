@@ -2517,13 +2517,24 @@ export function personDisplayName(row) {
   return firstTextOf(row.art_names)
 }
 
-/** 按 `id`（或 `code`）取正式印人行（未命中 ⇒ `null`）。 */
+/**
+ * 按 `id` / `code` / 九位 CARD 编号（`card_id`）取正式印人行（未命中 ⇒ `null`）。
+ *
+ * **三种编号同一口径、恰一处判定**：本地 `PR` 号（`id` ／ `code`）与 CARD 九位号（`card_id`）
+ * 在引用字段里**等价**（服务端 `createSealUpload` / 勘误提交两者都认）⇒ 客户端前置门必须同认，
+ * 否则「作者填九位 CARD 号」会被误判为「庫中沒有對應的印人」。空值（`''` / `null` /
+ * `undefined` / 缺省 `card_id`）**一律不匹配**（先归一成空串即返回 `null`，不进匹配）。
+ */
 export function personById(personId) {
   const id = personId === null || personId === undefined ? '' : String(personId).trim()
   if (!id) return null
   return (
     listPersonRows().find(
-      (row) => row && (String(row.id || '') === id || String(row.code || '') === id)
+      (row) =>
+        row &&
+        (String(row.id || '') === id ||
+          String(row.code || '') === id ||
+          String(row.card_id || '') === id)
     ) || null
   )
 }
