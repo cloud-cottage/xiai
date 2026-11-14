@@ -15,10 +15,16 @@
  *   B. **服务层本地前置门**（`src/services/corrections.js::submitCorrection`，云端形态端到端）：
  *      本机镜像 `REJECTED` 行不参与防重 ⇒ 放行到服务端受理；改回 `PENDING` ⇒ 本地门拒
  *      （恰 3 键 ＋ 零写入 ＋ **零往返**）；值逐字比较（标点变体不判重）。
- *   C. **视图层两处循环**（`SealDetailView.vue::submitFaceEntry` / `submitCorrection`，
- *      提取函数体真源后以注入依赖执行）：部分跳过 / 全部跳过 / 真实失败 / 0 跳过 四态上屏**逐字**；
+ *   C. **视图层提交循环**（`SealDetailView.vue::submitCorrection`，提取函数体真源后以注入依赖执行）：
+ *      部分跳过 / 全部跳过 / 真实失败 / 0 跳过 四态上屏**逐字**；
  *      两条跳过文案 `s2t(x) === x` 恒等 ＋「失敗 / 错误」族字样命中数 ＝ 0；
  *      表单收尾（`accepted + skipped === 填写项数` ⇒ 清空草稿 / 关闭弹窗）。
+ *      **2026-11-14 裁定翻转（`docs/attr-panel-restructure-ruling-2026-11-14.md`，实现 `3d91833`）**：
+ *      `face-entry` 内联勘误表单**整块删除** ⇒ 其提交循环 `submitFaceEntry` 随之删除，视图内
+ *      **只剩一处**提交循环（`submitCorrection`＝合并弹窗「屬性」页签）。故本段由「两处循环」翻为
+ *      「唯一循环」：C1〜C4c 的四态**逐条等值平移**到唯一循环上（同输入、同期期望文案、
+ *      断言条数不删、判据不松），C10 的锚由「两处各 1 处」翻为「视图内恰 1 处」，C0 另加
+ *      「`submitFaceEntry` 已消失」的正向钉住（删除是裁定结果，不是漏改）。
  *   D. **回包信封不变量**：`submitCorrection` 拒绝面恰 3 键；`endorseCorrection` /
  *      `reviewCorrection` 的响应键集与**改前（`83cceb0^`）**逐字相同（改前模块由
  *      `git show` 取出到一次性目录后**实跑**对拍，另配冻结字面值双锚）。
@@ -539,12 +545,26 @@ function extractFunction(src, name, isAsync = false) {
   return src.slice(start, end)
 }
 
-const FACE_ENTRY_SRC = extractFunction(vueSrc, 'submitFaceEntry', true)
+/* **2026-11-14 裁定**：`face-entry` 整块删除 ⇒ `submitFaceEntry` 不再存在（视图内唯一提交循环
+   是 `submitCorrection`）。原先「两处循环」的提取改成「唯一循环 ＋ 已删除的正向钉住」：
+   不再用 `extractFunction` 硬取（取不到会抛错 ⇒ 整段崩成无 id 的 crash，判据反而不可读）。 */
+const FACE_ENTRY_MARKER = 'async function submitFaceEntry('
+const FACE_ENTRY_GONE = vueSrc.indexOf(FACE_ENTRY_MARKER) < 0
 const FORM_SRC = extractFunction(vueSrc, 'submitCorrection', true)
-/* 两处循环依赖的**模块级**真源一并提取（成功句 / 部分跳过句 / 全部跳过句）。 */
+/* 循环依赖的**模块级**真源一并提取（成功句 / 部分跳过句 / 全部跳过句）。 */
 const FEEDBACK_HELPER_SRC = extractFunction(vueSrc, 'correctionFeedbackOf', false)
 const SKIP_ALL_CONST_SRC = (vueSrc.match(/const CORRECTION_SKIP_ALL_MESSAGE =\s*'[^']*'/) || [''])[0]
-check('C0', '两处提交循环 ＋ 文案常量 / 成功句函数均从视图真源提取成功（不以读代码推断充当证据）', true, FACE_ENTRY_SRC.length > 500 && FORM_SRC.length > 500 && FEEDBACK_HELPER_SRC.length > 100 && SKIP_ALL_CONST_SRC.includes('CORRECTION_SKIP_ALL_MESSAGE ='))
+check(
+  'C0',
+  '视图真源提取：唯一提交循环 `submitCorrection` ＋ 文案常量 / 成功句函数均提取成功（不以读代码推断充当证据）；`submitFaceEntry` 已随 `face-entry` 表单整块删除（2026-11-14 裁定 §三「不留死代码」）',
+  { formLoop: true, feedbackHelper: true, skipAllConst: true, faceEntryGone: true },
+  {
+    formLoop: FORM_SRC.length > 500,
+    feedbackHelper: FEEDBACK_HELPER_SRC.length > 100,
+    skipAllConst: SKIP_ALL_CONST_SRC.includes('CORRECTION_SKIP_ALL_MESSAGE ='),
+    faceEntryGone: FACE_ENTRY_GONE
+  }
+)
 
 const FACE_CONTENT_KEY = (vueSrc.match(/const FACE_CONTENT_KEY = '([^']+)'/) || [])[1]
 const FACE_STYLE_KEY = (vueSrc.match(/const FACE_STYLE_KEY = '([^']+)'/) || [])[1]
@@ -558,8 +578,6 @@ const makeViewRunner = () =>
   new Function(
     'corrections',
     'points',
-    'faceEntryFeedback',
-    'faceEntryDraftOf',
     'FACE_CONTENT_KEY',
     'FACE_STYLE_KEY',
     'seal',
@@ -569,7 +587,7 @@ const makeViewRunner = () =>
     'formFeedback',
     'formOpen',
     'correctionFieldVisible',
-    `const publishCorrectionNotice = () => {};\n${SKIP_ALL_CONST_SRC}\n${FEEDBACK_HELPER_SRC}\n${FACE_ENTRY_SRC}\n${FORM_SRC}\nreturn { submitFaceEntry, submitCorrection }`
+    `const publishCorrectionNotice = () => {};\n${SKIP_ALL_CONST_SRC}\n${FEEDBACK_HELPER_SRC}\n${FORM_SRC}\nreturn { submitCorrection }`
   )
 
 const SKIP_ALL_MESSAGE = '所選項目已有相同提交，本次未新增勘誤。若你贊同該值，請改用【採信】為它佐證。'
@@ -582,44 +600,9 @@ const failResult = (message) => ({ ok: false, reason: 'INVALID_VALUE', message }
 const runner = makeViewRunner()
 check('C0d', '从视图真源提取的「全部跳过」文案常量逐字 ＝ 冻结期望（`AC-635②` 去向句）', SKIP_ALL_MESSAGE, (SKIP_ALL_CONST_SRC.match(/'([^']*)'/) || [])[1])
 
-/** 跑一次 `submitFaceEntry`（faceEntry 两字段：content ＋ style）。 */
-async function runFaceEntry(script, draftInit) {
-  let i = 0
-  const calls = []
-  const fake = {
-    MARKABLE_FIELDS: corrections.MARKABLE_FIELDS,
-    newBatchId: () => 'qa-batch-view-1',
-    submitCorrection: async (args) => {
-      calls.push(args)
-      const step = script[i]
-      if (!step) throw new Error('视图脚本用尽（多调了一次 submitCorrection）')
-      i += 1
-      return step
-    }
-  }
-  const draft = Object.assign({ content: '', style: '' }, draftInit)
-  const faceEntryFeedback = {}
-  const env = {
-    corrections: fake,
-    points,
-    faceEntryFeedback,
-    faceEntryDraftOf: () => draft,
-    FACE_CONTENT_KEY,
-    FACE_STYLE_KEY,
-    seal: { value: { stamp_id: SEAL_A } },
-    dataVersion: { value: 0 },
-    form: {},
-    formFaceId: { value: '' },
-    formFeedback: { value: '' },
-    formOpen: { value: false },
-    correctionFieldVisible: () => true
-  }
-  const api = runner(env.corrections, env.points, env.faceEntryFeedback, env.faceEntryDraftOf, env.FACE_CONTENT_KEY, env.FACE_STYLE_KEY, env.seal, env.dataVersion, env.form, env.formFaceId, env.formFeedback, env.formOpen, env.correctionFieldVisible)
-  await api.submitFaceEntry({ id: 'fc-view-1', sealId: SEAL_A })
-  return { feedback: faceEntryFeedback['fc-view-1'], draft, calls }
-}
-
-/** 跑一次表单 `submitCorrection`（`filled` ＝ 非空表单项）。 */
+/** 跑一次表单 `submitCorrection`（`filled` ＝ 非空表单项）。
+    （原「印面块 `submitFaceEntry` 两字段」那条入口已随 `face-entry` 表单删除；其四态由本函数
+    以同输入承接 —— C1〜C4c 见下。） */
 async function runForm(script, formInit) {
   let i = 0
   const calls = []
@@ -640,8 +623,6 @@ async function runForm(script, formInit) {
   const api = runner(
     fake,
     points,
-    {},
-    () => ({ content: '', style: '' }),
     FACE_CONTENT_KEY,
     FACE_STYLE_KEY,
     { value: { stamp_id: SEAL_A } },
@@ -659,32 +640,32 @@ async function runForm(script, formInit) {
 const expectedPartial = (accepted, skipped) =>
   `已提交 ${accepted} 條勘誤，平臺審覈採納後每條獎勵 ${points.CORRECTION_REWARD} 金。另有 ${skipped} 條已有相同提交（無需重複提交），本次未新增。`
 
-/* C1：`submitFaceEntry` —— 2 项中 1 跳过。 */
+/* C1：唯一循环 —— 2 项中 1 跳过（原「印面块两字段」同输入：N=2 / K=1）。 */
 {
-  const out = await runFaceEntry([okResult(), dupResult()], { content: '內容甲', style: '風格甲' })
-  check('C1', 'AC-635① 印面块部分跳过（N=2 / K=1）上屏**逐字**', expectedPartial(1, 1), out.feedback)
+  const out = await runForm([okResult(), dupResult()], { seal_name: '內容甲', transcription: '風格甲' })
+  check('C1', 'AC-635① 部分跳过（N=2 / K=1）上屏**逐字**（裁定后由唯一循环 `submitCorrection` 承接，输入与期望同期不变）', expectedPartial(1, 1), out.feedback)
   check('C1b', 'AC-635① 跳过条数如实（M ＝ 1，不多报不少报）', true, out.feedback.includes('另有 1 條'))
-  check('C1c', 'AC-635 表单收尾：accepted(1) ＋ skipped(1) ＝ 填写项数(2) ⇒ 草稿清空', ['', ''], [out.draft.content, out.draft.style])
+  check('C1c', 'AC-635 表单收尾：accepted(1) ＋ skipped(1) ＝ 填写项数(2) ⇒ 关闭弹窗（合并弹窗里「草稿清空」的等值判据 ＝ 成功收尾即关闭并重置）', false, out.formOpen)
 }
-/* C2：`submitFaceEntry` —— 全部跳过。 */
+/* C2：唯一循环 —— 全部跳过。 */
 {
-  const out = await runFaceEntry([dupResult(), dupResult()], { content: '內容乙', style: '風格乙' })
+  const out = await runForm([dupResult(), dupResult()], { seal_name: '內容乙', transcription: '風格乙' })
   check('C2', 'AC-635② 全部跳过上屏**逐字**（含【採信】去向）', SKIP_ALL_MESSAGE, out.feedback)
-  check('C2b', 'AC-635 表单收尾：全部跳过（0＋2 ＝ 2）⇒ 草稿清空', ['', ''], [out.draft.content, out.draft.style])
+  check('C2b', 'AC-635 表单收尾：全部跳过（0＋2 ＝ 2）⇒ 关闭弹窗（等值判据同上）', false, out.formOpen)
 }
-/* C3：`submitFaceEntry` —— 有真实失败（跳过不覆盖失败）。 */
+/* C3：唯一循环 —— 有真实失败（跳过不覆盖失败）。 */
 {
-  const out = await runFaceEntry([dupResult(), failResult(FAIL_MESSAGE)], { content: '內容丙', style: '風格丙' })
+  const out = await runForm([dupResult(), failResult(FAIL_MESSAGE)], { seal_name: '內容丙', transcription: '風格丙' })
   check('C3', 'AC-634 判负面：真实失败时上屏**失败原文**（跳过不覆盖失败）', FAIL_MESSAGE, out.feedback)
-  check('C3b', 'AC-635 表单收尾：存在真实失败（1＋0 ≠ 2）⇒ 草稿**不清空**', ['內容丙', '風格丙'], [out.draft.content, out.draft.style])
+  check('C3b', 'AC-635 表单收尾：存在真实失败（1＋0 ≠ 2）⇒ 弹窗**不关**（＝原「草稿不清空」的等值判据：可原地重试）', true, out.formOpen)
 }
-/* C4：`submitFaceEntry` —— 0 项重复（对照）。 */
+/* C4：唯一循环 —— 0 项重复（对照）。 */
 {
-  const out = await runFaceEntry([okResult(), okResult()], { content: '內容丁', style: '風格丁' })
+  const out = await runForm([okResult(), okResult()], { seal_name: '內容丁', transcription: '風格丁' })
   const expected = `已提交 2 條勘誤，平臺審覈採納後每條獎勵 ${points.CORRECTION_REWARD} 金。`
   check('C4', 'AC-635③ 0 项重复 ⇒ 只上屏成功句（**不出现跳过提示**）', expected, out.feedback)
   check('C4b', 'AC-635③ 0 项重复 ⇒ 无【採信】引导、无「另有」句', false, out.feedback.includes('另有') || out.feedback.includes('所選項目'))
-  check('C4c', 'AC-635 表单收尾：2＋0 ＝ 2 ⇒ 草稿清空', ['', ''], [out.draft.content, out.draft.style])
+  check('C4c', 'AC-635 表单收尾：2＋0 ＝ 2 ⇒ 关闭弹窗（等值判据同上）', false, out.formOpen)
 }
 
 /* C5：表单 `submitCorrection` —— 3 项中 2 跳过（跳过条数如实）。 */
@@ -755,16 +736,24 @@ const expectedPartial = (accepted, skipped) =>
   check('C9d', 'AC-634③ 「failed」族字样命中数 ＝ 0', [0, 0], failedWord)
 }
 
-/* C10：静态锚 —— 两处循环都把 `DUPLICATE_VALUE` 计入 skipped（而非失败）。 */
+/* C10：静态锚 —— 唯一循环把 `DUPLICATE_VALUE` 计入 skipped（而非失败）。
+   （裁定后 `face-entry` 循环已删 ⇒ 该锚在视图内**恰 1 处**；原判据是「两处各 1 处」，
+   强度等价：仍是「每处循环都命中三锚」＋ 新增「不再有第二处循环」的钉住。） */
 {
   const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
-  const faceBody = strip(FACE_ENTRY_SRC)
   const formBody = strip(FORM_SRC)
   const anchorOf = (body) =>
     /else if \(result\.reason === 'DUPLICATE_VALUE'\) skipped \+= 1/.test(body) &&
     /if \(accepted === 0 && firstError\)/.test(body) &&
     /accepted \+ skipped === /.test(body)
-  check('C10', '两处循环均：`DUPLICATE_VALUE` ⇒ skipped＋1 / 失败判定不被跳过覆盖 / 收尾用 accepted＋skipped', [true, true], [anchorOf(faceBody), anchorOf(formBody)])
+  const strippedView = strip(vueSrc)
+  const anchorCount = strippedView.split("else if (result.reason === 'DUPLICATE_VALUE') skipped += 1").length - 1
+  check(
+    'C10',
+    '唯一循环：`DUPLICATE_VALUE` ⇒ skipped＋1 / 失败判定不被跳过覆盖 / 收尾用 accepted＋skipped；且视图内该锚**恰 1 处**（`face-entry` 循环随表单删除，不再有两处）',
+    { anchors: [true], anchorCount: 1 },
+    { anchors: [anchorOf(formBody)], anchorCount }
+  )
 }
 
 /* ---------------------------------------------------------------------------
