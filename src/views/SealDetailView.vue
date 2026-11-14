@@ -3240,8 +3240,9 @@ onBeforeUnmount(() => {
         <!-- **屬性列表（2026-11-14 裁定 §三③）**：取代原属性表格（四列 `屬性/當前展示值/來源/待覈審`）的逐行呈现。
              每条一行（屬性名 ＋ 当前展示值摘要）；行本体是**真 `button`**（Enter / Space 天然可激活）
              ⇒ 打开「屬性詳情」模态框（當前展示值 / 來源 / 待覈審 ＋ 单条【勘誤】）。
-             行尾【勘誤】默认不可见（`opacity:0` / `visibility:hidden`，**不用 `display:none`**，
-             键盘与读屏仍可达）；鼠标悬停该行或按钮 `:focus-visible` 时浮现；触摸设备
+             行尾【勘誤】默认不可见（`opacity:0` / `pointer-events:none`，**不用 `display:none`、
+             也不用 `visibility:hidden`**：那两种都会让元素不可聚焦、脱离无障碍树 ⇒ 键盘与读屏
+             不可达）；鼠标悬停该行、行内 `:focus-within` 或按钮 `:focus-visible` 时浮现；触摸设备
              （`@media (hover: none)`）**恒显**（无 hover 可用）。
              行内按钮一律 `@click.stop`（防误触行本体）；钩子只用 `data-action`
              （`attr-detail` / `attr-correction`），**不进** `[data-admin-action]` 族。 -->
@@ -4657,25 +4658,27 @@ onBeforeUnmount(() => {
   padding-right: var(--s-2);
 }
 
-/* 行尾【勘誤】：默认不可见（**不用 `display:none`**：键盘与读屏仍可达）；
-   悬停该行 / 按钮 `:focus-visible` 时浮现；触摸设备（无 hover）⇒ 恒显。 */
+/* 行尾【勘誤】：默认不可见（**不用 `display:none` / `visibility:hidden`**：两者都会把元素
+   移出无障碍树并令其不可聚焦 ⇒ 键盘与读屏彻底不可达）；用 `opacity:0` + `pointer-events:none`
+   只做视觉隐藏，元素仍可 Tab 聚焦、仍在无障碍树内。
+   悬停该行 / 行内 `:focus-within` / 按钮 `:focus-visible` 时浮现；触摸设备（无 hover）⇒ 恒显。 */
 .attr-row__fix {
   opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.12s ease, visibility 0.12s ease;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
 }
 
 .attr-row:hover .attr-row__fix,
 .attr-row:focus-within .attr-row__fix,
 .attr-row__fix:focus-visible {
   opacity: 1;
-  visibility: visible;
+  pointer-events: auto;
 }
 
 @media (hover: none) {
   .attr-row__fix {
     opacity: 1;
-    visibility: visible;
+    pointer-events: auto;
   }
 }
 
