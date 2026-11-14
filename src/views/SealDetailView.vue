@@ -76,8 +76,6 @@ async function copyDiagText() {
   }
 }
 
-const ORDINALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
-
 /* 固定属性保存后 +1，使下面的派生读数与影像都重新读取。 */
 const dataVersion = ref(0)
 
@@ -87,6 +85,14 @@ const seal = computed(() => {
 })
 /** 印面是属性归属的载体：固定属性、可标记属性都按印面分块展示。 */
 const faces = computed(() => (seal.value ? seal.value.faces : []))
+/**
+ * **整枚印章圖**（裁定件 §三）：`stamp_id` 指向本章、且**未被任何面行**（`face_image_id` /
+ * `edge_image_ids`）引用的影像行 —— 集合由服务层单点给出（`listSeals` 的 `wholeSealImages`），
+ * 本页不自行筛。空 ⇒ 该区块整块不渲染（不留空壳）。
+ */
+const wholeSealImages = computed(() => (seal.value && Array.isArray(seal.value.wholeSealImages) ? seal.value.wholeSealImages : []))
+/** 本章是否已有印面（＝已有 base face）⇒ 上传弹窗的 `base face` 选项禁用（裁定件 §五）。 */
+const sealHasBaseFace = computed(() => faces.value.some((face) => seals.faceRoleOf(face, faces.value) === seals.FACE_ROLE_BASE))
 const gallery = computed(() => (seal.value ? photoService.listPhotosByStamp(seal.value.stamp_id) : []))
 
 /* ---------------------- 影像：二进制只在 IndexedDB ---------------------- */
@@ -106,6 +112,11 @@ const faceImageIds = computed(() => {
   faces.value.forEach((face) => {
     if (face.face_image_id) ids.push(String(face.face_image_id))
     ;(face.edge_image_ids || []).forEach((id) => ids.push(String(id)))
+  })
+  /* **整枚印章圖**（未被任何面引用的影像行）同樣要取二進制 —— 與面塊走**同一套讀取面**
+     （`seals.imageDisplaySourceOf`），不自行拼對象鍵、不另寫第二條取圖路徑。 */
+  wholeSealImages.value.forEach((image) => {
+    if (image && image.id) ids.push(String(image.id))
   })
   return [...new Set(ids)]
 })
@@ -837,15 +848,13 @@ function digestTextOf(image) {
   return digest ? `摘要 ${digest.slice(0, 12)}…` : '摘要 暫無（該影像行未留存摘要）'
 }
 
-function ordinal(index) {
-  return ORDINALS[index] || String(index + 1)
-}
-
-/** 印面标签，如「印面一」「边款一」（序号按同类别印面计）。 */
+/**
+ * 印面标签（**上屏单点**）：`base face` / `side face 一`（同角色序号）。
+ * 判定与拼装都在服务层 `seals.faceLabelOn`（`is_primary` ⇒ base，其余一律 side —— 含 DB 内
+ * `kind='EDGE'` 的行）；本视图只把本章面集合交给它，**不自写第二套分类或文案**。
+ */
 function faceLabel(face) {
-  const sameKind = faces.value.filter((item) => item.kind === face.kind)
-  const index = sameKind.findIndex((item) => item.id === face.id)
-  return `${seals.faceKindLabel(face.kind)}${ordinal(index)}`
+  return seals.faceLabelOn(face, faces.value)
 }
 
 /** 该印面的可标记属性（勘误对象）当前对外展示值，按印面自身汇总。 */
@@ -2714,7 +2723,7 @@ onBeforeUnmount(() => {
         <p>
           <span class="detail__tag detail__tag--era">{{ seal.dynasty }}</span>
           <span class="detail__tag">{{ seal.seal_type }}</span>
-          <span v-if="seal.hasEdge" class="detail__tag detail__tag--edge">含邊款</span>
+          <span v-if="seal.faceCount > 1" class="detail__tag detail__tag--multi">多面</span>
           <span class="detail__id">藏品編號 {{ seal.stamp_id }}</span>
           <span class="detail__id">共 {{ faces.length }} 個印面</span>
         </p>
@@ -2846,7 +2855,7 @@ onBeforeUnmount(() => {
     </section>
 
     <p class="detail__hint detail__lede">
-      一枚印章可含多個印面，邊款是其中的特殊印面；下列屬性均按印面歸屬。
+      一枚印章可含多個印面：最先為 base face（封面圖），其餘一律為 side face；下列屬性均按印面歸屬。
     </p>
 
     <!-- **「印面列表」區塊標題 ＋ 新增入口（本單）**：入口**恰一個**，在 `v-for` 之外
@@ -2876,11 +2885,15 @@ onBeforeUnmount(() => {
       :key="face.id"
       class="panel face-block"
       :data-face-kind="face.isEdge ? 'EDGE' : 'FACE'"
+      :data-face-role="seals.faceRoleOf(face, faces)"
       :data-face-id="face.id"
     >
       <div class="panel__head">
         <h2 class="face-block__title">
-          <span class="face-block__badge" :class="{ 'face-block__badge--edge': face.isEdge }">
+          <span
+            class="face-block__badge"
+            :class="{ 'face-block__badge--side': seals.faceRoleOf(face, faces) === seals.FACE_ROLE_SIDE }"
+          >
             {{ faceLabel(face) }}
           </span>
           <span class="face-block__name">{{ corrections.resolveSealDisplayName(face) }}</span>
@@ -2932,7 +2945,7 @@ onBeforeUnmount(() => {
             <dd>{{ face.face_image_id ? `影像編號 ${face.face_image_id}` : '暫缺' }}</dd>
           </div>
           <div>
-            <dt>邊款圖片 ID</dt>
+            <dt>side face 圖片 ID</dt>
             <dd>{{ face.edge_image_ids.length ? face.edge_image_ids.join('、') : '無' }}</dd>
           </div>
         </dl>
@@ -2987,16 +3000,16 @@ onBeforeUnmount(() => {
 
           <template v-if="face.isEdge">
             <div v-for="image in face.edgeImages" :key="image.id" class="face-block__figure">
-              <p class="face-block__figure-title">邊款影像 {{ image.id }}</p>
+              <p class="face-block__figure-title">side face 影像 {{ image.id }}</p>
               <!-- 影像勘誤入口已**并入**「可標記屬性」区的**唯一**【勘誤】钮（本單：两入口合一）：
-                   本邊款影像卡不再单列【勘誤】；目标影像在合并弹窗「影像」页签内选（多图时给选择器）。 -->
+                   本 side face 影像卡不再单列【勘誤】；目标影像在合并弹窗「影像」页签内选（多图时给选择器）。 -->
               <SliceImage
                 v-if="imageReadyOf(image.id)"
                 class="face-block__img"
                 :src="imageUrlOf(image.id)"
                 :row="image"
-                alt="邊款影像"
-                :caption="`邊款圖 ${image.id}`"
+                alt="side face 影像"
+                :caption="`side face 圖 ${image.id}`"
                 data-face-image
               />
               <p v-else-if="imageErrorOf(image.id)" class="detail__hint">{{ imageErrorOf(image.id) }}</p>
@@ -3004,9 +3017,9 @@ onBeforeUnmount(() => {
               <p class="detail__sha">{{ digestTextOf(image) }}</p>
             </div>
             <p v-if="face.missingEdgeIds.length" class="face-block__empty">
-              影像庫中暫無編號「{{ face.missingEdgeIds.join('、') }}」對應的影像，請覈對邊款圖片 ID。
+              影像庫中暫無編號「{{ face.missingEdgeIds.join('、') }}」對應的影像，請覈對 side face 圖片 ID。
             </p>
-            <p v-else-if="face.edge_image_ids.length === 0" class="detail__hint">本邊款尚未登記邊款圖片 ID。</p>
+            <p v-else-if="face.edge_image_ids.length === 0" class="detail__hint">本 side face 尚未登記 side face 圖片 ID。</p>
           </template>
         </div>
 
@@ -3321,6 +3334,49 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
+    <!-- **整枚印章圖（裁定件 §三 / §四3）**：`stamp_id` 指向本章、但**未被任何面行**引用的影像行
+         ⇒ 所有面塊**之後**的独立区块；无此图 ⇒ 整块不渲染（不留空壳）。
+         图取用与面块**同一套**（`seals.imageDisplaySourceOf` ⇒ 本页 `imageUrlOf` / `SliceImage`），
+         **不自行拼对象键**、不另写第二条读取路径。 -->
+    <section v-if="wholeSealImages.length" class="panel" data-whole-seal-images>
+      <div class="panel__head">
+        <h2>整枚印章圖</h2>
+        <span class="detail__hint">共 {{ wholeSealImages.length }} 張 · 不屬於任何面</span>
+      </div>
+      <div class="panel__body">
+        <div class="detail__gallery">
+          <figure
+            v-for="image in wholeSealImages"
+            :key="image.id"
+            class="detail__photo"
+            data-whole-seal-figure
+            :data-image-id="image.id"
+          >
+            <SliceImage
+              v-if="imageReadyOf(image.id)"
+              class="face-block__img"
+              :src="imageUrlOf(image.id)"
+              :row="image"
+              alt="整枚印章圖"
+              :caption="`整枚印章圖 ${image.id}`"
+              data-whole-seal-image
+            />
+            <p v-else-if="imageErrorOf(image.id)" class="detail__hint">
+              {{ imageErrorOf(image.id) }}（本機影像庫中暫無該編號的圖象文件。）
+            </p>
+            <p v-else class="detail__hint">{{ imagePendingHintOf(image.id) }}</p>
+            <figcaption>
+              {{ image.id }}
+              <template v-if="image.width && image.height"> · {{ image.width }} × {{ image.height }}</template>
+              <template v-if="image.bytes"> · {{ formatBytes(image.bytes) }}</template>
+              <template v-if="image.color_mode"> · {{ image.color_mode }}</template>
+            </figcaption>
+            <p class="detail__sha">{{ digestTextOf(image) }}</p>
+          </figure>
+        </div>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel__head">
         <h2>實物照片</h2>
@@ -3381,6 +3437,7 @@ onBeforeUnmount(() => {
       v-if="addFaceOpen && seal"
       :stamp-id="seal.stamp_id"
       :seal-title="corrections.resolveSealDisplayName(seal)"
+      :has-base-face="sealHasBaseFace"
       @close="closeAddSealFace"
       @added="onSealFaceAdded"
     />
@@ -4034,7 +4091,7 @@ onBeforeUnmount(() => {
                     :key="`${item.kind}:${item.imageId}`"
                     :value="`${item.kind}:${item.imageId}`"
                   >
-                    {{ item.kind === seals.FACE_KIND.EDGE ? `邊款圖 ${item.imageId}` : `印面圖 ${item.imageId}` }}
+                    {{ item.kind === seals.FACE_KIND.EDGE ? `side face 圖 ${item.imageId}` : `印面圖 ${item.imageId}` }}
                   </option>
                 </select>
               </div>
@@ -4309,7 +4366,7 @@ onBeforeUnmount(() => {
   color: var(--slot-tag-text);
 }
 
-.detail__tag--edge {
+.detail__tag--multi {
   background: var(--c-gold-soft);
   border-color: var(--c-gold);
   color: var(--c-gold-strong);
@@ -4362,7 +4419,7 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.face-block__badge--edge {
+.face-block__badge--side {
   background: var(--c-gold-soft);
   border-color: var(--c-gold);
   color: var(--c-gold-strong);

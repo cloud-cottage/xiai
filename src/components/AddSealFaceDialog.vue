@@ -32,7 +32,9 @@ const props = defineProps({
   /** 目標印章的藏品編號（`stamp_id`；建面時作 `stamp_id` 上送）。 */
   stampId: { type: String, required: true },
   /** 頁面顯示名（只用于標題旁的人類可讀交代；不参与任何請求）。 */
-  sealTitle: { type: String, default: '' }
+  sealTitle: { type: String, default: '' },
+  /** 本章是否**已有印面**（＝已有 base face）⇒ `base face` 選項禁用（裁定件 §五）。 */
+  hasBaseFace: { type: Boolean, default: false }
 })
 const emit = defineEmits(['close', 'added'])
 
@@ -45,13 +47,43 @@ const PIPELINE_MISSING_MESSAGE =
   PIPELINE_NOTICE ||
   '圖像處理模塊未就緒（utils/image.js 的 loadImageFile 不可用），暫時無法在本機處理印面圖，請稍後重試。'
 
-const KIND_OPTIONS = [
-  { value: FACE_KIND.FACE, label: '印面' },
-  { value: FACE_KIND.EDGE, label: '邊款' }
-]
-
-/** 面類別（缺省 `FACE`；`EDGE` ＝ 邊款，屬同章的特殊印面）。 */
-const kind = ref(FACE_KIND.FACE)
+/* ============================================================================
+   **上傳三選一（裁定件 `docs/face-layer-ruling-2026-11-14.md` §五）**
+   ----------------------------------------------------------------------------
+   · `base face`：`addSealFace`（`kind='FACE'`）⇒ 該面 `is_primary:true`；
+     **僅當本章尚無任何面時可選**，已有 base ⇒ 選項禁用並說明。
+   · `side face`（**預設**）：`addSealFace`（`kind='FACE'`）⇒ `is_primary:false`。
+   · `整枚印章圖`：**不建面**（不調 `addSealFace`），只入冊影像行（`registerWholeSealImage`）。
+   · 前端**不再暴露 `EDGE`**（服務端仍保留該分支作兼容；UI 一律 `kind='FACE'`）。
+   ============================================================================ */
+const UPLOAD_MODE_BASE = 'base'
+const UPLOAD_MODE_SIDE = 'side'
+const UPLOAD_MODE_SEAL = 'seal'
+const MODE_OPTIONS = Object.freeze([
+  { value: UPLOAD_MODE_BASE, label: seals.FACE_ROLE_BASE },
+  { value: UPLOAD_MODE_SIDE, label: seals.FACE_ROLE_SIDE },
+  { value: UPLOAD_MODE_SEAL, label: '整枚印章圖' }
+])
+/** 已選類型（**預設 side face**：本章多數情況是加一枚 side face）。 */
+const mode = ref(UPLOAD_MODE_SIDE)
+/** `base face` 選項是否禁用（本章已有印面 ⇒ 已有 base face）。 */
+function modeDisabled(value) {
+  return value === UPLOAD_MODE_BASE && props.hasBaseFace
+}
+/** 當前類型的說明（**逐字交代服務端行為**，不靜默、不誤導）。 */
+const modeHint = computed(() => {
+  if (mode.value === UPLOAD_MODE_BASE) {
+    return 'base face 是本章的主印面（封面圖，顯示時排最前）；僅在章內尚無印面時可選。'
+  }
+  if (mode.value === UPLOAD_MODE_SEAL) {
+    return '整枚印章圖不屬於任何面：只建立影像行，不建立面、不改變印面數；成功後顯示在詳情頁最後的「整枚印章圖」區塊。'
+  }
+  return 'side face 是本章其餘的印面（預設選項）；顯示次序在 base face 之後，按面號升序。'
+})
+/** 影像區的字段名（按當前類型如實標示）。 */
+const imageFieldLabel = computed(() => (mode.value === UPLOAD_MODE_SEAL ? '整枚印章圖（必填）' : '印面圖（必填）'))
+/** 失敗文案裡的影像稱謂（同一份文案按類型切換，不混稱）。 */
+const imageNoun = computed(() => (mode.value === UPLOAD_MODE_SEAL ? '整枚印章圖' : '印面圖'))
 /** 印文（**選填**，≤ 既有上限）。 */
 const sealName = ref('')
 /** 已選原圖：`{ bitmap, width, height, originalBytes, originalMime, name, previewUrl }`。 */
@@ -99,7 +131,7 @@ async function runExport() {
     if (source.value !== src) return
     if (!result.ok) {
       exported.value = null
-      feedback.value = `印面圖處理失敗：${result.message}`
+      feedback.value = `${imageNoun.value}處理失敗：${result.message}`
       return
     }
     exported.value = {
@@ -112,7 +144,7 @@ async function runExport() {
   } catch (err) {
     if (source.value !== src) return
     exported.value = null
-    feedback.value = `印面圖處理失敗：${(err && err.message) || '未知原因'}`
+    feedback.value = `${imageNoun.value}處理失敗：${(err && err.message) || '未知原因'}`
   }
 }
 
@@ -184,7 +216,7 @@ async function submit() {
   feedback.value = ''
   imageRegistered.value = false
   if (!source.value || !source.value.bitmap) {
-    feedback.value = '請先選擇一張本機圖片文件，或把游標置於圖片區粘貼剪貼板中的圖片（印面圖必填）。'
+    feedback.value = `請先選擇一張本機圖片文件，或把游標置於圖片區粘貼剪貼板中的圖片（${imageNoun.value}必填）。`
     return
   }
   if (sealNameTooLong.value) {
@@ -205,7 +237,7 @@ async function submit() {
     })
     if (!result.ok) {
       exported.value = null
-      feedback.value = `印面圖處理失敗：${result.message}（本次未提交任何內容）`
+      feedback.value = `${imageNoun.value}處理失敗：${result.message}（本次未提交任何內容）`
       return
     }
     exported.value = {
@@ -214,15 +246,28 @@ async function submit() {
       width: result.width,
       height: result.height
     }
-    const added = await seals.addSealFace({
-      stampId,
-      kind: kind.value,
-      sealName: sealName.value.trim(),
-      bytes: result.bytes,
-      mime: result.mime,
-      width: result.width,
-      height: result.height
-    })
+    /* **第三選項「整枚印章圖」不建面**：只入冊影像行（`registerWholeSealImage`），
+       不被任何面引用 ⇒ `face_count` 不變（裁定件 §五）。 */
+    const added =
+      mode.value === UPLOAD_MODE_SEAL
+        ? await seals.registerWholeSealImage({
+            stampId,
+            bytes: result.bytes,
+            mime: result.mime,
+            width: result.width,
+            height: result.height
+          })
+        : await seals.addSealFace({
+            stampId,
+            /* 前端**不再暴露 `EDGE`**：base / side face 一律 `kind='FACE'`
+               （主 / 次之別由服務端按 `is_primary` 定，不由前端傳類別）。 */
+            kind: FACE_KIND.FACE,
+            sealName: sealName.value.trim(),
+            bytes: result.bytes,
+            mime: result.mime,
+            width: result.width,
+            height: result.height
+          })
     if (!added.ok) {
       /* 如實上屏：服務層文案原文（含「影像已入冊但印面未建立」的如實交代），不吞成一句。 */
       imageRegistered.value = added.registered === true
@@ -233,7 +278,8 @@ async function submit() {
     releaseSource()
     emit('added', added)
   } catch (err) {
-    feedback.value = `新增印面失敗：${(err && err.message) || '未知原因'}（本次未確認結果，請重新整理後再試）`
+    const actionText = mode.value === UPLOAD_MODE_SEAL ? '整枚印章圖入冊失敗' : '新增印面失敗'
+    feedback.value = `${actionText}：${(err && err.message) || '未知原因'}（本次未確認結果，請重新整理後再試）`
   } finally {
     submitting.value = false
   }
@@ -255,31 +301,37 @@ onBeforeUnmount(() => {
     <div class="add-face-box">
       <h3 class="add-face-box__title">新增印面</h3>
       <p class="add-face-box__lede">
-        爲本印章新增一個印面（或一個邊款）。印面圖必填；印文選填，可稍後在「編輯固定屬性」補齊。
+        爲本印章新增一個 base face、一個 side face，或一張整枚印章圖。圖片必填；印文選填，可稍後在「編輯固定屬性」補齊。
         <template v-if="sealTitle">當前印章：{{ sealTitle }}<template v-if="stampId">（藏品編號 {{ stampId }}）</template>。</template>
       </p>
 
       <div class="field">
-        <label>類型</label>
-        <div class="add-face-kinds">
-          <label v-for="option in KIND_OPTIONS" :key="option.value" class="add-face-kind">
+        <label>類型（三選一）</label>
+        <div class="add-face-kinds" data-add-face-modes>
+          <label
+            v-for="option in MODE_OPTIONS"
+            :key="option.value"
+            class="add-face-kind"
+            :class="{ 'add-face-kind--disabled': modeDisabled(option.value) }"
+          >
             <input
-              v-model="kind"
+              v-model="mode"
               type="radio"
               name="add-seal-face-kind"
               :value="option.value"
-              :disabled="submitting"
+              :disabled="submitting || modeDisabled(option.value)"
               data-add-face-kind
             />
             <span>{{ option.label }}</span>
+            <span v-if="modeDisabled(option.value)" class="field__hint" data-add-face-mode-disabled>
+              本章已有主印面，請改選 side face
+            </span>
           </label>
         </div>
-        <span class="field__hint">
-          印面（FACE）會計入本印章的印面數；邊款（EDGE）是其中的特殊印面，不計入印面數。
-        </span>
+        <span class="field__hint" data-add-face-mode-hint>{{ modeHint }}</span>
       </div>
 
-      <div class="field">
+      <div v-if="mode !== UPLOAD_MODE_SEAL" class="field">
         <label for="add-seal-face-name">印文（選填）</label>
         <input
           id="add-seal-face-name"
@@ -297,7 +349,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="field" tabindex="0" data-paste-zone="add-seal-face" @paste="onPaste">
-        <label for="add-seal-face-image">印面圖（必填）</label>
+        <label for="add-seal-face-image">{{ imageFieldLabel }}</label>
         <input
           id="add-seal-face-image"
           type="file"
@@ -313,7 +365,7 @@ onBeforeUnmount(() => {
         </span>
 
         <div v-if="source" class="add-face-preview" data-add-face-preview>
-          <img v-if="source.previewUrl" class="add-face-preview__img" :src="source.previewUrl" alt="印面圖預覽" />
+          <img v-if="source.previewUrl" class="add-face-preview__img" :src="source.previewUrl" alt="影像預覽" />
           <div v-else class="add-face-preview__img add-face-preview__img--missing">預覽不可用（原圖仍可處理）</div>
           <p class="add-face-preview__summary" data-add-face-summary>
             已選 {{ source.name }} · 原圖 {{ source.width }} × {{ source.height }} · 原文件 {{ formatBytes(source.originalBytes) }}
@@ -324,7 +376,7 @@ onBeforeUnmount(() => {
             <template v-else>處理中…</template>
           </p>
         </div>
-        <p v-else class="field__hint" data-add-face-image-missing>尚未選圖（印面圖必填）。</p>
+        <p v-else class="field__hint" data-add-face-image-missing>尚未選圖（{{ imageNoun }}必填）。</p>
       </div>
 
       <p v-if="feedback" class="notice" :data-add-face-feedback="imageRegistered ? 'image-registered' : 'plain'">
@@ -402,6 +454,12 @@ onBeforeUnmount(() => {
   gap: var(--s-1);
   align-items: center;
   cursor: pointer;
+}
+
+/* 已禁用的選項（本章已有 base face）⇒ 顯式可讀，不用 CSS 隱藏冒充。 */
+.add-face-kind--disabled {
+  cursor: not-allowed;
+  color: var(--c-text-muted);
 }
 
 .add-face-preview {

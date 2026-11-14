@@ -4064,7 +4064,7 @@ export async function insertFaceRow(actor, payload = {}) {
     row,
     /* **如实回显识别编码**（`fid` 恒由 `face_no` 重算，传入值一律被覆盖）。 */
     code: { face_no: faceNo, fid: encodedFace.code, number_source: faceNumberSource },
-    message: `已新增${kind === FACE_KIND.EDGE ? '邊款' : '印面'}（${faceId}）`
+    message: `已新增${kind === FACE_KIND.EDGE ? 'side face' : '印面'}（${faceId}）`
   }
 }
 
@@ -4277,7 +4277,7 @@ export function planSealWithFaceInput(actor, payload = {}) {
   let edgeImage = null
   if (payload.edgeImage !== undefined && payload.edgeImage !== null && payload.edgeImage !== '') {
     edgeImage = normalizeImagePayload(payload.edgeImage)
-    if (!edgeImage.ok) return { ok: false, reason: imageReasonOf(edgeImage), message: `邊款圖：${edgeImage.message}` }
+    if (!edgeImage.ok) return { ok: false, reason: imageReasonOf(edgeImage), message: `side face 圖：${edgeImage.message}` }
     edgeInput = payload.edgeImage
   }
 

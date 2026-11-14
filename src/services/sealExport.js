@@ -141,7 +141,7 @@ export function imageTasksOf(faces, photos) {
       add({ key: `face:${imageId}`, source: 'face', imageId, kindLabel: '印面圖', faceLabel: label })
     }
     fixed.edge_image_ids.forEach((id) => {
-      add({ key: `face:${id}`, source: 'face', imageId: id, kindLabel: '邊款圖', faceLabel: label })
+      add({ key: `face:${id}`, source: 'face', imageId: id, kindLabel: 'side face 圖', faceLabel: label })
     })
   })
   photos.forEach((row) => {

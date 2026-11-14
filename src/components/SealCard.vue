@@ -32,11 +32,20 @@ const authorName = computed(() => corrections.resolveAuthorDisplayName(props.sea
 const cardMode = computed(() => sealCards.isCloudCardRow(props.seal) || sealCards.coverKeyOf(props.seal) !== '')
 /** 標籤取值：卡片行用 `category`（＝印面內容）；本機行沿用 `seal_type`。 */
 const contentTag = computed(() => String(props.seal.seal_type || props.seal.category || ''))
-/** 「含邊款」判據：卡片行讀 `edge_count`；本機行沿用 `hasEdge`。 */
-const hasEdge = computed(() => {
-  if (props.seal.hasEdge === true) return true
-  const edges = Number(props.seal.edge_count)
-  return Number.isFinite(edges) && edges > 0
+/** 「多面」判據（裁定件 §三）：**面數 > 1** ⇒ 多面（不再按 `kind === 'EDGE'` 分類）。
+    卡片行 ＝ `face_count`（非 EDGE 面數）＋ `edge_count`（EDGE 面數）；
+    本機視圖模型 ＝ `faceCount`（`seals.js` 的 `faces.length`，含 `kind='EDGE'` 面）；
+    两键皆缺的旧行才回落到 `hasEdge`（兼容兜底，非分类口径）。 */
+const isMultiFace = computed(() => {
+  if (props.seal.face_count !== undefined && props.seal.face_count !== null) {
+    const faceCount = Number(props.seal.face_count)
+    const edgeCount = Number(props.seal.edge_count)
+    const total = (Number.isFinite(faceCount) ? faceCount : 0) + (Number.isFinite(edgeCount) ? edgeCount : 0)
+    return total > 1
+  }
+  const localFaces = Number(props.seal.faceCount)
+  if (Number.isFinite(localFaces) && localFaces > 0) return localFaces > 1
+  return props.seal.hasEdge === true
 })
 /** 主印面（**僅本機形態**查詢**；卡片形態下不查**，避免任何全量映射依賴）。 */
 const face = computed(() => (cardMode.value ? null : seals.primaryFaceOf(props.seal.stamp_id)))
@@ -243,7 +252,7 @@ onBeforeUnmount(revokeThumb)
       <div class="seal-card__tags">
         <span class="seal-card__tag seal-card__tag--era">{{ seal.dynasty }}</span>
         <span class="seal-card__tag">{{ contentTag }}</span>
-        <span v-if="hasEdge" class="seal-card__tag seal-card__tag--edge">含邊款</span>
+        <span v-if="isMultiFace" class="seal-card__tag seal-card__tag--multi">多面</span>
       </div>
 
       <h3 class="seal-card__title">
@@ -368,7 +377,7 @@ onBeforeUnmount(revokeThumb)
   border-color: var(--slot-chip-active-bg);
 }
 
-.seal-card__tag--edge {
+.seal-card__tag--multi {
   color: var(--slot-gold-text);
   border-color: var(--slot-gold-line);
   background: var(--slot-gold-bg);

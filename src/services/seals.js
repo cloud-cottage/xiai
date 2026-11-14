@@ -154,12 +154,27 @@ import { WRITE_FACE_MODES, writeFaceMode } from '../data/writeFaceMode.js'
 
 export { FACE_KIND }
 
-const KIND_LABELS = {
-  [FACE_KIND.FACE]: '印面',
-  [FACE_KIND.EDGE]: '邊款'
-}
+/* ============================================================================
+   **面角色（口徑真源：`docs/face-layer-ruling-2026-11-14.md` §三 / §四｜單點）**
+   ----------------------------------------------------------------------------
+   上屏只有兩個詞，**判定只用 `is_primary`**：`is_primary === true` ⇒ `base face`；
+   其餘**所有**面 —— 不論 DB 內 `kind` 是 `FACE` 還是 `EDGE` —— ⇒ `side face`。
+   `kind` 從此只是內部實現細節（不參與上屏分類、不作篩選 / 標籤 / 彈窗選項；數據值
+   `FACE` / `EDGE` 一字不動，零遷移）。**角色判定 / 標籤文案 / 面塊次序都只在本檔實現**，
+   視圖只消費，不得自寫第二份。
+   ============================================================================ */
+
+/** 上屏面角色字面值（全站只此兩個；`SealDetailView` / 彈窗一律引用本常量）。 */
+export const FACE_ROLE_BASE = 'base face'
+export const FACE_ROLE_SIDE = 'side face'
 
 const ORDINALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+
+/** `is_primary` 真值三形態（服務端 `true` / 舊行字符串 `'true'` / 數值 `1`）。 */
+function isPrimaryFlagged(row) {
+  if (!row) return false
+  return row.is_primary === true || row.is_primary === 'true' || row.is_primary === 1
+}
 
 /** 可标记属性（勘误对象）在印面上的键名（R-30：`seal_type` ＝【印面内容】）。 */
 const MARKABLE_KEYS = [
@@ -170,8 +185,68 @@ const MARKABLE_KEYS = [
   'transcription'
 ]
 
-export function faceKindLabel(kind) {
-  return KIND_LABELS[kind] || KIND_LABELS[FACE_KIND.FACE]
+/**
+ * 面角色（`base face` / `side face`）—— **判定單點**（裁定件 §三）。
+ *
+ * · `is_primary === true`（三形態真值）⇒ `base face`；
+ * · 其餘一律 `side face` —— **含 DB 內 `kind = 'EDGE'` 的行**（`kind` 不參與上屏分類）；
+ * · 兜底（僅當整章**都沒** `is_primary`：本機示範資料 / 極舊行）⇒ 按數據層既有主面口徑
+ *   `primaryFaceIn` 取一枚作 `base face`，**不另立第二套判據**。
+ *
+ * @param {object} face 印面（原始行 / 視圖模型皆可）
+ * @param {Array<object>} [siblings] 同章印面集合（兜底分支用；缺省 ⇒ 只按 `is_primary` 判）
+ * @returns {string} `base face` | `side face`
+ */
+export function faceRoleOf(face, siblings) {
+  if (isPrimaryFlagged(face)) return FACE_ROLE_BASE
+  const list = Array.isArray(siblings) ? siblings.filter(Boolean) : []
+  if (list.length && !list.some(isPrimaryFlagged)) {
+    const primary = primaryFaceIn(list)
+    if (primary && face && String(primary.id) === String(face.id)) return FACE_ROLE_BASE
+  }
+  return FACE_ROLE_SIDE
+}
+
+/**
+ * 面標籤（**上屏單點**）：`base face` / `side face 一`、`side face 二`（序號按**同角色**計，
+ * 次序與面塊顯示次序同源）。視圖不得自寫第二份標籤拼裝。
+ *
+ * @param {object} face 印面
+ * @param {Array<object>} [siblings] 同章印面集合（次序即 `sortFacesForDisplay` 的產物）
+ */
+export function faceLabelOn(face, siblings) {
+  const list = Array.isArray(siblings) ? siblings.filter(Boolean) : []
+  const role = faceRoleOf(face, list)
+  if (role === FACE_ROLE_BASE) return FACE_ROLE_BASE
+  const sameRole = list.filter((item) => faceRoleOf(item, list) === role)
+  const index = sameRole.findIndex((item) => String(item.id) === String(face && face.id))
+  return `${role} ${ORDINALS[index] || String(index + 1)}`
+}
+
+/**
+ * 面塊顯示次序（裁定件 §四｜**全站唯一排序點**）：`base face` 最先 ⇒ 其餘按 `face_no` 升序
+ * （無 `face_no` 的行排在同組末尾，彼此保持原序 ⇒ 同章穩定）。
+ */
+export function compareFaceDisplayOrder(a, b) {
+  const rankA = isPrimaryFlagged(a) ? 0 : 1
+  const rankB = isPrimaryFlagged(b) ? 0 : 1
+  if (rankA !== rankB) return rankA - rankB
+  const noA = Number(a && a.face_no)
+  const noB = Number(b && b.face_no)
+  const hasA = Number.isFinite(noA)
+  const hasB = Number.isFinite(noB)
+  if (hasA && hasB) {
+    if (noA === noB) return 0
+    return noA < noB ? -1 : 1
+  }
+  if (hasA) return -1
+  if (hasB) return 1
+  return 0
+}
+
+/** 排序入口（**不就地改動入參**；唯一調用點見 `listFacesOf`）。 */
+export function sortFacesForDisplay(faces) {
+  return (Array.isArray(faces) ? faces.slice() : []).sort(compareFaceDisplayOrder)
 }
 
 /* -------------------------------- 印面 -------------------------------- */
@@ -220,11 +295,16 @@ export function faceViewModel(row) {
   }
 }
 
-/** 某印章的全部印面（按种子顺序，含边款）。 */
+/**
+ * 某印章的全部印面 —— **顯示次序的唯一定序點**（裁定件 §四）：`base face` 最先 ⇒ 其餘按
+ * `face_no` 升序。全部讀面（詳情頁面塊 / 卡片 / 導出）都經本函數 ⇒ 不得到各處再排一遍。
+ */
 export function listFacesOf(sealId) {
-  return listFaceRows()
-    .filter((row) => (row.sealId || row.stamp_id) === sealId)
-    .map(faceViewModel)
+  return sortFacesForDisplay(
+    listFaceRows()
+      .filter((row) => (row.sealId || row.stamp_id) === sealId)
+      .map(faceViewModel)
+  )
 }
 
 export function getFaceById(faceId) {
@@ -243,18 +323,16 @@ export function primaryFaceOf(sealId) {
   return primaryFaceIn(faces) || faces[0] || null
 }
 
-/** 印面标签：所属印章内**同类别**序号 + 类别，如「印面二」「边款一」。 */
+/** 印面标签（**上屏單點**）：`base face` / `side face 一`（同角色序號；裁定件 §三 / §四）。 */
 export function faceLabelOf(faceId, sealId = '') {
   const rows = listFaceRows()
   if (faceId) {
     const row = rows.find((item) => item.id === faceId)
     if (row) {
       const sealKey = row.sealId || row.stamp_id
-      const siblings = rows.filter(
-        (item) => (item.sealId || item.stamp_id) === sealKey && item.kind === row.kind
-      )
-      const index = siblings.findIndex((item) => item.id === faceId)
-      return `${faceKindLabel(row.kind)}${ORDINALS[index] || String(index + 1)}`
+      /* 同章全部面（**保持存儲序** ⇒ 序號穩定；次序本身由 `listFacesOf` 單點負責）。 */
+      const siblings = rows.filter((item) => (item.sealId || item.stamp_id) === sealKey)
+      return faceLabelOn(row, siblings)
     }
   }
   if (sealId) {
@@ -275,6 +353,36 @@ function markableValue(primary, sealRow, key) {
   if (faceValue !== undefined && faceValue !== null && faceValue !== '') return faceValue
   const sealValue = sealRow ? sealRow[key] : ''
   return sealValue === undefined || sealValue === null ? '' : sealValue
+}
+
+/**
+ * **整枚印章圖**（裁定件 §三｜單點）：`xiai_images` 中 `stamp_id` 指向本印章、且**未被任何面行**
+ * 的 `face_image_id` / `edge_image_ids` 引用的影像行 —— 按影像編號升序（穩定）。
+ * 頁面把它排在所有面塊**之後**（無面掛載的圖排最後，裁定件 §一.3）。
+ *
+ * @param {Array<object>} faces 本章印面（原始行 / 視圖模型皆可）
+ * @param {Array<object>} images 本章影像行（`xiai_images`，已按 `stamp_id` 限定）
+ * @returns {Array<object>} 未被任何面引用的影像行
+ */
+export function wholeSealImagesOf(faces, images) {
+  const referenced = new Set()
+  ;(Array.isArray(faces) ? faces : []).forEach((face) => {
+    if (!face) return
+    if (face.face_image_id) referenced.add(String(face.face_image_id))
+    const ids = Array.isArray(face.edge_image_ids) ? face.edge_image_ids : []
+    ids.forEach((id) => {
+      if (id) referenced.add(String(id))
+    })
+  })
+  return (Array.isArray(images) ? images : [])
+    .filter((row) => row && row.id && !referenced.has(String(row.id)))
+    .slice()
+    .sort((a, b) => {
+      const left = String(a.id)
+      const right = String(b.id)
+      if (left === right) return 0
+      return left < right ? -1 : 1
+    })
 }
 
 /**
@@ -318,6 +426,8 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
       const primary = primaryFaceIn(faces) || faces[0] || null
       const edges = faces.filter((face) => face.kind === FACE_KIND.EDGE)
       const edgeImages = edges.reduce((acc, face) => acc.concat(face.edgeImages), [])
+      /* 本章影像行（`xiai_images`）—— 整枚印章圖 與影像讀數共用同一份集合（**只讀一次**）。 */
+      const stampImages = listImageRows().filter((img) => img.stamp_id === row.stamp_id)
       const resolved = {}
       MARKABLE_KEYS.forEach((key) => {
         resolved[key] = markableValue(primary, row, key)
@@ -360,7 +470,10 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
           edgeFaces: edges,
           edgeImages,
           hasEdge: edges.length > 0,
-          images: listImageRows().filter((img) => img.stamp_id === row.stamp_id),
+          images: stampImages,
+          /* **整枚印章圖（裁定件 §三）**：`stamp_id` 指向本章、且未被任何面行引用的影像行
+             ⇒ 詳情頁在**所有面塊之後**單獨成區（無此圖 ⇒ 該區塊不渲染）。 */
+          wholeSealImages: wholeSealImagesOf(faces, stampImages),
           /* **作者显示名（单点派生）**：供文本导出等按印章取名（**同一单点**，不另写名表）。 */
           author_display: authorDisplay,
           /* **作者引用型（person-model §4.1）**：印章行**不落引用副本**（P1-2）⇒ 印章视图模型的
@@ -904,7 +1017,7 @@ async function createSealWithFaceViaCloud(actor, payload = {}) {
   if (edgeImage) {
     edgeStored = await storeArtifactBytes(edgeImage.bytes)
     if (!edgeStored.ok) {
-      return cloudUploadFail(edgeStored.reason, `上傳印章失敗（邊款圖）：${edgeStored.message}（入雲前中止；本次未寫入任何本機行）`)
+      return cloudUploadFail(edgeStored.reason, `上傳印章失敗（side face 圖）：${edgeStored.message}（入雲前中止；本次未寫入任何本機行）`)
     }
   }
   const faceKey = faceStored.storageKey || artifactObjectKeyOf(faceStored.sha256)
@@ -2491,7 +2604,7 @@ export async function addSealFace(payload = {}) {
     }
   }
   if (FACE_ADD_ALLOWED_KINDS.indexOf(kindRaw) === -1) {
-    return { ok: false, reason: 'INVALID_VALUE', message: '印面類別（kind）只能是 FACE（印面）或 EDGE（邊款）；本次未提交任何內容。' }
+    return { ok: false, reason: 'INVALID_VALUE', message: '印面類別（kind）取值不合法；本次未提交任何內容。' }
   }
   if (sealName.length > FACE_ADD_SEAL_NAME_MAX) {
     return {
@@ -2690,7 +2803,11 @@ export async function addSealFace(payload = {}) {
   }
   const readback = cloudFaceRowOf(faceId)
   const countText = faceCount === null ? '' : `；本印章現有 ${faceCount} 個印面`
-  const kindText = faceKindLabel(kindOut)
+  /* **上屏面角色（裁定件 §三）**：回包不含 `is_primary` ⇒ 按面數如實推定 ——
+     本輪建的是本章**第一枚**面（`face_count === 1`）⇒ `base face`，其餘 ⇒ `side face`；
+     `kind = 'EDGE'` 的行一律 `side face`（`kind` 不參與上屏分類）。 */
+  const kindText =
+    kindOut !== FACE_KIND.EDGE && Number(faceCount) === 1 ? FACE_ROLE_BASE : FACE_ROLE_SIDE
   const base = {
     ok: true,
     faceId,
@@ -2711,6 +2828,197 @@ export async function addSealFace(payload = {}) {
     ? `${countText}；印面圖與屬性可繼續編輯。`
     : `${countText}；雲端快照暫未見該印面（快照狀態：${readback.state}），請稍後重新整理確認（面行以服務端為準）。`
   return { ...base, message: `${head}${tail}` }
+}
+
+/* ============================================================================
+   **管理員「整枚印章圖」入冊（裁定件 §五｜第三選項：不建面）**
+   ----------------------------------------------------------------------------
+   口徑：整枚印章圖**不屬於任何面** ⇒ **不調 `addSealFace`**、不建面行、`face_count` 不變；
+   只跑既有管道（`storeArtifactBytes` → `registerFaceImage`）建影像行，且**不被任何面引用**
+   ⇒ 詳情頁「整枚印章圖」區塊可見（`xiai_images` 已在讀面集合 ⇒ 零新增 op、零新 reason）。
+   硬口徑（逐條）：
+     · **零新增 op**：入冊走既有 `registerFaceImage`（`ADMIN_OPS` 集合不變）；
+     · `face_id` 必填門沿用既有**佔位串** `FACE_REGISTER_PENDING_FACE_ID`（該 op 只用它過必填 /
+       字符串門、行體不含面引用）；佔位值**顯式命名為 pending**，不冒充任何真實面號；
+     · `kind` 上送 `FACE`（影像族容器口徑）；該行不出現在任何面行的 `face_image_id` /
+       `edge_image_ids` 裡 ⇒ 不參與 base / side 分類；
+     · dev / 離線形態沒有雲端入冊面 ⇒ 結構化拒絕 ＋ 零寫入（不造假行）；
+     · 成功 ⇒ 重取雲端快照 ＋ 只讀回讀（影像行是否已在快照裡），如實上屏。
+   ============================================================================ */
+
+/**
+ * **整枚印章圖入冊**（管理員專屬；`AddSealFaceDialog` 第三選項的唯一業務入口）。
+ *
+ * @param {{stampId?:string, stamp_id?:string, bytes?:Uint8Array|ArrayBuffer,
+ *          mime?:string, width?:number, height?:number}} [payload]
+ *   `bytes` ＝ 瀏覽器端處理後的**存儲件**（單頁 8bit Deflate TIFF；不得是原始 PNG / JPG 字節）。
+ * @returns {Promise<{ok:boolean, imageId?:string, registered?:boolean, wholeSeal?:boolean,
+ *   verifiedInSnapshot?:boolean, snapshotState?:string, reason?:string, message:string}>}
+ */
+export async function registerWholeSealImage(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {}
+  const stampId = String(source.stampId ?? source.stamp_id ?? '').trim()
+
+  /* ① 形參門 —— 全部判在任何請求 / 任何寫入之前（與 `addSealFace` 同門、同 reason 集合）。 */
+  const user = currentUser()
+  if (!user) {
+    return { ok: false, reason: 'UNAUTHENTICATED', message: '請先登錄管理員賬號後再加入整枚印章圖（本次未提交任何內容）。' }
+  }
+  if (!canAddSealFace(user)) {
+    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以加入整枚印章圖（本次未提交任何內容）。' }
+  }
+  if (!stampId) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '未指定要加入整枚印章圖的印章（缺少 stamp_id）；本次未提交任何內容。' }
+  }
+  if (stampId.length > FACE_ADD_STAMP_ID_MAX) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message: `印章編號（stamp_id）超過 ${FACE_ADD_STAMP_ID_MAX} 個字符；本次未提交任何內容。`
+    }
+  }
+  const bytes = toUint8Array(source.bytes)
+  if (!bytes || bytes.length === 0) {
+    return { ok: false, reason: 'EMPTY_CONTENT', message: '整枚印章圖內容爲空，請先選擇本機圖片文件或粘貼剪貼板圖片；本次未提交任何內容。' }
+  }
+  if (bytes.length > FACE_IMAGE_ARTIFACT_MAX_BYTES) {
+    return {
+      ok: false,
+      reason: 'ARTIFACT_TOO_LARGE',
+      message:
+        `本機影像生成失敗：整枚印章圖存儲件 ${describeBytes(bytes.length)} 超過入庫上限 ` +
+        `${describeBytes(FACE_IMAGE_ARTIFACT_MAX_BYTES)}；本次未提交任何內容。`
+    }
+  }
+  const actualMime = sniffBytesMime(bytes)
+  if (!actualMime) {
+    return { ok: false, reason: 'NOT_IMAGE', message: '這不是可用的圖片內容（無法識別圖片格式）；本次未提交任何內容。' }
+  }
+  if (actualMime !== STORAGE_MIME) {
+    return {
+      ok: false,
+      reason: 'ENCODE_FAILED',
+      message:
+        `入庫對象必須是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${actualMime}）⇒ 已拒絕提交；` +
+        '本次未建立任何影像行（原始 PNG / JPG 字節不得直接入冊，請經影像管線處理後再提交）。'
+    }
+  }
+
+  /* ② 形態分流點（唯一一處）：雲端模式才走雲 op（本機不造假影像行）。 */
+  if (writeFaceMode() !== WRITE_FACE_MODES.CLOUD) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message:
+        '本機為 dev / 離線形態（沒有雲端影像入冊面）：整枚印章圖只入雲端影像行，本機不自行建行；' +
+        '本次未提交任何內容。'
+    }
+  }
+
+  /* ③ 字節交權威存儲（既有單點；內容尋址、冪等）。 */
+  const stored = await storeArtifactBytes(bytes)
+  if (!stored || stored.ok !== true) {
+    return {
+      ok: false,
+      reason: (stored && stored.reason) || 'STORAGE_UNAVAILABLE',
+      message: `整枚印章圖上傳失敗：${(stored && stored.message) || '權威存儲暫時不可用'}；本次未建立任何雲端影像行。`
+    }
+  }
+  const sha256 = String(stored.sha256 || '').toLowerCase()
+  const storageKey = String(stored.storageKey || stored.storage_key || '')
+  const storedBytes = Number(stored.bytesLength)
+  const storedMime = String(stored.mime || '').trim().toLowerCase()
+  if (!sha256 || !storageKey || !Number.isInteger(storedBytes) || storedBytes <= 0 || storageKey !== artifactObjectKeyOf(sha256)) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message:
+        `整枚印章圖上傳回包缺少內容尋址讀數（sha256 / bytes / storage_key；storage_key＝${storageKey || '空'}）` +
+        '⇒ 未產生雲端內容尋址對象鍵；本次未入雲端影像行。'
+    }
+  }
+  if (storedMime && storedMime !== STORAGE_MIME) {
+    return {
+      ok: false,
+      reason: 'ENCODE_FAILED',
+      message:
+        `入庫對象不是存儲容器 ${STORAGE_MIME}（按字節魔數判定為 ${storedMime}）⇒ 已拒絕入冊；` +
+        '本次未建立任何雲端影像行。'
+    }
+  }
+  const mime = storedMime || STORAGE_MIME
+
+  /* ④ 入冊（既有雲 op `registerFaceImage`；**不建面**）。 */
+  let registration = null
+  try {
+    registration = await userWriteGate(
+      FACE_IMAGE_REGISTER_OP,
+      {
+        seal_id: stampId,
+        face_id: FACE_REGISTER_PENDING_FACE_ID,
+        sha256,
+        bytes: storedBytes,
+        mime,
+        storage_key: storageKey,
+        kind: FACE_KIND.FACE
+      },
+      { readoutKeys: FACE_IMAGE_REGISTER_READOUT_KEYS }
+    )
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: `整枚印章圖入冊請求失敗：${(err && err.message) || '未知原因'}；本次未建立任何影像行。`
+    }
+  }
+  if (registration && registration.dev === true) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '本機為 dev / 離線形態（沒有雲端影像入冊面）⇒ 本次未建立任何影像行。'
+    }
+  }
+  if (!registration || registration.ok !== true) {
+    return {
+      ok: false,
+      reason: (registration && registration.reason) || 'STORAGE_UNAVAILABLE',
+      message:
+        `整枚印章圖存儲件已就位，但影像入冊失敗：${(registration && registration.message) || '入冊服務暫時不可用'}；` +
+        '本次未建立任何影像行，可重試（同一張圖不會重複建影像行）。'
+    }
+  }
+  const registeredFromReadout = typeof registration.image_id === 'string' ? registration.image_id.trim() : ''
+  const registeredFromDocId = typeof registration.docId === 'string' ? registration.docId.trim() : ''
+  const imageId = registeredFromReadout || registeredFromDocId
+  if (!imageId.startsWith('img-')) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '影像入冊回包形狀不可辨識（未附影像編號 image_id）；本次未建立任何影像行，請稍後重試。'
+    }
+  }
+
+  /* ⑤ 重取雲端快照 ＋ 只讀回讀（影像行是否已在快照裡；**面行零改動**）。 */
+  try {
+    await retryDataSource()
+  } catch (err) {
+    /* 重取失敗不改變入冊結論（行已由服務端建好）；下面的回讀讀數會如實反映快照狀態。 */
+  }
+  const snapshot = cloudBaseReadOf('images')
+  const snapshotState = snapshot && typeof snapshot.state === 'string' ? snapshot.state : 'unknown'
+  const verified = Boolean(findCloudImageRow(imageId))
+  const tail = verified
+    ? '詳情頁「整枚印章圖」區塊即可見（該圖不屬於任何面，印面數不變）。'
+    : `雲端快照暫未見該影像（快照狀態：${snapshotState}），請稍後重新整理確認（影像行以服務端為準）。`
+  return {
+    ok: true,
+    imageId,
+    registered: true,
+    wholeSeal: true,
+    verifiedInSnapshot: verified,
+    snapshotState,
+    message: `整枚印章圖已入冊：影像編號 ${imageId}（不建立面、不改變印面數）；${tail}`
+  }
 }
 
 /* ============================================================================
@@ -3174,7 +3482,7 @@ export async function submitSealImport({
     return {
       ok: false,
       reason: 'MISSING_REQUIRED',
-      message: '導入行請至少帶一個印面（faces[] 1..N，含邊款 kind=EDGE；源側無圖之印章可帶 image_status=source_no_image 例外）；本次零寫入。'
+      message: '導入行請至少帶一個印面（faces[] 1..N；源側無圖之印章可帶 image_status=source_no_image 例外）；本次零寫入。'
     }
   }
 

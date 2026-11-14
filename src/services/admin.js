@@ -65,7 +65,7 @@ export function listSealsForAdmin() {
 
 export const FIXED_ATTR_LABELS = {
   face_image_id: '印面圖片',
-  edge_image_ids: '邊款圖片 ID',
+  edge_image_ids: 'side face 圖片 ID',
 }
 
 /**

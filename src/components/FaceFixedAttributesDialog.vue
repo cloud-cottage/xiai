@@ -38,7 +38,7 @@ const imageOptions = computed(() => {
   const rows = sealId ? seals.listImagesByStamp(sealId) : []
   const list = rows.map((row) => ({
     id: String(row.id),
-    label: `${row.id}（${row.kind === seals.FACE_KIND.EDGE ? '邊款圖' : '印面圖'}）`
+    label: `${row.id}（${row.kind === seals.FACE_KIND.EDGE ? 'side face 圖' : '印面圖'}）`
   }))
   const current = props.face.face_image_id ? String(props.face.face_image_id) : ''
   if (current && !list.some((item) => item.id === current)) {
@@ -124,7 +124,7 @@ async function submit() {
         只提交發生改動的項目。
       </p>
       <p class="fixed-box__lede">
-        本對話框只含「印面級」固定屬性（印面圖片 / 邊款圖片 ID）。
+        本對話框只含「印面級」固定屬性（印面圖片 / side face 圖片 ID）。
         材質已改爲「印章級」固定屬性，請到頁面頂部的「印章固定屬性」區編輯。
       </p>
 
@@ -138,12 +138,12 @@ async function submit() {
       </div>
 
       <div class="field">
-        <label for="fixed-edge-ids">邊款圖片 ID</label>
+        <label for="fixed-edge-ids">side face 圖片 ID</label>
         <input id="fixed-edge-ids" v-model="form.edge_image_ids" type="text" placeholder="多個編號用頓號分隔，如 img-0001e" />
         <span v-if="edgeIdOptions.length" class="field__hint">
-          本印章現有邊款影像編號：{{ edgeIdOptions.join('、') }}
+          本印章現有 side face 圖片編號：{{ edgeIdOptions.join('、') }}
         </span>
-        <span v-else class="field__hint">本印章暫無邊款影像；留空表示不登記邊款圖片 ID。</span>
+        <span v-else class="field__hint">本印章暫無 side face 圖片；留空表示不登記 side face 圖片 ID。</span>
       </div>
 
       <p v-if="feedback" class="fixed-box__feedback" data-admin-feedback="edit-fixed">{{ feedback }}</p>

@@ -128,20 +128,20 @@ export function hdManifestText(seal, displayName = '') {
     `影像尺寸：${face.width || '—'} × ${face.height || '—'}`,
     `影像體量：${face.bytes === undefined ? '—' : `${face.bytes} 字節`}`,
     `色彩模式：${face.color_mode || '—'}`,
-    `邊款影像標識：${edges.map((img) => img.id).join('、') || '無'}`,
+    `side face 影像標識：${edges.map((img) => img.id).join('、') || '無'}`,
     '',
     `印面清單（共 ${faces.length} 個）：`
   ]
   faces.forEach((item, index) => {
     lines.push(
-      `  ${index + 1}. ${item.kind === 'EDGE' ? '邊款' : '印面'} ${item.id}`,
+      `  ${index + 1}. ${item.kind === 'EDGE' ? 'side face' : '印面'} ${item.id}`,
       `     印文：${item.seal_name || '—'}`,
       /* 作者（同链尾回落：`item.author_display` 缺位时才读裸 `item.author`）。 */
       `     朝代 / 分類 / 作者：${item.dynasty || '—'} / ${item.seal_type || '—'} / ${item.author_display || item.author || '—'}`,
       `     印面圖片：${item.face_image_id || '—'}`
     )
     if (item.edge_image_ids && item.edge_image_ids.length > 0) {
-      lines.push(`     邊款圖片 ID：${item.edge_image_ids.join('、')}`)
+      lines.push(`     side face 圖片 ID：${item.edge_image_ids.join('、')}`)
     }
   })
   return `${lines.join('\n')}\n`
