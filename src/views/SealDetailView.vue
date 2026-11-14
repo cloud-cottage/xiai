@@ -3,10 +3,12 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AddSealFaceDialog from '../components/AddSealFaceDialog.vue'
+import AdminBadge from '../components/AdminBadge.vue'
 import AttrDetailDialog from '../components/AttrDetailDialog.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
+import PersonPicker from '../components/PersonPicker.vue'
 import PersonProposalDialog from '../components/PersonProposalDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
@@ -1538,18 +1540,32 @@ const form = reactive({
 /* ============================================================================
    【作者】＝**引用型**检索 + 选人控件（person-model §4.1 / §4.3）
    ----------------------------------------------------------------------------
-   - 「作者」字段改为**检索 + 选人**：选项只来自既有印人（`persons.listPersons` /
-     `persons.searchPersons`）；`form.author` 承载所选印人 id（`author_person_id`）。
-   - **不填 ⇒ 空**（作者仍选填）；填则**必须**指向既有印人（不得手输自由文本）。
-   - **库中无此人 ⇒ 上屏引导去提交印人提案**（不是静默失败、不是放行自由文本）。
+   - **单一入口 ＝ `PersonPicker`**（搜索 ＋ 按姓氏拼音分组 ＋ 右侧 A–Z 索引；**只点选、无自由输入**），
+     与【上傳印章】弹窗同一条接线（裁定件 2026-11-14）；本页**不自写第二套检索**
+     （搜索 / 分组 / 索引全部由该控件承担），旧「检索输入框 ＋ 下拉选择框」两件套已整体删除。
+   - 行集 ＝ `authorPersons`（服务层单点 **`persons.referablePersons()`** 的 computed 快照）：只含
+     **可引用行**（有 `card_id` 的 CARD 已收录行 / 来自云快照的 `PR` 行；`tmp-` 与无 `card_id` 的
+     幻影行不列）⇒ 前端不会递出「云端不存在」的号；显示名用服务层 `persons.personName`（不另写派生）。
+   - `form.author` 承载所选印人 id（`author_person_id`）；**留空 ⇒ 该项不提交**（作者仍选填）。
+   - **库中无此人 ⇒ 上屏引导去提交印人提案**（不是静默失败、不是放行自由文本）；命中面真源仍是
+     `PersonPicker` 的 `filter` 事件（回传 `{ query, count }`）—— 本页只收状态、不自带检索。
    - 提交提案＝任何登录用户；**入口一律渲染**，未登录点击走登录引导（不得 CSS 隐藏 / disabled 冒充）。
    ============================================================================ */
-const authorKeyword = ref('')
-const correctionAuthorOptions = computed(() => {
-  const keyword = String(authorKeyword.value || '').trim()
-  const rows = keyword ? persons.searchPersons(keyword) : persons.listPersons()
-  return rows.map((row) => ({ id: String(row.id || ''), name: persons.personName(row) }))
+const authorPersons = computed(() => {
+  /* 依赖面挂本页既有的 `dataVersion`：印人行集变化（提案採納 / 云端快照重读）后 `computed`
+     需重算，否则选择器会一直拿着开窗那一刻的旧行集。 */
+  void dataVersion.value
+  return persons.referablePersons()
 })
+/** 作者检索状态（来源＝`PersonPicker` 的 `filter` 事件；本页不另立检索）。 */
+const authorFilter = reactive({ query: '', count: 0 })
+/** 作者检索**无命中**（关键词非空且零命中）⇒ 露出「提交印人提案」入口。 */
+const authorNoMatch = computed(() => authorFilter.query !== '' && authorFilter.count === 0)
+
+function onCorrectionAuthorFilter(state) {
+  authorFilter.query = String((state && state.query) || '')
+  authorFilter.count = Number((state && state.count) || 0)
+}
 /** 某印面「作者」的**对外展示名**（单点链：引用 → 旧文本 →「佚名」）。 */
 function authorDisplayValue() {
   return formFace.value ? corrections.resolveAuthorDisplayName(formFace.value) : ''
@@ -1785,9 +1801,11 @@ function openCorrection(face, options = {}) {
   /* 重开弹窗 ⇒ 页面级勘误提示作废（否则旧反馈会一直挂着，被当成新结果）。 */
   correctionNotice.value = ''
   correctionNoticeFaceId.value = ''
-  /* 【作者】引用型选人控件：每次开表单重置检索关键字（不残留上次状态）；
+  /* 【作者】引用型选人控件（`PersonPicker`）：每次开表单重置检索状态（不残留上次的关键词 /
+     命中数 ⇒ 提案入口不会凭空露面）；
      提案框是本弹窗之上的**独立嵌套层**，只在点入口时开、关闭即卸载（不跨次留存）。 */
-  authorKeyword.value = ''
+  authorFilter.query = ''
+  authorFilter.count = 0
   proposalDialogOpen.value = false
   /* 單條勘誤 ⇒ 记录锁定字段键（`''` ＝ 多条勘誤，字段全开）。 */
   correctionLockedField.value = (options && options.lockedField) || ''
@@ -2891,14 +2909,20 @@ onBeforeUnmount(() => {
         </button>
         <button class="btn btn--primary" type="button" @click="openDownload">下載高清原圖</button>
         <!-- 「一鍵導出印章數據」（管理员专属）：非管理员 / 游客 ⇒ **不渲染**（DOM 零命中；
-             不得用 CSS 隐藏 / `disabled` 冒充）。钩子字面值 `export-seal-data`。 -->
+             不得用 CSS 隐藏 / `disabled` 冒充）。钩子字面值 `export-seal-data`。
+             樣式＝`.btn--admin`（虛線輪廓）＋ `<AdminBadge>`（右上角鎖標）＋ `title` /
+             `aria-label` 後綴「僅管理員可見」—— 裁定件 docs/admin-button-styling-ruling-2026-11-14.md
+             （本页所有**管理员门控**按钮同此一处实现；普通按钮一律不带）。 -->
         <button
           v-if="canExportSeal"
-          class="btn btn--ghost"
+          class="btn btn--ghost btn--admin"
           type="button"
           data-admin-action="export-seal-data"
+          title="一鍵導出印章數據（僅管理員可見）"
+          aria-label="一鍵導出印章數據（僅管理員可見）"
           @click="runSealExport"
         >
+          <AdminBadge />
           一鍵導出印章數據
         </button>
         <!-- 「刪除印章」（管理员专属｜本单）：非管理员 / 游客 ⇒ **不渲染**（DOM 零命中；
@@ -2906,12 +2930,15 @@ onBeforeUnmount(() => {
              （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。 -->
         <button
           v-if="canDeleteSeal"
-          class="btn btn--ghost"
+          class="btn btn--ghost btn--admin"
           type="button"
           data-action="seal-delete"
           :disabled="sealDeleteBusy"
+          title="刪除印章（僅管理員可見）"
+          aria-label="刪除印章（僅管理員可見）"
           @click="openSealDelete"
         >
+          <AdminBadge />
           刪除印章
         </button>
       </div>
@@ -2971,11 +2998,14 @@ onBeforeUnmount(() => {
         <!-- 管理员专属（非管理员 / 游客 ⇒ 不渲染，DOM 零命中）。第 5 类能力 / 第 6 个字面值。 -->
         <button
           v-if="canEditSealAttrs"
-          class="btn btn--ghost"
+          class="btn btn--ghost btn--admin"
           type="button"
           data-admin-action="edit-seal-attributes"
+          title="編輯印章屬性（僅管理員可見）"
+          aria-label="編輯印章屬性（僅管理員可見）"
           @click="openSealAttributes"
         >
+          <AdminBadge />
           編輯印章屬性
         </button>
       </div>
@@ -3016,11 +3046,14 @@ onBeforeUnmount(() => {
       <h2 class="detail__faces-title">印面列表</h2>
       <button
         v-if="canAddSealFace"
-        class="btn btn--ghost"
+        class="btn btn--ghost btn--admin"
         type="button"
         data-action="add-seal-face"
+        title="新增印面（僅管理員可見）"
+        aria-label="新增印面（僅管理員可見）"
         @click="openAddSealFace"
       >
+        <AdminBadge />
         新增印面
       </button>
     </div>
@@ -3051,23 +3084,29 @@ onBeforeUnmount(() => {
         <div class="face-block__admin-actions">
           <button
             v-if="canEditFixed"
-            class="btn btn--ghost"
+            class="btn btn--ghost btn--admin"
             type="button"
             data-admin-action="edit-fixed-attributes"
+            title="編輯固定屬性（僅管理員可見）"
+            aria-label="編輯固定屬性（僅管理員可見）"
             @click="openFixedEditor(face)"
           >
+            <AdminBadge />
             編輯固定屬性
           </button>
           <!-- 管理员专属（普通用户 / 游客 ⇒ 不渲染，DOM 零命中）：替换**本印面**的印面图。
                仅印面（FACE）可换；边款（EDGE）不呈现此按钮（数据层未拦 EDGE，见规范登记）。 -->
           <button
             v-if="canReplaceFaceImage && !face.isEdge"
-            class="btn btn--ghost"
+            class="btn btn--ghost btn--admin"
             type="button"
             data-admin-action="replace-face-image"
             :data-face-id="face.id"
+            title="重新上傳印面圖（僅管理員可見）"
+            aria-label="重新上傳印面圖（僅管理員可見）"
             @click="openFaceImageReplace(face)"
           >
+            <AdminBadge />
             重新上傳印面圖
           </button>
           <!-- 管理员专属（普通用户 / 游客 ⇒ 不渲染，DOM 零命中）：**人工智能修復**本印面的印面图。
@@ -3075,12 +3114,15 @@ onBeforeUnmount(() => {
                管理员门沿用既有服务层判定（`canEditFixedAttributes`，role === 'admin'）。 -->
           <button
             v-if="canAiEnhanceFace && !face.isEdge && face.face_image_id"
-            class="btn btn--ghost"
+            class="btn btn--ghost btn--admin"
             type="button"
             data-admin-action="ai-enhance-face"
             :data-face-id="face.id"
+            title="人工智能修復（僅管理員可見）"
+            aria-label="人工智能修復（僅管理員可見）"
             @click="openAiEnhance(face)"
           >
+            <AdminBadge />
             人工智能修復
           </button>
           <!-- 管理員專屬（普通使用者 / 遊客 ⇒ 不渲染，DOM 零命中）：**切換 base face**（裁定件
@@ -3088,13 +3130,16 @@ onBeforeUnmount(() => {
                鉤子只用 `data-action="set-base-face"`，**不進** `[data-admin-action]` 族。 -->
           <button
             v-if="canSetBaseFaceOn(face)"
-            class="btn btn--ghost"
+            class="btn btn--ghost btn--admin"
             type="button"
             data-action="set-base-face"
             :data-face-id="face.id"
             :disabled="setBaseFaceBusy"
+            title="設為 base face（僅管理員可見）"
+            aria-label="設為 base face（僅管理員可見）"
             @click="openSetBaseFace(face)"
           >
+            <AdminBadge />
             設為 base face
           </button>
           <!-- **普通用户可见**（2026-11-14 裁定 §三①）：多條屬性一次性提交的【勘誤】。
@@ -3139,14 +3184,17 @@ onBeforeUnmount(() => {
                  `image-delete-confirm` / `image-delete-cancel`）。 -->
             <button
               v-if="canDeleteFaceImage"
-              class="btn btn--ghost"
+              class="btn btn--ghost btn--admin"
               type="button"
               data-action="image-delete"
               :data-face-id="face.id"
               :data-image-id="face.face_image_id"
               :disabled="faceImageDeleteBusy"
+              title="刪除本印面影像（僅管理員可見）"
+              aria-label="刪除本印面影像（僅管理員可見）"
               @click="openFaceImageDelete(face)"
             >
+              <AdminBadge />
               刪除
             </button>
             <!-- 影像勘誤入口已**并入**「可標記屬性」区的**唯一**【勘誤】入口（本單：两个入口合一）：
@@ -3416,13 +3464,16 @@ onBeforeUnmount(() => {
             <div class="detail__photo-actions">
               <button
                 v-if="canDeleteWholeSealImage"
-                class="btn btn--ghost"
+                class="btn btn--ghost btn--admin"
                 type="button"
                 data-action="delete-whole-seal-image"
                 :data-image-id="image.id"
                 :disabled="wholeSealDeleteBusy"
+                title="刪除整枚印章圖（僅管理員可見）"
+                aria-label="刪除整枚印章圖（僅管理員可見）"
                 @click="openWholeSealImageDelete(image)"
               >
+                <AdminBadge />
                 刪除
               </button>
             </div>
@@ -4059,7 +4110,9 @@ onBeforeUnmount(() => {
             :data-correction-field="item.key"
             :class="{ 'field--locked': correctionLockedField === item.key }"
           >
-            <label :for="`cr-${item.key}`">{{ item.label }}</label>
+            <!-- 字段标签：【作者】由 `PersonPicker` 自带标签（`label="作者"`）渲染 ⇒ 外层不再印一遍，
+                 避免同一行出现两个「作者」。 -->
+            <label v-if="item.key !== 'author'" :for="`cr-${item.key}`">{{ item.label }}</label>
             <select
               v-if="item.key === 'dynasty'"
               :id="`cr-${item.key}`"
@@ -4092,26 +4145,30 @@ onBeforeUnmount(() => {
             >
               <option v-for="k in sealClassOptions" :key="k" :value="k">{{ k }}</option>
             </select>
-            <!-- 【作者】＝**引用型**检索 + 选人（person-model §4.1 / §4.3）：只可选、不可填；
+            <!-- 【作者】＝**引用型**（person-model §4.1）：**只能选、不能填** —— **单一入口**
+                 ＝ `PersonPicker`（搜索 ＋ 按姓氏拼音分组 ＋ 右侧 A–Z 索引；**只点选、无自由输入**），
+                 与【上傳印章】弹窗同一条接线（裁定件 2026-11-14）。行集来自 `authorPersons`
+                 （服务层 `persons.referablePersons()` 的 computed 快照），显示名直接用服务层
+                 `persons.personName`；`form.author` 只承载所选印人 id ⇒ 提交值口径零改动。
+                 **单条勘误（锁定模式）走同一支**：字段可见性由 `correctionFieldVisible` 收敛，
+                 只要 `correctionLockedField === 'author'`，本弹窗渲染的就是这个选择器。
                  无命中 ⇒ 出「提交印人提案」引导（不静默、不放行自由文本）。 -->
             <template v-else-if="item.key === 'author'">
-              <input
-                id="cr-author-search"
-                v-model="authorKeyword"
-                type="text"
-                placeholder="檢索印人（姓 / 名 / 字 / 號 / 別名），留空即列出全部"
-                data-author-search="correction"
+              <PersonPicker
+                id="cr-author"
+                v-model="form[item.key]"
+                :persons="authorPersons"
+                :person-name="persons.personName"
+                label="作者"
+                data-author-picker="correction"
+                @filter="onCorrectionAuthorFilter"
               />
-              <select id="cr-author" v-model="form[item.key]" data-author-select="correction">
-                <option value="">（不選，留空）</option>
-                <option v-for="option in correctionAuthorOptions" :key="option.id" :value="option.id">{{ option.name }}</option>
-              </select>
               <span class="field__hint">
-                本印面當前作者：{{ authorDisplayValue() || '佚名' }}。作者選填：不選即不提交該項。
+                本印面當前作者：{{ authorDisplayValue() || '佚名' }}。作者選填：從既有印人中點選一位（本框共 {{ authorPersons.length }} 位可選），不選即不提交該項。
               </span>
-              <template v-if="authorKeyword.trim() && !correctionAuthorOptions.length">
+              <template v-if="authorNoMatch">
                 <span class="field__hint" data-author-nomatch="correction">
-                  庫中沒有匹配「{{ authorKeyword.trim() }}」的印人 ⇒ 不能手輸自由文本。
+                  庫中沒有匹配「{{ authorFilter.query }}」的印人 ⇒ 不能手輸自由文本。
                 </span>
                 <button
                   class="btn btn--ghost"

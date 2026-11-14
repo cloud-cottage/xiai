@@ -444,6 +444,24 @@ button {
 .btn--ghost:hover {
   background: var(--slot-gold-bg);
 }
+/* ============================================================================
+   管理员专属按钮（唯一单点实现；裁定件 docs/admin-button-styling-ruling-2026-11-14.md）
+   ----------------------------------------------------------------------------
+   · 只改**线型**（`dashed`）：宽度 / 圆角 / 内边距 / 盒模型全部沿用 `.btn`，
+     ⇒ 与普通按钮逐像素同尺寸，只有轮廓形状不同（形状差异，不靠颜色）；
+   · `position: relative` 只为承载右上角角标 `<AdminBadge>`（`position:absolute` ⇒
+     角标不参与布局、不撑大按钮）；
+   · `:hover` 恢复实线 ⇒ 给「可点」的即时反馈（角标不动）；
+   · 颜色零新增：边框色仍是 `.btn--ghost` / `.btn--primary` 的既有槽位令牌。
+   ============================================================================ */
+.btn--admin {
+  position: relative;
+  border-style: dashed;
+}
+
+.btn--admin:hover {
+  border-style: solid;
+}
 
 .btn[disabled] {
   opacity: 0.55;
