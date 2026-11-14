@@ -931,6 +931,202 @@ export async function deleteFaceImage(faceId, imageId) {
 }
 
 /* ============================================================================
+   **整枚印章圖刪除（管理員面｜裁定件 v2 §四｜本單）**
+   ----------------------------------------------------------------------------
+   · 口徑（裁定件 v2 §一.2 / §四）：整枚印章圖 ＝ `stamp_id` 指向本章、且**未被任何面行**
+     （`face_image_id` / `edge_image_ids`）引用的影像行 ⇒ 展示 ＋ 上傳 ＋ **刪除**（本函數）。
+   · 能力判定 `canDeleteWholeSealImage`：與 `canDeleteFaceImage` / `canDeleteSeal` **同一把尺子**
+     （`role === 'admin'`；缺省回落當前登錄態）——**不另造第二把尺子**。
+   · 通道（唯一、不另造第二條）：`userWrite.js::userWriteGate` → 雲端 op `deleteWholeSealImage`，
+     與勘誤 / 刪印 / 刪印面影像**同一條**令牌寫面通道。
+   · **本地先擋**（全部在發請求之前，拒絕即零網絡、零寫入）：管理員門 → 兩編號形態
+     （缺 ⇒ `INVALID_INPUT`）→ `local-dev` / 離線形態結構化拒絕 → 回包形狀校驗
+     （缺讀數 ⇒ 如實拒絕，**不編造**刪數）。
+   · 服務端判定（全部早於寫）由服務端裁決：影像行存在、`stamp_id` 相符（防跨章誤刪）、
+     **未被任何面行引用**（已被引用 ⇒ `INVALID_VALUE`，行與對象均不變）。本層零判定、零補編、
+     **零新增 reason 字面值**。
+   · 成功 ⇒ 該編號 dataUrl 緩存立即作廢 ＋ 重取雲端快照（與既有寫面同一刷新路徑）。
+   ============================================================================ */
+
+/** 雲端 op 名（與雲函數 `ADMIN_OPS` 註冊面逐字一致；本文件唯一出現處）。 */
+const WHOLE_SEAL_IMAGE_DELETE_OP = 'deleteWholeSealImage'
+
+/** 回包讀數鍵面（按 op 收窄透傳**逐字同集**；本文件零派生）。 */
+const WHOLE_SEAL_IMAGE_DELETE_READOUT_KEYS = Object.freeze(['image_id', 'deleted_rows', 'deleted_objects'])
+
+/** 當前（或指定）賬號是否可**刪除整枚印章圖** —— 供詳情頁該區塊決定入口是否渲染（管理員專屬）。 */
+export function canDeleteWholeSealImage(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/**
+ * **刪除一張整枚印章圖**（僅管理員；服務端裁決；已被印面引用者服務端拒刪且保持原狀）。
+ *
+ * @param {{stamp_id?:string, stampId?:string, image_id?:string, imageId?:string}} [payload]
+ * @returns {Promise<{ok:true, image_id:string, deleted_rows:number, deleted_objects:number}
+ *          |{ok:false, reason:string, message:string}>}
+ */
+export async function deleteWholeSealImage(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {}
+  if (!canDeleteWholeSealImage()) {
+    return {
+      ok: false,
+      reason: 'NOT_ADMIN',
+      message: '僅管理員可以刪除整枚印章圖（前端前置；未發出任何請求、零寫入）。'
+    }
+  }
+  const stampId = String(source.stamp_id ?? source.stampId ?? '').trim()
+  const imageId = String(source.image_id ?? source.imageId ?? '').trim()
+  if (!stampId || !imageId) {
+    return {
+      ok: false,
+      reason: 'INVALID_INPUT',
+      message: '刪除整枚印章圖需要印章編號（stamp_id）與影像編號（image_id），本次未發出任何請求。'
+    }
+  }
+  const gate = await userWriteGate(
+    WHOLE_SEAL_IMAGE_DELETE_OP,
+    { stamp_id: stampId, image_id: imageId },
+    { readoutKeys: WHOLE_SEAL_IMAGE_DELETE_READOUT_KEYS }
+  )
+  /* 傳輸層 / 補簽 / 服務端結構化拒絕 ⇒ **原樣透傳**（`reason` / `message` 一字不改寫）。 */
+  if (!gate || gate.ok !== true) {
+    if (gate && typeof gate === 'object') return gate
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '刪除整枚印章圖服務暫時不可用，請稍後再試。'
+    }
+  }
+  if (gate.dev === true || gate.mode === 'local-dev') {
+    /* dev / 離線形態：門放行但**未經雲端** ⇒ 如實結構化拒絕（不編造已刪讀數）。 */
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: 'dev / 離線形態：未經雲端驗證，刪除整枚印章圖不可用（非正式路徑；本次零寫入）。'
+    }
+  }
+  /* **回包形狀校驗**：兩個刪數是「刪了什麼」的唯一憑據 ⇒ 缺位即如實拒絕（不補編 0）。 */
+  const imageIdOut = typeof gate.image_id === 'string' && gate.image_id.trim() ? gate.image_id.trim() : imageId
+  const deletedRows = Number(gate.deleted_rows)
+  const deletedObjects = Number(gate.deleted_objects)
+  if (!Number.isFinite(deletedRows) || !Number.isFinite(deletedObjects)) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '刪除整枚印章圖回包形狀不可辨識（未附 deleted_rows / deleted_objects 讀數），請刷新後再試。'
+    }
+  }
+  /* 该编号缓存**立即作废**（服务层唯一失效口；缓存不再冒充现值）。 */
+  invalidateImageDataUrl(imageIdOut)
+  /* 重取雲端快照（與本頁既有寫面**同一刷新路徑**；失敗不改變刪除結論）。 */
+  try {
+    await retryDataSource()
+  } catch (err) {
+    /* 快照重取失敗不改寫刪除讀數（行以服務端為準）。 */
+  }
+  return {
+    ok: true,
+    image_id: imageIdOut,
+    deleted_rows: deletedRows,
+    deleted_objects: deletedObjects
+  }
+}
+
+/* ============================================================================
+   **切換 base face（管理員面｜裁定件 v2 §五｜本單）**
+   ----------------------------------------------------------------------------
+   · 口徑（裁定件 v2 §一.3 / §五）：base face **可切換**，仍保證**每章恰一枚**（`is_primary`）。
+   · 能力判定 `canSetBaseFace`：與上面同一把尺子（`role === 'admin'`）。
+   · 通道：`userWrite.js::userWriteGate` → 雲端 op `setBaseFace`（同一條令牌寫面通道）。
+   · **本地先擋**：管理員門 → 兩編號形態（缺 ⇒ `INVALID_INPUT`）→ `local-dev` 形態結構化拒絕
+     → 回包形狀校驗（缺 `face_id` ⇒ 如實拒絕）。
+   · 服務端判定 / 寫序由其裁決：目標面屬該章、`kind` 必須是 `FACE`；同參 ⇒ **零寫**（冪等，
+     `previous_base_face_id` 等於目標）；否則先舊 base 置 `false`、再目標置 `true`。
+     本層零判定、零補編、**零新增 reason 字面值**。
+   · 成功 ⇒ 重取雲端快照（面塊的 base 徽標 / 封面圖隨之更新）。
+   ============================================================================ */
+
+/** 雲端 op 名（與雲函數 `ADMIN_OPS` 註冊面逐字一致；本文件唯一出現處）。 */
+const SET_BASE_FACE_OP = 'setBaseFace'
+
+/** 回包讀數鍵面（按 op 收窄透傳**逐字同集**；本文件零派生）。 */
+const SET_BASE_FACE_READOUT_KEYS = Object.freeze(['face_id', 'previous_base_face_id'])
+
+/** 當前（或指定）賬號是否可**切換 base face** —— 供詳情頁面塊決定入口是否渲染（管理員專屬）。 */
+export function canSetBaseFace(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/**
+ * **把某一枚印面設為本章的 base face**（僅管理員；每章仍恰一枚）。
+ *
+ * @param {{stamp_id?:string, stampId?:string, face_id?:string, faceId?:string}} [payload]
+ * @returns {Promise<{ok:true, face_id:string, previous_base_face_id:string}
+ *          |{ok:false, reason:string, message:string}>}
+ *   `previous_base_face_id` 逐字取服務端回包（同參冪等時等於目標面編號）。
+ */
+export async function setBaseFace(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {}
+  if (!canSetBaseFace()) {
+    return {
+      ok: false,
+      reason: 'NOT_ADMIN',
+      message: '僅管理員可以切換主印面（前端前置；未發出任何請求、零寫入）。'
+    }
+  }
+  const stampId = String(source.stamp_id ?? source.stampId ?? '').trim()
+  const faceId = String(source.face_id ?? source.faceId ?? '').trim()
+  if (!stampId || !faceId) {
+    return {
+      ok: false,
+      reason: 'INVALID_INPUT',
+      message: '切換主印面需要印章編號（stamp_id）與印面編號（face_id），本次未發出任何請求。'
+    }
+  }
+  const gate = await userWriteGate(
+    SET_BASE_FACE_OP,
+    { stamp_id: stampId, face_id: faceId },
+    { readoutKeys: SET_BASE_FACE_READOUT_KEYS }
+  )
+  /* 傳輸層 / 補簽 / 服務端結構化拒絕 ⇒ **原樣透傳**（`reason` / `message` 一字不改寫）。 */
+  if (!gate || gate.ok !== true) {
+    if (gate && typeof gate === 'object') return gate
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '切換主印面服務暫時不可用，請稍後再試。'
+    }
+  }
+  if (gate.dev === true || gate.mode === 'local-dev') {
+    /* dev / 離線形態：門放行但**未經雲端** ⇒ 如實結構化拒絕（不造假已切換讀數）。 */
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: 'dev / 離線形態：未經雲端驗證，切換主印面不可用（非正式路徑；本次零寫入）。'
+    }
+  }
+  const faceIdOut = typeof gate.face_id === 'string' && gate.face_id.trim() ? gate.face_id.trim() : faceId
+  if (!faceIdOut) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '切換主印面回包形狀不可辨識（未附印面編號 face_id），請刷新後再試。'
+    }
+  }
+  const previous = typeof gate.previous_base_face_id === 'string' ? gate.previous_base_face_id.trim() : ''
+  /* 重取雲端快照（與本頁既有寫面**同一刷新路徑**；失敗不改變切換結論）。 */
+  try {
+    await retryDataSource()
+  } catch (err) {
+    /* 快照重取失敗不改寫切換讀數（面行以服務端為準）。 */
+  }
+  return { ok: true, face_id: faceIdOut, previous_base_face_id: previous }
+}
+
+/* ============================================================================
    能力 6「上传印章（新增进藏品库）」（v1.3｜口径 B）
 
 /** 当前（或指定）账号是否可上传印章 —— 供广场页决定按钮是否渲染。 */

@@ -5622,6 +5622,84 @@ async function readStorageRepairWindow(after, windowSize) {
   return storageRepairWindowOf(collected, cursor, windowSize)
 }
 
+/**
+ * 行是否满足**等值 match**（内存判据；**与注入式假体同一把尺** `String(row[key]) === String(value)`）。
+ * 非基本值的 match 值（如 `command.gt(...)` 这类查询命令对象）**不参与**内存判据 —— 那是主路查询的事。
+ * @param {object} row 行
+ * @param {object} match 等值 match
+ * @returns {boolean}
+ */
+function rowMatchesEqualityOf(row, match) {
+  const keys = Object.keys(match || {})
+  for (const key of keys) {
+    const value = match[key]
+    if (value === null || typeof value === 'object' || typeof value === 'function') continue
+    if (String(row ? row[key] : undefined) !== String(value)) return false
+  }
+  return true
+}
+
+/**
+ * **升序游标窗口读单点**（`_id` 升序 ＋ 严格大于游标 ＋ 等值 match 的**一窗行**）。
+ * ============================================================================
+ * **持久化路径封闭（`verify-endorsement` D4）**：本文件是 `collection(` 的**唯二**落点之一；
+ * 任何模块要「按 `_id` 升序翻一窗」都不许自建集合句柄，一律经本单点（**零第二套**）。
+ * 主路（真实 SDK）＝ `where({...等值, _id: gt(cursor)}) → orderBy('_id','asc') → limit(n)`；
+ * 退路（注入式假体无 `command` / `orderBy` / `skip`）＝ 同容器整桶读回（有 `skip` 则逐页翻，
+ * 页读不满 / 本页零新增即收尽）后内存同尺收口 —— **与 `readStorageRepairWindow` 两路同形**，
+ * 排序 / 严格大于 / 截断全复用 `storageRepairWindowOf`（**不再第二套窗口纯函数**）。
+ * 任一路抛错都**原样上抛**（由调用方转 `STORAGE_UNAVAILABLE`；**绝不吞成 0 行**）。
+ * @param {string} collectionName 集合名（取自 `COLLECTIONS`，本文件之外零集合名字面）
+ * @param {object} [match] 等值 match（缺省 ⇒ 不设等值条件）
+ * @param {string} [after] 游标值（上一轮回包的 `next_cursor`；空串 ⇒ 从头）
+ * @param {number} [windowSize] 窗口上限（＝ `limit`）
+ * @returns {Promise<Array<object>>}
+ */
+async function readAscendingWindowOf(collectionName, match, after, windowSize) {
+  const name = text(collectionName)
+  if (name === '') throw new Error('COLLECTION_NAME_REQUIRED')
+  const cursor = text(after)
+  const numericSize = Number(windowSize)
+  const size = Number.isFinite(numericSize) ? Math.max(0, Math.trunc(numericSize)) : 0
+  const equality = match && typeof match === 'object' && !Array.isArray(match) ? match : {}
+  const db = resolveDb()
+  const command = db && db.command
+  /* 主路：一条范围查询（`command` 缺席才走退路）。 */
+  if (command && typeof command.gt === 'function') {
+    const query = cursor === '' ? { ...equality } : { ...equality, _id: command.gt(cursor) }
+    let chain = db.collection(name).where(query)
+    if (chain && typeof chain.orderBy === 'function') chain = chain.orderBy('_id', 'asc')
+    if (chain && typeof chain.limit === 'function') chain = chain.limit(size)
+    const rows = rowsOfReply(await chain.get()).filter((row) => rowMatchesEqualityOf(row, equality))
+    return storageRepairWindowOf(rows, cursor, size)
+  }
+  /* 退路：有 `skip` ⇒ 逐页翻（`_id` 升序）；无 `skip`（极简假体）⇒ 整桶一次取回后再收口。 */
+  const probe = db.collection(name).where({})
+  if (!probe || typeof probe.get !== 'function') throw new Error('DB_QUERY_UNSUPPORTED')
+  const collected = []
+  if (typeof probe.skip !== 'function') {
+    collected.push(...rowsOfReply(await probe.get()))
+  } else {
+    let offset = 0
+    for (let page = 0; page < REPAIR_IMAGE_STORAGE_MAX_PAGES; page += 1) {
+      let chain = db.collection(name).where({})
+      if (typeof chain.orderBy === 'function') chain = chain.orderBy('_id', 'asc')
+      if (offset > 0 && typeof chain.skip === 'function') chain = chain.skip(offset)
+      if (typeof chain.limit === 'function') chain = chain.limit(REPAIR_IMAGE_STORAGE_PAGE_SIZE)
+      const rows = rowsOfReply(await chain.get())
+      if (rows.length === 0) break
+      collected.push(...rows)
+      if (rows.length < REPAIR_IMAGE_STORAGE_PAGE_SIZE) break
+      offset += rows.length
+    }
+  }
+  return storageRepairWindowOf(
+    collected.filter((row) => rowMatchesEqualityOf(row, equality)),
+    cursor,
+    size
+  )
+}
+
 const ADMIN_OPS = Object.freeze({
   /**
    * **管理員「新增印面」（`addSealFace`｜印章詳情頁建面入口）** —— 薄委派：業務邏輯單點、
@@ -9813,6 +9891,77 @@ const ADMIN_OPS = Object.freeze({
     const after = await readRows(COLLECTIONS.faces, match, { limit: 1 })
     const row = after.length > 0 ? after[0] : Object.assign({}, faceRow, doc)
     return { ok: true, row }
+  },
+
+  /**
+   * **管理員「EDGE → FACE 数据迁移」（`migrateEdgeFaces`｜本批只迁数据）** —— 薄委派：业务逻辑
+   * 单点、载荷封闭键面与回包读数键面都在 `lib/faceLayerOps.js`（本处零第二套逻辑；`require`
+   * 延迟以打破加载环，照 `repairSealViewCount` 的写法）。**`ADMIN_OPS` 41 → 42**。
+   *
+   * 硬口径（逐条；实现真源 ＝ `lib/faceLayerOps.js` 头注）：① **第一行即管理员门**（既有
+   * `adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋ **零读零写**）；② 载荷**封闭恰 3 键**
+   * `{dry_run, limit, cursor}`（`dry_run` 缺省 `true`；`limit` 1〜500 整数、缺省 200；`cursor`
+   * 双向分页、非空长度 ≤ 64）；③ 窗口只取 `kind === 'EDGE'` 的行（`_id` 升序、严格大于 `cursor`）；
+   * ④ 写序逐行「改面行（`kind:'FACE'` / `face_image_id` ＝ `edge_image_ids` 首项 /
+   * `edge_image_ids: []` / `is_primary:false`）→ **重算该章 `face_count`**（数 `kind === 'FACE'`
+   * 的面行数，写体只含 `face_count` 一个键）」；⑤ 回包**恒恰 7 键**
+   * `{ok, scanned, eligible, written, failed, samples, next_cursor}`（`written` 由**整窗读回**
+   * 判定；`failed` 元素恰 2 键、`samples` ≤ 5 且元素恰 3 键）；⑥ **幂等**（无 EDGE 行 ⇒
+   * `eligible 0 / written 0`；重放不重复搬图）；⑦ **零删行、零新集合、`reason` 零新增**、
+   * **不产 `plan`**；既有 `kind === 'EDGE'` 代码分支**本批一律保留**（迁移后成死代码，删分支是
+   * 下一批的独立清理单）。
+   * @param {object} [payload] `{dry_run?:boolean, limit?:number, cursor?:string}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async migrateEdgeFaces(payload, identity, context) {
+    /* 延遲 require：與 `repairSealViewCount` 同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/faceLayerOps.js::migrateEdgeFaces` 的**第一行**（零读零写地拒）。 */
+    const { migrateEdgeFaces: runMigrate } = require('./faceLayerOps.js')
+    return runMigrate(payload, identity, context)
+  },
+
+  /**
+   * **管理員「刪除整枚印章圖」（`deleteWholeSealImage`｜無面歸屬的章級影像）** —— 薄委派：业务
+   * 逻辑单点在 `lib/faceLayerOps.js::deleteWholeSealImage`（本处零第二套逻辑；`require` 延迟）。
+   * **`ADMIN_OPS` 42 → 43**。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（零读零写地拒）；② 载荷**封闭恰 2 键**
+   * `{stamp_id, image_id}`；③ 判定**全部早于写**：影像行存在（无 ⇒ `INVALID_VALUE`「該影像
+   * 不存在」）→ 行上 `stamp_id` ＝ 载荷（防跨章误删）→ **未被任何面行引用**（`face_image_id`
+   * 命中 / 任一 `edge_image_ids` 含它 ⇒ `INVALID_VALUE`「該影像已被印面引用，請改用印面級刪除」）；
+   * ④ 写序：删影像行 → **尽力**删对象（候选单点 `deleteImageObjectsOfRow`；失败不阻断、计数如实）；
+   * ⑤ 回包**恰 4 键** `{ok, image_id, deleted_rows, deleted_objects}`、失败恰 3 键；
+   * **不写流水、不计费、零新集合、`reason` 零新增**。
+   * @param {object} payload 载荷（封闭两键 `stamp_id` / `image_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async deleteWholeSealImage(payload, identity, context) {
+    /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { deleteWholeSealImage: runDelete } = require('./faceLayerOps.js')
+    return runDelete(payload, identity, context)
+  },
+
+  /**
+   * **管理員「設為 base face」（`setBaseFace`｜切主印面、每章仍恰一枚）** —— 薄委派：业务逻辑
+   * 单点在 `lib/faceLayerOps.js::setBaseFace`（本处零第二套逻辑；`require` 延迟）。
+   * **`ADMIN_OPS` 43 → 44**。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（零读零写地拒）；② 载荷**封闭恰 2 键**
+   * `{stamp_id, face_id}`；③ 判定：面行存在且属该章、`kind` 必须是 `FACE`（否则 `INVALID_VALUE`
+   * ＋ 零写）；④ 写序：目标已是 base ⇒ **零写**并回 `previous_base_face_id` ＝ 目标（幂等）；
+   * 否则**先旧 base 置 `false`、再目标置 `true`**，失败**回滚旧 base 为 `true`**（绝不留零 base
+   * 或多 base）；⑤ 回包**恰 3 键** `{ok, face_id, previous_base_face_id}`、失败恰 3 键；
+   * **不写 `face_count`、不动 `face_no`、不删行、零新集合、`reason` 零新增**。
+   * @param {object} payload 载荷（封闭两键 `stamp_id` / `face_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async setBaseFace(payload, identity, context) {
+    /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { setBaseFace: runSwitch } = require('./faceLayerOps.js')
+    return runSwitch(payload, identity, context)
   }
 })
 
@@ -10400,6 +10549,10 @@ module.exports = {
   /* **AI 修復（§3.68）離線自檢**：`lib/aiEnhance.js` 經此讀點取影像行（本文件既有函數，
      只補登記到導出面 —— 實現零改）。 */
   readRows,
+  /* **升序游标窗口读单点（本单：D4 持久化路径封闭）**：集合名词 ＋ 等值 match ＋ 游标 ⇒ 一窗行
+     （`_id` 升序、严格大于游标、前 `limit` 行）。主路范围查询、退路整桶内存收口 —— 与
+     `readStorageRepairWindow` 两路同形；`lib/faceLayerOps.js` 的 EDGE 窗口经此读（**零自建集合句柄**）。 */
+  readAscendingWindowOf,
   uploadDisplayArtifactBytes,
   /* **AI 候選圖弃除面（本單 `ai-enhance-discard`）**：删行 / 删对象两个写点 ＋ 对象删除注入缝
      （供离线自检直接断言；实现零第二套 —— 删对象单点在本文件 `deleteArtifactObject`）。 */

@@ -3,6 +3,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AddSealFaceDialog from '../components/AddSealFaceDialog.vue'
+import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
@@ -418,6 +419,165 @@ async function confirmFaceImageDelete() {
   /* **就地刷新（不刷整页）**：作废该编号缓存（服务层单点）＋ 派生读数重算 ＋ 云端快照重读
      （印面指向由服务端清空 ⇒ 必须重读云端才不再指向已删影像）。 */
   seals.invalidateImageDataUrl(target.imageId)
+  dataVersion.value += 1
+  retryDataSource()
+}
+
+/* ============================================================================ *
+   **整枚印章圖刪除（管理員面｜裁定件 v2 §四｜本單）**
+   ----------------------------------------------------------------------------
+   · 渲染條件＝服務層判定 `seals.canDeleteWholeSealImage`（普通使用者 / 遊客 ⇒ false ⇒ 不渲染，
+     DOM 零命中；**不得** CSS 隱藏 / `disabled` 冒充）。
+   · 鉤子只用 `data-action="delete-whole-seal-image"` —— **不進** `[data-admin-action]` 族
+     （該族取值集合仍恰 12 值）。
+   · 二次確認（`role="dialog"` ＋ `aria-label`，提交中兩鈕禁用）**必須列明**：影像編號、
+     **不可恢復**、**若已被印面引用服務端會拒絕並保持原狀**。
+   · 成功 ⇒ 重取雲端快照（與既有寫面同一刷新路徑）＋ 繁體讀數上屏；失敗 ⇒ 服務端 `message`
+     **原文上屏**（不吞成一句、不改寫真因）。
+   ============================================================================ */
+const canDeleteWholeSealImage = computed(() => seals.canDeleteWholeSealImage())
+const wholeSealDeleteOpen = ref(false)
+const wholeSealDeleteBusy = ref(false)
+const wholeSealDeleteFeedback = ref('')
+/** 待刪目標 `{imageId}`（關窗即清，避免殘留指向）。 */
+const wholeSealDeleteTarget = ref(null)
+
+/** 二次確認主文案（**必須列明**：影像編號、不可恢復、已引用則服務端拒刪並保持原狀）。 */
+const wholeSealDeleteMessage = computed(() => {
+  const target = wholeSealDeleteTarget.value
+  if (!target) return '刪除本枚整枚印章圖。'
+  return (
+    `將刪除整枚印章圖 影像編號 ${target.imageId}；` +
+    '刪除後不可恢復，影像行與其對象一併刪除。' +
+    '（該影像若已被任何印面引用，服務端會拒絕刪除並保持原狀。）'
+  )
+})
+
+/** 打開二次確認（每次打開重置舊反饋）。 */
+function openWholeSealImageDelete(image) {
+  const imageId = image && image.id ? String(image.id) : ''
+  if (!imageId) {
+    wholeSealDeleteFeedback.value = '本圖沒有影像編號，無從刪除。'
+    return
+  }
+  wholeSealDeleteFeedback.value = ''
+  wholeSealDeleteTarget.value = { imageId }
+  wholeSealDeleteOpen.value = true
+}
+
+/** 確認刪除：過服務層管理員寫面門；成功 ⇒ 重取快照，失敗 ⇒ 原文上屏。 */
+async function confirmWholeSealImageDelete() {
+  /* **一次性提交守衛**（按鈕禁用不是原子門；這裡才是）。 */
+  if (wholeSealDeleteBusy.value) return
+  const target = wholeSealDeleteTarget.value
+  const stampId = seal.value ? String(seal.value.stamp_id || '') : ''
+  if (!target || !stampId) {
+    wholeSealDeleteOpen.value = false
+    wholeSealDeleteFeedback.value = '未能取得影像或印章編號，本次零寫入。'
+    return
+  }
+  wholeSealDeleteBusy.value = true
+  let result = null
+  try {
+    result = await seals.deleteWholeSealImage({ stamp_id: stampId, image_id: target.imageId })
+  } catch {
+    result = { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '刪除整枚印章圖服務暫時不可用，請稍後再試。' }
+  }
+  wholeSealDeleteBusy.value = false
+  wholeSealDeleteOpen.value = false
+  wholeSealDeleteTarget.value = null
+  if (!result || result.ok !== true) {
+    /* 失敗：服務端 `message` **原文上屏**（不吞真因、不改寫）。 */
+    wholeSealDeleteFeedback.value = (result && result.message) || '刪除整枚印章圖失敗，本次零寫入。'
+    return
+  }
+  wholeSealDeleteFeedback.value =
+    `已刪除整枚印章圖 影像編號 ${result.image_id}（刪行 ${result.deleted_rows} 件、刪對象 ` +
+    `${result.deleted_objects} 件）；該圖不再顯示，印面數不變。`
+  /* 重取雲端快照（與既有寫面同一刷新路徑）＋ 派生讀數重算。 */
+  dataVersion.value += 1
+  retryDataSource()
+}
+
+/* ============================================================================ *
+   **切換 base face（管理員面｜裁定件 v2 §五｜本單）**
+   ----------------------------------------------------------------------------
+   · 渲染條件＝服務層判定 `seals.canSetBaseFace` 且**只在非 base 的 FACE 面塊**渲染
+     （已是 base 的目標不給按鈕；邊款 `EDGE` 亦不渲染）。
+   · 鉤子只用 `data-action="set-base-face"` —— **不進** `[data-admin-action]` 族。
+   · 二次確認（`role="dialog"` ＋ `aria-label`，提交中兩鈕禁用）列明：切換後原 base face 變為
+     side face、每章仍恰一枚、封面圖隨之更新。
+   · 成功 ⇒ 重取快照 ＋ 上屏「已切換主印面（封面圖已更新）」；失敗 ⇒ 原文上屏。
+   ============================================================================ */
+const canSetBaseFace = computed(() => seals.canSetBaseFace())
+const setBaseFaceOpen = ref(false)
+const setBaseFaceBusy = ref(false)
+const setBaseFaceFeedback = ref('')
+/** 待切換目標 `{faceId, label}`（關窗即清）。 */
+const setBaseFaceTarget = ref(null)
+/** 成功文案（單點字面值；裁定件 v2 §六 指定）。 */
+const SET_BASE_FACE_DONE_MESSAGE = '已切換主印面（封面圖已更新）'
+
+/** 該面是否已是本章的 base face（角色判定單點在服務層，本頁不自寫第二份）。 */
+function isBaseFaceOf(face) {
+  return seals.faceRoleOf(face, faces.value) === seals.FACE_ROLE_BASE
+}
+
+/** 該面塊是否渲染【設為 base face】：管理員 ＋ 非邊款 ＋ **尚非 base**。 */
+function canSetBaseFaceOn(face) {
+  return canSetBaseFace.value && Boolean(face) && !face.isEdge && !isBaseFaceOf(face)
+}
+
+/** 二次確認主文案（列明切換後果與「每章恰一枚」）。 */
+const setBaseFaceMessage = computed(() => {
+  const target = setBaseFaceTarget.value
+  if (!target) return '把本印面設為本章的 base face。'
+  return (
+    `將把印面「${target.label}」（印面編號 ${target.faceId}）設為本章的 base face ⇒ 封面圖隨之更新；` +
+    '原 base face 變為 side face，每章仍恰一枚 base face。'
+  )
+})
+
+/** 打開二次確認（每次打開重置舊反饋）。 */
+function openSetBaseFace(face) {
+  const faceId = face && face.id ? String(face.id) : ''
+  if (!faceId) {
+    setBaseFaceFeedback.value = '本印面沒有印面編號，無從切換主印面。'
+    return
+  }
+  setBaseFaceFeedback.value = ''
+  const label = seals.faceLabelOf(faceId, seal.value ? seal.value.stamp_id : '') || faceId
+  setBaseFaceTarget.value = { faceId, label }
+  setBaseFaceOpen.value = true
+}
+
+/** 確認切換：過服務層管理員寫面門；成功 ⇒ 重取快照，失敗 ⇒ 原文上屏。 */
+async function confirmSetBaseFace() {
+  /* **一次性提交守衛**。 */
+  if (setBaseFaceBusy.value) return
+  const target = setBaseFaceTarget.value
+  const stampId = seal.value ? String(seal.value.stamp_id || '') : ''
+  if (!target || !stampId) {
+    setBaseFaceOpen.value = false
+    setBaseFaceFeedback.value = '未能取得印面或印章編號，本次零寫入。'
+    return
+  }
+  setBaseFaceBusy.value = true
+  let result = null
+  try {
+    result = await seals.setBaseFace({ stamp_id: stampId, face_id: target.faceId })
+  } catch {
+    result = { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '切換主印面服務暫時不可用，請稍後再試。' }
+  }
+  setBaseFaceBusy.value = false
+  setBaseFaceOpen.value = false
+  setBaseFaceTarget.value = null
+  if (!result || result.ok !== true) {
+    setBaseFaceFeedback.value = (result && result.message) || '切換主印面失敗，本次零寫入。'
+    return
+  }
+  const previous = result.previous_base_face_id ? `（原 base face：${result.previous_base_face_id}）` : ''
+  setBaseFaceFeedback.value = `${SET_BASE_FACE_DONE_MESSAGE}：印面編號 ${result.face_id}${previous}`
   dataVersion.value += 1
   retryDataSource()
 }
@@ -2933,6 +3093,20 @@ onBeforeUnmount(() => {
           >
             人工智能修復
           </button>
+          <!-- 管理員專屬（普通使用者 / 遊客 ⇒ 不渲染，DOM 零命中）：**切換 base face**（裁定件
+               v2 §六）—— 只在**非 base 的 FACE 面塊**渲染（已是 base ⇒ 不給按鈕；邊款 EDGE 亦不給）。
+               鉤子只用 `data-action="set-base-face"`，**不進** `[data-admin-action]` 族。 -->
+          <button
+            v-if="canSetBaseFaceOn(face)"
+            class="btn btn--ghost"
+            type="button"
+            data-action="set-base-face"
+            :data-face-id="face.id"
+            :disabled="setBaseFaceBusy"
+            @click="openSetBaseFace(face)"
+          >
+            設為 base face
+          </button>
         </div>
       </div>
       <div class="panel__body">
@@ -3372,6 +3546,23 @@ onBeforeUnmount(() => {
               <template v-if="image.color_mode"> · {{ image.color_mode }}</template>
             </figcaption>
             <p class="detail__sha">{{ digestTextOf(image) }}</p>
+            <!-- 管理員專屬【刪除】（普通使用者 / 遊客 ⇒ 不渲染，DOM 零命中；**不得** CSS 隱藏 /
+                 `disabled` 冒充）：鉤子只用 `data-action="delete-whole-seal-image"` —— **不進**
+                 `[data-admin-action]` 族（該族取值集合仍恰 12 值）。二次確認另掛
+                 `delete-whole-seal-image-confirm` / `delete-whole-seal-image-cancel`。 -->
+            <div class="detail__photo-actions">
+              <button
+                v-if="canDeleteWholeSealImage"
+                class="btn btn--ghost"
+                type="button"
+                data-action="delete-whole-seal-image"
+                :data-image-id="image.id"
+                :disabled="wholeSealDeleteBusy"
+                @click="openWholeSealImageDelete(image)"
+              >
+                刪除
+              </button>
+            </div>
           </figure>
         </div>
       </div>
@@ -3840,6 +4031,53 @@ onBeforeUnmount(() => {
     <!-- **刪除印面影像的可读反馈（本页；成功 / 失败都上屏）。** -->
     <p v-if="faceImageDeleteFeedback" class="notice detail__notice" data-image-delete-feedback>
       {{ faceImageDeleteFeedback }}
+    </p>
+
+    <!-- **整枚印章圖刪除的二次確認（本單｜裁定件 v2 §六）**：`role="dialog"` ＋ `aria-label`，
+         提交中兩鈕禁用；文案**必須列明**影像編號 / 不可恢復 / 已被印面引用時服務端拒刪並保持原狀。
+         確認 / 取消鈕只掛 `data-action`（`delete-whole-seal-image-confirm` /
+         `delete-whole-seal-image-cancel`，**不新增 `data-admin-action`**）。 -->
+    <ConfirmActionDialog
+      v-if="wholeSealDeleteOpen"
+      title="刪除整枚印章圖"
+      aria-label="刪除整枚印章圖確認"
+      :message="wholeSealDeleteMessage"
+      hint="刪除為不可恢復操作：該影像的行與對象會一併移除；本圖不屬於任何面，印面與印面數均不變。"
+      confirm-text="確認刪除"
+      busy-text="正在刪除…"
+      confirm-action="delete-whole-seal-image-confirm"
+      cancel-action="delete-whole-seal-image-cancel"
+      :busy="wholeSealDeleteBusy"
+      @confirm="confirmWholeSealImageDelete"
+      @cancel="wholeSealDeleteOpen = false"
+    />
+
+    <!-- **整枚印章圖刪除的讀數（成功 / 失敗都上屏；失敗為服務端原文）。** -->
+    <p v-if="wholeSealDeleteFeedback" class="notice detail__notice" data-whole-seal-image-delete-feedback>
+      {{ wholeSealDeleteFeedback }}
+    </p>
+
+    <!-- **切換 base face 的二次確認（本單｜裁定件 v2 §六）**：`role="dialog"` ＋ `aria-label`，
+         提交中兩鈕禁用；文案列明「原 base face 變 side face、每章仍恰一枚、封面圖更新」。
+         確認 / 取消鈕只掛 `data-action`（`set-base-face-confirm` / `set-base-face-cancel`）。 -->
+    <ConfirmActionDialog
+      v-if="setBaseFaceOpen"
+      title="設為 base face"
+      aria-label="設為 base face 確認"
+      :message="setBaseFaceMessage"
+      hint="切換後本印面成為本章的 base face（封面圖取它），原 base face 轉為 side face；每章仍恰一枚 base face。"
+      confirm-text="確認切換"
+      busy-text="正在切換…"
+      confirm-action="set-base-face-confirm"
+      cancel-action="set-base-face-cancel"
+      :busy="setBaseFaceBusy"
+      @confirm="confirmSetBaseFace"
+      @cancel="setBaseFaceOpen = false"
+    />
+
+    <!-- **切換 base face 的讀數（成功 / 失敗都上屏；成功為「已切換主印面（封面圖已更新）」）。** -->
+    <p v-if="setBaseFaceFeedback" class="notice detail__notice" data-set-base-face-feedback>
+      {{ setBaseFaceFeedback }}
     </p>
 
     <!-- **普通用戶影像勘誤（§3.77｜本單）的页面级提示位**：提交成功后弹窗即关 ⇒ 同一份
@@ -4730,6 +4968,13 @@ onBeforeUnmount(() => {
   padding: var(--s-1) var(--s-2);
   color: var(--c-text-muted);
   font-size: var(--t-xs);
+}
+
+/* 整枚印章圖卡片上的管理員動作列（【刪除】；非管理員 ⇒ 按鈕不渲染，本列隨之為空）。 */
+.detail__photo-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--s-1) var(--s-2) var(--s-2);
 }
 
 .detail__upload {

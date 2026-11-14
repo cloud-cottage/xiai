@@ -78,6 +78,17 @@ const { REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS } = require('./lib/authorMatch.js')
    ＝ 該 op 的**讀數鍵面真源**（6 鍵并集、**存在性驅動**、按 op 收窄透傳 ⇒ 建面輪與冪等輪
    各恰如 op 契約；其餘 op 回包逐字不變）。 */
 const { ADD_SEAL_FACE_READOUT_KEYS } = require('./lib/addSealFace.js')
+/* **face 层三 op（`migrateEdgeFaces` / `deleteWholeSealImage` / `setBaseFace`）**：
+   三个读数键面常量是各 op **回包键面的唯一真源**（`lib/faceLayerOps.js` 与 `lib/ops.js` 的
+   薄委派共用同一份）；本文件只按 `op` **收窄透传**（存在性驱动）⇒ 其余 op 回包逐字不变。
+   · `migrateEdgeFaces`     → 恒恰 7 键（`dry_run` 与真写同形）；
+   · `deleteWholeSealImage` → 恰 4 键；
+   · `setBaseFace`          → 恰 3 键。 */
+const {
+  MIGRATE_EDGE_FACES_READOUT_KEYS,
+  DELETE_WHOLE_SEAL_IMAGE_READOUT_KEYS,
+  SET_BASE_FACE_READOUT_KEYS
+} = require('./lib/faceLayerOps.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
 
@@ -875,6 +886,33 @@ async function handleVerify(event, config, callContext) {
    既有字段一律不刪、不改。 */
 if (op === 'addSealFace') {
   for (const key of ADD_SEAL_FACE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+/* **face 層三 op 讀數面（additive 透傳｜**按 op 收窄**）**：键名真源 ＝ `lib/faceLayerOps.js`
+   的三个 `*_READOUT_KEYS` 常量（`lib/ops.js` 的同名薄委派共用同一份）；逐 op 封闭、存在性驱动：
+   · `migrateEdgeFaces`     → `ok / scanned / eligible / written / failed / samples / next_cursor`
+                              （**恒恰 7 键、`dry_run` 与真写同形**）；
+   · `deleteWholeSealImage` → `ok / image_id / deleted_rows / deleted_objects`（恰 4 键）；
+   · `setBaseFace`          → `ok / face_id / previous_base_face_id`（恰 3 键）。
+   **其餘任何 op 一律不透傳這些鍵**（即使 `opResult` 意外帶同名鍵 —— 例如 `repairPrimaryFace` /
+   `repairSealFaceCount` / `repairSealViewCount` 的 `scanned` / `eligible` / `written` /
+   `next_cursor`、`deleteFaceImage` 的 `image_id`、`replaceFaceImage` 的 `previous_image_id`、
+   `addSealFace` 的 `face_id` —— 亦一個都不外泄）⇒ 既有回包**逐字不變**（序列化後亦不新增鍵）。
+   失敗回包（`ok:false`）走上面的早退分支、恒 3 鍵、零讀數鍵；三個 op **均不產 `plan`**
+   （寫步在 op 內按確定序執行）⇒ `plan` 零外傳；既有字段一律不刪、不改。 */
+if (op === 'migrateEdgeFaces') {
+  for (const key of MIGRATE_EDGE_FACES_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'deleteWholeSealImage') {
+  for (const key of DELETE_WHOLE_SEAL_IMAGE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'setBaseFace') {
+  for (const key of SET_BASE_FACE_READOUT_KEYS) {
     if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
   }
 }
