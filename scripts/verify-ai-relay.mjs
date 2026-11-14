@@ -1261,7 +1261,7 @@ check('R11', '④ 异步失败（`status=failed`、无 `error_msg`）⇒ 502 `UP
 /* ===========================================================================
    F 段：交付面静态门
    =========================================================================== */
-section('F', '交付面：依赖落 dependencies / vercel.json functions / 路由导出 / 42 脚本')
+section('F', '交付面：依赖落 dependencies / vercel.json functions / 路由导出 / 43 脚本')
 
 const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 check('F1', '`@cloudbase/node-sdk` 已从 devDependencies 移入 dependencies（版本沿用 ^3.18.3）', { inDeps: '^3.18.3', notInDev: true }, { inDeps: (pkg.dependencies || {})['@cloudbase/node-sdk'], notInDev: !((pkg.devDependencies || {})['@cloudbase/node-sdk']) })
@@ -1272,7 +1272,8 @@ check('F2', '`vercel.json` `functions` 段改为 `api/ai/v1/images/*.js`（maxDu
 check('F3', '路由默认导出是真 handler 函数（`createHandler` 工厂在场）', { defaultType: 'function', factory: 'function' }, { defaultType: typeof routeModule.default, factory: typeof routeModule.createHandler })
 
 const verifyScripts = readdirSync(path.join(ROOT, 'scripts')).filter((name) => /^verify-.*\.mjs$/.test(name))
-check('F4', '本套为第 42 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕＋ seal-view-count〔v1.110 新增：印章浏览量 view_count ＋ 首页热度排序〕＋ add-seal-face〔v1.111 新增：詳情頁新增印面 addSealFace〕＋ face-layer〔v1.112 新增：base face / side face / 整枚印章圖，AC-748〜753〕；另 3 套既有套件未逐项登记，计数一律以 `scripts/` 实际目录为准）', { count: 42, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4', '本套为第 43 个 `scripts/verify-*.mjs`（基线 26 ＋ ai-relay ＋ ai-connect-page ＋ ai-enhance ＋ ai-enhance-discard ＋ cloudfn-transport ＋ object-key-pattern ＋ ai-enhance-wire ＋ ai-enhance-mirror ＋ correction-duplicate-skip〔v1.83 新增〕＋ correction-readonly〔v1.84 新增：勘误只读面 AC-636〜639〕＋ seal-view-count〔v1.110 新增：印章浏览量 view_count ＋ 首页热度排序〕＋ add-seal-face〔v1.111 新增：詳情頁新增印面 addSealFace〕＋ face-layer〔v1.112 新增：base face / side face / 整枚印章圖，AC-748〜753〕＋ modal-esc〔v1.114 新增：模态框 ESC＝取消 ＋ 印人提案入口三处落点，AC-763〜771〕；另 3 套既有套件未逐项登记，计数一律以 `scripts/` 实际目录为准）', { count: 43, includesSelf: true }, { count: verifyScripts.length, includesSelf: verifyScripts.indexOf('verify-ai-relay.mjs') !== -1 })
+check('F4g', '新增套 `verify-modal-esc.mjs` 亦在册（v1.114 模态框 ESC＝取消 ＋ 提案入口三处落点，AC-763〜771；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-modal-esc.mjs') !== -1)
 check('F4f', '新增套 `verify-face-layer.mjs` 亦在册（v1.112 seal/face 層口徑 base face / side face / 整枚印章圖；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-face-layer.mjs') !== -1)
 check('F4e', '新增套 `verify-add-seal-face.mjs` 亦在册（v1.111 詳情頁新增印面 `addSealFace`；F4 计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-add-seal-face.mjs') !== -1)
 check('F4b', '新增套 `verify-ai-connect-page.mjs` 亦在册（脚本计数随之 +1，不漏登）', true, verifyScripts.indexOf('verify-ai-connect-page.mjs') !== -1)
