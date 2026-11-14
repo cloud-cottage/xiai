@@ -16,6 +16,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { drive } from '../services/index.js'
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 const props = defineProps({
   /** 資料夾行（含 `id` / `name` / `owner_user_id`；**分享仅限拥有者**）。 */
@@ -24,6 +25,9 @@ const props = defineProps({
   isOwner: { type: Boolean, default: true }
 })
 const emit = defineEmits(['close', 'changed'])
+
+/* ESC ＝ 取消（全仓单点实现）；本框无提交中态，恒可取消（已生成的分享链接不受影响）。 */
+useEscToClose({ onCancel: () => emit('close') })
 
 /** 有效期说明的数值走服务层常量（`720 小时 / 24 = 30 天`）—— **不硬编码**。 */
 const ttlDays = drive.SHARE_TTL_HOURS / 24

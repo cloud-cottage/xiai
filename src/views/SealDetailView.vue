@@ -6,6 +6,7 @@ import AddSealFaceDialog from '../components/AddSealFaceDialog.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
+import PersonProposalDialog from '../components/PersonProposalDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
@@ -19,6 +20,8 @@ import { saveLocalBinary } from '../utils/file.js'
 import { IMAGE_LIMITS, MIN_CROP_SIDE, describeBytes, exportSquareImage, loadImageFile } from '../utils/image.js'
 /* 剪贴板一键粘贴图片（共用纯函数）：实物照片与替换印面图两处上传面共用判定内核。 */
 import { PASTE_HINT, handleClipboardPaste } from '../utils/clipboardImage.js'
+/* 模态框 ESC ＝ 取消的**全仓单点实现**（本页 5 扇弹窗各注册一层，见文末注册块）。 */
+import { useEscToClose } from '../utils/useEscToClose.js'
 /* 受控诊断面（`?diag=1`）：读 / 写形态字符串的唯一判据（与 `MyCorrectionsView` 同一真源；
    同文件的直接引用先例见 `MyCorrectionsView.vue` 的 `isLocalImportFace`）。 */
 import { diagFaceMode } from '../data/writeFaceMode.js'
@@ -1639,80 +1642,21 @@ function personInfoOf(face) {
   return { name: corrections.resolveAuthorDisplayName(face) || '佚名', nativePlace, biography }
 }
 
-/* 印人提案（新增印人）**内联提交面**：仅当检索无命中时露出（§3.54.7 / §4.3）。 */
-const proposalOpen = ref(false)
-const proposalFeedback = ref('')
-const proposalBusy = ref(false)
-const proposal = reactive({
-  familyName: '',
-  givenName: '',
-  courtesy: '',
-  art: '',
-  alias: '',
-  birthYear: '',
-  deathYear: '',
-  cbdbId: '',
-  /* **批 2（v1.54｜人类已拍 ①）**：提案表单亦收四扩字段（籍贯 / 传记 / 来源 / 来源 id）。 */
-  nativePlace: '',
-  biography: '',
-  source: '',
-  sourceId: '',
-  note: ''
-})
-
-function resetProposal() {
-  proposal.familyName = ''
-  proposal.givenName = ''
-  proposal.courtesy = ''
-  proposal.art = ''
-  proposal.alias = ''
-  proposal.birthYear = ''
-  proposal.deathYear = ''
-  proposal.cbdbId = ''
-  proposal.nativePlace = ''
-  proposal.biography = ''
-  proposal.source = ''
-  proposal.sourceId = ''
-  proposal.note = ''
-}
+/* 印人提案（新增印人）：**详情页不再是入口**（2026-11-14 裁定 —— 按钮与内联表单整体迁出）。
+   表单本体已抽成共用组件 `components/PersonProposalDialog.vue`，三处落点共用同一实现：
+     A. 本页「提交勘誤」弹窗（作者检索**无命中**时露出的按钮）；
+     B. 首页【上傳印章】弹窗（同上）；
+     C. `/persons` 控制条常驻入口。
+   本页只留**打开动作**：未登录 ⇒ 走登录引导（入口不隐藏、不禁用）；已登录 ⇒ 打开共用提案框。
+   提交仍落 `PENDING`（管理员在 `/my/corrections`「待審印人提案」采纳 / 驳回）。 */
+const proposalDialogOpen = ref(false)
 
 function openPersonProposal() {
-  proposalFeedback.value = ''
   if (!logged.value) {
-    /* 未登录 ⇒ 入口已渲染，点击走**登录引导**（不得 CSS 隐藏 / disabled 冒充）。 */
     goLogin()
     return
   }
-  proposalOpen.value = true
-}
-
-async function submitPersonProposalForm() {
-  if (proposalBusy.value) return
-  proposalBusy.value = true
-  try {
-    /* 写面接线（本单）：`submitPersonProposal` 已改 `async`（经写面门 `userWriteGate` 验签后落盘）⇒ 须 `await`。 */
-    const result = await persons.submitPersonProposal({
-      targetPersonId: null,
-      familyName: proposal.familyName,
-      givenName: proposal.givenName,
-      courtesyNames: proposal.courtesy,
-      artNames: proposal.art,
-      aliasNames: proposal.alias,
-      birthYear: proposal.birthYear,
-      deathYear: proposal.deathYear,
-      cbdbId: proposal.cbdbId,
-      /* **四扩字段（正字段，繁体为正）**：逐字提交；**不强制、不拒收、不自动改写**。 */
-      nativePlace: proposal.nativePlace,
-      biography: proposal.biography,
-      source: proposal.source,
-      sourceId: proposal.sourceId,
-      note: proposal.note
-    })
-    proposalFeedback.value = result.message
-    if (result.ok) resetProposal()
-  } finally {
-    proposalBusy.value = false
-  }
+  proposalDialogOpen.value = true
 }
 
 const uploadFeedback = ref('')
@@ -1831,11 +1775,10 @@ function openCorrection(face) {
   /* 重开弹窗 ⇒ 页面级勘误提示作废（否则旧反馈会一直挂着，被当成新结果）。 */
   correctionNotice.value = ''
   correctionNoticeFaceId.value = ''
-  /* 【作者】引用型选人控件：每次开表单重置检索关键字与提案子表单（不残留上次状态）。 */
+  /* 【作者】引用型选人控件：每次开表单重置检索关键字（不残留上次状态）；
+     提案框是本弹窗之上的**独立嵌套层**，只在点入口时开、关闭即卸载（不跨次留存）。 */
   authorKeyword.value = ''
-  proposalOpen.value = false
-  proposalFeedback.value = ''
-  resetProposal()
+  proposalDialogOpen.value = false
   formFaceId.value = face.id
   /* 合并弹窗（本單）：默认停在「屬性」页签；影像页签的目标一并装填 ——
      候选唯一 ⇒ 直取该图；多图 ⇒ 默认首图（页签内可换）；无图 ⇒ 目标留空，
@@ -2827,6 +2770,39 @@ async function acceptAiEnhance() {
   }
 }
 
+/* ============================================================================
+   模态框 ESC ＝ 取消（**全仓单点实现** `utils/useEscToClose.js`；本页 5 扇自建弹窗各注册一层）
+   ----------------------------------------------------------------------------
+   · 只关最上层（后开先关）：勘误弹窗内再开提案框时，一次 ESC 只关提案框；
+   · 提交中（busy）不生效：勘误影像页签 / 换图 / AI 修復 / 校验作者 / 固定属性保存 各自有提交态；
+   · 取消 ＝ 关闭并丢弃未提交输入，**不发任何写请求**（各弹窗的关闭函数本身零写，逐字沿用）。
+   ============================================================================ */
+useEscToClose({
+  isActive: () => formOpen.value,
+  onCancel: () => {
+    formOpen.value = false
+  },
+  isBusy: () => imageCorrectionBusy.value
+})
+useEscToClose({ isActive: () => sealAttrsOpen.value, onCancel: () => closeSealAttributes() })
+useEscToClose({
+  isActive: () => !!replaceFace.value,
+  onCancel: () => closeFaceImageReplace(),
+  isBusy: () => replaceBusy.value
+})
+useEscToClose({
+  isActive: () => !!aiEnhanceFace.value,
+  onCancel: () => closeAiEnhance(),
+  /* 修復在途（running）与取 / 弃在途都不响应 ESC：取消入口在弹窗内（只停等、不撤任务）。 */
+  isBusy: () =>
+    aiEnhanceStatus.value === 'running' || aiEnhanceAccepting.value || aiEnhanceDiscarding.value
+})
+useEscToClose({
+  isActive: () => authorVerifyOpen.value,
+  onCancel: () => closeAuthorVerify(),
+  isBusy: () => authorVerifyBusy.value
+})
+
 onBeforeUnmount(() => {
   releaseReplaceSource()
   /* 注销本页的逐影像 dataUrl 缓存持有者（不给服务层留悬挂引用）。 */
@@ -3237,99 +3213,9 @@ onBeforeUnmount(() => {
         <div class="face-block__sub-head">
           <button v-if="canSubmit" class="btn btn--ghost" type="button" @click="openCorrection(face)">勘誤</button>
           <span v-else class="detail__hint">登錄後可提交勘誤，審覈通過後每條獎勵 {{ points.CORRECTION_REWARD }} 金。</span>
-          <!-- **印人提案入口（P1-3）**：**与登录态解耦** —— 一律渲染、可见可达（落点在「可標記屬性」区，
-               **不埋进**登录后才展开的勘誤表单、**不用 CSS 隐藏 / disabled 冒充**）。
-               未登录点击 ⇒ `openPersonProposal` 走**登录引导**（`goLogin`，不静默失败）；
-               登录点击 ⇒ 就地展开下方提案表单。 -->
-          <button
-            class="btn btn--ghost"
-            type="button"
-            data-action="person-proposal-open"
-            data-person-proposal-entry="detail-markable"
-            @click="formFaceId = face.id; openPersonProposal(face)"
-          >
-            提交印人提案
-          </button>
-        </div>
-        <!-- 印人提案内联表单（**唯一实例**：仅目标印面渲染，避免多印面重复；由 `proposalOpen` 控制，
-             与登录态无关 —— 未登录时该表单不展开，但上方入口照常可见）。 -->
-        <div v-if="proposalOpen && formFaceId === face.id" class="proposal-form" data-person-proposal-form>
-          <h4 class="proposal-form__title">提交印人提案</h4>
-          <div class="field">
-            <label for="pp-family">姓</label>
-            <input id="pp-family" v-model="proposal.familyName" type="text" data-person-proposal-family />
-          </div>
-          <div class="field">
-            <label for="pp-given">名</label>
-            <input id="pp-given" v-model="proposal.givenName" type="text" data-person-proposal-given />
-          </div>
-          <div class="field">
-            <label for="pp-courtesy">字（多個以逗號分隔）</label>
-            <input id="pp-courtesy" v-model="proposal.courtesy" type="text" data-person-proposal-courtesy />
-          </div>
-          <div class="field">
-            <label for="pp-art">號（多個以逗號分隔）</label>
-            <input id="pp-art" v-model="proposal.art" type="text" data-person-proposal-art />
-          </div>
-          <div class="field">
-            <label for="pp-alias">別名（多個以逗號分隔）</label>
-            <input id="pp-alias" v-model="proposal.alias" type="text" data-person-proposal-alias />
-          </div>
-          <div class="field">
-            <label for="pp-birth">生年（公元，可空）</label>
-            <input id="pp-birth" v-model="proposal.birthYear" type="text" data-person-proposal-birth />
-          </div>
-          <div class="field">
-            <label for="pp-death">卒年（公元，可空）</label>
-            <input id="pp-death" v-model="proposal.deathYear" type="text" data-person-proposal-death />
-          </div>
-          <div class="field">
-            <label for="pp-cbdb">CBDB id（可空）</label>
-            <input id="pp-cbdb" v-model="proposal.cbdbId" type="text" data-person-proposal-cbdb />
-          </div>
-          <!-- **批 2（v1.54｜人类已拍 ①③）**：提案表单亦收四扩字段（籍贯 / 传记 / 来源 / 来源 id）。
-               繁體錄入 ＝ **變體 C**：**軟提示 ＋ 既有「一鍵轉繁」三動作鈕**（TextTransformButtons）；
-               **不強制、不拒收、不自動改寫**（不得攔截提交 ⇒ 四字段全空亦可提交；
-               提交值 ＝ 用戶所見的當前值，逐字，沿 §3.16「不轉用戶輸入」）。 -->
-          <p class="proposal-form__trad-hint" data-person-proposal-trad-hint>
-            建議使用繁體字填寫（不強制，留空亦可提交；系統不自動轉換）。
-          </p>
-          <div class="field">
-            <label for="pp-native-place">籍貫</label>
-            <input id="pp-native-place" v-model="proposal.nativePlace" type="text" data-person-proposal-native-place />
-            <TextTransformButtons v-model="proposal.nativePlace" field-key="person-proposal:native_place" field-label="籍貫" />
-          </div>
-          <div class="field">
-            <label for="pp-biography">傳記</label>
-            <input id="pp-biography" v-model="proposal.biography" type="text" data-person-proposal-biography />
-            <TextTransformButtons v-model="proposal.biography" field-key="person-proposal:biography" field-label="傳記" />
-          </div>
-          <div class="field">
-            <label for="pp-source">來源</label>
-            <input id="pp-source" v-model="proposal.source" type="text" data-person-proposal-source />
-            <TextTransformButtons v-model="proposal.source" field-key="person-proposal:source" field-label="來源" />
-          </div>
-          <div class="field">
-            <label for="pp-source-id">來源 id</label>
-            <input id="pp-source-id" v-model="proposal.sourceId" type="text" data-person-proposal-source-id />
-            <TextTransformButtons v-model="proposal.sourceId" field-key="person-proposal:source_id" field-label="來源 id" />
-          </div>
-          <div class="field">
-            <label for="pp-note">依據（選填）</label>
-            <input id="pp-note" v-model="proposal.note" type="text" data-person-proposal-note />
-          </div>
-          <p v-if="proposalFeedback" class="notice" data-person-proposal-feedback>{{ proposalFeedback }}</p>
-          <div class="proposal-form__foot">
-            <button
-              class="btn btn--primary"
-              type="button"
-              data-action="person-proposal-submit"
-              :disabled="proposalBusy"
-              @click="submitPersonProposalForm"
-            >
-              提交提案
-            </button>
-          </div>
+          <!-- **印人提案入口已迁出本页**（2026-11-14 裁定）：详情页不再有按钮与内联表单。
+               现三处落点：作者【勘誤】弹窗（检索无命中）／首页【上傳印章】弹窗（同）／`/persons` 常驻入口；
+               表单本体＝共用组件 `components/PersonProposalDialog.vue`（本页由勘误弹窗内按钮打开）。 -->
         </div>
 
         <!-- 【印面内容】（R-30，9 值）/【印面风格】（R-31，23 值）：**封闭选择框**，每个印面块各一组。
@@ -4217,12 +4103,13 @@ onBeforeUnmount(() => {
                   class="btn btn--ghost"
                   type="button"
                   data-action="person-proposal-open"
-                  @click="openPersonProposal(formFace.value); formOpen = false"
+                  data-person-proposal-entry="correction-dialog"
+                  @click="openPersonProposal"
                 >
                   提交印人提案
                 </button>
                 <span class="field__hint">
-                  庫中無此人 ⇒ 可先提交印人提案（提交面在「可標記屬性」區，本彈窗將關閉），經管理員審覈通過後即可在此選中。
+                  庫中無此人 ⇒ 可先提交印人提案（提案框開在本彈窗之上，本彈窗保持現狀、已填內容不丟），經管理員審覈通過後即可在此選中。
                 </span>
               </template>
             </template>
@@ -4534,6 +4421,11 @@ onBeforeUnmount(() => {
         </p>
       </div>
     </div>
+
+    <!-- **印人提案（新增印人）共用对话框**（2026-11-14 裁定落点 A）：本页唯一入口是「提交勘誤」
+         弹窗内「作者检索无命中」时露出的按钮 ⇒ 本框嵌在那扇弹窗之上（`z-index` 更高）。
+         详情页「可標記屬性」区**不再有**该入口（按钮与内联表单已删除、DOM 零命中）。 -->
+    <PersonProposalDialog v-if="proposalDialogOpen" @close="proposalDialogOpen = false" />
 
     <!-- 保存入口②的轻量选择器（与入口①**同一个组件**；保存必经选择器，不静默存入）。 -->
     <SealFolderPicker
@@ -5427,26 +5319,5 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
-}
-
-/* 印人提案（新增印人）内联提交面（仅检索无命中时露出）。 */
-.proposal-form {
-  flex: 1 1 100%;
-  margin-top: var(--s-2);
-  padding: var(--s-3) var(--s-4);
-  background: var(--c-surface-sunken);
-  border: 1px solid var(--c-line);
-  border-radius: var(--r-md);
-}
-
-.proposal-form__title {
-  margin: 0 0 var(--s-2);
-  font-size: var(--t-sm);
-  color: var(--c-text);
-}
-
-.proposal-form__foot {
-  display: flex;
-  justify-content: flex-end;
 }
 </style>

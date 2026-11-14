@@ -23,6 +23,7 @@ import { IMAGE_LIMITS, loadImageFile } from '../utils/image.js'
 import { formatBytes } from '../utils/format.js'
 /* 剪貼板一鍵粘貼圖片（共用純函數）：與本框 `@paste` 同源，不另寫貼圖解析。 */
 import { PASTE_HINT, handleClipboardPaste } from '../utils/clipboardImage.js'
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 /* 面類別字面值（`FACE` / `EDGE`）的唯一真源：經服務層已導出的 `FACE_KIND` 取用，
    本組件不自寫第二份字面值（`services/index.js` 不轉出該常量，故由 `seals` 命名空間取）。 */
@@ -209,6 +210,9 @@ function close() {
   releaseSource()
   emit('close')
 }
+
+/* ESC ＝ 取消（全仓单点实现）：走同一个 `close()`（提交中不生效、且顺带释放预览对象）。 */
+useEscToClose({ onCancel: close, isBusy: () => submitting.value })
 
 /** 提交：**提交前重新導出一次**（確保入冊字節就是當前處理結果）→ 交服務層建面。 */
 async function submit() {

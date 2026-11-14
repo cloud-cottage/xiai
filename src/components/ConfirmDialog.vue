@@ -1,5 +1,7 @@
 
 <script setup>
+import { useEscToClose } from '../utils/useEscToClose.js'
+
 defineProps({
   title: { type: String, required: true },
   message: { type: String, default: '' },
@@ -13,6 +15,9 @@ defineProps({
 })
 
 const emit = defineEmits(['confirm', 'cancel'])
+
+/* ESC ＝ 取消（全仓单点实现 `utils/useEscToClose.js`）；本框无提交中态 ⇒ 恒可取消。 */
+useEscToClose({ onCancel: () => emit('cancel') })
 </script>
 
 <template>

@@ -19,14 +19,18 @@
  * 朝代篩選**按庫內實際值**生成（`清 / 明 / 民國 / 現代 / 待考（空）`，其餘庫內值照實追加；
  * 全員皆無朝代 ⇒ 整個篩選器不渲染）。
  *
- * 保留既有約定：`[data-person-roster]` 容器；未登錄點【徵集印家】走登錄引導（帶 `redirect`
- * 回本頁），已登錄只給指引用文案；`[data-collect-action]` 恰一處。
+ * 保留既有約定：`[data-person-roster]` 容器；`[data-collect-action]` 恰一處。
+ * 提案入口（2026-11-14 裁定）：控制條**常駐**「提交印人提案」＋ 底部【徵集印家】，二者同走
+ * `openProposalEntry` —— **與登錄態解耦**（未登錄照常渲染可點，點擊走登錄引導帶 `redirect` 回本頁；
+ * 已登錄就地打開共用提案框 `components/PersonProposalDialog.vue`）。表单不在本頁重建。
+ * 水合未落定時數字位顯示占位「—」，**不得**說成「收錄 0 位」。
  * 上屏文案一律繁體（`*_chs` 副字段不上屏）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { isLoggedIn } from '../data/session.js'
 import { persons, seals } from '../services/index.js'
+import PersonProposalDialog from '../components/PersonProposalDialog.vue'
 import {
   buildPersonIndex,
   searchPersons,
@@ -37,19 +41,19 @@ import {
 const router = useRouter()
 const route = useRoute()
 
-/* ------------------------------ 徵集入口（要求登录；未登錄 ⇒ 引導登錄） ------------------------------ */
-const collectGuide = ref('')
+/* ------------------------------ 提案入口（與登錄態解耦；未登錄 ⇒ 引導登錄） ------------------------------ */
+const proposalOpen = ref(false)
 
-function onCollect() {
-  collectGuide.value = ''
+function openProposalEntry() {
   if (!isLoggedIn.value) {
-    /* 未登錄 ⇒ 入口照常渲染，點擊走**登錄引導**（帶 `redirect` 回本頁），不靜默失敗。 */
+    /* 未登錄 ⇒ 入口照常渲染、可點（不得 CSS 隱藏 / disabled 冒充），點擊走**登錄引導**
+       （帶 `redirect` 回本頁），不靜默失敗。 */
     router.push({ name: 'login', query: { redirect: route.fullPath } })
     return
   }
-  /* 已登錄 ⇒ 走既有提案流：本頁**不重建第二個提案表單**，改為指引到既有提案入口
-     （任一印章詳情頁「可標記屬性」區的「提交印人提案」）。 */
-  collectGuide.value = '請進入任一印章詳情頁，於「可標記屬性」區點「提交印人提案」，即可提交新的印家資料。'
+  /* 已登錄 ⇒ 就地打開共用提案框（`components/PersonProposalDialog.vue`，全站唯一一份表單；
+     本頁**不自建第二個表單**）。提交仍落 `PENDING`，管理員在 `/my/corrections` 審覈。 */
+  proposalOpen.value = true
 }
 
 /* ------------------------------ 數據面（只讀） ------------------------------ */
@@ -267,6 +271,11 @@ watch(indexLetters, () => nextTick(syncActive))
 const loading = computed(() => rosterRows.value.length === 0 && source.value.pending)
 const unavailable = computed(() => rosterRows.value.length === 0 && source.value.failed)
 
+/* 水合期（首屏數據未落定）**不得**把「還沒讀到」說成「收錄 0 位」：數字位顯示占位「—」，
+   落定後顯示真實數（空集則照實顯示 0）。 */
+const totalLabel = computed(() => (loading.value ? '—' : String(rosterRows.value.length)))
+const visibleLabel = computed(() => (loading.value ? '—' : String(visibleRows.value.length)))
+
 const emptyTitle = computed(() => {
   if (searching.value || textOf(dynastyPick.value)) return '查無所獲'
   if (loading.value) return '正在讀取印人資料'
@@ -290,7 +299,7 @@ const emptyBody = computed(() => {
       <p class="roster__eyebrow">印人 · 名錄</p>
       <h1 class="roster__title">印家匯徵</h1>
       <p class="roster__sub">
-        收錄 <b data-roster-total>{{ rosterRows.length }}</b> 位印人<span class="roster__dot">·</span>依姓氏拼音 A–Z 編次<span class="roster__dot">·</span>字 · 號 · 齋號可檢索
+        收錄 <b data-roster-total>{{ totalLabel }}</b> 位印人<span class="roster__dot">·</span>依姓氏拼音 A–Z 編次<span class="roster__dot">·</span>字 · 號 · 齋號可檢索
       </p>
     </header>
 
@@ -315,7 +324,16 @@ const emptyBody = computed(() => {
           <option v-for="option in dynastyOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
       </label>
-      <span class="roster__count" data-roster-count><b>{{ visibleRows.length }}</b> 位</span>
+      <button
+        class="btn btn--primary roster__submit"
+        type="button"
+        data-action="person-proposal-open"
+        data-person-proposal-entry="persons-index"
+        @click="openProposalEntry"
+      >
+        提交印人提案
+      </button>
+      <span class="roster__count" data-roster-count><b>{{ visibleLabel }}</b> 位</span>
     </div>
 
     <!-- A–Z 豎索引：只列有人的字母（含末尾 `#`）；搜索態整個不渲染。 -->
@@ -383,20 +401,22 @@ const emptyBody = computed(() => {
       </div>
     </section>
 
-    <!-- 徵集入口：要求登錄（未登錄仍渲染、點擊引導登錄）。 -->
+    <!-- 徵集入口：與登錄態解耦（未登錄仍渲染、可點，點擊引導登錄）；已登錄即開共用提案框。 -->
     <section class="panel roster__collect">
       <div class="panel__body roster__collect-body">
         <button
           class="btn btn--primary"
           type="button"
           data-collect-action="person-collect"
-          @click="onCollect"
+          @click="openProposalEntry"
         >
           徵集印家
         </button>
-        <p v-if="collectGuide" class="roster__guide" data-person-collect-guide>{{ collectGuide }}</p>
       </div>
     </section>
+
+    <!-- 共用印人提案框（全站唯一一份表單；本頁由控制條常駐入口 / 底部徵集入口打開）。 -->
+    <PersonProposalDialog v-if="proposalOpen" @close="proposalOpen = false" />
   </section>
 </template>
 
@@ -750,10 +770,9 @@ const emptyBody = computed(() => {
   gap: var(--s-2);
 }
 
-.roster__guide {
-  margin: 0;
-  color: var(--c-text-muted);
-  font-size: var(--t-sm);
+.roster__submit {
+  flex: none;
+  white-space: nowrap;
 }
 
 /* ------------------------------ 窄屏（≤640px）：索引轉橫排黏頂 ------------------------------ */

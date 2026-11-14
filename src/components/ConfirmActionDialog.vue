@@ -12,7 +12,9 @@
  *   · **一次性提交守衛**在調用方的 `confirm` 處理裡（`if (busy) return`）—— 這是唯一可靠的位置
  *     （按鈕 `disabled` 不是原子門）。
  */
-defineProps({
+import { useEscToClose } from '../utils/useEscToClose.js'
+
+const props = defineProps({
   title: { type: String, required: true },
   /* 無障礙名（缺省回落 `title`）：`aria-label` 必須是完整可讀的動作名。 */
   ariaLabel: { type: String, default: '' },
@@ -31,6 +33,9 @@ defineProps({
 })
 
 const emit = defineEmits(['confirm', 'cancel'])
+
+/* ESC ＝ 取消（全仓单点实现）；**`busy` 时 ESC 不生效**（不制造半提交状态）。 */
+useEscToClose({ onCancel: () => emit('cancel'), isBusy: () => props.busy })
 </script>
 
 <template>

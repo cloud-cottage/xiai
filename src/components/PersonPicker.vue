@@ -42,6 +42,7 @@
  */
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { buildPersonIndex, searchPersons, groupPersonsByInitial } from '../services/personSearch.js'
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 const props = defineProps({
   /** 所选印人 id（字符串；空串 ＝ 未选）。 */
@@ -55,7 +56,7 @@ const props = defineProps({
   /** 未选时的占位文案。 */
   placeholder: { type: String, default: '按姓名 / 字號 / 別名搜尋' }
 })
-const emit = defineEmits(['update:modelValue', 'picked'])
+const emit = defineEmits(['update:modelValue', 'picked', 'filter'])
 
 /* ------------------------------ 行派生（只读） ------------------------------ */
 
@@ -130,6 +131,11 @@ function closePicker() {
   open.value = false
 }
 
+/* ESC ＝ 取消（全仓单点实现）：本控件是**弹层**（常驻挂载、按需开），故按 `open` 注册 / 出栈。
+   浮层开着时它就是最上层 ⇒ 一次 ESC 只关浮层；浮层关掉后再按 ESC 才关外层弹窗。
+   旧的 `@keydown.esc.prevent` 已移除（否则同一按键会**重复触发**：本地关闭 ＋ 全局关闭）。 */
+useEscToClose({ isActive: () => open.value, onCancel: closePicker })
+
 function togglePicker() {
   if (open.value) closePicker()
   else openPicker()
@@ -167,6 +173,15 @@ const groups = computed(() => (searching.value ? [] : groupPersonsByInitial(visi
 
 /** 扁平顺序（＝搜索态按相关度；清空后 ＝ 组内顺序连接）：键盘高亮与 `Enter` 选中都按它走。 */
 const flatOptions = computed(() => (searching.value ? visibleRows.value : groups.value.flatMap((group) => group.rows)))
+
+/**
+ * 过滤状态**只读回传**（`filter` 事件）：父组件据此判「作者检索无命中」⇒ 露出「提交印人提案」入口
+ * （如 `UploadSealDialog`）。**不在父组件里复制第二套检索算法** —— 命中面唯一真源仍在本控件。
+ */
+watch(
+  () => [String(query.value || '').trim(), flatOptions.value.length],
+  () => emit('filter', { query: String(query.value || '').trim(), count: flatOptions.value.length })
+)
 
 /** 行 id → 扁平下标（O(1) 判高亮，避免每行 `findIndex`）。 */
 const flatIndexById = computed(() => {
@@ -341,7 +356,6 @@ defineExpose({ open, query, groups, activeIndex })
       aria-modal="true"
       aria-label="選擇作者"
       data-person-panel
-      @keydown.esc.prevent="closePicker"
     >
       <div class="pp__search-row">
         <input

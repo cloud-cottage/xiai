@@ -25,6 +25,8 @@ import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import { admin, corrections, points, seals } from '../services/index.js'
 import { formatDateTime } from '../utils/format.js'
+/* 模态框 ESC ＝ 取消的全仓**单点**实现（本页「編輯邀請獎勵」弹窗注册一层）。 */
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 /** 任何一次写入（如改邀请奖励）后 +1，使派生读数立即重算。 */
 const dataVersion = ref(0)
@@ -127,6 +129,14 @@ async function submitEdit() {
     editBusy.value = false
   }
 }
+
+/* ESC ＝ 取消（全仓单点实现 `utils/useEscToClose.js`）：关闭「編輯邀請獎勵」弹窗、丢弃未提交输入、
+   **零写请求**；提交中（`editBusy`）ESC 不生效。 */
+useEscToClose({
+  isActive: () => editOpen.value,
+  onCancel: closeEdit,
+  isBusy: () => editBusy.value
+})
 </script>
 
 <template>

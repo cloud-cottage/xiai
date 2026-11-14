@@ -19,6 +19,7 @@
 
 import { computed, reactive, ref } from 'vue'
 import { seals, corrections } from '../services/index.js'
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 const props = defineProps({
   face: { type: Object, required: true },
@@ -29,6 +30,9 @@ const emit = defineEmits(['close', 'saved'])
 
 const feedback = ref('')
 const saving = ref(false)
+
+/* ESC ＝ 取消（全仓单点实现）；保存中（`saving`）不生效，避免半保存状态。 */
+useEscToClose({ onCancel: () => emit('close'), isBusy: () => saving.value })
 
 const canEditFixed = computed(() => seals.canEditFixedAttributes())
 

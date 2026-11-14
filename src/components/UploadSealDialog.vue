@@ -4,6 +4,9 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
 /* 【作者】单一点选入口（搜索＋按姓氏分组＋右侧 A–Z 索引）；替换旧「检索输入框 ＋ select」两件套。 */
 import PersonPicker from './PersonPicker.vue'
+/* 印人提案（新增印人）：与「作者勘誤」弹窗 / `/persons` 共用**同一份表单**（不复制第二份）。 */
+import PersonProposalDialog from './PersonProposalDialog.vue'
+import { useEscToClose } from '../utils/useEscToClose.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS, isKnownSealClass, suggestSealClass } from '../data/seed.js'
 import { seals, persons } from '../services/index.js'
 import { pipelineNotice, runUploadPipeline } from './uploadPipeline.js'
@@ -60,6 +63,28 @@ const exported = ref(null)
 const feedback = ref('')
 const submitting = ref(false)
 const dragging = ref(null)
+
+/* ------------------------------ 印人提案（本单新增入口 B） ------------------------------
+   **作者检索无命中**时露出「提交印人提案」按钮（原来只有一句「庫中無此人…」却没有路）。
+   命中面真源仍是 `PersonPicker`（它的 `filter` 事件把当前关键词与命中数回传，本组件不自带第二套检索）。
+   提案表单与「作者勘誤」弹窗 / `/persons` **共用同一份组件**；提交 ⇒ `PENDING` ⇒ 管理员审。 */
+const proposalOpen = ref(false)
+const authorFilter = reactive({ query: '', count: 0 })
+/** 作者检索无命中（关键词非空且零命中）⇒ 露出提案入口。 */
+const authorNoMatch = computed(() => authorFilter.query !== '' && authorFilter.count === 0)
+
+function onAuthorFilter(state) {
+  authorFilter.query = String((state && state.query) || '')
+  authorFilter.count = Number((state && state.count) || 0)
+}
+
+function openPersonProposal() {
+  proposalOpen.value = true
+}
+
+/* ESC ＝ 取消（全仓单点实现）：整个「上傳印章」弹窗；提交中不生效。
+   嵌套的提案框 / 选作者浮层各自注册，后开先关 ⇒ 一次 ESC 只关最上层。 */
+useEscToClose({ onCancel: () => emit('close'), isBusy: () => submitting.value })
 
 const limitLabel = formatBytes(IMAGE_LIMITS.maxInputBytes)
 const maxSideLabel = `${IMAGE_LIMITS.maxSide}px`
@@ -639,6 +664,7 @@ onBeforeUnmount(() => {
           :persons="authorPersons"
           :person-name="persons.personName"
           label="作者（必填）"
+          @filter="onAuthorFilter"
         />
         <span class="field__hint">
           作者必填：必須從既有印人中點選一位（本框共 {{ authorPersons.length }} 位可選），不能手輸新作者、不可留空。
@@ -646,6 +672,26 @@ onBeforeUnmount(() => {
         <span v-if="!form.author" class="field__hint" data-author-unselected="upload-seal">
           尚未選擇作者（必填）；請從候選印人中點選一位後再提交。
         </span>
+        <!-- **印人提案入口（本单新增｜裁定件 2026-11-14 落點 B）**：作者檢索**無命中**時露出 ——
+             把原来「只说不给路」的文案补成真入口（點開即彈共用提案對話框）。
+             與登錄態解耦：本框本身已由 `canUploadSeal()` 收敛到登錄態，故此处只看命中面。 -->
+        <template v-if="authorNoMatch">
+          <span class="field__hint" data-author-nomatch="upload-seal">
+            庫中沒有匹配「{{ authorFilter.query }}」的印人 ⇒ 不能手輸自由文本。
+          </span>
+          <button
+            class="btn btn--ghost"
+            type="button"
+            data-action="person-proposal-open"
+            data-person-proposal-entry="upload-seal"
+            @click="openPersonProposal"
+          >
+            提交印人提案
+          </button>
+          <span class="field__hint">
+            庫中無此人 ⇒ 可先提交印人提案，經管理員審覈通過後即可在此選中（本框保持打開）。
+          </span>
+        </template>
       </div>
 
       <div class="field">
@@ -722,6 +768,10 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
+
+    <!-- **共用的印人提案對話框**（本框之上嵌套；`z-index` 更高、ESC 后开先关 ⇒ 一次只关这一层）。
+         提交成功后本框保持原状（已填字段与已选图不丢）。 -->
+    <PersonProposalDialog v-if="proposalOpen" @close="proposalOpen = false" />
   </div>
 </template>
 

@@ -25,6 +25,7 @@
 import { computed, ref } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
 import { drive, corrections } from '../services/index.js'
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 const props = defineProps({
   /** 被保存的印章编号（引用式：只传引用，**不复制印章字段**）。 */
@@ -33,6 +34,9 @@ const props = defineProps({
   sealName: { type: String, default: '' }
 })
 const emit = defineEmits(['close', 'saved'])
+
+/* ESC ＝ 取消（全仓单点实现）；本框无提交中态（点选即完成保存），恒可取消。 */
+useEscToClose({ onCancel: () => emit('close') })
 
 /** 任何一次写入后 +1，使下面的派生读数立即重算（服务层读的是已落盘数据）。 */
 const version = ref(0)
