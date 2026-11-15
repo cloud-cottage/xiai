@@ -5300,7 +5300,13 @@ async function directWriteRowOfExistingSeal(sealRow, idempotent) {
        外传）；失败恒 **3 键** `{ok:false, reason, message}`。
    --------------------------------------------------------------------------- */
 
-/** 印面圖入册载荷允许键（**封闭键面**；身份类键一律拒 —— 与其余 op 同口径）。 */
+/**
+ * 印面圖入册载荷允许键（**封闭键面**；身份类键一律拒 —— 与其余 op 同口径）。
+ *
+ * **本單（2026-11-15 E1 裁定｜影像可见性）**：封闭键面 **7 → 8**，**只加 `visibility` 一个键**
+ * （其余键一字未动、不得顺手放宽）。口径：同一印面两张图 —— **原图（裁切 TIFF）标 `hidden`
+ * （仅管理员可见）**、**精修件标 `visible`**；没有精修件时原图必须 `visible`（缺省即 `visible`）。
+ */
 const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
   'seal_id',
   'face_id',
@@ -5308,11 +5314,39 @@ const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
   'bytes',
   'mime',
   'storage_key',
-  'kind'
+  'kind',
+  'visibility'
 ])
 
 /** `kind` 合法取值（与 `FACE_KIND` / `buildDirectImageRow` 同口径；缺省 `FACE`）。 */
 const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
+
+/** 影像可见性合法取值（**封闭二值**；与前端 `src/data/cloudbase.js::IMAGE_VISIBILITY_VALUES` 逐字同值）。 */
+const IMAGE_VISIBILITY_VALUES = Object.freeze(['visible', 'hidden'])
+
+/** 影像可见性**缺省值**（未传 ⇒ 落 `visible`；**不落空串、不落 `null`**）。 */
+const IMAGE_VISIBILITY_DEFAULT = 'visible'
+
+/**
+ * 影像可见性**值域门**（封闭二值；违反 ⇒ `INVALID_VALUE` ＋ 零写入）。
+ *
+ * 判据（顺序即判定序）：
+ *   ① 载荷**没有** `visibility` 键（或值 `undefined`）⇒ 缺省 `'visible'`；
+ *   ② 有该键且值是字符串且**逐字** ∈ `IMAGE_VISIBILITY_VALUES` ⇒ 原样采信；
+ *   ③ 其余（非字符串 / 空串 / `null` / 大小写不符 / 表外字面）⇒ `{ok:false}`（**不静默归一**）。
+ * @param {object} payload 载荷
+ * @returns {{ok:true, value:string}|{ok:false}}
+ */
+function imageVisibilityOf(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  if (!Object.prototype.hasOwnProperty.call(src, 'visibility') || src.visibility === undefined) {
+    return { ok: true, value: IMAGE_VISIBILITY_DEFAULT }
+  }
+  if (typeof src.visibility !== 'string' || IMAGE_VISIBILITY_VALUES.indexOf(src.visibility) === -1) {
+    return { ok: false }
+  }
+  return { ok: true, value: src.visibility }
+}
 
 /* ---------------------------------------------------------------------------
    **印面圖替換面（本單新增 op｜`replaceFaceImage`｜管理員面）**
@@ -9232,14 +9266,15 @@ const ADMIN_OPS = Object.freeze({
    *   ③ 必填六键：缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`（`bytes` 另判整数）；
    *   ④ 值域门：`sha256` 64 位小写十六进制；`storage_key` 匹配 `ARTIFACT_OBJECT_KEY_PATTERN`
    *      **且键内摘要 ≡ sha256**；`bytes` ∈ 1〜`ARTIFACT_MAX_BYTES`；`kind` ∈ {FACE, EDGE}
-   *      （缺省 `FACE`）⇒ 任一不符 `INVALID_VALUE` ＋ 零写入、零读取之外的任何副作用；
+   *      （缺省 `FACE`）；`visibility` ∈ {visible, hidden}（**缺省 `visible`**）
+   *      ⇒ 任一不符 `INVALID_VALUE` ＋ 零写入、零读取之外的任何副作用；
    *   ⑤ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用、不消耗号；否则经
    *      `imageSeqsOf` / `nextImageSeqOf`，**本 op 不自算号**）；
    *   ⑥ 行体 ＝ `buildDirectImageRow` 字段面（`stamp_id` 回填 `seal_id`）＋ `kind:'set'`
    *      覆写计划 ⇒ **同 `id` 重放不建第二行、不消耗号**；
    *   ⑦ 成功回包**恰 2 键** `{ok:true, image_id}`（＋ `plan` 内部面，`index.js` 不外传）；
    *      失败恒**恰 3 键**，`reason` 只用既有冻结值（**零新增**）。
-   * @param {object} payload 载荷（封闭七键，见 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`）
+   * @param {object} payload 载荷（封闭八键，见 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`；`visibility` 缺省 `visible`）
    * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
    * @param {{adminPhone?:string, nowSeconds?:number}} [context]
    * @returns {Promise<{ok:true, image_id:string, plan:object}|{ok:false, reason:string, message:string}>}
@@ -9297,6 +9332,12 @@ const ADMIN_OPS = Object.freeze({
       }
       kind = payload.kind
     }
+    /* ④d 可见性门（**本單｜2026-11-15 E1 裁定**；缺省 `visible`、只收 `visible` / `hidden`，
+       判在**任何读之前** ⇒ 非法值结构性拒绝 ＋ **零读取、零写入**）。 */
+    const visibility = imageVisibilityOf(payload)
+    if (!visibility.ok) {
+      return deny(REASONS.INVALID_VALUE, '影像可見性（visibility）只能是 visible 或 hidden；本次零寫入。')
+    }
     const sealId = text(payload.seal_id)
     const at = new Date().toISOString()
     /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
@@ -9318,14 +9359,16 @@ const ADMIN_OPS = Object.freeze({
     const seq = sameSealExisting
       ? Number(existing.seq)
       : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
-    /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`。 */
+    /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`
+       ＋ **`visibility`（本單；缺省即 `visible`，恒落该键 —— 不落空串、不落 `null`）**。 */
     const row = {
       ...buildDirectImageRow(
         { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
         at,
         seq
       ),
-      stamp_id: sealId
+      stamp_id: sealId,
+      visibility: visibility.value
     }
     /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
     return {

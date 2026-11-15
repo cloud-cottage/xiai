@@ -697,8 +697,121 @@ export function normalizeImageRow(doc, options = {}) {
        **仅管理员可见**：本字段只随影像行读出（管理员读面）；**不得**进入任何普通用户可见的
        卡片 / DTO（与浏览量「卡片不显示」同口径）。 */
     book_id: text(row.book_id) || null,
+    /* **影像可见性（2026-11-15 E1 裁定）**：只认逐字 `'hidden'`，缺键 / 空值 / 表外取值一律
+       归一为 `'visible'`（旧行不得因本单消失）。判据单点 ＝ `imageVisibilityOf`。 */
+    visibility: imageVisibilityOf(row),
     created_at: text(row.created_at)
   }
+}
+
+/**
+ * **影像可见性（`xiai_images.visibility`｜2026-11-15 E1 裁定）**
+ * ============================================================================
+ * 裁定口径：同一个印面会有**两张图** ——
+ *   · **原图（裁切 TIFF）标 `hidden`**（仅管理员可见）；
+ *   · **精修件标 `visible`**；
+ *   · **没有精修件时，原图必须 `visible`**（不变量，见 `filterImageRowsForViewer` 的提升分支）。
+ *
+ * 读面纪律（本文件是**唯一**判据点，页面 / 组件不得自判）：
+ *   ① **管理员全取**（含 `hidden` 行）；
+ *   ② **非管理员**读不到 `visibility === 'hidden'` 的行；
+ *   ③ **缺该键的行一律当 `visible`** —— 旧行（`visibility` 键尚未写入）不得因本单突然消失；
+ *   ④ 表外取值（`''` / `null` / `'HIDDEN'` / 手改垃圾）**也当 `visible`** —— 只有逐字 `'hidden'`
+ *      才藏；这条是「宁可露出也不能凭空少一张」的正向护栏。
+ *
+ * 不变量实现选择（第 5 条，二选一）：**自动把原图当 visible**（读面提升），理由：
+ *   · 写面「结构化拒绝」需要**跨集合**知道该面是否另有 `visible` 行，而两张图是**两次独立写**
+ *     （先原图、后精修）⇒ 第一次写时「还没有精修件」恒真 ⇒ 拒绝会让正确流程第一步就走不通；
+ *   · 读面提升只在「该 `(stamp_id, kind)` 组**一张 `visible` 都没有**」时才把**序号最小的那张**
+ *     当 `visible` 交出（确定性，不随机挑）⇒ 面永远有图可显示，且**不会**把已正确的组改动。
+ * ============================================================================
+ */
+
+/** 可见性取值（与云函数 `lib/ops.js::IMAGE_VISIBILITY_VALUES` 逐字同值）。 */
+export const IMAGE_VISIBILITY = Object.freeze({ VISIBLE: 'visible', HIDDEN: 'hidden' })
+
+/** 可见性值域（封闭二值）。 */
+export const IMAGE_VISIBILITY_VALUES = Object.freeze([IMAGE_VISIBILITY.VISIBLE, IMAGE_VISIBILITY.HIDDEN])
+
+/** 缺键 / 表外取值时的**缺省语义**（`visible`；旧行不得消失）。 */
+export const IMAGE_VISIBILITY_DEFAULT = IMAGE_VISIBILITY.VISIBLE
+
+/**
+ * 行上的可见性（缺键 / 空值 / 表外取值 ⇒ `'visible'`）。
+ * @param {object} row 影像行（云行或本机行）
+ * @returns {'visible'|'hidden'}
+ */
+export function imageVisibilityOf(row) {
+  const raw = text(row && row.visibility)
+  return IMAGE_VISIBILITY_VALUES.indexOf(raw) === -1 ? IMAGE_VISIBILITY_DEFAULT : raw
+}
+
+/** 是否 `hidden`（**逐字**才真；`imageVisibilityOf` 已把表外值折叠成 `visible`）。 */
+export function isHiddenImageRow(row) {
+  return imageVisibilityOf(row) === IMAGE_VISIBILITY.HIDDEN
+}
+
+/** 组键（`(stamp_id, kind)`；**未归属 / 占位 `stamp_id` 不成组** ⇒ 不参与提升）。 */
+function imageGroupKeyOf(row) {
+  const stamp = text(row && row.stamp_id)
+  if (stamp === '' || stamp.indexOf('imp-') === 0) return ''
+  return `${stamp}|${text(row && row.kind) === 'EDGE' ? 'EDGE' : 'FACE'}`
+}
+
+/** 提升候选排序：`seq` 升序（缺 / 非法 `seq` 置后）⇒ 同序按 `id` 升序（确定性）。 */
+function promotedOrderOf(a, b) {
+  const seqOf = (row) => {
+    const value = Number(row && row.seq)
+    return Number.isInteger(value) && value > 0 ? value : Number.MAX_SAFE_INTEGER
+  }
+  const diff = seqOf(a) - seqOf(b)
+  if (diff !== 0) return diff
+  return text(a && a.id).localeCompare(text(b && b.id))
+}
+
+/**
+ * **按角色过滤影像行**（读面 / 水合结果的**唯一**可见性过滤点）。
+ *
+ * 判据（顺序即判定序）：
+ *   ① `options.isAdmin === true` ⇒ **原数组原样返回**（零分配、零改写；管理员全取）；
+ *   ② 非管理员 ⇒ 去掉 `hidden` 行；
+ *   ③ **不变量**：某 `(stamp_id, kind)` 组**一张 `visible` 都没有** ⇒ 把该组**序号最小的那张**
+ *      `hidden` 行**当 `visible` 交出**（交出的是**副本**，`visibility` 改写为 `'visible'` ——
+ *      投影 / 界面拿到的行与其语义一致；原行对象不就地改写）；
+ *   ④ 其余行身份不变（`visible` 行、缺键旧行**逐字原样**透传）。
+ * @param {Array<object>} rows 影像行
+ * @param {{isAdmin?:boolean}} [options] 身份（缺省按非管理员）
+ * @returns {Array<object>} 可交给界面 / 水合结果的行
+ */
+export function filterImageRowsForViewer(rows, options = {}) {
+  const list = Array.isArray(rows) ? rows : []
+  if (options.isAdmin === true) return list
+  const groups = new Map()
+  list.forEach((row, index) => {
+    const key = imageGroupKeyOf(row)
+    if (key === '') return
+    if (!groups.has(key)) groups.set(key, { hasVisible: false, hidden: [] })
+    const bucket = groups.get(key)
+    if (isHiddenImageRow(row)) bucket.hidden.push(index)
+    else bucket.hasVisible = true
+  })
+  const promoted = new Set()
+  groups.forEach((bucket) => {
+    if (bucket.hasVisible || bucket.hidden.length === 0) return
+    const candidates = bucket.hidden.map((index) => list[index])
+    const ordered = candidates.slice().sort(promotedOrderOf)
+    promoted.add(list.indexOf(ordered[0]))
+  })
+  const out = []
+  list.forEach((row, index) => {
+    if (!isHiddenImageRow(row)) {
+      out.push(row)
+      return
+    }
+    if (!promoted.has(index)) return
+    out.push({ ...row, visibility: IMAGE_VISIBILITY.VISIBLE })
+  })
+  return out
 }
 
 /**

@@ -23,8 +23,8 @@
  * 上屏文案一律**繁体**（`s2t(x) === x`），且**零「切分」措辞**。
  */
 
-import { listSealRows, listFaceRows, primaryFaceIn } from '../data/db.js'
-import { currentUser } from '../data/session.js'
+import { listSealRows, listFaceRows, primaryFaceIn, isImageRowHidden } from '../data/db.js'
+import { currentUser, isAdmin as isAdminSessionRef } from '../data/session.js'
 /* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
    雙端同段代碼 ⇒ 前端只能**副作用導入**、API 掛 `globalThis.__XIAI_CODE_ID__`。 */
 import '../utils/codeId.js'
@@ -135,10 +135,17 @@ function sealBriefOf(sealId) {
   const stampId = seal.id || seal.stamp_id || id
   const faces = listFaceRows().filter((row) => (row.sealId || row.stamp_id) === stampId)
   const primary = primaryFaceIn(faces)
+  /* **影像可见性（2026-11-15 E1 裁定）**：投影里**不得出现 `hidden` 影像行**。
+     面行指向的那张图若是 `hidden` ⇒ 非管理员拿到的 `image_id` 为**空串**（同键、同形状，
+     只是不把被藏行的 id 交出去）；管理员照旧拿到真 id。
+     判据用 `isImageRowHidden`（**不吃读面过滤** —— 若问已过滤的 `listImageRows()`，
+     非管理员根本看不到 hidden 行，「查不到」与「被藏」不可分辨）。 */
+  const referencedImageId = primary && primary.face_image_id ? String(primary.face_image_id) : ''
+  const withheld = referencedImageId !== '' && !isAdminSessionRef.value && isImageRowHidden(referencedImageId)
   return {
     seal_id: id,
     seal_name: seal.seal_name || seal.name || '',
-    image_id: primary && primary.face_image_id ? String(primary.face_image_id) : '',
+    image_id: withheld ? '' : referencedImageId,
     found: true
   }
 }

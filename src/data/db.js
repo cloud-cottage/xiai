@@ -60,7 +60,11 @@ import { uidOf } from './uid.js'
    全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。
    另經 `cloudBaseSnapshot()` 拿**同一份快照對象**做「上傳成功後併入」（`mergeCloudSnapshotRows`）：
    仍是**同一個單點的讀口**，不新增判據、不發請求；併入只替換集合數組身份以失效讀緩存。 */
-import { cloudBaseReadOf, cloudBaseSnapshot, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS } from './cloudbase.js'
+import { cloudBaseReadOf, cloudBaseSnapshot, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS, filterImageRowsForViewer, isHiddenImageRow } from './cloudbase.js'
+/* **影像可见性（2026-11-15 E1 裁定）的**身份来源**：`session.js` 的 `isAdmin` 是登录态唯一真源
+   （角色 `role === 'admin'`）。本文件**只读该标志**，不另立第二套判据、不碰写入面。
+   单向依赖（`session.js` 不 import 本文件）⇒ 无加载环。 */
+import { isAdmin as isAdminSessionRef } from './session.js'
 /* **雲模式停寫本機鏡像行（本單）**：`writeFaceMode()` 是「寫入口形態」的**唯一判據來源**
    （`data/writeFaceMode.js` 文件頭明文：頁面 / 服務不得各自判斷）；本文件只讀它。 */
 import { writeFaceMode, WRITE_FACE_MODES } from './writeFaceMode.js'
@@ -509,8 +513,13 @@ export function localOrphanSealReadout() {
      ③ 其余（未配置 `off` / 失败 `failed` / 非本层接管的键）⇒ **既有本地实现一字未改**
         （`ensureSeed()` ⇒ `readKey(key)`）。
    ============================================================================ */
-/** **集合读缓存（本单）**：`key -> {gen, state, cloudRows, rows}`；失效判据见 `readCollection` 内注。 */
+/** **集合读缓存（本单）**：`key -> {gen, state, cloudRows, admin, rows}`；失效判据见 `readCollection` 内注。 */
 const collectionReadCache = new Map()
+
+/** 当前读面身份是否管理员（`session.js::isAdmin` 唯一真源；缺值 ⇒ 非管理员）。 */
+function viewerIsAdmin() {
+  return isAdminSessionRef.value === true
+}
 
 function readCollection(key, fallback) {
   /* **启动兜底**：`main.js` 不在本单接线面内 ⇒ 首次读取顺带把水合拉起来（幂等；未配置时零成本）。
@@ -537,8 +546,18 @@ function readCollection(key, fallback) {
      云模式下**仍不调 `ensureSeed()`**（与改前逐字一致：云模式一行种子都不写进 localStorage）。
      ======================================================================== */
   const cloudRows = Array.isArray(cloud.rows) && cloud.rows.length > 0 ? cloud.rows : null
+  /* **影像可见性（2026-11-15 E1 裁定）**：`images` 是唯一受身份影响的集合 ⇒ 缓存键**多一条**
+     身份判据（`admin`）—— 否则匿名读（已滤掉 hidden）会被管理员复用、hidden 行永不出现
+     （反之更糟）。其余集合 `admin` 不参与比较（值恒等于自身，不改变任何命中率）。 */
+  const admin = viewerIsAdmin()
   const cached = collectionReadCache.get(key)
-  if (cached && cached.gen === storageGeneration() && cached.state === cloud.state && cached.cloudRows === cloudRows) {
+  if (
+    cached &&
+    cached.gen === storageGeneration() &&
+    cached.state === cloud.state &&
+    cached.cloudRows === cloudRows &&
+    cached.admin === admin
+  ) {
     return cached.rows
   }
   let rows
@@ -551,8 +570,14 @@ function readCollection(key, fallback) {
     const value = readKey(key)
     rows = Array.isArray(value) ? value : fallback
   }
+  /* **本单（影像可见性）**：`images` 一族在**交出之前**按角色过滤（单点
+     `cloudbase.js::filterImageRowsForViewer`：非管理员去 `hidden`、缺键旧行当 `visible`、
+     「一组只剩 hidden」时把序号最小的原图当 `visible`）。空集 / 非 images 键零改动。 */
+  if (key === STORAGE_KEYS.images && rows.length > 0 && !admin) {
+    rows = filterImageRowsForViewer(rows, { isAdmin: false })
+  }
   /* 代数在 `ensureSeed()` **之后**取：种子写盘会递增代数，缓存必须记「写盘后的那一档」。 */
-  collectionReadCache.set(key, { gen: storageGeneration(), state: cloud.state, cloudRows, rows })
+  collectionReadCache.set(key, { gen: storageGeneration(), state: cloud.state, cloudRows, admin, rows })
   return rows
 }
 
@@ -1533,7 +1558,7 @@ export function saveFaceRows(rows) {
 }
 
 /** **影像行读缓存（本单）**：`src` 身份变化即失效（判据同 `collectionReadCache`）。 */
-let imageRowsCache = { src: null, rows: null }
+let imageRowsCache = { src: null, rows: null, admin: null }
 
 /* ============================================================================
 
@@ -1624,16 +1649,56 @@ export function listImageRows() {
      （`src` 身份变化即失效）；读语义不变（只读、不写存储）。 */
   const src = readCollection(STORAGE_KEYS.images, [])
   /* **本單（內存 upsert 失效）**：`imageRowMemoryGen` 變了（雲端候選行剛補進來）⇒ 重算一次；
-     與上面 `src` 身份判據**並列**，不新增任何其它失效時機。 */
-  if (imageRowsCache.src === src && imageRowsCache.gen === imageRowMemoryGen) return imageRowsCache.rows
-  const rows = withSliceMeta(withImageRowMemoryOverlay(src))
-  imageRowsCache = { src, rows, gen: imageRowMemoryGen }
+     與上面 `src` 身份判據**並列**，不新增任何其它失效時機。
+     **影像可见性（2026-11-15 E1 裁定）**：內存補位行**不經** `readCollection` ⇒ 這裡再過一次
+     同一個過濾單點（冪等：底層已是可見行原樣透傳）；身份同樣是緩存失效判據之一。 */
+  const admin = viewerIsAdmin()
+  if (imageRowsCache.src === src && imageRowsCache.gen === imageRowMemoryGen && imageRowsCache.admin === admin) {
+    return imageRowsCache.rows
+  }
+  const merged = withImageRowMemoryOverlay(src)
+  const visible = admin || merged.length === 0 ? merged : filterImageRowsForViewer(merged, { isAdmin: false })
+  const rows = withSliceMeta(visible)
+  imageRowsCache = { src, rows, gen: imageRowMemoryGen, admin }
   return rows
 }
 
 export function saveImageRows(rows) {
   if (cloudMirrorWriteSkipped()) return rows
   return writeCollection(STORAGE_KEYS.images, rows)
+}
+
+/**
+ * **投影侧判据：某影像行是否被可见性藏起**（`resolveShare` 专用；**不吃读面过滤**）。
+ *
+ * 为什么单列一支：分享投影要判「面行指向的那张图是不是 `hidden`」。若去问**已过滤**的
+ * `listImageRows()`，非管理员根本看不到 hidden 行 ⇒ 判不出来（「查不到」与「被藏」不可分辨）。
+ * 故这里直接查**两处未过滤真源**：
+ *   ① 内存补位行 `imageRowMemory`（雲端候選行剛補進來的）；
+ *   ② 云端快照的 `images` 集合（`cloudBaseReadOf('images')` —— **原始行**，
+ *      `readCollection` 的过滤只作用于**交出的副本**，快照本体一字未改）。
+ * 本机镜像行（localStorage）不带 `visibility`（抽样 300 行零命中）⇒ 不必扫。
+ * @param {string} imageRowId 影像行 id
+ * @returns {boolean} `true` ＝ 该行存在且 `visibility === 'hidden'`；不存在 / 缺键 ⇒ `false`
+ */
+export function isImageRowHidden(imageRowId) {
+  const id = imageRowId === null || imageRowId === undefined ? '' : String(imageRowId)
+  if (id === '') return false
+  /* ① 內存補位行（雲端候選行剛補進來的那一批）。 */
+  const memoryRow = imageRowMemory.get(id)
+  if (memoryRow && isHiddenImageRow(memoryRow)) return true
+  /* ② 云端快照的原始行（`readCollection` 的过滤只作用于交出的副本，快照本体未改）。 */
+  const cloud = cloudBaseReadOf('images')
+  const cloudRows = cloud && Array.isArray(cloud.rows) ? cloud.rows : []
+  const cloudHit = cloudRows.find((row) => String((row && (row.id || row._id)) || '') === id)
+  if (cloudHit) return isHiddenImageRow(cloudHit)
+  /* ③ 雲端未接管（`off` / `pending` / `failed`）⇒ 本機鏡像行（離線驗收 / 本機調試用；
+     生產雲模式下本機鏡像停寫，本支恆走不到）。 */
+  if (cloud && cloud.state === 'ready') return false
+  ensureSeed()
+  const local = readKey(STORAGE_KEYS.images)
+  const localHit = Array.isArray(local) ? local.find((row) => String((row && (row.id || row._id)) || '') === id) : null
+  return localHit ? isHiddenImageRow(localHit) : false
 }
 
 /* ============================================================================
@@ -1802,7 +1867,7 @@ export async function clearLocalDatabase() {
   report.messages.push(...report.idb.messages)
   /* ③ 讀緩存一律失效 ⇒ 下一次讀必重讀（不得拿舊快照充數）。 */
   collectionReadCache.clear()
-  imageRowsCache = { src: null, rows: null }
+  imageRowsCache = { src: null, rows: null, admin: null }
   faceRowsCache = { src: null, rows: null }
   SEED_FINGERPRINT_CACHE.clear()
   setOrphanSeals([])
