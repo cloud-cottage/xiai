@@ -8,19 +8,21 @@
 
 ---
 
-## 第 0 步｜先确认线上密钥都在位（约 100 字）
+## 第 0 步｜核对 `xiai-user-token` 的环境变量（约 100 字）
 
-打开云开发控制台 → 云函数 → 分别选中 `xiai-user-token`、`xiai-admin-token` → 函数配置 → 环境变量。确认三个键存在且非空：`XIAI_USER_TOKEN_SECRET`、`XIAI_ADMIN_TOKEN_SECRET`（两把必须是不同的随机 64 位十六进制）、`XIAI_ADMIN_PHONE`（管理员手机号，与前端 `src/data/seed.js` 的 `ADMIN_PHONE` 同值）。缺哪个就补哪个，别改值。
+打开云开发控制台 → 云函数 → `xiai-user-token` → 函数配置 → 环境变量。必须有两项非空：`XIAI_USER_TOKEN_SECRET`（已确认在位）、**`XIAI_ADMIN_PHONE`**（管理员手机号，与 `src/data/seed.js::ADMIN_PHONE` 同值）。可选：`XIAI_USER_TOKEN_VERSION`（默认 1）、`XIAI_USER_TOKEN_LEEWAY_SECONDS`（默认 60）。
 
-**做错会怎样**：缺令牌密钥 ⇒ 所有登录请求回 `STORAGE_UNAVAILABLE`（内部错误）；缺 `XIAI_ADMIN_PHONE` ⇒ 管理面全部结构化拒绝（安全默认，不放行）。
+**缺 `XIAI_ADMIN_PHONE` 会怎样**：管理面整片不可用 —— 采纳、驳回、邀请奖励一律 `FORBIDDEN`（这是安全默认，不会放行）。普通用户登录与勘误提交仍正常，所以只测登录发现不了这个问题。
+
+**关于 `xiai-admin-token`（管理员令牌函数）**：**本轮不需要给它配任何环境变量**。实测前端对它零调用点，管理面白名单真源在 `xiai-user-token` 上；它缺变量时回 `STORAGE_UNAVAILABLE`（fail-closed，由于无人调用，无实际影响）。将来若要启用管理员专用通道，再给它配 `XIAI_ADMIN_TOKEN_SECRET` + `XIAI_ADMIN_PHONE`。
 
 ---
 
 ## 第 1 步｜配 30 天令牌有效期（约 100 字）
 
-还在同一个「环境变量」页面，给两个函数各加一项：`xiai-user-token` 加 `XIAI_USER_TOKEN_TTL_SECONDS=2592000`，`xiai-admin-token` 加 `XIAI_ADMIN_TOKEN_TTL_SECONDS=2592000`（2592000 秒 = 30 天）。可选再加 `XIAI_AUTH_REGION=ap-shanghai`（不填默认就是它）。**注意这个页面是整表替换**：编辑时把原有键一起保留提交，漏掉的键等于删除。
+在 `xiai-user-token` 的环境变量页面加一项：`XIAI_USER_TOKEN_TTL_SECONDS=2592000`（2592000 秒 = 30 天）。可选再加 `XIAI_AUTH_REGION=ap-shanghai`（不填默认就是它，本环境无需设置）。`xiai-admin-token` 的 `XIAI_ADMIN_TOKEN_TTL_SECONDS` **只在将来启用该函数时才需要**，本轮可跳过。
 
-**做错会怎样**：不配 ⇒ 代码默认仍是 900 秒，「刷新不掉登录」只剩 15 分钟窗口；整表替换漏键 ⇒ 该函数立刻报「服务未配置」，全员登录失败。
+**注意这个页面是整表替换**：编辑时把原有键（含 `XIAI_USER_TOKEN_SECRET`、`XIAI_ADMIN_PHONE`）一起保留提交，漏掉的键等于删除 —— 那条函数会立刻报「服务未配置」，全员登录失败。
 
 ---
 
@@ -34,9 +36,11 @@ tcb fn code update xiai-user-token  -e liwu-cny1313-d1gb2fukyb7cb19bb
 tcb fn code update xiai-admin-token -e liwu-cny1313-d1gb2fukyb7cb19bb
 ```
 
-`code update` 只上传代码、不碰环境变量（这正是 §1.58 裁定里 W-68 的合规通道之一）。跑完用 `tcb fn list -e liwu-cny1313-d1gb2fukyb7cb19bb` 看「更新时间」是否变成刚才。
+`code update` 只上传代码、不碰环境变量（这正是 W-68 裁定的合规通道之一）。跑完用 `tcb fn list -e liwu-cny1313-d1gb2fukyb7cb19bb` 看「更新时间」是否变成刚才。
 
-**做错会怎样**：改用 `tcb fn deploy` ⇒ 环境变量可能被 `cloudbaserc.json` 里的空值覆盖，密钥全丢，全站登录立刻失效。
+**`xiai-admin-token` 那条别怕报错**：它没有环境变量，部署后任何调用都回 `STORAGE_UNAVAILABLE` —— 这是预期的 fail-closed，不是部署失败；因为前端对它零调用点，不影响任何功能。部署它的意义在于把旧代码里「认固定码 `729341`」的活口焊死。
+
+**做错会怎样**：改用 `tcb fn deploy` ⇒ 环境变量可能被 `cloudbaserc.json` 里的空值覆盖，`xiai-user-token` 的密钥全丢，全站登录立刻失效。
 
 ---
 
