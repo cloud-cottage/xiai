@@ -40,6 +40,8 @@ import { cloudBaseReadOf, cloudBaseStatus, retryCloudBaseHydration } from '../da
 export const BOOK_OP_CREATE = 'createBook'
 export const BOOK_OP_LIST = 'listBooks'
 export const BOOK_OP_SET_IMAGE = 'setImageBook'
+/** 按需检索可挂影像（批量挂图面板唯一读面；2026-11-15）。 */
+export const BOOK_OP_SEARCH_IMAGES = 'searchBookImages'
 
 /** `book_id` 形态（与云函数 `lib/books.js::BOOK_ID_PATTERN` **同尺**：五位纯数字）。 */
 export const BOOK_ID_PATTERN = /^\d{5}$/
@@ -264,6 +266,40 @@ export async function listBooks(input = {}) {
     truncated: gate.truncated === true,
     mode: gate.mode
   }
+}
+
+/**
+ * **按需检索可挂影像（管理员）** —— 「批量挂图」面板的唯一读面。
+ *
+ * 为什么：旧面板把全部印章/影像装配进浏览器（6,445 张）⇒ 页面卡顿；
+ * 现在只在**输入关键词后**才查（服务端按印文 / 章号 / 序号匹配，简繁双形态）。
+ *
+ * @param {{q:string, limit?:number}} input `q` 必填；`limit` 1〜100（默认服务端 24）
+ * @returns {Promise<{ok:true, rows:Array<{image_id:string,stamp_id:string,seal_name:string,
+ *            kind:string,book_id:string}>, total:number, mode:string}
+ *          |{ok:false, reason:string, message:string}>}
+ */
+export async function searchBookImages(input = {}) {
+  if (isLocalDevMode()) return localDevDenial('檢索可掛影像')
+  const source = input && typeof input === 'object' ? input : {}
+  const q = text(source.q)
+  if (q === '') return denial('MISSING_REQUIRED', '請輸入檢索關鍵詞（印文 / 章號 / 序號）；本次零讀取。')
+  if (q.length > 60) return denial('INVALID_VALUE', '關鍵詞不得超過 60 字；本次零讀取。')
+  const payload = { q }
+  const limit = Number(source.limit)
+  if (Number.isInteger(limit) && limit > 0) payload.limit = Math.min(limit, 100)
+  const gate = await userWriteGate(BOOK_OP_SEARCH_IMAGES, payload, { readoutKeys: ['rows', 'total'] })
+  if (!gate.ok) return denial(gate.reason, gate.message)
+  if (!Array.isArray(gate.rows)) {
+    return denial('STORAGE_UNAVAILABLE', '雲端已受理檢索，但未回傳影像清單（rows）；請稍後重試。')
+  }
+  const rows = gate.rows.map((row) => {
+    const src = row && typeof row === 'object' ? row : {}
+    const out = {}
+    for (const key of BOOK_IMAGE_ROW_KEYS) out[key] = text(src[key])
+    return out
+  })
+  return { ok: true, rows, total: Number.isInteger(gate.total) ? gate.total : rows.length, mode: gate.mode }
 }
 
 /**

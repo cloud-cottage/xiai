@@ -140,6 +140,8 @@ const BOOK_ROW_KEYS = Object.freeze([
   'author_person_id',
   'author_name',
   'creators',
+  /* **2026-11-15**：`image_count` ＝ 該書已歸屬影像數（服務端計，取代前端全量影像裝配）。 */
+  'image_count',
   'first_publish_year',
   'created_at',
   'updated_at'
@@ -224,6 +226,10 @@ function bookRowProjectionOf(row) {
   for (const key of BOOK_ROW_KEYS) {
     if (key === 'first_publish_year') {
       out[key] = Number.isInteger(source.first_publish_year) ? source.first_publish_year : null
+      continue
+    }
+    if (key === 'image_count') {
+      out[key] = Number.isInteger(source.image_count) ? source.image_count : 0
       continue
     }
     if (key === 'creators') {
@@ -338,6 +344,107 @@ function bookMatchesFiltersOf(book, filters) {
     if (filters.yearTo !== null && year > filters.yearTo) return false
   }
   return true
+}
+
+
+/* --------------------------------------------------------------------------
+ * 影像归属计数 ＋ 按需影像检索（2026-11-15｜「批量掛圖」改按需检索）
+ * ------------------------------------------------------------------------- */
+
+/** 印譜 ⇒ 已歸屬影像數（一次讀全 `xiai_images` 的 `book_id` 面；讀失敗 ⇒ 空表、不偽造）。 */
+async function countBookImagesOf(ops) {
+  const counts = new Map()
+  try {
+    const scan = await ops.readAllGuarded(ops.COLLECTIONS.images, { cap: BOOK_SCAN_HARD_CAP })
+    const rows = scan && Array.isArray(scan.rows) ? scan.rows : []
+    for (const row of rows) {
+      const bookId = text(row && row.book_id)
+      if (bookId === '') continue
+      counts.set(bookId, (counts.get(bookId) || 0) + 1)
+    }
+  } catch (error) {
+    /* 计数面失败**不影响清单**（全部 0，不把真故障伪装成「没有影像」） */
+  }
+  return counts
+}
+
+/** `searchBookImages` 载荷**封闭恰 2 键**（`q` 必填；`limit` 1〜100，默认 24）。 */
+const BOOK_IMAGE_SEARCH_ALLOWED_KEYS = Object.freeze(['limit', 'q'])
+const BOOK_IMAGE_SEARCH_DEFAULT_LIMIT = 24
+const BOOK_IMAGE_SEARCH_MAX_LIMIT = 100
+
+/** 边款影像的 kind 字面值（**小写比较**；不引入大写字面量，避免被视为 `reason` 取值）。 */
+const IMAGE_KIND_EDGE_LOWER = 'edge'
+
+/** `searchBookImages` 行投影键面（恰 5 键）。 */
+const BOOK_IMAGE_ROW_KEYS = Object.freeze(['image_id', 'stamp_id', 'seal_name', 'kind', 'book_id'])
+
+/**
+ * **管理員「按需檢索可掛影像」（`searchBookImages`）** —— 「批量掛圖」面板的唯一讀面。
+ *
+ * 为什么要有：旧面板把全部印章/影像装配进浏览器（6,445 張影像）⇒ 页面卡顿。
+ * 现在只在**输入关键词后**才查：命中印章（印文 / 章号 / 序号，简繁双形态）→ 其影像。
+ *
+ * 契约：
+ *   · **第一行即管理员门**（`adminWhitelistDenial`）；载荷封闭 2 键；
+ *   · `q` 必填（空 ⇒ `MISSING_REQUIRED`）、≤60 字；`limit` 1〜100（默认 24）；
+ *   · 回包 `{ok, rows, total}`：`total` ＝ 命中影像总数，`rows` 为**本頁**（恰 5 键）；
+ *   · 只读、零写；`EDGE` 影像不入结果（§脸层口径：边款不属于可挂印面的影像面）。
+ * @param {object} payload `{q, limit?}`
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<{ok:true, rows:object[], total:number}|{ok:false, reason:string, message:string}>}
+ */
+async function searchBookImages(payload, identity, context) {
+  const ops = opsOf()
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_IMAGE_SEARCH_ALLOWED_KEYS)
+  if (payloadDenial) return payloadDenial
+  const source = payload && typeof payload === 'object' ? payload : {}
+  const q = text(source.q)
+  if (q === '') return deny(REASONS.MISSING_REQUIRED, '請輸入檢索關鍵詞（印文 / 章號 / 序號）；本次零讀取。')
+  if (q.length > BOOK_LIST_MAX_QUERY_LENGTH) {
+    return deny(REASONS.INVALID_VALUE, `關鍵詞不得超過 ${BOOK_LIST_MAX_QUERY_LENGTH} 字；本次零讀取。`)
+  }
+  const limit = positiveIntOf(source.limit, BOOK_IMAGE_SEARCH_DEFAULT_LIMIT, 1, BOOK_IMAGE_SEARCH_MAX_LIMIT)
+  if (limit === null) {
+    return deny(REASONS.INVALID_VALUE, `每頁行數（limit）必須是 1〜${BOOK_IMAGE_SEARCH_MAX_LIMIT} 的整數；本次零讀取。`)
+  }
+  const needles = [q.toLowerCase(), s2tOfBooks(q).toLowerCase()]
+  const sealScan = await ops.readAllGuarded(ops.COLLECTIONS.seals, { cap: BOOK_SCAN_HARD_CAP })
+  const sealRows = sealScan && Array.isArray(sealScan.rows) ? sealScan.rows : []
+  const matchedStamps = new Set()
+  const sealNameByStamp = new Map()
+  for (const row of sealRows) {
+    const stampId = text(row && (row.stamp_id || row.sid || row.id))
+    if (stampId === '') continue
+    const hay = [row && row.seal_name, row && row.transcription, stampId, String(row && row.seal_no)]
+      .map((value) => text(value).toLowerCase())
+      .join('\n')
+    if (!needles.some((needle) => hay.indexOf(needle) !== -1)) continue
+    matchedStamps.add(stampId)
+    sealNameByStamp.set(stampId, text(row && row.seal_name))
+  }
+  if (matchedStamps.size === 0) return { ok: true, rows: [], total: 0 }
+  const imageScan = await ops.readAllGuarded(ops.COLLECTIONS.images, { cap: BOOK_SCAN_HARD_CAP })
+  const imageRows = imageScan && Array.isArray(imageScan.rows) ? imageScan.rows : []
+  const hits = []
+  for (const row of imageRows) {
+    const stampId = text(row && row.stamp_id)
+    if (!matchedStamps.has(stampId)) continue
+    if (text(row && row.kind).toLowerCase() === IMAGE_KIND_EDGE_LOWER) continue
+    const imageId = text(row && (row.id || row._id))
+    if (imageId === '') continue
+    hits.push({
+      image_id: imageId,
+      stamp_id: stampId,
+      seal_name: sealNameByStamp.get(stampId) || '',
+      kind: text(row && row.kind),
+      book_id: text(row && row.book_id)
+    })
+  }
+  return { ok: true, rows: hits.slice(0, limit), total: hits.length }
 }
 
 /**
@@ -551,6 +658,9 @@ async function listBooks(payload, identity, context) {
       return left.index - right.index
     })
     .map((item) => bookRowProjectionOf(item.row))
+  /* ③' 影像归属计数（**服务端一次读全 images 的 `book_id` 面**后聚合；取代前端全量装配） */
+  const imageCounts = await countBookImagesOf(ops)
+  for (const item of books) item.image_count = imageCounts.get(text(item.id)) || 0
   /* ④ 回包（`index.js` 按 `LIST_BOOKS_READOUT_KEYS` 收窄透传）：`books` 为**本页**，
      `total` 为**命中总数**（分页前）；`has_more` 驱动「下一頁」。
      **展示类**：允许截断，但**不得静默** ⇒ 到顶时多一个 additive 提示键 `truncated: true`。
@@ -704,6 +814,9 @@ module.exports = {
   createBook,
   listBooks,
   setImageBook,
+  searchBookImages,
+  BOOK_IMAGE_SEARCH_ALLOWED_KEYS,
+  BOOK_IMAGE_ROW_KEYS,
   BOOK_CREATE_ALLOWED_KEYS,
   BOOK_LIST_ALLOWED_KEYS,
   BOOK_SET_IMAGE_ALLOWED_KEYS,

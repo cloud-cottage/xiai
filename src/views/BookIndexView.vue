@@ -177,22 +177,6 @@ function authorNameOf(book) {
   return '（未收錄於印人庫）'
 }
 
-/* 影像行（只在管理员态读）：关联影像数从影像行 `book_id` 统计，不另造统计接口。 */
-const sealRows = computed(() => {
-  void version.value
-  if (!canManage.value) return []
-  return seals.listSeals()
-})
-
-/** 影像行是否已带 `book_id` 字段（数据层未落地 ⇒ 关联数无法统计 ⇒ 见表格下方提示）。 */
-const bookFieldPresent = computed(() =>
-  sealRows.value.some((seal) =>
-    (Array.isArray(seal.images) ? seal.images : []).some(
-      (image) => image && Object.prototype.hasOwnProperty.call(image, 'book_id')
-    )
-  )
-)
-
 /** 本页写入成功后的本地归属覆盖（影像编号 → 印譜编号；'' ⇒ 未归属），用于即时反映而不假成功。 */
 const bookOverrides = ref({})
 
@@ -203,22 +187,17 @@ function bookIdOfImageRow(image) {
   return image.book_id === null || image.book_id === undefined ? '' : String(image.book_id)
 }
 
-/** 逐本印譜的關聯影像数（含 side face 影像 —— 计数按影像行原值，不做分类裁剪）。 */
-const imageCountByBook = computed(() => {
-  const counts = new Map()
-  sealRows.value.forEach((seal) => {
-    ;(Array.isArray(seal.images) ? seal.images : []).forEach((image) => {
-      const bookId = bookIdOfImageRow(image)
-      if (!bookId) return
-      counts.set(bookId, (counts.get(bookId) || 0) + 1)
-    })
-  })
-  return counts
-})
+/**
+ * 逐本印譜的關聯影像数：**服务端行上快照**（`book.image_count`）＋ 本次页面内的挂载增量
+ * （`bookOverrides` 里由本页写入产生的变化）。不再从前端全量影像装配里统计。
+ */
+const attachDelta = ref({}) // bookId -> +1 / -1
 
 function imageCountOf(book) {
   const id = book && book.id ? String(book.id) : ''
-  return id ? imageCountByBook.value.get(id) || 0 : 0
+  const base = Number.isInteger(book && book.image_count) ? book.image_count : 0
+  const delta = attachDelta.value[id] || 0
+  return Math.max(0, base + delta)
 }
 
 const bookById = computed(() => {
@@ -336,61 +315,59 @@ async function submitBook() {
 
 /* ------------------------------ ③ 批量掛圖 ------------------------------ */
 const selectedBookId = ref('')
-const imageFilter = ref('')
 const selectedImages = ref([]) // [{ imageId, stampId, bookId }]
 const attaching = ref(false)
 const attachFeedback = ref('')
 /** 待确认的批量提交（`{ ids, conflicts }`；`ids` ＝ 当时全部勾选项，`conflicts` 仅用于明示当前归属）。 */
 const pendingAttach = ref(null)
 
-/** 可挂影像清单：印面影像 ＋ 整枚印章圖（裁定件 §1.2 覆盖的两类影像行）。 */
-const allImages = computed(() => {
-  const out = []
-  sealRows.value.forEach((seal) => {
-    const images = Array.isArray(seal.images) ? seal.images : []
-    const faceIds = new Set()
-    const wholeIds = new Set()
-    ;(Array.isArray(seal.faces) ? seal.faces : []).forEach((face) => {
-      if (face && face.face_image_id) faceIds.add(String(face.face_image_id))
-    })
-    ;(Array.isArray(seal.wholeSealImages) ? seal.wholeSealImages : []).forEach((image) => {
-      if (image && image.id) wholeIds.add(String(image.id))
-    })
-    const sealName = corrections.resolveSealDisplayName(seal) || '（未命名印章）'
-    const stampId = seal && seal.stamp_id ? String(seal.stamp_id) : ''
-    images.forEach((image) => {
-      const imageId = image && image.id ? String(image.id) : ''
-      if (!imageId) return
-      const kind = faceIds.has(imageId) ? '印面影像' : wholeIds.has(imageId) ? '整枚印章圖' : ''
-      if (!kind) return
-      out.push({ imageId, stampId, sealName, kind, bookId: bookIdOfImageRow(image) })
-    })
-  })
-  return out
-})
+/* **按需检索**（2026-11-15）：不再把全部印章/影像装进浏览器 —— 输入关键词后由服务端检索
+   （`searchBookImages`：印文 / 章号 / 序号，简繁双形态），只回本页 24 条。 */
+const imageSearch = ref({ q: '', busy: false, rows: [], total: 0, searched: false, error: '' })
+const IMAGE_SEARCH_LIMIT = 24
 
-const IMAGE_RENDER_LIMIT = 200
-
-/** 命中条数（不受渲染上限影响；用于「清單過長」提示）。 */
-const filteredImageCount = computed(() => {
-  const keyword = String(imageFilter.value || '').trim().toLowerCase()
-  if (!keyword) return allImages.value.length
-  return allImages.value.filter((row) =>
-    [row.imageId, row.stampId, row.sealName, row.kind].join(' ').toLowerCase().includes(keyword)
-  ).length
-})
-
-const visibleImages = computed(() => {
-  const keyword = String(imageFilter.value || '').trim().toLowerCase()
-  const rows = keyword
-    ? allImages.value.filter((row) =>
-        [row.imageId, row.stampId, row.sealName, row.kind].join(' ').toLowerCase().includes(keyword)
-      )
-    : allImages.value
-  return rows.slice(0, IMAGE_RENDER_LIMIT)
-})
-
-const imagesTruncated = computed(() => visibleImages.value.length < filteredImageCount.value)
+/** 执行检索（`q` 必填；空 ⇒ 本地挡，零请求）。 */
+async function runImageSearch() {
+  /* 管理员门前置：非管理员 ⇒ 零请求（不得先取后藏）。 */
+  if (!canManage.value) return
+  const keyword = String(imageSearch.value.q || '').trim()
+  if (!keyword) {
+    imageSearch.value = { ...imageSearch.value, error: '請輸入檢索關鍵詞（印文 / 章號 / 序號）。', rows: [], total: 0, searched: false }
+    return
+  }
+  if (imageSearch.value.busy) return
+  imageSearch.value = { ...imageSearch.value, busy: true, error: '' }
+  const api = await loadBookApi()
+  if (!api || typeof api.searchBookImages !== 'function') {
+    imageSearch.value = { ...imageSearch.value, busy: false, error: '影像檢索尚未就緒（服務層缺 `searchBookImages`）。' }
+    return
+  }
+  let out = null
+  try {
+    out = await api.searchBookImages({ q: keyword, limit: IMAGE_SEARCH_LIMIT })
+  } catch (err) {
+    out = { ok: false, message: (err && err.message) || '調用異常' }
+  }
+  if (!out || out.ok !== true) {
+    imageSearch.value = {
+      ...imageSearch.value,
+      busy: false,
+      rows: [],
+      total: 0,
+      searched: true,
+      error: `檢索失敗：${(out && (out.message || out.reason)) || '服務未回報原因'}`
+    }
+    return
+  }
+  imageSearch.value = {
+    ...imageSearch.value,
+    busy: false,
+    rows: Array.isArray(out.rows) ? out.rows : [],
+    total: Number.isInteger(out.total) ? out.total : 0,
+    searched: true,
+    error: ''
+  }
+}
 
 const selectedImageIds = computed(() => new Set(selectedImages.value.map((row) => row.imageId)))
 
@@ -398,14 +375,30 @@ function isSelected(imageId) {
   return selectedImageIds.value.has(imageId)
 }
 
-/** 勾选 / 取消（保留勾选时的归属快照 ⇒ 改挂确认据此明示「当前归属」）。 */
+/**
+ * 勾選 / 取消（保留勾選時的歸屬快照 ⇒ 改掛確認據此明示「当前归属」）。
+ * 行形态来自服务端 `searchBookImages`（**snake_case**：`image_id` / `stamp_id` / `book_id`），
+ * 这里两种形态都认（兼容驼峰调用），不依赖单一命名。
+ */
 function toggleImage(row) {
   if (attaching.value) return
-  if (isSelected(row.imageId)) {
-    selectedImages.value = selectedImages.value.filter((item) => item.imageId !== row.imageId)
+  const imageId = textOfRow(row, 'image_id', 'imageId')
+  if (!imageId) return
+  if (isSelected(imageId)) {
+    selectedImages.value = selectedImages.value.filter((item) => item.imageId !== imageId)
     return
   }
-  selectedImages.value = [...selectedImages.value, { imageId: row.imageId, stampId: row.stampId, bookId: row.bookId }]
+  selectedImages.value = [
+    ...selectedImages.value,
+    { imageId, stampId: textOfRow(row, 'stamp_id', 'stampId'), bookId: textOfRow(row, 'book_id', 'bookId') }
+  ]
+}
+
+/** 行字段读取（蛇形 / 驼峰二选一；缺 ⇒ 空串，不造值）。 */
+function textOfRow(row, snake, camel) {
+  const source = row && typeof row === 'object' ? row : {}
+  const value = source[snake] !== undefined ? source[snake] : source[camel]
+  return String(value === undefined || value === null ? '' : value)
 }
 
 function clearSelection() {
@@ -480,6 +473,14 @@ async function runAttach(imageIds) {
     const echoedBook = out && out.book_id !== undefined && out.book_id !== null ? String(out.book_id) : ''
     if (out && out.ok === true && (!echoedImage || echoedImage === imageId) && echoedBook === targetId) {
       bookOverrides.value = { ...bookOverrides.value, [imageId]: targetId }
+      /* 关联数即时反映：目标书 +1；若该影像原本属于别的书 ⇒ 原书 -1（改挂）。 */
+      const previousBookId = (selectedImages.value.find((item) => item.imageId === imageId) || {}).bookId || ''
+      const nextDelta = { ...attachDelta.value }
+      nextDelta[targetId] = (nextDelta[targetId] || 0) + 1
+      if (previousBookId && previousBookId !== targetId) {
+        nextDelta[previousBookId] = (nextDelta[previousBookId] || 0) - 1
+      }
+      attachDelta.value = nextDelta
       succeeded.push(imageId)
     } else {
       failures.push(`${imageId}：${(out && (out.message || out.reason)) || '回包與請求不一致'}`)
@@ -610,7 +611,7 @@ watch(
                 <th>出版社</th>
                 <th>ISBN</th>
                 <th>CIP</th>
-                <th v-if="bookFieldPresent">關聯影像數</th>
+                <th>關聯影像數</th>
               </tr>
             </thead>
             <tbody>
@@ -627,7 +628,7 @@ watch(
                 <td>{{ book.publisher || '未著錄' }}</td>
                 <td>{{ book.isbn || '未著錄' }}</td>
                 <td>{{ book.cip || '未著錄' }}</td>
-                <td v-if="bookFieldPresent">{{ imageCountOf(book) }}</td>
+                <td data-book-image-count>{{ imageCountOf(book) }}</td>
               </tr>
             </tbody>
           </table>
@@ -653,9 +654,6 @@ watch(
               @click="gotoNextPage"
             >下一頁</button>
           </div>
-          <p v-if="books.length && !bookFieldPresent" class="books__hint" data-books-hint="no-book-field">
-            影像行尚未回傳 `book_id` 欄位（數據層未落地）⇒ 關聯影像數暫不能統計，本列暫不顯示。
-          </p>
         </div>
       </section>
 
@@ -755,39 +753,52 @@ watch(
               </option>
             </select>
           </div>
-          <div class="field">
-            <label for="book-batch-filter">篩選影像</label>
-            <input
-              id="book-batch-filter"
-              v-model="imageFilter"
-              type="text"
-              placeholder="按影像編號 / 印章編號 / 印文 / 類型篩選"
-            />
+          <form class="field books-search" data-books-image-search @submit.prevent="runImageSearch">
+            <label for="book-batch-search">檢索影像（按需）</label>
+            <div class="books-search__row">
+              <input
+                id="book-batch-search"
+                v-model="imageSearch.q"
+                type="search"
+                maxlength="60"
+                placeholder="輸入印文 / 章號 / 序號，如「登彼太行」或 AACBM"
+              />
+              <button class="btn btn--primary" type="submit" data-action="book-batch-search" :disabled="imageSearch.busy">
+                {{ imageSearch.busy ? '檢索中…' : '檢索' }}
+              </button>
+            </div>
             <span class="field__hint">
-              命中 {{ filteredImageCount }} 張影像；目前顯示前 {{ visibleImages.length }} 張，已勾選 {{ selectedImages.length }} 張。
+              只在檢索後才讀取（每頁 {{ IMAGE_SEARCH_LIMIT }} 張）；命中 {{ imageSearch.total }} 張，已勾選
+              {{ selectedImages.length }} 張<template v-if="imageSearch.total > imageSearch.rows.length">，
+              僅列前 {{ imageSearch.rows.length }} 張 ⇒ 請收窄關鍵詞</template>。
             </span>
-          </div>
+          </form>
 
-          <ul v-if="visibleImages.length" class="books-images">
-            <li v-for="row in visibleImages" :key="row.imageId" class="books-image" :data-image-id="row.imageId">
+          <p v-if="imageSearch.error" class="notice books__notice" data-books-feedback="image-search">
+            {{ imageSearch.error }}
+          </p>
+          <ul v-if="imageSearch.rows.length" class="books-images">
+            <li v-for="row in imageSearch.rows" :key="row.image_id" class="books-image" :data-image-id="row.image_id">
               <label class="books-image__check">
                 <input
                   type="checkbox"
-                  :checked="isSelected(row.imageId)"
+                  :checked="isSelected(row.image_id)"
                   :disabled="attaching"
-                  :data-image-id="row.imageId"
+                  :data-image-id="row.image_id"
                   data-action="book-batch-pick"
                   @change="toggleImage(row)"
                 />
-                <span class="books-image__id">{{ row.imageId }}</span>
+                <span class="books-image__id">{{ row.image_id }}</span>
               </label>
-              <span class="books-image__meta">{{ row.sealName }}（{{ row.stampId || '無編號' }}）· {{ row.kind }}</span>
-              <span class="books-image__owner" :data-image-owner="row.bookId">{{ bookLabel(row.bookId) }}</span>
+              <span class="books-image__meta">{{ row.seal_name || '（未命名印章）' }}（{{ row.stamp_id || '無編號' }}）· {{ row.kind || '影像' }}</span>
+              <span class="books-image__owner" :data-image-owner="row.book_id">{{ bookLabel(row.book_id) }}</span>
             </li>
           </ul>
-          <p v-else class="books__empty">沒有符合條件的影像。</p>
-          <p v-if="imagesTruncated" class="books__hint" data-books-hint="image-limit">
-            清單過長，僅顯示前 {{ IMAGE_RENDER_LIMIT }} 張 ⇒ 請用上方「篩選影像」收窄。
+          <p v-else-if="imageSearch.searched && !imageSearch.error" class="books__empty">
+            沒有符合條件的影像；換個關鍵詞再試（印文片段也可）。
+          </p>
+          <p v-else-if="!imageSearch.searched" class="books__empty">
+            尚未檢索 —— 輸入印文 / 章號後按【檢索】。
           </p>
 
           <p v-if="attachFeedback" class="notice books__notice" data-books-feedback="attach">

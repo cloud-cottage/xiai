@@ -7155,6 +7155,16 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「按需檢索可掛影像」（`searchBookImages`｜批量掛圖面板的唯一讀面）** —— 薄委派：
+   * 契約真源在 `lib/books.js::searchBookImages`（本處零第二套邏輯）。**`ADMIN_OPS` 47 → 48**；
+   * 载荷封閉 2 鍵（`q` 必填 / `limit` 1〜100）；回包 `{ok,rows,total}`；只讀、恆零寫。
+   */
+  async searchBookImages(payload, identity, context) {
+    const { searchBookImages: runSearch } = require('./books.js')
+    return runSearch(payload, identity, context)
+  },
+
+  /**
    * 设置邀请奖励数值（**管理员写路径**；值域门 ＋ 白名单门，**均在任何写入之前**）。
    * 明文：**本 op 不产出云落盘计划** —— 站点配置键（`xiai:v1:invite-reward`）活在客户端
    * localStorage（链路 `admin.js → drive.js → storage.js`，与管理员函数 Phase 1 同口径）；

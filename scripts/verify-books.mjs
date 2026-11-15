@@ -208,7 +208,12 @@ function makeHarness(options = {}) {
   ])
   const images = new Map([
     ['img-face-1', { id: 'img-face-1', stamp_id: 'AAAAX', kind: 'FACE' }],
-    ['img-whole-1', { id: 'img-whole-1', stamp_id: 'AAAAX', kind: 'WHOLE' }]
+    ['img-whole-1', { id: 'img-whole-1', stamp_id: 'AAAAX', kind: 'WHOLE' }],
+    /* 边款影像（`EDGE`）—— `searchBookImages` 必须把它排除在结果外。 */
+    ['img-edge-1', { id: 'img-edge-1', stamp_id: 'AAAAX', kind: 'EDGE' }]
+  ])
+  const seals = new Map([
+    ['AAAAX', { _id: 'AAAAX', id: 'AAAAX', stamp_id: 'AAAAX', seal_name: '甲印', seal_no: 1 }]
   ])
   const books = new Map()
   const log = { persist: 0, issue: [], taken: [], reads: 0, writes: [] }
@@ -225,13 +230,17 @@ function makeHarness(options = {}) {
         ? [...images.values()]
         : collection === 'xiai_persons'
           ? [...persons.values()]
-          : []
+          : collection === 'xiai_seals'
+            ? [...seals.values()]
+            : []
   const mapOf = (collection) =>
     collection === 'xiai_books' ? books : collection === 'xiai_images' ? images : null
 
   const ops = {
-    COLLECTIONS: Object.freeze({ books: 'xiai_books', images: 'xiai_images', persons: 'xiai_persons' }),
+    COLLECTIONS: Object.freeze({ books: 'xiai_books', images: 'xiai_images', persons: 'xiai_persons', seals: 'xiai_seals' }),
     adminWhitelistDenial: () => (options.denyAdmin ? deny(REASONS.FORBIDDEN, '非管理員；本次零讀寫。') : null),
+    /* 假体的翻页取全（真运行时由 `lib/ops.js::readAllGuarded` 提供）。 */
+    readAllGuarded: async (collection) => ({ ok: true, rows: rowsOf(collection), truncated: false, scanned: rowsOf(collection).length }),
     pointsPayloadDenial: (payload, allowed) => {
       const source = payload && typeof payload === 'object' ? payload : {}
       const unknown = Object.keys(source).filter((key) => !allowed.includes(key))
@@ -574,7 +583,7 @@ async function probeList(mod) {
 /* =============================== 静态判据 =============================== */
 const ADMIN_ACTIONS = 12
 const REASON_COUNT = 13
-const BOOK_ROW_KEY_COUNT = 11
+const BOOK_ROW_KEY_COUNT = 12
 
 function judgeSidebar(raw) {
   const clean = stripComments(raw, { line: true })
@@ -755,8 +764,8 @@ const notInPublicOps = BOOK_OPS.filter((op) => Object.prototype.hasOwnProperty.c
 
 check(
   'A1',
-  '三 op 全落 `ADMIN_OPS` 且均为 function；`ADMIN_OPS` 恰 47（44 → 47，仅 +3）；三 op 不落 `OPS` / `PUBLIC_OPS`（零用户读面）',
-  { types: ['function', 'function', 'function'], adminOpsCount: 47, contains: true, userOpsLeak: [], publicOpsLeak: [] },
+  '三 op 全落 `ADMIN_OPS` 且均为 function；`ADMIN_OPS` 恰 48（47 → 48，新增 searchBookImages）；三 op 不落 `OPS` / `PUBLIC_OPS`（零用户读面）',
+  { types: ['function', 'function', 'function'], adminOpsCount: 48, contains: true, userOpsLeak: [], publicOpsLeak: [] },
   {
     types: BOOK_OPS.map((op) => typeof adminOps[op]),
     adminOpsCount: adminOpKeys.length,
@@ -862,7 +871,7 @@ check('A4', '作者**引用型**门：未收录 id / 自由文本人名 / `tmp-`
 
 const listProbe = await probeList(booksModule0())
 
-check('A5', '`listBooks`：`books` / `total` / `offset` / `limit` / `has_more` 键面；行投影**恰 `BOOK_ROW_KEYS` 11 键**（2026-11-15 增 publisher ＋ author_name ＋ creators）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
+check('A5', '`listBooks`：`books` / `total` / `offset` / `limit` / `has_more` 键面；行投影**恰 `BOOK_ROW_KEYS` 12 键**（2026-11-15 增 publisher ＋ author_name ＋ creators ＋ image_count）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
   responseKeys: ['books', 'has_more', 'limit', 'offset', 'ok', 'total'],
   total: 3,
   count: 3,
@@ -905,6 +914,44 @@ check('A5c', '`listBooks` 篩選：`q`（書名包含）、`author`（作者名�
   byYear: pagingProbe.byYear.ids,
   badLimit: pagingProbe.badLimit.reason,
   badYearRange: pagingProbe.badYearRange.reason
+})
+
+/** `searchBookImages` 探针（2026-11-15）：关键词必填 / 命中面 / 边款排除 / 行键面 / 只读。 */
+async function probeSearchBookImages(mod) {
+  const h = makeHarness()
+  installOps(h.ops)
+  const writesBefore = h.log.writes.length
+  const empty = await mod.searchBookImages({}, {}, ADMIN_CTX)
+  const emptyReads = h.log.reads
+  const byName = await mod.searchBookImages({ q: '甲印' }, {}, ADMIN_CTX)
+  const byStamp = await mod.searchBookImages({ q: 'AAAAX' }, {}, ADMIN_CTX)
+  const noHit = await mod.searchBookImages({ q: '不存在' }, {}, ADMIN_CTX)
+  const rows = Array.isArray(byName.rows) ? byName.rows : []
+  return {
+    empty: { ok: empty.ok === true, reason: empty.reason, reads: emptyReads },
+    byName: { ok: byName.ok === true, total: byName.total, ids: rows.map((row) => textOf(row.image_id)), keys: rows.map((row) => sorted(Object.keys(row))), expectedKeys: sorted(mod.BOOK_IMAGE_ROW_KEYS || []) },
+    byStamp: { ok: byStamp.ok === true, total: byStamp.total },
+    noHit: { ok: noHit.ok === true, total: noHit.total },
+    writes: h.log.writes.length - writesBefore
+  }
+}
+
+const searchProbe = await probeSearchBookImages(booksModule0())
+
+check('A5d', '`searchBookImages`：`q` 必填（空 ⇒ `MISSING_REQUIRED` ＋ 零读）；按印文或章號命中即回该章影像、**边款（EDGE）不入结果**；行投影恰 5 键；无命中 ⇒ `total 0`；**全程零写**', {
+  empty: { ok: false, reason: REASONS.MISSING_REQUIRED, reads: 0 },
+  byName: { ok: true, total: 2, ids: ['img-face-1', 'img-whole-1'] },
+  byStamp: { ok: true, total: 2 },
+  noHit: { ok: true, total: 0 },
+  rowKeysDistinct: 1,
+  writes: 0
+}, {
+  empty: searchProbe.empty,
+  byName: { ok: searchProbe.byName.ok, total: searchProbe.byName.total, ids: searchProbe.byName.ids },
+  byStamp: searchProbe.byStamp,
+  noHit: searchProbe.noHit,
+  rowKeysDistinct: new Set(searchProbe.byName.keys.map((keys) => keys.join('|'))).size,
+  writes: searchProbe.writes
 })
 
 const setGuards = await probeSetImageGuards(booksModule0())
