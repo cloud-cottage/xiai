@@ -1030,21 +1030,55 @@ export function canReviewCorrections(actor) {
  * —— 唯一产品侧调用点是 `src/views/MyCorrectionsView.vue`（队列读数读 `result.ok ? result.rows : []`，
  * 并把 `result.message` 作为可读文案渲染，**不静默**）。
  * @param {object|null} actor 操作者（须为管理员；缺省回落到当前登录态）
+ * @param {string} [status=CORRECTION_STATUS.PENDING] 审核队列状态（**只许三态**
+ *   `PENDING` / `ACCEPTED` / `REJECTED`；缺省 `PENDING`）；非法值 ⇒ **结构化拒绝**
+ *   `{ok:false, reason:'INVALID_VALUE', message}` ＋ **零读取**（不静默归一）。
+ *   载荷键面不变（仍是既有 `{status, limit}`），`ADMIN_OPS` 计数不变。
  * @returns {Promise<{ok:true, rows:Array<object>, count:number, maybeMore:boolean}
  *   |{ok:false, reason:string, message:string}>}
- *   `rows` 为 `PENDING` 勘误行（按提交时间倒序）
+ *   `rows` 为对应状态的勘误行（按提交时间倒序）
  */
+/** 管理员审核队列可读的**三态**（值域门真源；顺序同上屏页签顺序）。 */
+export const ADMIN_QUEUE_STATUSES = Object.freeze([
+  CORRECTION_STATUS.PENDING,
+  CORRECTION_STATUS.ACCEPTED,
+  CORRECTION_STATUS.REJECTED
+])
+
+/**
+ * 管理员队列 `status` 入参的值域门：只许 `PENDING` / `ACCEPTED` / `REJECTED` 三态字符串。
+ * 缺省（`undefined` / `null`）⇒ `PENDING`（**既有调用点不传参 ⇒ 行为逐字不变**）。
+ * @returns {string|null} 合法 ⇒ 归一后的状态；非法 ⇒ `null`（由调用方**结构化拒绝**，不静默归一）
+ */
+function adminQueueStatusOf(status) {
+  if (status === undefined || status === null) return CORRECTION_STATUS.PENDING
+  const raw = typeof status === 'string' ? status.trim() : ''
+  return ADMIN_QUEUE_STATUSES.indexOf(raw) === -1 ? null : raw
+}
+
 /** 诊断串包装：记「入参 / 回包摘要（含本机镜像行数）」**不改**回包（原样透传、原样外抛）。 */
-export async function listPendingForAdmin(actor) {
+export async function listPendingForAdmin(actor, status = CORRECTION_STATUS.PENDING) {
   const localBefore = diagLocalCount()
   diagGateMode = ''
+  const wanted = adminQueueStatusOf(status)
   diagNote(
-    `listPendingForAdmin 入參{status:${CORRECTION_STATUS.PENDING}, limit:${CORRECTION_ROWS_LIMIT}, ` +
+    `listPendingForAdmin 入參{status:${wanted || `INVALID(${String(status)})`}, limit:${CORRECTION_ROWS_LIMIT}, ` +
       `actor:${canReviewCorrections(actor || currentUser()) ? 'admin' : 'non-admin'}, 本機鏡像:${localBefore}}`
   )
+  /* 值域门（读之前）：只许三态字符串；非法值 ⇒ **结构化拒绝**（`INVALID_VALUE` 为既有字面值，
+     零新增 reason）＋ 零读取。缺省 / `undefined` / `null` ⇒ 回落 `PENDING`（既有调用点行为不变）。 */
+  if (!wanted) {
+    return {
+      ok: false,
+      reason: 'INVALID_VALUE',
+      message:
+        `審覈狀態「${String(status === undefined || status === null ? '' : status)}」不在允許的 3 類之內` +
+        '（PENDING 待審 / ACCEPTED 已採納 / REJECTED 已駁回），已拒絕讀取。'
+    }
+  }
   let res
   try {
-    res = await listPendingForAdminInner(actor)
+    res = await listPendingForAdminInner(actor, wanted)
   } catch (err) {
     diagNote(`listPendingForAdmin 回包{threw:${(err && err.message) || '未知錯誤'}}`)
     throw err
@@ -1056,16 +1090,18 @@ export async function listPendingForAdmin(actor) {
   return res
 }
 
-async function listPendingForAdminInner(actor) {
+async function listPendingForAdminInner(actor, status = CORRECTION_STATUS.PENDING) {
   const who = actor || currentUser()
-  /* 与写入口 `review` 同判定：非管理员**结构化拒绝**（不是空集）。 */
+  /* 与写入口 `review` 同判定：非管理员**结构化拒绝**（不是空集）。
+     —— 三态共用**同一道管理员门**（不新增第二套判定）。 */
   if (!canReviewCorrections(who)) {
     return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
   }
-  /* ① 本机镜像（与改前同一段逻辑；数据层拒绝 ⇒ **原样透传、不再发起云读**）。 */
+  /* ① 本机镜像（与改前同一段逻辑；数据层拒绝 ⇒ **原样透传、不再发起云读**）。
+        `PENDING` ⇒ **逐字走既有数据层入口**；`ACCEPTED` / `REJECTED` ⇒ 同门判权后按状态过滤本机行。 */
   let res
   try {
-    res = listPendingCorrectionRowsForAdmin(who)
+    res = status === CORRECTION_STATUS.PENDING ? listPendingCorrectionRowsForAdmin(who) : localAdminRowsFor(who, status)
   } catch (err) {
     /* 数据层已改为结构化拒绝；此兜底只为保证展示面不崩（如实回报，绝不外抛）。 */
     if (isPermissionError(err)) {
@@ -1086,23 +1122,60 @@ async function listPendingForAdminInner(actor) {
       message: (res && res.message) || '僅管理員可以查看全部用戶的待審勘誤'
     }
   }
-  /* ② 云端只读（管理员白名单门在**服务端**判；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝 ＋ 零读取）。 */
+  /* ② 云端只读（管理员白名单门在**服务端**判；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝 ＋ 零读取）。
+     `status` 照原样透传给**既有**载荷键（服务端已支持三态，缺省 `PENDING`）—— 不新增键、不新增 op。 */
   const gate = await userWriteGate(LIST_PENDING_CORRECTIONS_OP, {
-    status: CORRECTION_STATUS.PENDING,
+    status,
     limit: CORRECTION_ROWS_LIMIT
   })
   diagMarkGate(gate)
-  /* local-dev / 离线形态：门不发请求 ⇒ **仅本机镜像**（行为与改前逐字一致）。 */
+  /* local-dev / 离线形态：门不发请求 ⇒ **仅本机镜像**（`PENDING` 与改前逐字一致；
+     已审态的本机行同样按 `status` 过滤，绝不把待审行串进已审页签）。 */
   if (gate && gate.mode === 'local-dev') {
     return { ok: true, rows: local, count: local.length, maybeMore: false }
   }
   const denial = correctionRowsDenial(gate)
   if (denial) {
-    /* 云读失败 ⇒ **恰 3 键结构化拒绝**（与写入口同形）；**不以本机镜像冒充待审读数**。 */
-    return { ok: false, reason: denial.reason, message: `雲端讀取待審勘誤失敗：${denial.message}待審讀數不可用。` }
+    /* 云读失败 ⇒ **恰 3 键结构化拒绝**（与写入口同形）；**不以本机镜像冒充读数**。 */
+    return {
+      ok: false,
+      reason: denial.reason,
+      message:
+        status === CORRECTION_STATUS.PENDING
+          ? `雲端讀取待審勘誤失敗：${denial.message}待審讀數不可用。`
+          : `雲端讀取已審勘誤失敗：${denial.message}該讀數不可用。`
+    }
   }
-  const merged = mergeCorrectionRows(gate.rows, local)
+  /* 已审态：本机镜像只保留**同状态**的行（云行与按状态过滤后的本机行合并 ⇒ 不串数据）。 */
+  const localForStatus =
+    status === CORRECTION_STATUS.PENDING ? local : local.filter((row) => normalizeCorrectionStatus(row.status) === status)
+  const merged = mergeCorrectionRows(gate.rows, localForStatus)
   return { ok: true, rows: merged, count: merged.length, maybeMore: correctionRowsMaybeMore(gate, gate.rows) }
+}
+
+/**
+ * 已审态（`ACCEPTED` / `REJECTED`）的本机镜像读数：**同门判权**（复用数据层入口的 `FORBIDDEN`
+ * 结构化拒绝，不新增第二套判定）后，从本机勘误行里按状态过滤、按 `created_at` 倒序。
+ *
+ * 为什么不能直接用 `listPendingCorrectionRowsForAdmin`：该入口的语义钉死为 `PENDING`
+ * （数据层冻结），已审行它一律不返回 ⇒ 已审页签会永远是空集。这里只做**读侧的按状态过滤**，
+ * 不改数据层、不改写路径、不新增 op。
+ * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:string, message:string}}
+ */
+function localAdminRowsFor(who, status) {
+  const gate = listPendingCorrectionRowsForAdmin(who)
+  if (Array.isArray(gate)) {
+    /* 兼容：万一数据层回退成裸数组（改前兼容分支同款），仍按状态过滤本机全量行。 */
+    return { ok: true, rows: filterLocalRowsByStatus(status) }
+  }
+  if (!gate || !gate.ok) return gate
+  return { ok: true, rows: filterLocalRowsByStatus(status) }
+}
+
+function filterLocalRowsByStatus(status) {
+  return listCorrectionRows()
+    .filter((row) => normalizeCorrectionStatus(row.status) === status)
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
 }
 
 function isPermissionError(err) {

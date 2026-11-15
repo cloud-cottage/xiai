@@ -686,6 +686,44 @@ const queueMaybeMore = computed(() => pendingResult.value.ok && pendingResult.va
 const queueLoading = ref(true)
 
 /* ----------------------------------------------------------------------------
+   管理態三頁簽：**待審 / 已採納 / 已駁回**（裁 2026-11-15｜admin-correction-history）
+   ----------------------------------------------------------------------------
+   · 默认落「待審」⇒ 与改前**逐字一致**（同一个 `listPendingForAdmin` 默认值）；
+   · 切页签 ⇒ 按对应 `status` **重新取数**（上限仍 `CORRECTION_ROWS_LIMIT`＝200）；
+   · **先清空旧列表再加载**：绝不把上个页签的行接着展示（避免串数据）；
+   · 普通用户面零变化（页签只在 `canReview` 区块内渲染）。
+   -------------------------------------------------------------------------- */
+const queueTabs = Object.freeze([
+  { value: corrections.CORRECTION_STATUS.PENDING, label: '待審' },
+  { value: corrections.CORRECTION_STATUS.ACCEPTED, label: '已採納' },
+  { value: corrections.CORRECTION_STATUS.REJECTED, label: '已駁回' }
+])
+/** 当前队列页签（默认「待審」）。 */
+const queueStatus = ref(corrections.CORRECTION_STATUS.PENDING)
+/** 当前页签是否「待審」（只有待審面渲染动作按钮与批次分组）。 */
+const isPendingTab = computed(() => queueStatus.value === corrections.CORRECTION_STATUS.PENDING)
+/** 当前页签的上屏名（加载 / 空态文案用）。 */
+const queueStatusLabel = computed(() => {
+  const hit = queueTabs.find((tab) => tab.value === queueStatus.value)
+  return hit ? hit.label : '待審'
+})
+/** 「僅看我審的」：纯前端按 `reviewer_id === 当前 uid` 过滤，**默认关**。 */
+const onlyMineReviewed = ref(false)
+/** 当前登录 uid（用于上面的纯前端过滤）。 */
+const myUid = computed(() => String((actor.value && actor.value.id) || ''))
+/** 页签读数（未开开关 ⇒ 原样；开了 ⇒ 仅 reviewer_id 命中的行）。 */
+const queueRows = computed(() => {
+  const list = queue.value
+  /* 待審面不受该开关影响（待審行没有 `reviewer_id`，过滤会误清空）。 */
+  if (isPendingTab.value || !onlyMineReviewed.value) return list
+  const uid = myUid.value
+  if (!uid) return []
+  return list.filter((row) => String(row.reviewer_id || row.reviewerId || '') === uid)
+})
+/** 队列取数序号（切页签 ⇒ 自增；迟到回包按序号丢弃，绝不写进新页签）。 */
+let queueSeq = 0
+
+/* ----------------------------------------------------------------------------
    按提交单（batch）分组 + 组级批量审核（R-B3 / R-B4 / R-B7）
    ----------------------------------------------------------------------------
    分组口径**只在服务层**（`listPendingBatchesForAdmin`）；视图层不另写第二套。
@@ -720,6 +758,9 @@ function refreshCorrectionReads() {
 async function runCorrectionReads() {
   myLoading.value = true
   queueLoading.value = true
+  /* 本轮所取的页签状态 ＋ 序号（切页签会让序号自增 ⇒ 本轮队列回包按序号判定是否仍有效）。 */
+  const status = queueStatus.value
+  const seq = ++queueSeq
   try {
     const [mine, pending] = await Promise.all([
       corrections
@@ -731,35 +772,80 @@ async function runCorrectionReads() {
           rows: rows.value
         })),
       corrections
-        .listPendingForAdmin(actor.value)
+        .listPendingForAdmin(actor.value, status)
         .catch((error) => ({ ok: false, reason: 'STORAGE_UNAVAILABLE', message: `讀取待審勘誤失敗：${(error && error.message) || '未知錯誤'}` }))
     ])
     /* 我的提交：成功 ⇒ 服务层已合并「云行 ∪ 本机镜像」；失败 ⇒ 服务层随行回本机镜像 ＋ 降级文案。 */
     rows.value = Array.isArray(mine && mine.rows) ? mine.rows : []
     myMaybeMore.value = !!(mine && mine.ok && mine.maybeMore === true)
     myNotice.value = mine && mine.ok ? '' : (mine && mine.message) || '讀取我的勘誤記錄失敗。'
+    /* 队列回包：切换过页签（序号已变）⇒ **丢弃本轮队列结果**，由新页签自己那一轮上屏。 */
+    if (seq !== queueSeq) return
     pendingResult.value =
       pending && typeof pending === 'object'
         ? pending
         : { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取待審勘誤回傳形狀不可辨識。' }
-    /* 分组口径**只在服务层**：复用同一次待审读数（不另开第二条读路径）。 */
-    batchResult.value = await corrections
-      .listPendingBatchesForAdmin(actor.value, pendingResult.value)
-      .catch(() => ({ ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取待審勘誤分組失敗。' }))
+    /* 分组口径**只在服务层**：复用同一次待审读数（不另开第二条读路径）；已审页签无批次分组。 */
+    batchResult.value = !isPendingTab.value
+      ? { ok: true, batches: [] }
+      : await corrections
+          .listPendingBatchesForAdmin(actor.value, pendingResult.value)
+          .catch(() => ({ ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取待審勘誤分組失敗。' }))
   } catch (error) {
     /* 兜底（**不外抛、不静默**）：任何未预期异常都要有可读文案。 */
     if (!myNotice.value) myNotice.value = `讀取勘誤記錄失敗：${(error && error.message) || '未知錯誤'}`
-    if (pendingResult.value.ok) {
+    if (seq === queueSeq && pendingResult.value.ok) {
       pendingResult.value = { ok: false, reason: 'STORAGE_UNAVAILABLE', message: `讀取待審勘誤失敗：${(error && error.message) || '未知錯誤'}` }
       batchResult.value = pendingResult.value
     }
   } finally {
     myLoading.value = false
-    queueLoading.value = false
+    if (seq === queueSeq) queueLoading.value = false
     /* 受控诊断面：本轮 `listMyCorrections` / `listPendingForAdmin` 的里程碑已落缓冲 ⇒
        此刻 +1 让面板重读（无定时器、无请求）。 */
     diagTick.value += 1
   }
+}
+
+/**
+ * **仅重取队列**（切页签专用）：先把旧列表清空、亮起加载态，再按新页签的 `status` 取数 ——
+ * 保证「上一个页签的行」**一刻都不停留**在新页签上（不串数据）。
+ * 我的提交（`rows`）不动：切页签与「我的勘誤」无关，不重发那条读。
+ */
+async function loadQueueOnly() {
+  const status = queueStatus.value
+  const seq = ++queueSeq
+  queueLoading.value = true
+  try {
+    const pending = await corrections.listPendingForAdmin(actor.value, status).catch((error) => ({
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: `讀取${queueStatusLabel.value}勘誤失敗：${(error && error.message) || '未知錯誤'}`
+    }))
+    if (seq !== queueSeq) return /* 迟到的旧页签回包 ⇒ 丢弃 */
+    pendingResult.value =
+      pending && typeof pending === 'object'
+        ? pending
+        : { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取勘誤回傳形狀不可辨識。' }
+    batchResult.value = !isPendingTab.value
+      ? { ok: true, batches: [] }
+      : await corrections
+          .listPendingBatchesForAdmin(actor.value, pendingResult.value)
+          .catch(() => ({ ok: false, reason: 'STORAGE_UNAVAILABLE', message: '讀取待審勘誤分組失敗。' }))
+  } finally {
+    if (seq === queueSeq) queueLoading.value = false
+    diagTick.value += 1
+  }
+}
+
+/** 切页签：**先清空旧列表**（不接着展示上个页签的数据）再按新 `status` 重新取数。 */
+function switchQueueStatus(status) {
+  if (status === queueStatus.value) return
+  queueStatus.value = status
+  pendingResult.value = { ok: true, rows: [], count: 0, maybeMore: false }
+  batchResult.value = { ok: true, batches: [] }
+  queueLoading.value = true
+  void loadQueueOnly()
 }
 
 /* **审核后重取**：任何一次审核 / 提交把 `dataVersion` 自增 ⇒ 重读云端 ＋ 本机镜像
@@ -924,6 +1010,16 @@ function statusClass(status) {
   if (status === corrections.CORRECTION_STATUS.ACCEPTED) return 'chip--adopted'
   if (status === corrections.CORRECTION_STATUS.REJECTED) return 'chip--rejected'
   return 'chip--pending'
+}
+
+/**
+ * **审核人上屏（已审行）**：`reviewer_id` 是不透明 uid ⇒ 走**既有单点** `submitterLabelOf`
+ * （`暱稱（uid 短碼）`，查无账号仍给短碼，**不显示手机号**）；无审核人 ⇒ `—`。
+ * 复用同一格式化单点 ⇒ 不另立第二套 uid → 展示名映射。
+ */
+function reviewerOf(row) {
+  const id = String((row && (row.reviewer_id || row.reviewerId)) || '')
+  return id ? corrections.submitterLabelOf(id) : '—'
 }
 
 function submitterOf(row) {
@@ -1116,8 +1212,8 @@ async function confirmRevoke() {
     <div class="page-head">
       <h1>我的勘誤記錄</h1>
       <p v-if="canReview">
-        這裏列出你提交的全部勘誤；上方另列出全部用戶的待審覈勘誤，可直接採納或駁回。
-        採納後提交者獲得 {{ reward }} 金獎勵，駁回不改變積分。
+        這裏列出你提交的全部勘誤；上方另列出全部用戶的勘誤（待審 / 已採納 / 已駁回），
+        待審項可直接採納或駁回。採納後提交者獲得 {{ reward }} 金獎勵，駁回不改變積分。
       </p>
       <p v-else>這裏列出你提交的全部勘誤，審覈通過後會獲得金獎勵。</p>
     </div>
@@ -1130,15 +1226,43 @@ async function confirmRevoke() {
       data-import-review-progress
     >{{ importReviewProgress }}</p>
 
+    <!-- 管理態三頁簽（裁 2026-11-15 已裁定）：**待審 / 已採納 / 已駁回**。
+         页签只在管理员区块内渲染（`canReview` 外不出现 ⇒ 普通用户面零变化）；
+         切页签**先清空旧列表再按 `status` 重新取数**（上限 200），不串数据。
+         钩子只用新增的 `data-correction-status` / `data-correction-only-mine`，
+         **不新增管理员动作钩子的任何取值**（动作按钮集合仍是既有 12 值）。 -->
     <section v-if="canReview" class="panel">
       <div class="panel__head">
-        <h2>待審覈勘誤（全部用戶）</h2>
+        <h2>勘誤審覈（全部用戶）</h2>
         <!-- 计数行**如实三态**：加载中 / 认证读数不可用 / 正常读数（**不以「共 0 條」冒充读数不可用**）。 -->
         <span v-if="queueLoading" class="muted-hint" data-correction-queue-loading>正在讀取…</span>
-        <span v-else-if="!pendingResult.ok" class="muted-hint" data-correction-queue-unavailable>待審讀數不可用</span>
-        <span v-else class="muted-hint">共 {{ queue.length }} 條 · {{ batches.length }} 批</span>
+        <span v-else-if="!pendingResult.ok" class="muted-hint" data-correction-queue-unavailable>讀數不可用</span>
+        <span v-else-if="isPendingTab" class="muted-hint">共 {{ queueRows.length }} 條 · {{ batches.length }} 批</span>
+        <span v-else class="muted-hint" data-correction-queue-count>共 {{ queueRows.length }} 條</span>
       </div>
       <div class="panel__body">
+        <div class="review__tabs" role="tablist" aria-label="勘誤審覈狀態" data-correction-status-tabs>
+          <button
+            v-for="tab in queueTabs"
+            :key="tab.value"
+            type="button"
+            role="tab"
+            class="btn"
+            :class="tab.value === queueStatus ? 'btn--primary' : 'btn--ghost'"
+            :aria-selected="tab.value === queueStatus ? 'true' : 'false'"
+            :data-correction-status="tab.value"
+            @click="switchQueueStatus(tab.value)"
+          >
+            {{ tab.label }}
+          </button>
+        </div>
+        <!-- 「僅看我審的」：**纯前端过滤**（`reviewer_id === 当前 uid`），默认关；
+             仅已审页签有意义（待審行没有 `reviewer_id`）。 -->
+        <label v-if="!isPendingTab" class="review__only-mine" data-correction-only-mine-row>
+          <input v-model="onlyMineReviewed" type="checkbox" data-correction-only-mine />
+          僅看我審的
+        </label>
+        <template v-if="isPendingTab">
         <!-- **本单（W-54）**：服务层按 `count === limit` 派生「可能還有更多」⇒ 如实上屏，不报成全部。 -->
         <p v-if="queueMaybeMore" class="notice review__notice" data-correction-queue-more>
           已取 {{ queue.length }} 條（可能還有更多）
@@ -1254,6 +1378,62 @@ async function confirmRevoke() {
           {{ queueNotice }}
         </p>
         <p v-else class="muted-hint">當前沒有待審覈的勘誤。</p>
+        </template>
+        <!-- 已審面（已採納 / 已駁回）：**只读** —— 不渲染採納/駁回按钮（已终态）；
+             已审行多两列：审核时间 `reviewed_at` ＋ 审核人 `reviewer_id`。 -->
+        <template v-else>
+          <table v-if="queueRows.length" class="list-table" data-correction-reviewed-table>
+            <thead>
+              <tr>
+                <th>印章</th>
+                <th>印面</th>
+                <th>屬性</th>
+                <th>提交值</th>
+                <th>提交人</th>
+                <th>提交時間</th>
+                <th>審核時間</th>
+                <th>審核人</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in queueRows" :key="row.id" :data-correction-id="row.id">
+                <td>
+                  <router-link
+                    class="list-table__link"
+                    :to="{ name: 'seal-detail', params: { id: sealKeyOf(row) } }"
+                  >
+                    {{ sealLabel(sealKeyOf(row)) }}
+                  </router-link>
+                  <span class="list-table__meta">{{ sealKeyOf(row) }}</span>
+                </td>
+                <td>{{ faceLabelOfRow(row) }}</td>
+                <td>{{ attributeLabelOf(row) }}</td>
+                <td>
+                  <template v-if="isImageCorrectionRow(row)">
+                    <span data-image-correction-target>{{ imageTargetOf(row) }}</span>
+                    <span v-if="imageNoteOf(row)" class="review__note" data-image-correction-note>
+                      備註：{{ imageNoteOf(row) }}
+                    </span>
+                  </template>
+                  <template v-else>{{ valueLabelOf(row) }}</template>
+                </td>
+                <td>{{ submitterOf(row) }}</td>
+                <td>{{ formatDateTime(row.created_at) }}</td>
+                <td data-correction-reviewed-at>{{ formatDateTime(row.reviewed_at) }}</td>
+                <td data-correction-reviewer>{{ reviewerOf(row) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else-if="queueLoading" class="muted-hint" data-correction-queue-loading-body>
+            正在讀取{{ queueStatusLabel }}勘誤…
+          </p>
+          <p v-else-if="queueNotice" class="notice review__notice" data-correction-queue-notice>
+            {{ queueNotice }}
+          </p>
+          <p v-else class="muted-hint" data-correction-queue-empty>
+            共 0 條 · 暫無{{ queueStatusLabel }}記錄
+          </p>
+        </template>
       </div>
     </section>
 
@@ -1893,6 +2073,25 @@ async function confirmRevoke() {
 .review__ops {
   display: flex;
   gap: var(--s-2);
+}
+
+/* 管理態三頁簽（待審 / 已採納 / 已駁回） */
+.review__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+/* 「僅看我審的」开关（已審頁簽专用，默认关） */
+.review__only-mine {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+  cursor: pointer;
 }
 
 .stat-row {
