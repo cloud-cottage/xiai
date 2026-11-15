@@ -26,6 +26,7 @@
 | `isbn` | 字符串 | 可空 | 空串 / `null` 均视为「未著录」；非空时保留原样（连字符不剥） |
 | `cip` | 字符串 | 可空 | 同上 |
 | `author_person_id` | 字符串 | ✓ | **引用型**：必须是 `xiai_persons` 已收录印人（与勘误作者同门）；上屏用 `persons.personName` |
+| `publisher` | 字符串 | 可空 | **【出版社】**（2026-11-15 Kevin 追加）：空串 / `null` ⇒「未著录」；非空原样保留，长度上界 **200**（与书名同级；编号类 `isbn`/`cip` 仍 64） |
 | `first_publish_year` | 整数 | 可空 | 首次出版年份；非空时须为 `1000`〜当年 的整数 |
 | `created_by` / `created_at` / `updated_at` | — | — | 审计面，服务端写，客户端不可递 |
 
