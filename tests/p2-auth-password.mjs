@@ -26,7 +26,12 @@
  *      零傳輸請求**（且此前已 `requestCode` 成功 ⇒ 不是「因缺 pending 而拒」的假綠）；
  *   ⑥ 機械口徑：`finalizeLogin` **恰 1 處定義 / 恰 2 處調用**、`saveUserRows(` **恰 1 處**；
  *      兩路（短訊碼路 vs 密碼路）建出的 user 行**鍵面相同、初始金 50、`invite.reason==='NO_INVITER'`**
- *      （形狀逐字相等）。
+ *      （形狀逐字相等）；
+ *   ⑦ **熱修口徑（新手機號無法取碼/登錄）**：取碼入參**無 `target` 鍵**；新號走
+ *      `signUp({phone_number, verification_token})` 並拿到會話、老號走 `signIn`（且都只發一次，
+ *      不拿一次性 token 試錯）；兩支都進 `ensureUserLoginToken(phone, accessToken)`；
+ *      取碼失敗上屏**平台真實原因**（不再回兜底句）；限頻仍原文 ＋ `retryAfter`；
+ *      探針不可用時才降級為「先 signIn 再 signUp」。
  *
  * 紀律：**不打印任何手機號 / 密碼 / 令牌原文**（只打布爾、計數、鍵名、金額）；
  *       不發任何真實短訊、不打任何真實雲端（傳輸層是注入的假體）；斷言失敗 ⇒ 退出碼非 0。
@@ -123,41 +128,131 @@ const OTP_CORRECT = '135790' // 假平台「正確驗證碼」的夾具值（**�
 const WEAK_FOR_OTP = '000000' // 假平台「錯誤驗證碼」的夾具值
 const FAKE_PLATFORM_SESSION = 'fake-platform-session-credential'
 
+/** 用戶名歸一（`+86 138…` / `138…` 同形）—— 兩形態在平台側是同一個身份。 */
+const phoneKeyOf = (username) => String(username || '').replace(/^\+86\s*/, '').trim()
+
 function makeFakePlatform() {
   const state = {
     passwords: new Map(), // 11 位手機號 -> 密碼（平台側唯一真源）
     issues: new Map(), // verification_id -> { phone, code }
+    otpUsers: new Set(), // 「已建號」的手機號（signUp 建的；signIn 只認這裡 ＋ 密碼表）
+    tokens: new Map(), // verification_token -> { phone, used:false }（一次性憑據的本地鏡像）
     seq: 0,
     signedIn: false,
-    calls: { getVerification: 0, verify: 0, signIn: 0, signInWithPassword: 0, resetPassword: 0, getSession: 0 }
+    /* 取碼回包的幾種「真實形態」（⑦ 用；其餘用例一律 'ok'） */
+    getVerificationMode: 'ok',
+    /* 探針是否可用（⑦7：模擬 `isUsernameRegistered` 拋錯 ⇒ 走降級路徑） */
+    hasUsernameProbe: true,
+    /* 取碼回包是否帶 `is_user`（null ＝ 不帶；true/false ＝ 平台正面表態） */
+    isUserHint: null,
+    lastGetVerificationArgs: null,
+    lastSignInArgs: null,
+    lastSignUpArgs: null,
+    lastVerifyArgs: null,
+    calls: {
+      getVerification: 0,
+      verify: 0,
+      signIn: 0,
+      signUp: 0,
+      isUsernameRegistered: 0,
+      signInWithPassword: 0,
+      resetPassword: 0,
+      getSession: 0
+    }
   }
   const auth = {
-    async getVerification({ phone_number: phoneNumber }) {
+    async getVerification(args) {
       state.calls.getVerification += 1
+      /* **原樣記錄調用參數**（⑦1 就是對它斷言「沒有 target 鍵」）。 */
+      state.lastGetVerificationArgs = { ...(args || {}) }
+      if (state.getVerificationMode === 'not_found') {
+        /* 真實形態：SDK 的 AuthError `message` ＝ `error_description || message`
+           ⇒ 兩者皆空時**只有 `code` / `category` 活著**（本輪熱修前的兜底句就是這樣吞掉真因的）。 */
+        const error = new Error('')
+        error.code = 'failed_precondition'
+        error.category = 'FAILED_PRECONDITION'
+        throw error
+      }
+      if (state.getVerificationMode === 'not_found_with_desc') {
+        const error = new Error('')
+        error.code = 'failed_precondition'
+        error.category = 'FAILED_PRECONDITION'
+        error.error_description = '账号不存在'
+        throw error
+      }
+      if (state.getVerificationMode === 'rate_limited') {
+        const error = new Error('Your phone can receive up to 1 text message per minute')
+        error.code = 'rate_limited'
+        error.category = 'RATE_LIMITED'
+        error.retryAfter = 42
+        throw error
+      }
       state.seq += 1
       const id = `vid-${state.seq}`
-      state.issues.set(id, { phone: String(phoneNumber), code: OTP_CORRECT })
-      return { verification_id: id }
+      state.issues.set(id, { phone: String(args && args.phone_number), code: OTP_CORRECT })
+      /* 平台回包的 `is_user` 只有「真的給了」才帶（其餘用例維持舊形態：沒有這個鍵）。 */
+      const reply = { verification_id: id }
+      if (typeof state.isUserHint === 'boolean') reply.is_user = state.isUserHint
+      return reply
+    },
+    async isUsernameRegistered(username) {
+      state.calls.isUsernameRegistered += 1
+      if (!state.hasUsernameProbe) {
+        const error = new Error('探针不可用（注入）')
+        error.code = 'unavailable'
+        throw error
+      }
+      const key = phoneKeyOf(username)
+      return state.otpUsers.has(key) || state.passwords.has(key)
     },
     async verify({ verification_id: id, verification_code: code }) {
       state.calls.verify += 1
+      state.lastVerifyArgs = { verification_id: id, verification_code: code }
       const record = state.issues.get(id)
       if (!record || record.code !== String(code)) {
         const error = new Error('驗證碼不正確或已過期，請重新獲取驗證碼。')
         error.code = 'INVALID_VERIFICATION_CODE'
         throw error
       }
-      return { verification_token: `vt-${id}` }
+      const token = `vt-${id}`
+      state.tokens.set(token, { phone: record.phone, used: false })
+      return { verification_token: token }
     },
-    async signIn() {
+    /** 老號分支：只認**已建號**的號碼；未知號 ⇒ `USER_NOT_FOUND`（一次性 token 不被消耗）。 */
+    async signIn(args) {
       state.calls.signIn += 1
+      state.lastSignInArgs = { ...(args || {}) }
+      const key = phoneKeyOf(args && args.username)
+      if (!state.otpUsers.has(key) && !state.passwords.has(key)) {
+        const error = new Error('账号不存在')
+        error.code = 'failed_precondition'
+        error.category = 'USER_NOT_FOUND'
+        throw error
+      }
+      consumeToken(state, args && args.verification_token)
+      state.signedIn = true
+      return { data: {} }
+    },
+    /** 新號分支：建號 ＋ 落會話（**已建號** ⇒ `already_exists`，一次性 token 不被消耗）。 */
+    async signUp(args) {
+      state.calls.signUp += 1
+      state.lastSignUpArgs = { ...(args || {}) }
+      const key = phoneKeyOf(args && args.phone_number)
+      if (state.otpUsers.has(key) || state.passwords.has(key)) {
+        const error = new Error('该手机号已注册')
+        error.code = 'user_already_exists'
+        error.category = 'INVALID_PARAMS'
+        throw error
+      }
+      consumeToken(state, args && args.verification_token)
+      state.otpUsers.add(key)
       state.signedIn = true
       return { data: {} }
     },
     async signInWithPassword({ username, password }) {
       state.calls.signInWithPassword += 1
       /* 平台兩種用戶名形態都認（`138…` 與 `+86 138…`）⇒ 這裡同形歸一。 */
-      const key = String(username).replace(/^\+86\s*/, '').trim()
+      const key = phoneKeyOf(username)
       const stored = state.passwords.get(key)
       if (stored === undefined || stored !== String(password)) {
         return { data: null, error: { code: 'invalid_username_or_password', message: 'invalid username or password' } }
@@ -182,14 +277,39 @@ function makeFakePlatform() {
   return { state, auth }
 }
 
+/**
+ * 一次性憑據的本地鏡像：**已被用過 ⇒ 再送就失效**。
+ *
+ * 這條口徑本身就是「不得拿 token 去試錯」的理由 —— 自檢把它寫進假平台，
+ * 於是「先 signIn 失敗再 signUp」只有在**第一支沒消耗 token**（錯誤碼指向另一支）時才可能成功。
+ */
+function consumeToken(state, token) {
+  const key = String(token || '')
+  const record = state.tokens.get(key)
+  if (!record || record.used) {
+    const error = new Error('verification_token 無效或已使用')
+    error.code = 'invalid_verification_token'
+    error.category = 'INVALID_CREDENTIALS'
+    throw error
+  }
+  record.used = true
+}
+
 /* ---------------------------------------------------------------------------
    4. 假雲函數傳輸（`xiai-user-token` 的 `action:'issue'` 一態）
    --------------------------------------------------------------------------- */
-const transportState = { mode: 'ok', log: [] }
+const transportState = { mode: 'ok', log: [], lastIssue: null }
 
 function fakeTransport(name, data) {
   const action = data && data.action
   transportState.log.push({ name, action })
+  /* ⑦4 的判據：換票入參（`phone` / `platformAccessToken`）——**只比對、不打印**。 */
+  if (action === 'issue') {
+    transportState.lastIssue = {
+      phone: String((data && data.phone) || ''),
+      platformAccessToken: String((data && data.platformAccessToken) || '')
+    }
+  }
   if (transportState.mode === 'forbidden') {
     return Promise.resolve({ result: { ok: false, reason: 'FORBIDDEN', message: '服務端結構化拒絕；本次零寫入。' } })
   }
@@ -220,6 +340,11 @@ function resetRuntime() {
   session.setUser(null)
   transportState.mode = 'ok'
   transportState.log.length = 0
+  transportState.lastIssue = null
+  platform.state.getVerificationMode = 'ok'
+  platform.state.hasUsernameProbe = true
+  platform.state.isUserHint = null
+  platform.state.signedIn = false
 }
 
 const issueCount = () => transportState.log.length
@@ -481,6 +606,145 @@ section('⑥ 收尾單點（機械檢索）＋ 兩路行形狀逐字相等')
   check('6s', '老賬號再登錄 ⇒ 仍恰 1 條流水（不重複發金）', 1, db.listPointRows().filter((row) => row.user_id === rowPw.id).length)
   /* 只比「是不是同一個人」（**不打 uid 原文**：它是手機號的雜湊派生，報告裡不必出現）。 */
   check('6t', '老賬號再登錄 ⇒ 拿到同一 user id', true, !!(again.user && again.user.id === rowPw.id))
+}
+
+/* ===========================================================================
+   ⑦ 熱修口徑：取碼不帶 target ＋ 新號 signUp / 老號 signIn 雙分支 ＋ 錯誤文案如實
+   ===========================================================================
+   背景（真平台實測，非推測）：`getVerification({phone_number, target:'USER'})` 對未註冊號碼
+   直接回 `FAILED_PRECONDITION / 賬號不存在`；而本環境幾乎每個真實用戶都是「新號」⇒ 登錄全掛。
+   本段逐條釘住修法：①取碼無 target；②新號走 signUp 並拿到會話；③老號走 signIn；
+   ④兩支都進 `ensureUserLoginToken(phone, accessToken)`；⑤取碼失敗上屏真實原因；
+   ⑥限頻仍原文 ＋ `retryAfter`。
+   =========================================================================== */
+section('⑦ 取碼無 target ＋ 新號 signUp / 老號 signIn ＋ 文案如實')
+
+const P_BRANCH_NEW = '13800000031'
+const P_BRANCH_OLD = '13800000032'
+const P_BRANCH_PROBE_DOWN = '13800000033'
+
+{
+  /* ---- ⑦1 取碼入參：**無 target 鍵** ---- */
+  resetRuntime()
+  const picked = await authSvc.requestCode(P_BRANCH_NEW)
+  const otpArgs = platform.state.lastGetVerificationArgs || {}
+  check('7a', '取碼成功（真走平台 getVerification）', true, picked.ok === true)
+  check('7b', '取碼入參**沒有 target 鍵**（不再傳 USER）', false, Object.prototype.hasOwnProperty.call(otpArgs, 'target'))
+  check('7c', '取碼入參鍵面恰為 ["phone_number"]（最小面，也不傳 ANY）', ['phone_number'], Object.keys(otpArgs).sort())
+
+  /* ---- ⑦2 新號 ⇒ signUp({phone_number, verification_token}) 並拿到會話 ---- */
+  resetRuntime()
+  const newCode = await authSvc.requestCode(P_BRANCH_NEW)
+  const signUpBefore = platform.state.calls.signUp
+  const signInBefore = platform.state.calls.signIn
+  const probeBefore = platform.state.calls.isUsernameRegistered
+  const issuedBeforeNew = issueCount()
+  const newLogin = await authSvc.login(P_BRANCH_NEW, OTP_CORRECT)
+  const signUpArgs = platform.state.lastSignUpArgs || {}
+
+  check('7d', '新號：取碼成功', true, newCode.ok === true)
+  check('7e', '新號：整體登入成功（本地收尾照舊）', true, newLogin.ok === true)
+  check('7f', '新號：走 signUp 恰 1 次', signUpBefore + 1, platform.state.calls.signUp)
+  check('7g', '新號：**零** signIn（不把一次性 token 拿去試錯）', signInBefore, platform.state.calls.signIn)
+  check('7h', 'signUp 入參恰為 {phone_number, verification_token}', ['phone_number', 'verification_token'], Object.keys(signUpArgs).sort())
+  check('7i', 'signUp 的 phone_number 為平台形態（+86 前綴）', true, String(signUpArgs.phone_number || '').indexOf('+86 ') === 0)
+  check('7j', '新號：驗碼後先做存在性探針（isUsernameRegistered 有被調）', true, platform.state.calls.isUsernameRegistered > probeBefore)
+  check('7k', '新號：換票恰 1 次（ensureUserLoginToken(phone, accessToken)）', issuedBeforeNew + 1, issueCount())
+  check('7l', '新號：換票憑證 ＝ 平台會話 access_token，且手機號為本號', ['session', 'phone'], [
+    transportState.lastIssue && transportState.lastIssue.platformAccessToken === FAKE_PLATFORM_SESSION ? 'session' : 'mismatch',
+    transportState.lastIssue && transportState.lastIssue.phone === P_BRANCH_NEW ? 'phone' : 'mismatch'
+  ])
+  check('7m', '新號：登入後本地 session 指向本人（id 非空）', true, !!(session.currentUser() && session.currentUser().id))
+
+  /* ---- ⑦3 老號 ⇒ signIn（不重複建號） ---- */
+  resetRuntime()
+  platform.state.otpUsers.add(P_BRANCH_OLD) // 平台側已有賬號
+  const oldCode = await authSvc.requestCode(P_BRANCH_OLD)
+  const signInBeforeOld = platform.state.calls.signIn
+  const signUpBeforeOld = platform.state.calls.signUp
+  const issuedBeforeOld = issueCount()
+  const oldLogin = await authSvc.login(P_BRANCH_OLD, OTP_CORRECT)
+  const signInArgs = platform.state.lastSignInArgs || {}
+
+  check('7n', '老號：取碼成功（新號/老號同一條取碼口徑）', true, oldCode.ok === true)
+  check('7o', '老號：整體登入成功', true, oldLogin.ok === true)
+  check('7p', '老號：走 signIn 恰 1 次', signInBeforeOld + 1, platform.state.calls.signIn)
+  check('7q', '老號：**零** signUp（不重複建號）', signUpBeforeOld, platform.state.calls.signUp)
+  check('7r', 'signIn 入參恰為 {username, verification_token}', ['username', 'verification_token'], Object.keys(signInArgs).sort())
+  check('7s', 'signIn 的 username 為平台形態（+86 前綴）', true, String(signInArgs.username || '').indexOf('+86 ') === 0)
+  check('7t', '老號：換票恰 1 次（ensureUserLoginToken(phone, accessToken)）', issuedBeforeOld + 1, issueCount())
+  check('7u', '老號：換票憑證 ＝ 平台會話 access_token，且手機號為本號', ['session', 'phone'], [
+    transportState.lastIssue && transportState.lastIssue.platformAccessToken === FAKE_PLATFORM_SESSION ? 'session' : 'mismatch',
+    transportState.lastIssue && transportState.lastIssue.phone === P_BRANCH_OLD ? 'phone' : 'mismatch'
+  ])
+
+  /* ---- ⑦5 取碼失敗：上屏平台真實原因（不得回兜底句） ---- */
+  resetRuntime()
+  platform.state.getVerificationMode = 'not_found'
+  const notFoundDenied = await authSvc.requestCode(P_BRANCH_NEW)
+  const notFoundMessage = String(notFoundDenied.message || '')
+  check('7v', '取碼失敗 ⇒ 文案含平台錯誤碼 FAILED_PRECONDITION', true, notFoundMessage.indexOf('FAILED_PRECONDITION') !== -1)
+  check('7w', '取碼失敗 ⇒ **不再**回兜底句（無「短訊驗證服務暫時不可用」）', false, notFoundMessage.indexOf('暫時不可用') !== -1)
+  check('7x', '取碼失敗 ⇒ category 原樣透傳', 'FAILED_PRECONDITION', notFoundDenied.category)
+
+  platform.state.getVerificationMode = 'not_found_with_desc'
+  const descDenied = await authSvc.requestCode(P_BRANCH_NEW)
+  check('7y', '有 error_description 時原文上屏（账号不存在）', true, String(descDenied.message || '').indexOf('账号不存在') !== -1)
+
+  /* ---- ⑦6 限頻：原文 ＋ retryAfter ---- */
+  resetRuntime()
+  platform.state.getVerificationMode = 'rate_limited'
+  const limited = await authSvc.requestCode(P_BRANCH_NEW)
+  const limitedMessage = String(limited.message || '')
+  check('7z', '限頻原因原文上屏（不折疊成通用提示）', true, limitedMessage.indexOf('up to 1 text message per minute') !== -1)
+  check('7aa', '限頻保留 retryAfter ＝ 42', 42, limited.retryAfter)
+  check('7ab', '限頻文案附平台建議等待秒數', true, limitedMessage.indexOf('42') !== -1)
+
+  /* ---- ⑦7 降級：探針不可用 ⇒ 先 signIn（判不存在）再同一 token signUp ---- */
+  resetRuntime()
+  platform.state.hasUsernameProbe = false
+  const degradedCode = await authSvc.requestCode(P_BRANCH_PROBE_DOWN)
+  const signInBeforeDeg = platform.state.calls.signIn
+  const signUpBeforeDeg = platform.state.calls.signUp
+  const degraded = await authSvc.login(P_BRANCH_PROBE_DOWN, OTP_CORRECT)
+  check('7ac', '降級：取碼成功', true, degradedCode.ok === true)
+  check('7ad', '降級：仍能登入（token 未被第一支白燒即可換向）', true, degraded.ok === true)
+  check('7ae', '降級：signIn / signUp 各 1 次', [signInBeforeDeg + 1, signUpBeforeDeg + 1], [
+    platform.state.calls.signIn,
+    platform.state.calls.signUp
+  ])
+
+  /* ---- ⑦8 回包 `is_user` 的兩態：正面表態時不探、也不建號 ---- */
+  const P_HINT_OLD = '13800000034'
+  resetRuntime()
+  platform.state.otpUsers.add(P_HINT_OLD)
+  platform.state.isUserHint = true
+  await authSvc.requestCode(P_HINT_OLD)
+  const probeBeforeHint = platform.state.calls.isUsernameRegistered
+  const signInBeforeHint = platform.state.calls.signIn
+  const signUpBeforeHint = platform.state.calls.signUp
+  const hintLogin = await authSvc.login(P_HINT_OLD, OTP_CORRECT)
+  check('7af', 'is_user=true ⇒ 直接走 signIn', [true, signInBeforeHint + 1, signUpBeforeHint], [
+    hintLogin.ok === true,
+    platform.state.calls.signIn,
+    platform.state.calls.signUp
+  ])
+  check('7ag', 'is_user=true ⇒ **不再**打存在性探針（省一次往返）', probeBeforeHint, platform.state.calls.isUsernameRegistered)
+
+  /* 反向保護：回包說「不存在」但探針說存在 ⇒ 判**老號**（寧可多探一次，也不給老用戶建號）。 */
+  const P_HINT_CONFLICT = '13800000035'
+  resetRuntime()
+  platform.state.otpUsers.add(P_HINT_CONFLICT)
+  platform.state.isUserHint = false
+  await authSvc.requestCode(P_HINT_CONFLICT)
+  const signInBeforeConflict = platform.state.calls.signIn
+  const signUpBeforeConflict = platform.state.calls.signUp
+  const conflictLogin = await authSvc.login(P_HINT_CONFLICT, OTP_CORRECT)
+  check('7ah', '回包 is_user=false 但探針說存在 ⇒ 仍走 signIn、零 signUp', [true, signInBeforeConflict + 1, signUpBeforeConflict], [
+    conflictLogin.ok === true,
+    platform.state.calls.signIn,
+    platform.state.calls.signUp
+  ])
 }
 
 /* ---------------------------------------------------------------------------

@@ -2,10 +2,18 @@
  * 玺爱 · 登录服务（手機號 + 短訊驗證碼 / 手機號 + 密碼）
  *
  * **短訊驗證碼（本輪 P1b 起的唯一取碼路徑）**：真發短訊，由**雲開發平台原生身份**承擔 ——
- *   · 取碼：`auth.getVerification({ phone_number, target: 'USER' })` ⇒ 平台下發短訊，
+ *   · 取碼：`auth.getVerification({ phone_number })` ⇒ 平台下發短訊。**不傳 `target`**：
+ *     傳 `'USER'` 只給「已註冊」用戶發碼 ⇒ 新號直接被平台拒
+ *     （實測 `FAILED_PRECONDITION / 賬號不存在`），而本平台環境幾乎全是新號 ⇒ 登錄全掛。
+ *     也不傳 `'ANY'`（多一個取值就多一份平台語義漂移；不傳已足夠）。
  *     回包帶 `verification_id`（純 11 位手機號由 SDK 自動補 `"+86 "` 前綴）；
  *   · 驗碼：`auth.verify({ verification_id, verification_code })` ⇒ 回包帶 `verification_token`；
- *   · 登入：`auth.signIn({ username: <+86 形態手機號>, verification_token })` ⇒ 取 `access_token`；
+ *   · 登入 / 建號：**先判該號是否已有平台賬號，再二選一** ——
+ *       老號 `auth.signIn({ username: <+86 形態手機號>, verification_token })`；
+ *       新號 `auth.signUp({ phone_number: <+86 形態手機號>, verification_token })`
+ *       （SDK 的 `signUp` 內部會 `credentialsClient.setCredentials` ⇒ 會話已落，可直接取 `access_token`）。
+ *     **不得拿 token 去「先試 signIn、失敗再 signUp」**：`verification_token` 是一次性憑據，
+ *     判別新老號要靠**存在性判據**（回包 `is_user` / `isUsernameRegistered` 探針），不是靠試錯。
  *   · 換令牌：把該平台憑證交後端（凍結契約）`ensureUserLoginToken(phone, platformAccessToken)`。
  *
  * **密碼（P2 起的第二條正式路徑）**：手機號 ＋ 密碼 ⇒ 平台 `signInWithPassword` ⇒ 取 `access_token`
@@ -104,7 +112,7 @@ const DEV_BUILD = (() => {
  * **不上屏、不外傳、不落盤**：它只是一個一次性的服務端句柄，值本身不是憑證；
  * 但按「驗證碼不進日誌 / 報告」的紀律，這裡同樣只在內存裡與手機號配對使用。
  */
-let pendingVerification = { phone: '', verificationId: '' }
+let pendingVerification = { phone: '', verificationId: '', isUser: null }
 
 export function isPhoneLike(phone) {
   return /^1[3-9]\d{9}$/.test(String(phone || '').trim())
@@ -118,17 +126,29 @@ function platformPhoneOf(phone) {
 /**
  * 平台失敗 ⇒ 可讀結果（**發碼路徑專用：原文如實**）。
  *
- * 平台已把技術錯誤歸一化成可讀中文（`Error.message`），並在頻控時帶 `retryAfter`
- * ⇒ 本函數**不改寫、不折疊**，只把需要的讀數（`retryAfter`）疊出來供倒計時使用。
+ * 平台已把技術錯誤歸一化成可讀中文（`Error.message` = `error_description || message`，
+ * 見 SDK 的 `AuthError` 構造：`dist/index.esm.js` 偏移 171068 `var i=e.error_description||e.message`），
+ * 並在頻控時帶 `retryAfter` ⇒ 本函數**不改寫、不折疊**，只把需要的讀數（`retryAfter`）疊出來。
+ *
+ * **空 `message` 的口徑（本輪熱修）**：舊版在這裡回一句「短訊驗證服務暫時不可用」——
+ * 那等於把平台給的真實原因（`FAILED_PRECONDITION / 賬號不存在`）吞掉，用戶與排障都被騙。
+ * 現在：`message` 空 ⇒ 用 `error_description` / `code` / `category` **拼出可讀原因**；
+ * 只有平台連 `code` 都沒給（極少見）才回「平台未返回任何錯誤說明」，那句話本身也是事實。
  * @param {*} error 平台拋出的錯誤對象
  * @returns {{ok:false, message:string, retryAfter?:number, category?:string}}
  */
 function otpFailureVerbatim(error) {
-  const original = String((error && error.message) || '').trim()
+  const description = String((error && (error.error_description || error.errorDescription)) || '').trim()
+  const original = String((error && error.message) || '').trim() || description
   const category = String((error && (error.category || error.code || error.error_code)) || '').trim()
   const retryRaw = Number(error && (error.retryAfter || error.retry_after))
   const retryAfter = Number.isFinite(retryRaw) && retryRaw > 0 ? Math.ceil(retryRaw) : 0
-  let message = original !== '' ? original : '短訊驗證服務暫時不可用，請稍後重試。'
+  let message = original
+  if (message === '') {
+    message = category !== ''
+      ? `短訊驗證未完成（平台返回 ${category}，未附文字說明）。`
+      : '短訊驗證未完成：平台未返回任何錯誤說明（message / code / error_description 皆空）。'
+  }
   if (retryAfter > 0) message = `${message}\n（平台建議等待 ${retryAfter} 秒後重發。）`
   const result = { ok: false, message }
   if (retryAfter > 0) result.retryAfter = retryAfter
@@ -186,7 +206,10 @@ export async function requestCode(phone) {
   }
   let body = null
   try {
-    body = await auth.getVerification({ phone_number: normalized, target: 'USER' })
+    /* **不傳 `target`**（本輪熱修）：`target:'USER'` 只給「已註冊」用戶發碼 ⇒ 新號被平台拒
+       （實測 `FAILED_PRECONDITION / 賬號不存在`）。不傳 target 才是「任意號碼可收碼」的最小面；
+       也不傳 `'ANY'`（多一個取值就多一份平台側語義漂移的風險）。 */
+    body = await auth.getVerification({ phone_number: normalized })
   } catch (error) {
     /* 頻控 / 風控 / 未開啟短訊登入 ⇒ **平台原文如實上屏**（含 `retryAfter`）。 */
     return otpFailureVerbatim(error)
@@ -199,7 +222,12 @@ export async function requestCode(phone) {
       message: '短訊發送回包形狀不可辨識，請稍後重試。'
     }
   }
-  pendingVerification = { phone: normalized, verificationId }
+  /* **新老號判據（免試錯）**：平台回包的 `is_user` 就是 SDK 自己 `signUp().verifyOtp` 用的判據
+     （`dist/index.esm.js` 偏移 231689：`e.is_user ? signIn({username, verification_token})
+     : authApi.signUp({..., verification_token})`）⇒ 有布爾值就當第一判據；沒有就記 `null`，
+     驗碼後走 `isUsernameRegistered` 探針。 */
+  const isUserHint = body && typeof body.is_user === 'boolean' ? body.is_user : null
+  pendingVerification = { phone: normalized, verificationId, isUser: isUserHint }
   return {
     ok: true,
     message: '驗證碼已發送至你填寫的手機號，請查收短訊。',
@@ -252,7 +280,134 @@ function localDevLoginAllowed() {
 }
 
 /**
- * 平台驗證（取碼 → 驗碼 → 登入 → 平台會話憑證）。
+ * 平台是否回「該號沒有賬號」（`USER_NOT_FOUND` 一類）。
+ *
+ * 判據來源：SDK 的 AuthError 分類器把 `FAILED_PRECONDITION` ＋「不存在 / not found / 未注册」
+ * 歸到 `category === 'USER_NOT_FOUND'`（`dist/index.esm.js` 偏移 172780）。
+ */
+function platformAccountMissing(error) {
+  const text = `${String((error && error.code) || '')} ${String((error && error.category) || '')} ${String(
+    (error && error.message) || ''
+  )}`.toLowerCase()
+  return (
+    text.indexOf('user_not_found') !== -1 ||
+    text.indexOf('user_not_exists') !== -1 ||
+    text.indexOf('账号不存在') !== -1 ||
+    text.indexOf('帳號不存在') !== -1 ||
+    text.indexOf('用户不存在') !== -1 ||
+    text.indexOf('用戶不存在') !== -1
+  )
+}
+
+/** 平台是否回「該號已經有賬號」（建號分支判錯 / 競態時，換回登入分支的唯一理由）。 */
+function platformAccountTaken(error) {
+  const text = `${String((error && error.code) || '')} ${String((error && error.category) || '')} ${String(
+    (error && error.message) || ''
+  )}`.toLowerCase()
+  return (
+    text.indexOf('user_already_exists') !== -1 ||
+    text.indexOf('already_exists') !== -1 ||
+    text.indexOf('already registered') !== -1 ||
+    text.indexOf('已注册') !== -1 ||
+    text.indexOf('已註冊') !== -1 ||
+    text.indexOf('已存在') !== -1 ||
+    text.indexOf('duplicate') !== -1
+  )
+}
+
+/**
+ * **存在性探針**（`auth.isUsernameRegistered`）—— 只為「不拿一次性 token 去試錯」。
+ *
+ * 源碼：`dist/index.esm.js` 偏移 265286 ⇒ `authApi.checkIfUserExist({ username })` ⇒
+ * GET `/v1/checkIfUserExist?username=…`（偏移 199104）⇒ 回 `.exist` 布爾。
+ * 兩種用戶名形態都探（賬號可能被建成 `138…`，也可能是手機號身份 `+86 138…`）。
+ * @returns {Promise<{known:boolean, registered:boolean}>} `known:false` ＝ 探針不可用/拋錯
+ */
+async function platformAccountRegistered(auth, phone) {
+  if (typeof auth.isUsernameRegistered !== 'function') return { known: false, registered: false }
+  const forms = [platformPhoneOf(phone), phone]
+  try {
+    for (let index = 0; index < forms.length; index += 1) {
+      /* eslint-disable no-await-in-loop */
+      const registered = await auth.isUsernameRegistered(forms[index])
+      if (registered === true) return { known: true, registered: true }
+    }
+  } catch {
+    return { known: false, registered: false }
+  }
+  return { known: true, registered: false }
+}
+
+/**
+ * **驗碼之後的「登入 or 建號」二選一**（本輪熱修的核心）。
+ *
+ * 判別順序（**兩個「肯定存在」的判據取「或」**，方向刻意偏保守）：
+ *   ① 取碼回包的 `is_user === true`（平台自己給的判據，SDK 的 `signUp().verifyOtp` 同款）⇒ 立刻判老號；
+ *   ② 否則 `isUsernameRegistered` 探針（兩種用戶名形態）；
+ *   ③ ②不可用（拋錯 / SDK 沒這個方法）***且*** ①沒正面說「存在」⇒ 已知性不足，
+ *      才退到「先 signIn，錯誤碼指路後換向 signUp」的降級鏈。
+ *
+ * 為什麼取「或」而不是「回包優先」：任一判據說「存在」就絕不建號 —— 給老用戶 signUp 是
+ * 用戶可見的壞結果，而多打一次探針只是多一次 GET。
+ * **① / ② 命中時只發一次登入請求**：`verification_token` 是一次性憑據，不能用來試錯。
+ * @returns {Promise<{ok:true, branch:'signIn'|'signUp'}|{ok:false, denial:object}>}
+ */
+async function establishPlatformSession(auth, phone, verificationToken, isUserHint) {
+  const hasSignIn = typeof auth.signIn === 'function'
+  const hasSignUp = typeof auth.signUp === 'function'
+  if (!hasSignIn && !hasSignUp) {
+    return {
+      ok: false,
+      denial: {
+        ok: false,
+        reason: 'STORAGE_UNAVAILABLE',
+        message: '短訊登入暫不可用（SDK 未提供 signIn / signUp）；本次未登入、零寫入。'
+      }
+    }
+  }
+  /* 回包正面說「存在」⇒ 老號，不必再探；否則探針補一刀（探針說存在同樣判老號）。 */
+  let known = isUserHint === true
+  let registered = known
+  if (!known) {
+    const probe = await platformAccountRegistered(auth, phone)
+    if (probe.known) {
+      known = true
+      registered = probe.registered
+    }
+  }
+  /* 判據明確 ⇒ 只走一支；判據不足 ⇒ 先試「登入」（不確定時不建號），錯誤碼指路後才換向一次。 */
+  const steps = known ? [registered ? 'signIn' : 'signUp'] : ['signIn', 'signUp']
+  let lastError = null
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]
+    const usable = step === 'signIn' ? hasSignIn : hasSignUp
+    if (!usable) {
+      if (index + 1 < steps.length) continue
+      break
+    }
+    try {
+      const reply =
+        step === 'signIn'
+          ? await auth.signIn({ username: platformPhoneOf(phone), verification_token: verificationToken })
+          : await auth.signUp({ phone_number: platformPhoneOf(phone), verification_token: verificationToken })
+      /* 該版 SDK 的 `signIn` / `signUp` 失敗時**拋錯**（`dist/index.esm.js` 偏移 264890 /
+         230716，兩處都沒有 `{data,error}` 收口）；仍容忍某些子版本回 `{error}` 的形態。 */
+      if (reply && reply.error) throw reply.error
+      return { ok: true, branch: step }
+    } catch (error) {
+      lastError = error
+      const switchable = step === 'signIn' ? platformAccountMissing(error) : platformAccountTaken(error)
+      if (!switchable || index + 1 >= steps.length) break
+    }
+  }
+  return {
+    ok: false,
+    denial: otpFailureFriendly(lastError, '登入未完成，請重新獲取驗證碼後再試。')
+  }
+}
+
+/**
+ * 平台驗證（取碼 → 驗碼 → 登入 / 建號 → 平台會話憑證）。
  * @param {string} phone 已歸一的 11 位手機號
  * @param {string} code 用戶輸入的驗證碼
  * @returns {Promise<{ok:true, mode:'cloud'|'local-dev', accessToken:string}
@@ -267,6 +422,8 @@ async function verifyPlatformOtp(phone, code) {
   if (!CODE_PATTERN.test(typed)) return { ok: false, message: '驗證碼應為 6 位數字' }
   const verificationId =
     pendingVerification && pendingVerification.phone === phone ? pendingVerification.verificationId : ''
+  const isUserHint =
+    pendingVerification && pendingVerification.phone === phone ? pendingVerification.isUser : null
   if (verificationId === '') {
     return { ok: false, message: '請先點「獲取驗證碼」，收到短訊後再輸入。' }
   }
@@ -289,16 +446,14 @@ async function verifyPlatformOtp(phone, code) {
     /* v2 形態的容錯：`verify` 直接把會話簽下來（不給 `verification_token`）⇒ 直接取會話憑證。 */
     const direct = await platformAccessTokenOf(auth)
     if (direct !== '') {
-      pendingVerification = { phone: '', verificationId: '' }
+      pendingVerification = { phone: '', verificationId: '', isUser: null }
       return { ok: true, mode: 'cloud', accessToken: direct }
     }
     return { ok: false, message: '驗證回包形狀不可辨識，請重新獲取驗證碼。' }
   }
-  try {
-    await auth.signIn({ username: platformPhoneOf(phone), verification_token: verificationToken })
-  } catch (error) {
-    return otpFailureFriendly(error, '登入未完成，請重新獲取驗證碼後再試。')
-  }
+  /* **老號 signIn / 新號 signUp 二選一**（存在性先行，不拿 token 試錯；見 establishPlatformSession）。 */
+  const established = await establishPlatformSession(auth, phone, verificationToken, isUserHint)
+  if (!established.ok) return denialOf(established.denial)
   const accessToken = await platformAccessTokenOf(auth)
   if (accessToken === '') {
     return {
@@ -308,7 +463,7 @@ async function verifyPlatformOtp(phone, code) {
     }
   }
   /* 一次性：驗過即作廢（重放同一 `verification_id` 沒有意義）。 */
-  pendingVerification = { phone: '', verificationId: '' }
+  pendingVerification = { phone: '', verificationId: '', isUser: null }
   return { ok: true, mode: 'cloud', accessToken }
 }
 
@@ -372,7 +527,8 @@ function finalizeLogin(phone, options = {}) {
  * @returns {Promise<{ok:boolean, user?:object, message?:string, invite?:object, reason?:string}>}
  *
  * 判定顺序（**任一步失敗即整體失敗、零半成品**）：
- *   ① 平台短訊驗證（`getVerification` → `verify` → `signIn` → `access_token`）；
+ *   ① 平台短訊驗證（`getVerification`（**不傳 target**）→ `verify` → 老號 `signIn` / 新號 `signUp`
+ *      → `access_token`）；
  *   ② 把平台憑證交後端換 xiai 令牌（凍結契約：`issue` 收 `{phone, platformAccessToken}`）；
  *   ③ 過①②之後才落本地鏡像：賬號行 / 初始金 / session / 邀請結算 —— 走**共用收尾**
  *      `finalizeLogin()`（與密碼登錄**同一份**；既有語義一字不改）。
@@ -644,7 +800,7 @@ export async function resetPasswordByOtp(phone, code, newPassword, options = {})
     return otpFailureVerbatim(error)
   }
   /* 一次性句柄：用過即作廢。 */
-  pendingVerification = { phone: '', verificationId: '' }
+  pendingVerification = { phone: '', verificationId: '', isUser: null }
   /* ⑤ 重置成功 ⇒ 立刻用新密碼登錄（等於「重設即登入」）。
      這一步失敗**不影響已完成的密碼重設** ⇒ 回 `ok:true, loggedIn:false` 並如實說明。 */
   const relogin = await loginWithPassword(normalized, newPassword, options)
