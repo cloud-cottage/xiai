@@ -737,7 +737,9 @@ function judgeIndexReadout() {
     setImage: countOf(clean, 'for (const key of SET_IMAGE_BOOK_READOUT_KEYS)')
   }
   const importOk =
-    /CREATE_BOOK_READOUT_KEYS,\s*\n\s*LIST_BOOKS_READOUT_KEYS,\s*\n\s*SET_IMAGE_BOOK_READOUT_KEYS\s*\n\}\s*=\s*require\('\.\/lib\/books\.js'\)/.test(
+    /* 允许在三个既有常量之后**追加**新常量（如 `SEARCH_BOOK_IMAGES_READOUT_KEYS`）——
+       只要求前三个仍在同一处、且整块来自 `./lib/books.js`（单一真源）。 */
+    /CREATE_BOOK_READOUT_KEYS,\s*\n\s*LIST_BOOKS_READOUT_KEYS,\s*\n\s*SET_IMAGE_BOOK_READOUT_KEYS(?:,\s*\n\s*[A-Z_]+)*\s*\n\}\s*=\s*require\('\.\/lib\/books\.js'\)/.test(
       clean
     )
   return {

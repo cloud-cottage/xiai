@@ -101,7 +101,8 @@ const {
 const {
   CREATE_BOOK_READOUT_KEYS,
   LIST_BOOKS_READOUT_KEYS,
-  SET_IMAGE_BOOK_READOUT_KEYS
+  SET_IMAGE_BOOK_READOUT_KEYS,
+  SEARCH_BOOK_IMAGES_READOUT_KEYS
 } = require('./lib/books.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
@@ -973,6 +974,11 @@ if (op === 'listBooks') {
 }
 if (op === 'setImageBook') {
   for (const key of SET_IMAGE_BOOK_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'searchBookImages') {
+  for (const key of SEARCH_BOOK_IMAGES_READOUT_KEYS) {
     if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
   }
 }

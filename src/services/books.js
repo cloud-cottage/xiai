@@ -72,6 +72,8 @@ export const BOOK_ROW_KEYS = Object.freeze([
   'author_name',
   /* **2026-11-15（v1.121）**：`creators` ＝ 创作者链（服務端權威；`[{person_id,card_id,role,name}]`） */
   'creators',
+  /* **2026-11-15**：`image_count` ＝ 服务端计好的「该书已归属影像数」。 */
+  'image_count',
   'first_publish_year',
   'created_at',
   'updated_at'
@@ -238,6 +240,10 @@ export async function listBooks(input = {}) {
     for (const key of BOOK_ROW_KEYS) {
       if (key === 'first_publish_year') {
         out[key] = Number.isInteger(src.first_publish_year) ? src.first_publish_year : null
+        continue
+      }
+      if (key === 'image_count') {
+        out[key] = Number.isInteger(src.image_count) ? src.image_count : 0
         continue
       }
       if (key === 'creators') {

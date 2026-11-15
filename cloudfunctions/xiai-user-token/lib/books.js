@@ -153,6 +153,9 @@ const CREATE_BOOK_READOUT_KEYS = Object.freeze(['book_id', 'skipped'])
 /** `listBooks` 回包读数键面（`truncated` 为 **additive 提示键**：仅在「取不全」那一轮出现）。 */
 const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total', 'has_more', 'offset', 'limit', 'truncated'])
 
+/** `searchBookImages` 回包读数键面（`total` ＝ 命中总数；`rows` 为本页）。 */
+const SEARCH_BOOK_IMAGES_READOUT_KEYS = Object.freeze(['rows', 'total'])
+
 /** `setImageBook` 回包读数键面（`book_id` 是**读回值**，非请求回显）。 */
 const SET_IMAGE_BOOK_READOUT_KEYS = Object.freeze(['image_id', 'book_id'])
 
@@ -825,5 +828,6 @@ module.exports = {
   BOOK_ID_PATTERN,
   CREATE_BOOK_READOUT_KEYS,
   LIST_BOOKS_READOUT_KEYS,
-  SET_IMAGE_BOOK_READOUT_KEYS
+  SET_IMAGE_BOOK_READOUT_KEYS,
+  SEARCH_BOOK_IMAGES_READOUT_KEYS
 }
