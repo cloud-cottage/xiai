@@ -32,6 +32,15 @@ envId 在运行期从 `TCB_ENV` / `SCF_NAMESPACE` / `CLOUDBASE_ENV_ID` 读（**�
    → {ok:false, reason, message}   （恰 3 键；reason ∈ 既有冻结表）
 
    已登记 op：`submitCorrection` → 集合 `xiai_corrections`（`PRIVATE` ⇒ 只能由本函数以管理端凭据写）
+
+③ 只读会话验签（**跨仓契约**：斐萃影子库服务端代验浏览器登录态；**零落盘 · 不签发 · 不续期**）
+   {action:'verifySession', token}
+   → {ok:true, uid:'u-<16 hex>', role:'user'|'admin'}          （恰 3 键）
+   → {ok:false, reason: TOKEN_INVALID | TOKEN_EXPIRED, message}  （缺 token / 非字符串 / 空串 ⇒ TOKEN_INVALID）
+   → {ok:false, reason: STORAGE_UNAVAILABLE, message}          （缺密钥等基础设施故障 ⇒ **不伪装令牌无效**）
+   说明：不需要 `op` / `payload`（在 authority / op 值域判定**之前**短路）；
+         `uid` 只由**已验签**的 `sub` 经 `uidOf` 派生，回包**零手机号、零令牌片段**；
+         同一令牌连续调用返回同一 `uid`（幂等无副作用）。
 ```
 
 **令牌形态**：`<base64url(payload)>.<base64url(hmac-sha256(payload))>`，payload `{v,sub,role,iat,exp,jti,ver}`。

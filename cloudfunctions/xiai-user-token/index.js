@@ -50,6 +50,19 @@ const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, write
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
+/* **只读会话验签面（`action:'verifySession'`｜跨仓契约：斐萃影子库服务端代验）**：
+   **零落盘 · 不签发 · 不续期**；`uid` 只由已验签的 `sub` 经 `config.uidOf` 派生
+   ⇒ 回包恰 3 键（`{ok,uid,role}` / `{ok:false,reason,message}`）。本文件在此只做
+   **短路分发 ＋ 失败兜底**，判定全在 `lib/verifySession.js`（零 SDK 字面照旧）。 */
+const {
+  VERIFY_SESSION_ACTION,
+  REASONS: VERIFY_SESSION_REASONS,
+  SUCCESS_KEYS: VERIFY_SESSION_SUCCESS_KEYS,
+  DENIAL_KEYS: VERIFY_SESSION_DENIAL_KEYS,
+  isVerifySessionAction,
+  readVerifyConfig,
+  verifySessionClaims
+} = require('./lib/verifySession.js')
 /* **首页卡片分页读面 ＋ 人物卡片读面**：`PUBLIC_OPS` ＝ **匿名可调**的只读 op 表（本文件在令牌 /
    会话 / 配置判定**之前**按它分流，只放行白名单里的 op；本单 `2 → 4`：
    `listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`）；
@@ -330,6 +343,56 @@ function handleIssue(event, config) {
     ttlSeconds: config.ttlSeconds,
     ver: issued.claims.ver,
     serverNow: now
+  }
+}
+
+/**
+ * **动作：只读会话验签（`action:'verifySession'`｜跨仓契约：斐萃影子库服务端代验）**。
+ *
+ * 硬口径（逐条；判定全部在 `lib/verifySession.js`，本函数只做**信封**）：
+ *  · **只读**：零落盘、**不签发新令牌**、**不走 `verify` 的滑动续期**；
+ *  · **短路位置**：由 `main()` 在**任何** authority / op 值域 / `payload` 判定**之前**调进来
+ *    （与只读诊断 op `sessionProbe` 同位置）⇒ **不要求 `payload`、不要求 `op`**，
+ *    也不读 `xiai_roles`、不看平台会话；
+ *  · **回包恰 3 键**：成功 `{ok,uid,role}`、失败 `{ok,reason,message}` —— 内部判别码
+ *    （`detail`）**只进日志**，绝不回客户端；
+ *  · **内部不可用不伪装令牌无效**：缺密钥 / 时钟异常 ⇒ `STORAGE_UNAVAILABLE`
+ *    （把配置故障谎报成 `TOKEN_INVALID` 会把在用会话无故清空）；
+ *  · **绝不自抛**：任何未预期异常 ⇒ 结构化拒绝（不 5xx、不伪装 `FORBIDDEN`）。
+ * @param {object} event 事件（`{action:'verifySession', token}`）
+ * @returns {Promise<object>} `{ok:true, uid, role}` ｜ `{ok:false, reason, message}`
+ */
+async function handleVerifySession(event) {
+  const now = serverNowSeconds()
+  try {
+    const verifyConfig = readVerifyConfig()
+    if (!verifyConfig.ready) {
+      audit({ action: VERIFY_SESSION_ACTION, outcome: verifyConfig.reason, stage: 'config', serverNow: now })
+      return deny(verifyConfig.reason, verifyConfig.message)
+    }
+    const result = verifySessionClaims({
+      token: event ? event.token : undefined,
+      secret: verifyConfig.secret,
+      nowSeconds: now,
+      version: verifyConfig.version,
+      leewaySeconds: verifyConfig.leewaySeconds
+    })
+    if (!result.ok) {
+      /* `detail`（内部判别码）**只进日志**；回包只取 `reason` / `message`（恰 3 键）。 */
+      audit({ action: VERIFY_SESSION_ACTION, outcome: result.reason, detail: result.detail, serverNow: now })
+      return deny(result.reason, result.message)
+    }
+    audit({
+      action: VERIFY_SESSION_ACTION,
+      outcome: 'ok',
+      uid: result.uid,
+      role: result.role,
+      serverNow: now
+    })
+    return { ok: true, uid: result.uid, role: result.role }
+  } catch {
+    audit({ action: VERIFY_SESSION_ACTION, outcome: REASONS.STORAGE_UNAVAILABLE, stage: 'internal', serverNow: now })
+    return deny(REASONS.STORAGE_UNAVAILABLE, '用戶令牌會話驗證服務內部錯誤；本次零寫入、未續期。')
   }
 }
 
@@ -1148,6 +1211,12 @@ exports.main = async function main(event, context) {
      （含全部 `PUBLIC_OPS` 读 op 与管理员 op）⇒ `FORBIDDEN` ＋ 零读写。计数面不依赖令牌配置
      ⇒ **不因写面配置缺失而连坐**（前端 fail-open、静默跳过）。 */
   if (action === 'public-write') return await handlePublicWrite(input)
+  /* **只读会话验签面（`action:'verifySession'`）**：与 `public` / `public-write` **同级**、
+     同在**任何 authority / op 值域 / `payload` 判定之前短路**（与只读诊断 op `sessionProbe`
+     同位置）—— **不要求 `payload`、不要求 `op`**，不读 `xiai_roles`、不看平台会话，
+     **零落盘 · 不签发 · 不续期**。它**不是** `action:'verify'` 的旁路：只判「令牌是否成立」，
+     判过了也**不会**放出任何写 op（写面仍必须走 `action:'verify'`）。 */
+  if (isVerifySessionAction(action)) return await handleVerifySession(input)
   let config = null
   try {
     config = readConfig()
@@ -1180,3 +1249,10 @@ exports.AI_ENHANCE_READOUT_KEYS = AI_ENHANCE_READOUT_KEYS
    离线直接断言（按 op 收窄 ⇒ 其余 op 零外泄）。 */
 exports.pickFeicuiDeviceTokenReadouts = pickFeicuiDeviceTokenReadouts
 exports.FEICUI_DEVICE_TOKEN_READOUT_KEYS = FEICUI_DEVICE_TOKEN_READOUT_KEYS
+/* **只读会话验签面（`action:'verifySession'`）**：供 `scripts/verify-verify-session.mjs`
+   离线断言「action 字面值 / 两句 reason / 回包键面恰如契约」。 */
+exports.VERIFY_SESSION_ACTION = VERIFY_SESSION_ACTION
+exports.VERIFY_SESSION_REASONS = VERIFY_SESSION_REASONS
+exports.VERIFY_SESSION_SUCCESS_KEYS = VERIFY_SESSION_SUCCESS_KEYS
+exports.VERIFY_SESSION_DENIAL_KEYS = VERIFY_SESSION_DENIAL_KEYS
+exports.handleVerifySession = handleVerifySession
