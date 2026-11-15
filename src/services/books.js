@@ -214,7 +214,11 @@ export async function listBooks(input = {}) {
     if (value !== '') payload[key] = value
   }
   for (const key of ['year_from', 'year_to']) {
-    const value = Number(source[key])
+    /* **空值不递**：`Number('') === 0` 且 `Number.isInteger(0)` 为真 —— 直接判整会
+       把「未填年份」误发成 `year_from: 0`，被服务端形态门拒（实测首屏直接读失败）。 */
+    const raw = source[key]
+    if (raw === undefined || raw === null || String(raw).trim() === '') continue
+    const value = Number(raw)
     if (Number.isInteger(value)) payload[key] = value
   }
   const gate = await userWriteGate(BOOK_OP_LIST, payload, { readoutKeys: LIST_BOOKS_READOUT_KEYS })

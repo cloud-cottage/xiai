@@ -96,10 +96,13 @@ function filterInputOf(applied) {
   const author = String(source.author || '').trim()
   if (q !== '') input.q = q
   if (author !== '') input.author = author
-  const yearFrom = Number(source.yearFrom)
-  const yearTo = Number(source.yearTo)
-  if (Number.isInteger(yearFrom)) input.year_from = yearFrom
-  if (Number.isInteger(yearTo)) input.year_to = yearTo
+  /* 空年份**不下发**（`Number('') === 0` 会被服务端形态门拒）；非空才判整。 */
+  for (const [from, to] of [['yearFrom', 'year_from'], ['yearTo', 'year_to']]) {
+    const raw = source[from]
+    if (raw === undefined || raw === null || String(raw).trim() === '') continue
+    const value = Number(raw)
+    if (Number.isInteger(value)) input[to] = value
+  }
   return input
 }
 
