@@ -561,11 +561,12 @@ export function findSealByCode(raw) {
   if (typeof CODE_ID.decodeSealCode !== 'function') {
     return { ok: false, reason: 'INVALID_VALUE', message: '識別編碼模塊未就緒，請稍後重試。' }
   }
-  const first = input.charAt(0)
-  const isDigitFirst = first >= '0' && first <= '9'
-  const decoded = isDigitFirst ? CODE_ID.decodeFaceCode(input) : CODE_ID.decodeSealCode(input)
+  /* 2026-11-15 起：fid 改 8 位字母（与 sid 同一字母表）⇒ 按**长度**分型，不再按首字符数字。
+     8 位字母 ⇒ 印面码（fid）；5 位字母 ⇒ 印章码（sid）。旧 8 位数字已全量作废。 */
+  const looksLikeFid = /^[A-HJ-KM-NP-TV-Z]{8}$/.test(input)
+  const decoded = looksLikeFid ? CODE_ID.decodeFaceCode(input) : CODE_ID.decodeSealCode(input)
   if (!decoded.ok) return { ok: false, reason: decoded.reason, message: decoded.message }
-  if (isDigitFirst) {
+  if (looksLikeFid) {
     const face =
       listFaceRows().find(
         (row) => Number(row && row.face_no) === decoded.no || String((row && row.fid) || '') === input

@@ -19,8 +19,10 @@
  *   · **sid**：`n` 的 **base-22 展开**（A 顺序、大端、定长 5 位、高位补 `A`）：
  *     `1 → AAAAB`、`22 → AAABA`；码空间容量 `22^5 = 5,153,632` 个码 ⇒ 号域
  *     `n ∈ [1, SID_MAX - 1] = [1, 5,153,631]`，`5,153,631 → ZZZZZ`。
- *   · **fid**：`n` 的十进制定长 8 位零填充：`1 → 00000001`；码空间容量 `10^8` 个码
- *     ⇒ 号域 `n ∈ [1, FID_MAX - 1] = [1, 99,999,999]`。
+ *   · **fid**：`n` 的 **base-22 展开**（与 sid 同一张字母表、定长 8 位、高位补 `A`）：
+ *     `1 → AAAAAAAB`；码空间容量 `22^8 = 54,875,873,536` 个码
+ *     ⇒ 号域 `n ∈ [1, FID_MAX - 1] = [1, 54,875,873,535]`。
+ *     （2026-11-15 起；旧口径是十进制 8 位零填充，已按裁定全量重编、旧码作废。）
  *   · **号域为何是开区间（如实登记）**：口径件 §2 写的「`n ∈ [1, 5153632]` ⇒ `5153632 → ZZZZZ`」
  *     与同条的 `1 → AAAAB` **算术上不可兼得** —— `ZZZZZ = 22^5 − 1 = 5,153,631`，而
  *     `1 → AAAAB` 已钉死「编码 ＝ n 的 base-22 展开、无偏移」（同条 fid 的 `1 → 00000001`
@@ -46,14 +48,15 @@ const FID_LENGTH = 8
 const SID_MAX = 5153632
 /** sid 最大可编码号（5,153,631 ⇒ `ZZZZZ`）。 */
 const SID_LAST = SID_MAX - 1
-/** fid 码空间容量（＝ 10⁸ 个码）；**可编码号域 ＝ [1, FID_MAX − 1]**。 */
-const FID_MAX = 100000000
+/** fid 码空间容量（＝ 22⁸ ＝ 54,875,873,536 个码，**与 sid 同一张 22 字母表**）；
+ *  **可编码号域 ＝ [1, FID_MAX − 1]**。 */
+const FID_MAX = 54875873536
 /** fid 最大可编码号（99,999,999 ⇒ `99999999`）。 */
 const FID_LAST = FID_MAX - 1
 /** sid 形态门（实测展开恰为上述 22 字母；**不是** `[A-HJ-NP-TV-Z]`——那会放进 L）。 */
 const SID_PATTERN = /^[A-HJ-KM-NP-TV-Z]{5}$/
-/** fid 形态门（8 位十进制）。 */
-const FID_PATTERN = /^\d{8}$/
+/** fid 形态门（8 位字母，字母表同 sid → 8 位 base-22 展开）。 */
+const FID_PATTERN = /^[A-HJ-KM-NP-TV-Z]{8}$/
 /** 结构化拒绝字面值（既有三值；**零新增**）。 */
 const REASON_INVALID_VALUE = 'INVALID_VALUE'
 const REASON_INVALID_FIELD = 'INVALID_FIELD'
@@ -101,7 +104,9 @@ function encodeSealCode(no) {
 }
 
 /**
- * 印面识别编码：`face_no` → fid（十进制定长 8 位零填充）。
+ * 印面识别编码：`face_no` → fid（**8 位 base-22 展开**，字母表与 sid 同一张、高位补 `A`）。
+ * 口径变化（2026-11-15）：旧口径是「十进制 8 位零填充」，与 sid 的字母形态不一致；
+ * 现统一为字母编码 —— `1 → AAAAAAAB`、`22 → AAAAAABA`、`22⁸−1 → ZZZZZZZZ`。
  * @param {number|string} no 自增号（整数或纯数字串）
  * @returns {{ok:true, code:string}|{ok:false, reason:'INVALID_VALUE', message:string}}
  */
@@ -112,7 +117,13 @@ function encodeFaceCode(no) {
       `識別編碼號域越界（fid 可編碼號域為 1…${FID_LAST} 的整數，容量 ${FID_MAX} 碼）；已結構化拒絕、未寫入任何內容。`
     )
   }
-  return { ok: true, code: String(value).padStart(FID_LENGTH, '0') }
+  let rest = value
+  let out = ''
+  for (let index = 0; index < FID_LENGTH; index += 1) {
+    out = CODE_ALPHABET.charAt(rest % CODE_ALPHABET_SIZE) + out
+    rest = Math.floor(rest / CODE_ALPHABET_SIZE)
+  }
+  return { ok: true, code: out }
 }
 
 function sidWidth() {
@@ -149,17 +160,24 @@ function decodeSealCode(code) {
 }
 
 /**
- * 解码 fid：8 位数字 → `face_no`。形态不符 / 号域越界 ⇒ 结构化拒绝。
- * @param {string} code 8 位数字码
+ * 解码 fid：8 位字母（base-22，字母表同 sid）→ `face_no`。形态不符 / 号域越界 ⇒ 结构化拒绝。
+ * @param {string} code 8 位字母码
  * @returns {{ok:true, no:number}|{ok:false, reason:'INVALID_VALUE', message:string}}
  */
 function decodeFaceCode(code) {
-  const raw = typeof code === 'string' ? code.trim() : ''
+  const raw = typeof code === 'string' ? code.trim().toUpperCase() : ''
   if (!FID_PATTERN.test(raw)) {
-    return denial('識別編碼形態不符（fid 需 8 位數字）；請重新輸入。')
+    return denial('識別編碼形態不符（fid 需 8 位英文字母，字母表不含 I / L / O / U，且不含數字）；請重新輸入。')
   }
-  const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 1 || value > FID_LAST) {
+  let value = 0
+  for (let index = 0; index < FID_LENGTH; index += 1) {
+    const digit = CODE_ALPHABET.indexOf(raw.charAt(index))
+    if (digit < 0) {
+      return denial('識別編碼含字母表以外的字符；請重新輸入。')
+    }
+    value = value * CODE_ALPHABET_SIZE + digit
+  }
+  if (value < 1 || value > FID_LAST) {
     return denial(`識別編碼號域越界（fid 可編碼號域為 1…${FID_LAST}）；請重新輸入。`)
   }
   return { ok: true, no: value }

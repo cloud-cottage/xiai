@@ -10,7 +10,8 @@
  *   C2 三端可载形态：三份都**不含 `export` / `import` 语句**；CJS `require` 拿到 API；
  *      纯脚本形态（模拟浏览器 ESM 副作用导入：`node:vm` 无 `module` 的上下文）⇒ `globalThis.__XIAI_CODE_ID__`
  *   C3 字母表恰 22、逐字正确、无重复、**不含 I / L / O / U**；`SID_PATTERN` 展开恰为这 22 字母
- *   C4 已知向量：`1 → AAAAB`、`22 → AAABA`、`5153631 → ZZZZZ`、`1 → 00000001`、`99999999 → 99999999`
+ *   C4 已知向量：`1 → AAAAB`、`22 → AAABA`、`5153631 → ZZZZZ`、
+ *      `1 → AAAAAAAB`、`22 → AAAAAABA`、`FID_LAST → ZZZZZZZZ`（fid 2026-11-15 起为 8 位 base-22）
  *   C5 独立实现对账：sid 用 `Number.prototype.toString(22)` 另算一路（抽样比对）
  *   C6 双射抽样：`decode(encode(n)) === n` 对边界与抽样号成立（两端各自）
  *   C7 越界结构化拒绝：`0 / −1 / 1.5 / 非数字 / SID_MAX / SID_MAX+1 / FID_MAX / FID_MAX+1`
@@ -96,9 +97,10 @@ check(
 check('C4a', 'encodeSealCode(1) ＝ AAAAB', 'AAAAB', api.encodeSealCode(1).code)
 check('C4b', 'encodeSealCode(22) ＝ AAABA', 'AAABA', api.encodeSealCode(22).code)
 check('C4c', 'encodeSealCode(5153631) ＝ ZZZZZ', 'ZZZZZ', api.encodeSealCode(api.SID_LAST).code)
-check('C4d', 'encodeFaceCode(1) ＝ 00000001', '00000001', api.encodeFaceCode(1).code)
-check('C4e', 'encodeFaceCode(99999999) ＝ 99999999', '99999999', api.encodeFaceCode(api.FID_LAST).code)
-check('C4f', '常数读数（22 / 5 / 8 / 5153632 / 100000000）', [22, 5, 8, 5153632, 100000000], [
+check('C4d', 'encodeFaceCode(1) ＝ AAAAAAAB（8 位 base-22，与 sid 同一字母表）', 'AAAAAAAB', api.encodeFaceCode(1).code)
+check('C4d2', 'encodeFaceCode(22) ＝ AAAAAABA', 'AAAAAABA', api.encodeFaceCode(22).code)
+check('C4e', 'encodeFaceCode(FID_LAST) ＝ ZZZZZZZZ', 'ZZZZZZZZ', api.encodeFaceCode(api.FID_LAST).code)
+check('C4f', '常数读数（22 / 5 / 8 / 5153632 / 54875873536）', [22, 5, 8, 5153632, 54875873536], [
   api.CODE_ALPHABET_SIZE,
   api.SID_LENGTH,
   api.FID_LENGTH,
@@ -134,9 +136,9 @@ const sidRoundTripBad = sidSamples.filter((n) => {
 })
 check('C6a', `sid 双射抽样（${sidSamples.length} 个号）`, [], sidRoundTripBad)
 
-const fidBounds = [1, 2, 9, 10, 99999999 - 1, 99999999]
+const fidBounds = [1, 2, 9, 10, 21, 22, 23, api.FID_LAST - 1, api.FID_LAST]
 const fidStride = []
-for (let n = 1; n <= api.FID_LAST; n += 997303) fidStride.push(n)
+for (let n = 1; n <= api.FID_LAST; n += 997303000) fidStride.push(n)
 const fidSamples = [...new Set([...fidBounds, ...fidStride])]
 const fidRoundTripBad = fidSamples.filter((n) => {
   const enc = api.encodeFaceCode(n)

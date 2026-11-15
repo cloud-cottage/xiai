@@ -6,7 +6,7 @@
 
    · **首字符判型**（忽略大小寫，只看首字符）：
        - 首字符 ∈ 22 字母 `ABCDEFGHJKMNPQRSTVWXYZ` ⇒ **字母 OTP**（5 格）；
-       - 首字符 ∈ `0–9` ⇒ **數字 OTP**（8 格）；
+       - 首字符 ∈ `0–9` ⇒ **數字 OTP**（**9 格**｜印人號 `100000159`：命中即跳印人詳情）；
        - **漢字及其它一切**（含空白、標點，以及 `I / L / O / U` 這四個
          拉丁但不在 22 字母表內的字母）⇒ **普通關鍵詞框**，**不觸發 OTP**、
          **不劫持輸入**、**不彈錯誤**。
@@ -16,7 +16,7 @@
      回車）⇒ `submit-code`（父級帶 `query:{code}` 走精確查）。
    · **復原**：OTP 態退格至**第 1 格變空** ⇒ 就地復原普通搜索框（清空、焦點保持）；
      另有「取消」小鈕與 `Esc` 同路復原。
-   · **粘貼**：貼 5 位字母 / 8 位數字（可含空白、連字符、小寫）⇒ 直接進 OTP
+   · **粘貼**：貼 5 位字母（印章）/ 9 位數字（印人號）（可含空白、連字符、小寫）⇒ 直接進 OTP
      逐格填充並即檢索；貼上的候選碼**含非法字符或位數不對 ⇒ 整次拒絕**＋繁體提示；
      首字符非碼類（漢字等）⇒ 放行原生粘貼（當關鍵詞）。
    · **非法字符一律就地拒**（`I / L / O / U`、數字、符號），**不做自動糾錯映射**。
@@ -36,7 +36,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['submit-keyword', 'submit-code'])
 
-const mode = ref('plain') // 'plain'（普通關鍵詞框）| 'letter'（5 格）| 'digit'（8 格）
+const mode = ref('plain') // 'plain'（普通關鍵詞框）| 'letter'（5 格｜印章）| 'digit'（9 格｜印人）
 const keyword = ref(props.initialQuery)
 const cells = ref([])
 const error = ref('')
@@ -81,7 +81,7 @@ function focusPlain() {
 /** 進 OTP 態並以首字符落格（第 1 格必非空 ⇒ 進來即可繼續輸入 / 直接退格復原）。 */
 function enterCodeMode(kind, seed) {
   if (!isSingleChar(seed)) return // 防禦：無有效首字符不進 OTP（空串不得判型）
-  const count = kind === 'digit' ? 8 : 5
+  const count = kind === 'digit' ? 9 : 5
   const filled = Array(count).fill('')
   filled[0] = seed
   mode.value = kind
@@ -138,12 +138,12 @@ function onPlainPaste(event) {
   const first = candidate.charAt(0)
   if (!isDigitChar(first) && !isLetterChar(first)) return // 關鍵詞粘貼：放行原生行為，由輸入事件判型
   const digits = isDigitChar(first)
-  const count = digits ? 8 : 5
+  const count = digits ? 9 : 5
   const allowed = digits ? isDigitChar : isLetterChar
   if (candidate.length !== count || candidate.split('').some((ch) => !allowed(ch))) {
     event.preventDefault()
     error.value = digits
-      ? '貼上的內容不是 8 位純數字識別編碼，已整次拒絕本次貼上。'
+      ? '貼上的內容不是 9 位純數字印人號（格式 100000159），已整次拒絕本次貼上。'
       : '貼上的內容不是 5 位字母識別編碼（字母表不含 I、L、O、U，且不得混入數字或符號），已整次拒絕本次貼上。'
     return
   }
@@ -184,7 +184,7 @@ function onCellInput(index, event) {
   }
   if (mode.value === 'digit' && !isDigitChar(ch)) {
     event.target.value = cells.value[index] || ''
-    error.value = '此識別編碼為 8 位數字，僅可輸入 0–9；該字符已就地拒絕。'
+    error.value = '印人號為 9 位數字，僅可輸入 0–9；該字符已就地拒絕。'
     return
   }
   if (mode.value === 'letter' && !isLetterChar(ch)) {
@@ -243,12 +243,12 @@ function onCellPaste(event) {
   if (!text) return
   event.preventDefault()
   const digits = isDigitChar(text.slice(0, 1))
-  const count = digits ? 8 : 5
+  const count = digits ? 9 : 5
   const chars = text.split('').filter((ch) => ch !== ' ' && ch !== '-' && ch !== '—' && ch !== '－')
   const allowed = digits ? isDigitChar : isLetterChar
   if (chars.length !== count || chars.some((ch) => !allowed(ch))) {
     error.value = digits
-      ? '貼上的內容不是 8 位純數字識別編碼，已整次拒絕本次貼上。'
+      ? '貼上的內容不是 9 位純數字印人號（格式 100000159），已整次拒絕本次貼上。'
       : '貼上的內容不是 5 位字母識別編碼（字母表不含 I、L、O、U，且不得混入數字或符號），已整次拒絕本次貼上。'
     return
   }

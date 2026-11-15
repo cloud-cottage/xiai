@@ -190,7 +190,7 @@ check('M2g', '首行映射 旧"1" → seal_no 1 → AAAAB',
   { old_stamp_id: '1', seal_no: 1, sid: 'AAAAB' }, dry.mapping.seals[0])
 check('M2h', '末行映射 旧"79" → seal_no 79',
   { old_stamp_id: '79', seal_no: 79, sid: codeId.encodeSealCode(79).code }, dry.mapping.seals[78])
-check('M2i', '印面首行 1 → 00000001', { face_no: 1, fid: '00000001' }, { face_no: dry.mapping.faces[0].face_no, fid: dry.mapping.faces[0].fid })
+check('M2i', '印面首行 1 → AAAAAAAB（8 位 base-22）', { face_no: 1, fid: 'AAAAAAAB' }, { face_no: dry.mapping.faces[0].face_no, fid: dry.mapping.faces[0].fid })
 check('M3', '干跑零写入（全库快照逐字节不变）', beforeM1, fullSnapshot())
 
 /* ---------------------------------------------------------------- M4 执行 */

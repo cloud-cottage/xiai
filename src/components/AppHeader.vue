@@ -36,8 +36,19 @@ function submitKeyword(keyword) {
 }
 
 /** 識別編碼提交（OTP 填滿 / 回車）：**只帶 `code`**（不帶 `q`），由 SquareView 精確查。 */
+/**
+ * 頁頭 OTP 提交（2026-11-15 起兩類）：
+ *   · **9 位純數字 ⇒ 印人號**（CARD 人物號，如 `100000159`）⇒ 直跳印人詳情 `/persons/:code`；
+ *   · 其餘（5 位印章碼 / 8 位面碼）⇒ 走 `square` 頁的 `?code=` 精確查（既有鏈路不變）。
+ * 不存在的印人號不在這裡攔：詳情頁按 CARD 主庫查，查無即由該頁明示「查無此人」（不編造假頁）。
+ */
 function submitCode(code) {
-  router.push({ name: 'square', query: { code } })
+  const raw = String(code === undefined || code === null ? '' : code).trim()
+  if (/^\d{9}$/.test(raw)) {
+    router.push({ name: 'personDetail', params: { code: raw } })
+    return
+  }
+  router.push({ name: 'square', query: { code: raw } })
 }
 
 function toggleMenu() {
