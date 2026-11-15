@@ -25,17 +25,32 @@
  *  ⑦ **回包**：成功**恰 4 键**（`ok, deleted, skipped, released`）；失败**恰 3 键**
  *     （`ok, reason, message`）；`reason` **零新增**（只用 `lib/config.js::REASONS` 既有冻结值）。
  *  ⑧ **零新集合、零删照片行、零删勘误行**：照片 / 勘误**只读计数**（`photos_kept` /
- *     `corrections_kept`）；读走 `ops.readRows`、删行走 `ops.deleteRow`、
- *     删对象走 `ops.deleteImageObjectsOfRow`（**候选单点**：`storage_key` 优先 → `sha` 派生
- *     后缀族逐个试 → 行内其它键、命中即停）、落盘走 `ops.persist`。
+ *     `corrections_kept`）；读走 `ops.readRows` / `ops.readAllGuarded`（判定类读面**翻页取全**，
+ *     见 ⑩）、删行走 `ops.deleteRow`、删对象走 `ops.deleteImageObjectsOfRow`（**候选单点**：
+ *     `storage_key` 优先 → `sha` 派生后缀族逐个试 → 行内其它键、命中即停）、落盘走 `ops.persist`。
  *  ⑨ **審計載體 preflight（本單新增）**：**任何删行之前**先
  *     `await ops.ensureCollection(ops.COLLECTIONS.adminAudit)`（建集只在 `ops.js` 内做；
  *     **不新造集合名** —— 名称仍只活在 `ops.js::COLLECTIONS`，规范在册 §3.33.3 第 14 項 /
  *     AC-373）。抛错 ⇒ **直接 `STORAGE_UNAVAILABLE` ＋ 零写入**（此时尚未删任何行）；
  *     成功（`created` / `exists`）才继续删行确定序 —— **「審計載體沒有 ⇒ 就不刪」**。
+ *  ⑩ **静默截断显式化 / 请求批量化 / 回执判据统一（2026-11-15 优化单 P0-2 / P1-5 / P1-6）**：
+ *     · **判定类读面**（本印印面、全量印面共用分母、照片与勘误保留计数、同摘要去重）一律改
+ *       `ops.readAllGuarded` **翻页取全**（硬上限 20000 行）；`truncated === true` ⇒
+ *       `STORAGE_UNAVAILABLE` **结构化拒绝**（判据件 §P0-2：宁可拒绝，绝不拿漏行的集合给结论）。
+ *       旧护栏 `REFERENCE_SCAN_LIMIT`(1000) / `IMAGE_REFERENCE_LIMIT`(64) **已撤除**。
+ *     · **N+1 批量化**：影像行改 `id ∈ imageIds` **一次批量读 + `Map` 查表**（`imageRowsByIds`），
+ *       删行 / 删对象两个循环内**零读库**。
+ *     · **删后读回确认**：`deleted.images` / `deleted.faces` 不再「`deleteRow` resolve 即成功」——
+ *       三面按**同一标识**（`_id ∈ 已删清单`）**批量重读**，任一行仍在 / 读失败 ⇒ 结构化失败
+ *       （不报假成功）；确认点在审计行与编号释放**之前**。
+ *     · **不变**：op 名 / 载荷与回包键面 / `reason` 字面值 / 删除语义（保留照片与勘误行、
+ *       编号写 `released` 供复用）。
  *
  * 存储纪律：本文件**零集合名字面、零取库句柄字面**（一切读写经 `lib/ops.js` 的既有导出；
  * 集合名只活在 `ops.js` 的 `COLLECTIONS` 登记表与 `COUNTERS_COLLECTION` 导出面）；
+ * **唯一例外（P1-5 批量读）**：`rowsByFieldIn` 经既有导出 `ops.resolveDb()` 只取**查询算子
+ * `db.command.in`** 用于拼 `match`（不据此另建查询、不另立第二套行读 —— 查询仍交 `ops.readRows`；
+ * 无 `in` 算子 ⇒ 退逐 key 窄读）。
  * **所有字符串一律繁體**。
  * ============================================================================ *
  */
@@ -64,11 +79,21 @@ const SEAL_DELETE_FAILURE_KEYS = Object.freeze(['ok', 'reason', 'message'])
 /** 印章行三形态检索的单次读取上限（形如「命中即取首行」的窄读）。 */
 const SEAL_ROW_SCAN_LIMIT = 8
 
-/** 引用面 / 全量印面扫描护栏（单次读取上限；口径同仓内既有 1000 行护栏）。 */
-const REFERENCE_SCAN_LIMIT = 1000
+/* **P0-2（2026-11-15 优化单｜静默截断 → 显式）**：旧护栏 `REFERENCE_SCAN_LIMIT`（1000）与
+   `IMAGE_REFERENCE_LIMIT`（64）已**全线撤除** —— 它们正是「到顶即静默停」的来源：
+   · 引用汇总漏行 ⇒ 少删本印印面 / 少计保留照片与勘误；
+   · 同摘要判定漏行 ⇒ 误判「无他行共用」⇒ **误删他行仍在用的对象**。
+   判定类读面一律改 `ops.readAllGuarded` **翻页取全**，取不全（`truncated === true`）⇒ 结构化拒绝。 */
 
-/** 同摘要去重扫描护栏（口径同候選圖弃除面）。 */
-const IMAGE_REFERENCE_LIMIT = 64
+/** **判定类翻页取全的硬上限**（与 `lib/ops.js::readAllGuarded` 的默认 `SCAN_HARD_CAP` 同值：20000 行）。 */
+const SEAL_SCAN_CAP = 20000
+
+/** **判定类读面「取不全」的拒绝文案**：逐字同 `lib/ops.js::TRUNCATED_SCAN_MESSAGE`（本单**不碰
+ *  `ops.js`** ⇒ 同一字面在此登记；两处必须逐字一致，离线自检可直接对拍）。 */
+const TRUNCATED_SCAN_MESSAGE = '集合行數超出可校驗範圍（>20000 行），本次零寫入；請縮小範圍後重試。'
+
+/** **批量窄读**的单批键数（`where in` 一次查询；超出切批 ⇒ 读次仍为 O(n/100)，非逐行 N 次）。 */
+const ID_BATCH_SIZE = 100
 
 /** 摘要形态（64 位小写十六进制）。 */
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
@@ -147,25 +172,119 @@ function opsModule() {
  * 按「字段族 × 检索键族」取回**去重后**的引用行（印章 / 照片 / 勘误三面共用同一读法，
  * **不另造第二套**）。任一读抛错 ⇒ 原样上抛（由 `index.js` 转 `STORAGE_UNAVAILABLE`，
  * **绝不吞成「零行」**）。
+ *
+ * **P0-2（判定类）**：每一读点改 `ops.readAllGuarded` **翻页取全**（旧版单次 `limit: 1000`
+ * 到顶即静默停 ⇒ 本印印面可能漏删、保留照片 / 勘误可能少计）。取不全 ⇒ 回 `truncated: true`，
+ * 由调用方**结构化拒绝**（判定类宁可拒绝，绝不拿漏行的集合给结论）。
  * @param {object} ops `lib/ops.js` 模块
  * @param {string} collection 集合名（调用方一律经 `ops.COLLECTIONS` 取值）
  * @param {string[]} fields 检索字段族（兼容规范键与既落盘别名）
  * @param {string[]} keys 检索键族（该印的 `sid` / `stamp_id` / 行 `id` / 入参）
- * @param {number} limit 单次读取上限
- * @returns {Promise<object[]>} 去重后的行表
+ * @returns {Promise<{ rows: object[], truncated: boolean }>} 去重后的行表 ＋ 是否取不全
  */
-async function rowsReferencing(ops, collection, fields, keys, limit) {
+async function rowsReferencing(ops, collection, fields, keys) {
   const seen = new Map()
+  let truncated = false
   for (let k = 0; k < keys.length; k += 1) {
     for (let f = 0; f < fields.length; f += 1) {
-      const rows = await ops.readRows(collection, { [fields[f]]: keys[k] }, { limit })
-      rows.forEach((row) => {
+      const scan = await ops.readAllGuarded(collection, {
+        match: { [fields[f]]: keys[k] },
+        cap: SEAL_SCAN_CAP
+      })
+      if (scan.truncated) truncated = true
+      scan.rows.forEach((row) => {
         const key = rowKeyOf(row) || `anon-${seen.size}`
         if (!seen.has(key)) seen.set(key, row)
       })
     }
   }
-  return Array.from(seen.values())
+  return { rows: Array.from(seen.values()), truncated }
+}
+
+/* --------------------------------------------------------------------------- *
+  **批量窄读（P1-5｜循环外一次批量取）** —— 读仍是 `ops.readRows`，本文件零第二套行读
+ * --------------------------------------------------------------------------- */
+
+/**
+ * **`field ∈ values` 一次批量读**（`where in` 主路 ⇒ 逐 key 窄读退路）。
+ *
+ * 为什么需要退路：`db.command.in` 是**服务端算子**，注入式内存假体（离线自检）与个别 SDK
+ * 版本没有它。「一次批量取」不得以牺牲可测性为代价 —— 故主路失败即退**逐 key 窄读**；
+ * **真存储故障会在退路里再次抛出**（原样上抛，绝不吞成「零行」），故退路不掩错。
+ * @param {object} ops `lib/ops.js` 模块
+ * @param {string} collection 集合名
+ * @param {string} field 检索字段（`id` / `_id`）
+ * @param {string[]} values 检索键族（内部去重保序）
+ * @returns {Promise<object[]>} 行表（可能少于键数：无行即无行）
+ */
+async function rowsByFieldIn(ops, collection, field, values) {
+  const unique = uniqueTexts(values)
+  if (unique.length === 0) return []
+  const db = typeof ops.resolveDb === 'function' ? ops.resolveDb() : null
+  const command = db && db.command
+  if (command && typeof command.in === 'function') {
+    try {
+      const rows = await ops.readRows(collection, { [field]: command.in(unique) }, { limit: unique.length })
+      return Array.isArray(rows) ? rows : []
+    } catch (error) {
+      /* 退路（**不吞真故障**）：算子不被支持 / 形态不符 ⇒ 逐 key 窄读；
+         真故障会在下面这次读里再次抛出，仍由 `index.js` 转 `STORAGE_UNAVAILABLE`。 */
+    }
+  }
+  const rows = []
+  for (let index = 0; index < unique.length; index += 1) {
+    const one = await ops.readRows(collection, { [field]: unique[index] }, { limit: 1 })
+    one.forEach((row) => rows.push(row))
+  }
+  return rows
+}
+
+/**
+ * **本印全部影像行（循环外一次批量取；分块 `ID_BATCH_SIZE`）**。
+ *
+ * 旧写法逐影像 id 串行读（N 次往返）⇒ 现按 `id ∈ imageIds` 批量读、建 `Map` 查表，
+ * **循环内零读库**（`lib/ops.js` 的 P1-5 口径：`where in` 或一次读后 `Map` 查表）。
+ * @param {object} ops `lib/ops.js` 模块
+ * @param {string[]} imageIds 影像 id 表（去重保序）
+ * @returns {Promise<Map<string, object>>} 影像 id ⇒ 行（无行则不在表内）
+ */
+async function imageRowsByIds(ops, imageIds) {
+  const ids = uniqueTexts(imageIds)
+  const byId = new Map()
+  for (let start = 0; start < ids.length; start += ID_BATCH_SIZE) {
+    const chunk = ids.slice(start, start + ID_BATCH_SIZE)
+    const rows = await rowsByFieldIn(ops, ops.COLLECTIONS.images, 'id', chunk)
+    rows.forEach((row) => {
+      const key = text(row && row.id) || text(row && row._id)
+      if (key !== '' && !byId.has(key)) byId.set(key, row)
+    })
+  }
+  return byId
+}
+
+/**
+ * **删后读回确认（P1-6）**：按 `_id ∈ docIds` **批量重读**，回**仍存在**的行 id 表。
+ *
+ * 判据统一口径（样板 ＝ `lib/books.js::setImageBook`）：**不得以写回执判成功** ——
+ * `deleteRow` resolve 只说明「调用没抛」，不说明「行真没了」；本函数把「还看得见」逐条列出，
+ * 由调用方**结构化失败**（读抛错亦由调用方转失败）。空表 ⇒ 确认已消失。
+ * @param {object} ops `lib/ops.js` 模块
+ * @param {string} collection 集合名
+ * @param {string[]} docIds 已删行的文档 `_id` 表
+ * @returns {Promise<string[]>} 仍在的行 `_id`（空表 ＝ 全部确认已消失）
+ */
+async function remainingRowIds(ops, collection, docIds) {
+  const ids = uniqueTexts(docIds)
+  const remaining = []
+  for (let start = 0; start < ids.length; start += ID_BATCH_SIZE) {
+    const chunk = ids.slice(start, start + ID_BATCH_SIZE)
+    const rows = await rowsByFieldIn(ops, collection, '_id', chunk)
+    rows.forEach((row) => {
+      const id = text(row && row._id)
+      if (id !== '' && chunk.indexOf(id) !== -1 && remaining.indexOf(id) === -1) remaining.push(id)
+    })
+  }
+  return remaining
 }
 
 /* --------------------------------------------------------------------------- *
@@ -176,10 +295,11 @@ async function rowsReferencing(ops, collection, fields, keys, limit) {
  * **刪一枚印章（＋編號釋放）**（管理员面；服务端裁决）。
  * 顺序（**判定全部早于删行**）：① 载荷形态 → ② 封闭键面 → ③ 管理员门（任何读之前）
  * → ④ `seal_id` / `reason` 值域 → ⑤ 印章行三形态检索 → ⑥ 引用汇总（印面 / 影像 / 共用判定
- * / 照片与勘误只读计数 / 计数器读）→ ⑥⁺ **審計載體 preflight**（`ops.ensureCollection`；
- * **任何删行之前**；失败 ⇒ `STORAGE_UNAVAILABLE` ＋ 零写入）
+ * / 照片与勘误只读计数 / 计数器读；判定类读面**翻页取全**、取不全即结构化拒绝）→ ⑥⁺ **審計載體 preflight**
+ * （`ops.ensureCollection`；**任何删行之前**；失败 ⇒ `STORAGE_UNAVAILABLE` ＋ 零写入）
  * → ⑦ 删非共用影像行 ＋ 删对象 → ⑧ 删全部印面行
- * → ⑨ 删印章行 → ⑩ 审计行 → ⑪ **編號釋放**（最后一步）→ ⑫ 成功回包恰 4 键。
+ * → ⑨ 删印章行 → ⑨⁺ **删后读回确认**（`_id ∈ 已删清单` 批量重读；仍在 / 读失败 ⇒ 结构化失败）
+ * → ⑩ 审计行 → ⑪ **編號釋放**（最后一步）→ ⑫ 成功回包恰 4 键。
  * @param {object} payload 载荷（封闭两键 `seal_id` / `reason`）
  * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
  * @param {{adminPhone?:string, nowSeconds?:number}} [context]
@@ -249,29 +369,35 @@ async function deleteSeal(payload, identity, context) {
   const at = nowIso(context)
 
   /* ⑧ **只读**汇总（全部早于任何删行）：印面 / 照片计数 / 勘误计数 / 全量印面（共用判定）/
-     影像行 / 计数器（編號釋放的落点）。任一读失败 ⇒ 原样上抛 ⇒ 零写入。 */
-  const ownFaces = await rowsReferencing(
-    ops,
-    ops.COLLECTIONS.faces,
-    ['sealId', 'stamp_id'],
-    referenceKeys,
-    REFERENCE_SCAN_LIMIT
-  )
-  const photoRows = await rowsReferencing(
-    ops,
-    ops.COLLECTIONS.photos,
-    ['sealId', 'stamp_id'],
-    referenceKeys,
-    REFERENCE_SCAN_LIMIT
-  )
-  const correctionRows = await rowsReferencing(
+     影像行 / 计数器（編號釋放的落点）。任一读失败 ⇒ 原样上抛 ⇒ 零写入。
+     **P0-2（判定类，逐处归类）**：
+       · `ownFaces` —— 判定类：**本印要删哪些印面行** ＋ 编号释放的 `face_no` 来源；
+       · `allFaces` —— 判定类：**共用影像保护**（其它印面是否仍引用同影像）；
+       · `photoRows` / `correctionRows` —— 计数回报（`skipped.photos_kept` / `corrections_kept`，
+         永不驱动删行），本可容忍截断；但回包键面冻结（恰 4 键、`skipped` 三键）**无处安放
+         「僅統計前 N 行」提示** ⇒ 按判定类**一并拒绝**：宁可拒绝，也不让审计行上的「保留数」
+         与「上屏提示」互斥地失真（代价仅当单印引用 > 20000 行）。
+     三处均 `truncated === true` ⇒ 结构化拒绝，且**此刻尚未删任何行** ⇒ 「本次零寫入」为真。 */
+  const ownFaceScan = await rowsReferencing(ops, ops.COLLECTIONS.faces, ['sealId', 'stamp_id'], referenceKeys)
+  if (ownFaceScan.truncated) return failure(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+  const ownFaces = ownFaceScan.rows
+  const photoScan = await rowsReferencing(ops, ops.COLLECTIONS.photos, ['sealId', 'stamp_id'], referenceKeys)
+  if (photoScan.truncated) return failure(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+  const photoRows = photoScan.rows
+  const correctionScan = await rowsReferencing(
     ops,
     ops.COLLECTIONS.corrections,
     ['sealId', 'stamp_id'],
-    referenceKeys,
-    REFERENCE_SCAN_LIMIT
+    referenceKeys
   )
-  const allFaces = await ops.readRows(ops.COLLECTIONS.faces, {}, { limit: REFERENCE_SCAN_LIMIT })
+  if (correctionScan.truncated) return failure(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+  const correctionRows = correctionScan.rows
+  /* 全量印面（**共用判定的分母**）：旧写法 `readRows(faces, {}, { limit: 1000 })` 到顶即静默停 ⇒
+     超 1000 面后「其它印面」这一侧失真 ⇒ 可能把**仍被引用**的影像判成「不共用」而删掉对象。
+     判定类 ⇒ 翻页取全；取不全 ⇒ 拒绝（此时零写入）。 */
+  const allFaceScan = await ops.readAllGuarded(ops.COLLECTIONS.faces, { cap: SEAL_SCAN_CAP })
+  if (allFaceScan.truncated) return failure(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+  const allFaces = allFaceScan.rows
   const ownRowIds = new Set(ownFaces.map(rowKeyOf).filter((id) => id !== ''))
   const otherFaces = allFaces.filter((row) => {
     const rowId = rowKeyOf(row)
@@ -293,12 +419,11 @@ async function deleteSeal(payload, identity, context) {
     edges.forEach(pushImageId)
   })
 
-  /* 影像行逐个读（无行 ⇒ 无行可删；不计入任何删数 —— **不编造读数**）。 */
-  const imageRows = new Map()
-  for (let index = 0; index < imageIds.length; index += 1) {
-    const rows = await ops.readRows(ops.COLLECTIONS.images, { id: imageIds[index] }, { limit: 1 })
-    if (rows.length > 0) imageRows.set(imageIds[index], rows[0])
-  }
+  /* 影像行（**P1-5：循环外一次批量取**；无行 ⇒ 无行可删，不计入任何删数 —— **不编造读数**）。
+     旧写法 `for (imageIds) await readRows(images, { id }, { limit: 1 })` ＝ N 次串行往返
+     （一印 1 主图 ＋ 2 图边 ⇒ 常态 3 次，整章图多时线性增长）；现按 `id ∈ imageIds` 批量读、
+     建 `Map` 查表 ⇒ **读次 = ceil(n/100)**，且下面所有循环内**零读库**。 */
+  const imageRows = await imageRowsByIds(ops, imageIds)
 
   /* **共用判定**：影像 id 出现在**其它印面行**（`face_image_id` / `edge_image_ids`）⇒ 保留。 */
   const sharedIds = imageIds.filter((imageId) =>
@@ -358,7 +483,11 @@ async function deleteSeal(payload, identity, context) {
     corrections_kept: correctionRows.length
   }
 
-  /* ⑨-① 非共用影像行 ＋ 尽量删对象（**共用者保留**；删对象失败不阻断、如实计数）。 */
+  /* ⑨-① 非共用影像行 ＋ 尽量删对象（**共用者保留**；删对象失败不阻断、如实计数）。
+     **P1-5**：影像行已在上游**一次批量取**（`imageRowsByIds`）⇒ 本循环**零读库**（除同摘要判定外）。
+     **P1-6**：删行后不再「以 resolve 记成功」—— 逐条登记已删 `_id`，删行确定序走完后
+     **一次批量读回确认「行真没了」**（见 ⑨-④）。 */
+  const deletedImageDocIds = []
   for (let index = 0; index < imageIds.length; index += 1) {
     const imageId = imageIds[index]
     if (sharedIds.indexOf(imageId) !== -1) {
@@ -370,16 +499,25 @@ async function deleteSeal(payload, identity, context) {
     const docId = rowKeyOf(row) || imageId
     await ops.deleteRow(ops.COLLECTIONS.images, docId)
     deleted.images += 1
+    deletedImageDocIds.push(docId)
     const rawDigest = text(row.sha256)
     const digest = rawDigest.toLowerCase()
     if (DIGEST_PATTERN.test(digest)) {
-      /* 内容寻址去重保护：本行删后再读同摘要，**尚有其它行 ⇒ 只删行**（对象与他行原封）。 */
-      const others = await ops.readRows(
-        ops.COLLECTIONS.images,
-        { sha256: rawDigest },
-        { limit: IMAGE_REFERENCE_LIMIT }
-      )
-      const stillShared = others.some((other) => rowKeyOf(other) !== docId)
+      /* 内容寻址去重保护：本行删后再读同摘要，**尚有其它行 ⇒ 只删行**（对象与他行原封）。
+         **P0-2（判定类）**：旧版 `{ limit: 64 }` 到顶即静默停 ⇒ 同摘要行超 64 时可能漏见他行
+         ⇒ **误删他行仍在用的对象**（不可回退的数据丢失）。故改翻页取全；取不全 ⇒ 拒绝继续
+         （不再删对象、不报成功）。 */
+      const othersScan = await ops.readAllGuarded(ops.COLLECTIONS.images, {
+        match: { sha256: rawDigest },
+        cap: SEAL_SCAN_CAP
+      })
+      if (othersScan.truncated) {
+        return failure(
+          REASONS.STORAGE_UNAVAILABLE,
+          `同摘要影像行取不全（>20000 行）⇒ 無法確認物件是否仍被他行引用，故未刪物件、不報成功；影像行可能已刪且不可回退，請人工核對（sha256：${digest}）。`
+        )
+      }
+      const stillShared = othersScan.rows.some((other) => rowKeyOf(other) !== docId)
       if (!stillShared) {
         /* 删对象一律走**候选单点** `ops.deleteImageObjectsOfRow`（行内 `storage_key` 优先 →
            `sha` 派生后缀族逐个试 → 行内其它键、**命中一件即停**；失败不抛、不阻断）。
@@ -392,16 +530,51 @@ async function deleteSeal(payload, identity, context) {
     }
   }
 
-  /* ⑨-② 本印全部印面行。 */
+  /* ⑨-② 本印全部印面行（逐条登记已删 `_id`，供 ⑨-④ 读回确认）。 */
+  const deletedFaceDocIds = []
   for (let index = 0; index < ownFaces.length; index += 1) {
     const docId = rowKeyOf(ownFaces[index])
     if (docId === '') continue
     await ops.deleteRow(ops.COLLECTIONS.faces, docId)
     deleted.faces += 1
+    deletedFaceDocIds.push(docId)
   }
 
   /* ⑨-③ **最后**删印章行（照片行 / 勘误行一律保留：零删行）。 */
-  await ops.deleteRow(ops.COLLECTIONS.seals, rowKeyOf(sealRow) || sealId)
+  const sealDocId = rowKeyOf(sealRow) || sealId
+  await ops.deleteRow(ops.COLLECTIONS.seals, sealDocId)
+
+  /* ⑨-④ **删后读回确认（P1-6｜判据统一）** —— 样板 ＝ `lib/books.js::setImageBook`：
+     「写调用没抛」≠「行真没了」（`delete()` 对**不存在**的行也不抛、平台回 `deleted: 0`）。
+     故按**同一标识**（`_id ∈ 已删清单`）**批量重读**三面：
+       · 任一行**仍在** ⇒ 结构化失败（不报假成功）；`deleted.*` 只作诊断，不进回包；
+       · 读抛错 ⇒ 同样结构化失败（**没有确认**就不许说成功）。
+     位置：在 ⑩ 审计行 / ⑪ 编号释放**之前** ⇒ 确认未过则审计行不落盘（不留「成功审计」假账）。
+     文案如实：此刻**已有行被删**（不可回退）⇒ 不写「本次零寫入」。 */
+  let stillPresent
+  try {
+    stillPresent = {
+      images: await remainingRowIds(ops, ops.COLLECTIONS.images, deletedImageDocIds),
+      faces: await remainingRowIds(ops, ops.COLLECTIONS.faces, deletedFaceDocIds),
+      seals: await remainingRowIds(ops, ops.COLLECTIONS.seals, [sealDocId])
+    }
+  } catch (error) {
+    return failure(
+      REASONS.STORAGE_UNAVAILABLE,
+      `刪除已送出，但讀回校驗失敗（seal_id：${sealId}）⇒ 不報成功；部分行可能已刪除，請重新整理確認。（診斷：${
+        (error && error.message) || 'unknown'
+      }）`
+    )
+  }
+  const leftover = stillPresent.images.concat(stillPresent.faces, stillPresent.seals)
+  if (leftover.length > 0) {
+    return failure(
+      REASONS.STORAGE_UNAVAILABLE,
+      `刪除讀回未確認：${leftover.length} 行仍在（${leftover.slice(0, 5).join('、')}${
+        leftover.length > 5 ? ' 等' : ''
+      }；seal_id：${sealId}）⇒ 不報成功，請重試或人工核對。`
+    )
+  }
 
   /* ⑩ 审计行（`kind:'add'`，封闭键面）＋ ⑪ **編號釋放**（`kind:'set'`，doc 不带 `_id`）——
      两步同交 `ops.persist` 按序执行 ⇒ 「釋放」恒为**最后一步**。
@@ -459,5 +632,9 @@ module.exports = {
   SEAL_DELETE_FAILURE_KEYS,
   DIGEST_PATTERN,
   IMAGE_OBJECT_KEY_PATTERN,
+  /* **P0-2 口径面（只增键、供离线自检直接对拍）**：判定类翻页取全的硬上限 ＋ 取不全的拒绝文案
+     （后者必须与 `lib/ops.js::TRUNCATED_SCAN_MESSAGE` 逐字一致 —— 本单不碰 `ops.js`）。 */
+  SEAL_SCAN_CAP,
+  TRUNCATED_SCAN_MESSAGE,
   deleteSeal
 }
