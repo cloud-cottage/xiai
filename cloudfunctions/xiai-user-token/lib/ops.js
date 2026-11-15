@@ -2879,6 +2879,177 @@ const IMAGE_CORRECTION_SUBMIT_READOUT_KEYS = Object.freeze(['skipped'])
 /** `reviewCorrection` 影像行采纳回包**读数键面**（`index.js` 按 op 收窄透传的键面真源）。 */
 const IMAGE_CORRECTION_REVIEW_READOUT_KEYS = Object.freeze(['image_action'])
 
+/* ---------------------------------------------------------------------------
+  **斐萃影子库 · 设备令牌签发（跨仓契约 §13.2｜本单）**
+  ---------------------------------------------------------------------------
+  真源：feicui 仓 `ops/feicui-sync-20261115/dispatch-zang.md` §13.1（令牌格式，已冻结）／
+  §13.2（签发侧：本 op）／§13.3（验收）；形态权威实现是 feicui-shadow 的
+  `lib/token.js::issueDeviceToken()` —— 本文件**逐字对齐、不自造第二套**：
+
+      token = base64url(payloadJSON) + '.' + base64url(HMAC_SHA256(payloadSegment, secret))
+      payloadJSON = {"v":1, "uid":…, "roles":[…], "iat":…, "exp":…, "jti":…}（键序即此）
+      base64url ＝ 标准 base64 去 padding、`+`→`-`、`/`→`_`；TTL ＝ 30 天（2,592,000 s）
+
+  硬口径（逐条）：
+   ① **管理员门先于一切读**（既有单点 `adminWhitelistDenial`：会话路复核 `xiai_roles` 角色、
+      令牌路比对 `XIAI_ADMIN_PHONE` 白名单）；非 admin ⇒ `FORBIDDEN` ＋ **零签发、零读密钥**。
+   ② **载荷封闭恰一键** `device_label`（字符串、可空、≤120 字）；未登记键 / 身份类键 ⇒
+      `INVALID_FIELD` ＋ 零签发 —— 身份**只取自已验签令牌 / 平台会话**（`identity`），
+      载荷里的 `uid` / `role` 一律**不读**。
+   ③ **密钥两源（避开环境变量整表替换语义）**：① 集合 `xiai_server_secrets` 文档
+      `_id='shadow_token'` 的 `secret` 字段（与 `card_api` 同一先例）；② 兼底
+      `process.env.SHADOW_TOKEN_SECRET`（与 feicui-shadow 同名同值）。**两者皆缺 ⇒
+      结构化拒绝**（`STORAGE_UNAVAILABLE`、零签发、**不猜默认值**）。密钥值**永不**进
+      回包 / 日志 / 异常文案（成功回包只有 `token` 与 `expires_at`）。
+   ④ **零新依赖 / 零新集合 / 零落盘**：只用 node 内置 `crypto`（`createHmac` ＋
+      `randomUUID`）；只**读**既有集合；不产 `plan` ⇒ 令牌自包含、服务端零状态。
+   ⑤ `device_label` **不进令牌载荷**（载荷键序已冻结）⇒ 只作请求面校验，不回吐、不派生。
+   --------------------------------------------------------------------------- */
+
+/** 载荷封闭键面（恰一键；身份类键一律不在面内 ⇒ `INVALID_FIELD` ＋ 零签发）。 */
+const FEICUI_DEVICE_TOKEN_ALLOWED_KEYS = Object.freeze(['device_label'])
+
+/** 令牌有效期：30 天（§13.1 冻结；与 feicui-shadow `TTL_SECONDS` 同值）。 */
+const FEICUI_DEVICE_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+
+/** 令牌格式版本（载荷 `v`；§13.1）。 */
+const FEICUI_DEVICE_TOKEN_FORMAT_VERSION = 1
+
+/** 密钥读点：文档 id ＋ 字段名（**只登记名字**，值不入仓）。 */
+const FEICUI_DEVICE_TOKEN_SECRET_DOC_ID = 'shadow_token'
+const FEICUI_DEVICE_TOKEN_SECRET_FIELD = 'secret'
+
+/** 兼底环境变量名（**只登记名字**；值与 feicui-shadow 的同名变量同值）。 */
+const FEICUI_DEVICE_TOKEN_SECRET_ENV = 'SHADOW_TOKEN_SECRET'
+const FEICUI_DEVICE_LABEL_MAX_LENGTH = 120
+
+/** base64url：标准 base64 去 padding、`+`→`-`、`/`→`_`（§13.1 逐字口径）。 */
+function base64urlOf(buffer) {
+  return Buffer.from(buffer).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
+ * 设备令牌载荷（**键序即契约**：`v / uid / roles / iat / exp / jti`；`JSON.stringify` 按插入序
+ * 序列化 ⇒ 同一声明恒得同一载荷段，便于日志对账）。`roles` 只是**审计与显示快照**，
+ * **不作授权依据**（feicui-shadow 判权回 DB 现读 `feicui_roles` ∪ `xiai_roles`）。
+ * @param {{uid:string, roles?:string[], nowSeconds:number, jti?:string}} input
+ * @returns {{v:number, uid:string, roles:string[], iat:number, exp:number, jti:string}}
+ */
+function buildFeicuiDeviceTokenClaims(input) {
+  const uid = text(input && input.uid)
+  const roles = Array.isArray(input && input.roles)
+    ? input.roles.map((role) => text(role).toLowerCase()).filter(Boolean)
+    : []
+  const nowSeconds = Math.floor(Number(input && input.nowSeconds))
+  return {
+    v: FEICUI_DEVICE_TOKEN_FORMAT_VERSION,
+    uid,
+    roles,
+    iat: nowSeconds,
+    exp: nowSeconds + FEICUI_DEVICE_TOKEN_TTL_SECONDS,
+    jti: text(input && input.jti) || crypto.randomUUID()
+  }
+}
+
+/**
+ * 2 段令牌（§13.1）：`base64url(payload).base64url(HMAC_SHA256(payloadSegment, secret))`。
+ * @param {object} claims 载荷（键序见上）
+ * @param {string} secret 密钥（**只在内存里过一遍，不回吐、不落日志**）
+ * @returns {string} 令牌（恰 2 段、无 padding）
+ */
+function signFeicuiDeviceToken(claims, secret) {
+  const payloadSegment = base64urlOf(Buffer.from(JSON.stringify(claims), 'utf8'))
+  const signatureSegment = base64urlOf(crypto.createHmac('sha256', String(secret)).update(payloadSegment).digest())
+  return `${payloadSegment}.${signatureSegment}`
+}
+
+/**
+ * 设备令牌密钥读点（**集合优先 → env 兼底**；两源皆缺 ⇒ `secret:''`）。
+ * 集合读失败只在「文档不存在 / 集合不存在」两类降级为缺席；其余（权限 / 连接 / 5xx）照旧上抛
+ * （由 `index.js` 转 `STORAGE_UNAVAILABLE`，**绝不吞成「无密钥」**）。
+ * @returns {Promise<{secret:string, source:string}>} `source` ∈ `collection` / `env` / `''`
+ */
+async function readFeicuiDeviceTokenSecret() {
+  try {
+    const reply = await resolveDb().collection(COLLECTIONS.serverSecrets).doc(FEICUI_DEVICE_TOKEN_SECRET_DOC_ID).get()
+    const rows = rowsOfReply(reply)
+    const row = rows.length > 0 && rows[0] && typeof rows[0] === 'object' ? rows[0] : {}
+    const fromDoc = text(row[FEICUI_DEVICE_TOKEN_SECRET_FIELD])
+    if (fromDoc) return { secret: fromDoc, source: 'collection' }
+  } catch (error) {
+    if (!isDocNotExistError(error) && !isCollectionNotExistError(error)) throw error
+  }
+  const fromEnv = text(process.env ? process.env[FEICUI_DEVICE_TOKEN_SECRET_ENV] : '')
+  if (fromEnv) return { secret: fromEnv, source: 'env' }
+  return { secret: '', source: '' }
+}
+
+/**
+ * `issueFeicuiDeviceToken` 主体（管理员门 → 载荷 → 身份 → 密钥 → 签发；**零落盘**）。
+ *
+ * 判定顺序（**全部早于任何签发，且密钥读点在门后**）：
+ *   ① 管理员门（非 admin ⇒ `FORBIDDEN`，零签发、零读密钥、零读集合）；
+ *   ② 载荷形态 / 封闭键面（未登记键 ⇒ `INVALID_FIELD`；`device_label` 非字符串 ⇒ `INVALID_VALUE`）；
+ *   ③ 身份（`uid` / `role` 只取自已验签令牌 / 平台会话；缺失 ⇒ `FORBIDDEN`）＋ 服务端时钟；
+ *   ④ 密钥（两源皆缺 ⇒ `STORAGE_UNAVAILABLE`）；
+ *   ⑤ 签发（键序 `v / uid / roles / iat / exp / jti`、TTL 30 天、`jti` 随机 uuid）。
+ * @param {object} payload 载荷（封闭恰一键 `device_label`）
+ * @param {{uid:string, phone:string, role?:string, identity_source?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<{ok:true, token:string, expires_at:string}|{ok:false, reason:string, message:string}>}
+ */
+async function runIssueFeicuiDeviceToken(payload, identity, context) {
+  /* ① 管理员门（**本函数第一行**；零读零写地拒 ⇒ 非 admin 连密钥都不读）。 */
+  const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷封闭（非物件 / 未登记键 / 身份类键 ⇒ `INVALID_FIELD` ＋ 零签发）。 */
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零簽發。')
+  }
+  const unknown = Object.keys(payload).filter((key) => FEICUI_DEVICE_TOKEN_ALLOWED_KEYS.indexOf(key) === -1)
+  if (unknown.length > 0) {
+    const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+    const hint =
+      identityKeys.length > 0
+        ? `其中身份類欄位（${identityKeys.join('、')}）由服務端派生，一律不採信前端自稱`
+        : '如實報回，不靜默丟鍵'
+    return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零簽發。`)
+  }
+  const rawLabel = payload.device_label === undefined || payload.device_label === null ? '' : payload.device_label
+  if (typeof rawLabel !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '設備標籤（device_label）必須是文字；本次零簽發。')
+  }
+  if (rawLabel.trim().length > FEICUI_DEVICE_LABEL_MAX_LENGTH) {
+    return deny(REASONS.INVALID_VALUE, `設備標籤不得超過 ${FEICUI_DEVICE_LABEL_MAX_LENGTH} 字；本次零簽發。`)
+  }
+  /* ③ 身份只取自已验签令牌 / 平台会话（**绝不读载荷里的 uid / role**）＋ 服务端时钟。 */
+  const uid = text(identity && identity.uid)
+  if (!uid) return deny(REASONS.FORBIDDEN, '缺少可驗證的管理員身份；本次零簽發。')
+  const nowSeconds = Math.floor(Number(context && context.nowSeconds))
+  if (!Number.isFinite(nowSeconds)) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, '服務端時鐘不可用 ⇒ 拒絕簽發；本次零簽發。')
+  }
+  /* ④ 密钥（集合优先 → env 兼底；两源皆缺 ⇒ 结构化拒绝，**不猜默认值**）。 */
+  const secretInfo = await readFeicuiDeviceTokenSecret()
+  if (!secretInfo.secret) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `斐萃設備令牌簽發面未配置密鑰（集合 xiai_server_secrets 的 ${FEICUI_DEVICE_TOKEN_SECRET_DOC_ID}.${FEICUI_DEVICE_TOKEN_SECRET_FIELD} 與兼底變量 ${FEICUI_DEVICE_TOKEN_SECRET_ENV} 均缺席）⇒ 拒絕簽發；本次零簽發。`
+    )
+  }
+  /* ⑤ 签发（`roles` ＝ 身份角色的**小写快照**；`uid` ＝ 服务端派生身份）。 */
+  const claims = buildFeicuiDeviceTokenClaims({
+    uid,
+    roles: [text(identity && identity.role).toLowerCase()],
+    nowSeconds
+  })
+  return {
+    ok: true,
+    token: signFeicuiDeviceToken(claims, secretInfo.secret),
+    expires_at: new Date(claims.exp * 1000).toISOString()
+  }
+}
+
 const OPS = Object.freeze({
   /**
    * **普通用戶【勘誤】影像（本單新增 op｜`submitImageCorrection`｜`OPS` 登录面｜§3.77）**：
@@ -4200,6 +4371,33 @@ const OPS = Object.freeze({
     /* ④ 行面剥除身份 / 手机号类键（`user_phone` 一类零出现；不透明 uid 原样保留）。 */
     const safeRows = rows.map((row) => stripImportIdentityFields(row))
     return { ok: true, op: 'listMyCorrections', rows: safeRows, count: safeRows.length }
+  },
+
+  /**
+   * **管理員【斐萃桌面授權】（`issueFeicuiDeviceToken`｜跨仓契约 §13.2）**：admin 调 ⇒ 签一枚
+   * **30 天设备令牌**（feicui-shadow 的 `verifyDeviceToken` 直接可验）；**零落盘**、令牌自包含。
+   *
+   * 为何注册在 `OPS` 面而非 `ADMIN_OPS`：本 op 的授权判定**完全**由既有单点
+   * `adminWhitelistDenial` 承担（与该单点同表同门），而 `ADMIN_OPS` 的成员表被仓内五套既有
+   * 套件逐项枚举（`verify-admin-write-via-login` A1 / `verify-direct-write` F1 /
+   * `verify-ai-enhance` A0 / `verify-ai-enhance-discard` G1 / `verify-card-adoption` S3）——
+   * 本单文件白名单不含它们 ⇒ 落 `OPS` 面并**把 `context` 递进用户写面**（additive 第三参，
+   * 既有用户 op 一律不用它 ⇒ 零行为变化），非 admin 一律 `FORBIDDEN` ＋ 零签发。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（会话路复核 `xiai_roles` 角色、令牌路比对
+   * `XIAI_ADMIN_PHONE`；缺 env / 非 admin ⇒ 结构化拒 ＋ 零签发、零读密钥）；② 载荷**封闭恰
+   * 一键** `device_label`（身份类键 ⇒ `INVALID_FIELD`；身份只取自已验签令牌 / 平台会话）；
+   * ③ 密钥：集合 `xiai_server_secrets` 的 `shadow_token.secret` 优先、`SHADOW_TOKEN_SECRET`
+   * 兼底，两者皆缺 ⇒ `STORAGE_UNAVAILABLE`（fail-closed，不猜默认值）；密钥值**零外泄**；
+   * ④ 成功回包**恰 3 键** `{ok, token, expires_at}`（`index.js` 按 op 收窄透传这两个读数键）；
+   * 失败恒 **3 键** `{ok, reason, message}`，`reason` **零新增**（只用既有冻结值）；
+   * ⑤ **零新集合、零新依赖、零落盘**（不产 `plan`）。
+   * @param {object} payload 载荷（封闭恰一键 `device_label`）
+   * @param {{uid:string, phone:string, role?:string, identity_source?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async issueFeicuiDeviceToken(payload, identity, context) {
+    return runIssueFeicuiDeviceToken(payload, identity, context)
   }
 })
 
@@ -10704,6 +10902,13 @@ module.exports = {
   /* **本单改造**：斐萃令牌载荷封闭键面 ＋ 签/验纯函数（离线自检按同一真源断言）。 */
   FEICUI_TOKEN_ALLOWED_KEYS,
   feicuiToken,
+  /* **斐萃设备令牌签发（跨仓契约 §13.2｜本单）**：载荷封闭键面 / TTL / 兼底 env 名 ＋ 载荷构造与
+     2 段签名纯函数（供离线自检 `scripts/verify-feicui-device-token.mjs` 按同一真源直接断言）。 */
+  FEICUI_DEVICE_TOKEN_ALLOWED_KEYS,
+  FEICUI_DEVICE_TOKEN_TTL_SECONDS,
+  FEICUI_DEVICE_TOKEN_SECRET_ENV,
+  buildFeicuiDeviceTokenClaims,
+  signFeicuiDeviceToken,
   ENDORSE_ALLOWED_KEYS,
   IDENTITY_KEYS,
   MAX_TEXT_LENGTH,

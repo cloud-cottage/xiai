@@ -177,6 +177,32 @@ function pickAiEnhanceReadouts(op, opResult) {
   return picked
 }
 
+/* ---------------------------------------------------------------------------
+ * **斐萃设备令牌签发读数面（跨仓契约 §13.2｜本单；additive 透传白名单）**
+ * `issueFeicuiDeviceToken` 成功回包恰 3 键 `{ok, token, expires_at}` —— 其中 `token` /
+ * `expires_at` 两键由本白名单**按 op 收窄**透传（前端的「复制 / 发起本地授权」两个动作要用）。
+ * **其余任何 op 一律零透传**（含登录签发面自己的 `token` ⇒ 一个都不外泄）。
+ * --------------------------------------------------------------------------- */
+const FEICUI_DEVICE_TOKEN_READOUT_KEYS = Object.freeze(['token', 'expires_at'])
+
+/**
+ * **§13.2 读数面挑拣（纯函数，供 `scripts/verify-feicui-device-token.mjs` 离线断言）**：
+ * 仅当 `op === 'issueFeicuiDeviceToken'` 时按白名单逐键挑出 `opResult` **真有**的键
+ * （`hasOwnProperty`）；**其余任何 op 一律回 `null`**（调用方零叠键 ⇒ 既有回包逐字不变）。
+ * @param {string} op 已通过值域门的 op 名
+ * @param {object|null} opResult op 的成功结果对象
+ * @returns {object|null} 要叠进回包的键值对象；非本面 op ⇒ `null`
+ */
+function pickFeicuiDeviceTokenReadouts(op, opResult) {
+  if (op !== 'issueFeicuiDeviceToken') return null
+  const picked = {}
+  if (!opResult || typeof opResult !== 'object') return picked
+  for (const key of FEICUI_DEVICE_TOKEN_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) picked[key] = opResult[key]
+  }
+  return picked
+}
+
 /**
  * 结构化审计日志（**不含令牌原文 / 不含密钥 / 不含手机号原文**）。
  * **P2-8**：落点改为单点 `lib/log.js`（`log.info('audit', record)`）—— 记录面**逐键保留**
@@ -405,7 +431,11 @@ async function handleVerify(event, config, callContext) {
   let opResult = null
   try {
     opResult = userValidator
-      ? await userValidator(event.payload, identity)
+      /* **跨仓契约 §13.2（本单）**：`context` 作为**additive 第三参**递进用户写面 ——
+         既有用户 op 一律只声明 `(payload, identity)` ⇒ **零行为变化**；仅
+         `issueFeicuiDeviceToken` 用它取 `adminPhone`（既有管理员单点
+         `adminWhitelistDenial` 的令牌路判据）与 `nowSeconds`（服务端时钟）。 */
+      ? await userValidator(event.payload, identity, context)
       : await adminValidator(event.payload, identity, context)
   } catch (error) {
     /* 读私有行失败（网络 / 内部）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**。 */
@@ -982,6 +1012,18 @@ if (op === 'searchBookImages') {
     if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
   }
 }
+/* **斐萃设备令牌签发读数面（additive 透传｜**按 op 收窄**｜跨仓契约 §13.2｜本单）**：
+   `token` / `expires_at` **僅當 `op === 'issueFeicuiDeviceToken'` 且 `opResult` 確有該鍵時**
+   才逐字疊進回包（前端拿它「複製」或「發起本地授權」）；**其餘任何 op 一律不透傳這 2 個鍵**
+   （即使 `opResult` 意外帶同名鍵 —— 例如登錄簽發面自己的 `token` —— 亦一個都不外泄）
+   ⇒ 既有回包**逐字不變**（序列化後亦不新增鍵）；失敗回包（`ok:false`）走上面的早退分支、
+   恒 3 鍵、零讀數鍵；本 op **不產 `plan`** ⇒ `plan` 零外傳。挑拣逻辑在纯函数
+   `pickFeicuiDeviceTokenReadouts`（白名单常量 `FEICUI_DEVICE_TOKEN_READOUT_KEYS`）。
+   既有字段一律不刪、不改。 */
+const feicuiDeviceTokenReadouts = pickFeicuiDeviceTokenReadouts(op, opResult)
+if (feicuiDeviceTokenReadouts) {
+  for (const key of Object.keys(feicuiDeviceTokenReadouts)) response[key] = feicuiDeviceTokenReadouts[key]
+}
 return response
 }
 
@@ -1134,3 +1176,7 @@ exports.ENV_NAMES = ENV_NAMES
 /* **§3.68 讀數面挑拣（纯函数）**：供 `scripts/verify-ai-enhance-wire.mjs` 离线直接断言。 */
 exports.pickAiEnhanceReadouts = pickAiEnhanceReadouts
 exports.AI_ENHANCE_READOUT_KEYS = AI_ENHANCE_READOUT_KEYS
+/* **§13.2 斐萃设备令牌读数面挑拣（纯函数）**：供 `scripts/verify-feicui-device-token.mjs`
+   离线直接断言（按 op 收窄 ⇒ 其余 op 零外泄）。 */
+exports.pickFeicuiDeviceTokenReadouts = pickFeicuiDeviceTokenReadouts
+exports.FEICUI_DEVICE_TOKEN_READOUT_KEYS = FEICUI_DEVICE_TOKEN_READOUT_KEYS

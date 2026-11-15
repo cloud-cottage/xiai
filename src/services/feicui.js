@@ -20,6 +20,13 @@ import { isAdmin, isLoggedIn } from '../data/session.js'
 export const FEICUI_FUNCTION_NAME = 'xiai-user-token'
 export const FEICUI_ISSUE_OP = 'issueFeicuiToken'
 
+/**
+ * **斐萃桌面授权**（设备令牌）op 名 —— 与 `lib/ops.js::OPS` 注册面逐字一致
+ * （跨仓契约 §13.2：admin only、TTL 30 天、回包恰 3 键 `{ok, token, expires_at}`）。
+ * 全 `src/**` 只在本文件出现（组件一律经下面的 `issueDeviceToken()` 动詞函数）。
+ */
+export const FEICUI_DEVICE_OP = 'issueFeicuiDeviceToken'
+
 /** 转发路由前缀（斐萃侧带 `Authorization: Feicui <token>` 打的就是它）。
  *  子路径迁移后对外公开的路由＝网关 `api/xiai` 下的 `/api/feicui/v1/*`（服务端内部
  *  路由段一字未改，前缀由 `cloudfunctions/xiai-web-api` 挂载时剥掉）。 */
@@ -133,4 +140,58 @@ export function remainingSeconds(expiresAt, nowMs) {
   if (!Number.isFinite(target)) return 0
   const now = Number.isFinite(nowMs) ? nowMs : Date.now()
   return Math.max(0, Math.round((target - now) / 1000))
+}
+
+/* ---------------------------------------------------------------------------
+   **斐萃桌面授權（設備令牌）** —— 跨仓契约 `dispatch-zang.md` §13（管理员入口）
+   ---------------------------------------------------------------------------
+   通道与 `issueToken` **同一条**（`xiai-user-token` 的 `action:'verify'` 信封），
+   入口契约逐字 `{action:'verify', op, payload}` —— **不是**把 op 名当 `action`。
+   硬口径（逐条）：
+     ① 载荷**封闭空对象** `{}`：本入口不收集任何字段（`device_label` 服务端可选，
+        UI 不传 ⇒ 服务端零歧义）；
+     ② 回包**恰 3 键** `{ok, token, expires_at}` —— 本层只挑这三键，**不多不少**；
+     ③ 失败原样透传服务端的 `{ok:false, reason, message}`（`FORBIDDEN` 就是
+        `FORBIDDEN`，不伪装成传输故障、不造兜底文案覆盖判定）；
+     ④ **本层零持久化**：不写本地存儲 / 會話存儲 / 瀏覽器資料庫 / cookie，
+        不進網址，不打日誌 —— 令牌只沿返回值上抛给调用方（组件内存持有）。
+*/
+export async function issueDeviceToken() {
+  if (!isLoggedIn.value) {
+    return { ok: false, reason: LOGIN_REQUIRED, message: '請先以管理員賬號登錄（未找到登錄會話）。' }
+  }
+  if (!isAdmin.value) {
+    return { ok: false, reason: NOT_ADMIN, message: '僅管理員可以簽發斐萃桌面授權。' }
+  }
+  const reply = await callCloudFunction(FEICUI_FUNCTION_NAME, {
+    action: 'verify',
+    op: FEICUI_DEVICE_OP,
+    payload: {}
+  })
+  /* 传输层失败（超时 / SDK / 网络）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装成 FORBIDDEN**。 */
+  if (!reply.ok) {
+    return {
+      ok: false,
+      reason: reply.reason || 'STORAGE_UNAVAILABLE',
+      message: reply.message || '斐萃桌面授權服務暫時不可用，請稍後再試。'
+    }
+  }
+  const result = reply.result || {}
+  if (result.ok !== true) {
+    return {
+      ok: false,
+      reason: typeof result.reason === 'string' && result.reason !== '' ? result.reason : 'STORAGE_UNAVAILABLE',
+      message: typeof result.message === 'string' && result.message !== '' ? result.message : '斐萃桌面授權簽發被拒絕。'
+    }
+  }
+  const token = String(result.token === undefined || result.token === null ? '' : result.token).trim()
+  if (token === '') {
+    /* 形状不可辨識（无令牌）⇒ 结构化拒绝；**不編造令牌**、调用方零上屏。 */
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '簽發回傳形狀不可辨識（無令牌）；請重試。' }
+  }
+  return {
+    ok: true,
+    token,
+    expires_at: String(result.expires_at === undefined || result.expires_at === null ? '' : result.expires_at)
+  }
 }

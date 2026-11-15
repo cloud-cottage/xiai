@@ -28,6 +28,7 @@ import {
   FEICUI_ROLES,
   FEICUI_TTL,
   FEICUI_TTL_OPTIONS,
+  issueDeviceToken,
   issueToken,
   remainingSeconds
 } from '../services/feicui.js'
@@ -372,6 +373,84 @@ async function onSaveUpstream() {
   upstreamForm.timeout_ms = fresh.timeout_ms || aiAccess.AI_LIMIT_RANGES.timeoutMs.def
   upstreamNotice.value = `已保存；服務端回報的金鑰遮罩：${fresh.key_mask || '（空）'}`
 }
+
+/* ===========================================================================
+   ④ 管理員區 —— 【斐萃桌面授權】卡片（跨倉契約 §13.2；條件渲染，非 CSS 隱藏）
+   ---------------------------------------------------------------------------
+   點【簽發設備令牌】⇒ 經服務層 `issueDeviceToken()`（`{action:'verify', op, payload:{}}`）
+   取得一枚 30 天設備令牌，斐萃桌面版憑它在本地寫入授權文件。
+
+   安全硬約束（逐條）：
+     · 令牌**只保存在本組件的一個 ref**（`deviceToken`）—— 不落任何前端持久層
+       （本地存儲 / 會話存儲 / 瀏覽器資料庫 / cookie）、不進網址（query / hash）、
+       不打日誌；頁面重新整理即重新申請（服務端零落盤，舊令牌只能被新令牌覆寫）；
+     · 每次請求**先清舊值**再發 ⇒ 失敗路徑**零令牌上屏**（不會殘留上一枚）；
+     · 非管理員：入口本身不渲染（`v-if="admin"`），並在動作首行前置短路、零請求。
+   =========================================================================== */
+const deviceBusy = ref(false)
+const deviceError = ref('')
+const deviceCopied = ref(false)
+/** **令牌唯一持有處**：`{token, expires_at}`（成功回包恰 3 鍵，`ok` 不外存）。 */
+const deviceToken = ref(null)
+
+/** 服務端 reason → 可讀繁體提示（**只作前綴；服務端 message 恆原樣並列上屏**）。 */
+const DEVICE_REASON_HINTS = Object.freeze({
+  FORBIDDEN: '權限不足：僅管理員可以簽發斐萃桌面授權。',
+  NOT_ADMIN: '僅管理員可以簽發斐萃桌面授權。',
+  LOGIN_REQUIRED: '請先登錄後再申請桌面授權。',
+  STORAGE_UNAVAILABLE: '雲端暫時不可用，請稍後再試。',
+  TIMEOUT: '請求逾時，請稍後再試。'
+})
+
+/** 失敗文案：hint ＋ 服務端 message（**不含任何令牌片段**；內部細節只到 reason / message）。 */
+function deviceErrorText(reply) {
+  const reason = String((reply && reply.reason) || '')
+  const hint = DEVICE_REASON_HINTS[reason] || ''
+  const message = String((reply && reply.message) || '').trim()
+  if (hint && message) return `${hint}（服務端：${message}）`
+  if (hint) return hint
+  if (message) return message
+  return '簽發失敗（未取得可讀原因）；請稍後再試。'
+}
+
+async function onIssueDeviceToken() {
+  if (!admin.value) return /* 非管理員：零請求（前端前置；服務端另有獨立門） */
+  if (deviceBusy.value) return
+  deviceBusy.value = true
+  deviceError.value = ''
+  deviceCopied.value = false
+  deviceToken.value = null /* **先清** ⇒ 任何失敗路徑都不殘留舊令牌 */
+  const reply = await issueDeviceToken()
+  deviceBusy.value = false
+  if (!reply.ok) {
+    deviceError.value = deviceErrorText(reply)
+    return
+  }
+  deviceToken.value = { token: reply.token, expires_at: reply.expires_at }
+}
+
+async function onCopyDeviceToken() {
+  if (!deviceToken.value) return
+  try {
+    if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(deviceToken.value.token)
+    }
+    deviceCopied.value = true
+  } catch {
+    /* 剪貼板不可用 ⇒ 如實提示手動選取（不假裝已複製） */
+    deviceCopied.value = false
+    deviceError.value = '無法自動複製，請在上方文字框內全選後手動複製。'
+  }
+}
+
+/** 令牌**唯一清除點**：置 `null` 即從記憶體釋放。 */
+function clearDeviceToken() {
+  deviceToken.value = null
+  deviceCopied.value = false
+}
+
+/* 離開頁面亦清（記憶體釋放；不影響任何持久層）。 */
+onUnmounted(clearDeviceToken)
 </script>
 
 <template>
@@ -565,6 +644,47 @@ async function onSaveUpstream() {
           </div>
           <p v-if="upstreamNotice" class="hint" data-ai-upstream-notice>{{ upstreamNotice }}</p>
           <p v-if="upstreamError" class="error" role="alert">{{ upstreamError }}</p>
+        </div>
+      </section>
+
+      <!-- ================= 管理員區：【斐萃桌面授權】卡片（條件渲染，非 CSS 隱藏） ================= -->
+      <section v-if="admin" class="panel" data-feicui-device-panel>
+        <div class="panel__head">
+          <h2>斐萃桌面授權</h2>
+          <button class="btn" type="button" data-action="feicui-device-issue" :disabled="deviceBusy" @click="onIssueDeviceToken">
+            {{ deviceBusy ? '簽發中…' : deviceToken ? '重新簽發' : '簽發設備令牌' }}
+          </button>
+        </div>
+        <div class="panel__body">
+          <p class="hint">
+            簽發一枚 <b>30 天</b>的斐萃桌面設備令牌：斐萃桌面版拿它在<b>本機</b>寫入授權文件，
+            之後即以你的身份讀寫。令牌<b>只出現在本次頁面的記憶體</b>裡，重新整理即消失（需再簽一次）；
+            本頁不寫任何本地存儲、不把令牌放進網址、也不打日誌。
+          </p>
+
+          <!-- 令牌區塊（**唯一上屏處**；`deviceToken` 為 null ⇒ 整塊不渲染） -->
+          <div v-if="deviceToken" class="token-box" data-feicui-device-token-box>
+            <div class="token-box__head">
+              <span class="token-box__title">設備令牌（可選取）</span>
+              <button class="btn btn--ghost" type="button" data-action="feicui-device-copy" @click="onCopyDeviceToken">
+                {{ deviceCopied ? '已複製' : '複製' }}
+              </button>
+            </div>
+            <textarea class="token-box__token" data-feicui-device-token readonly rows="3" :value="deviceToken.token"></textarea>
+            <dl class="token-box__meta">
+              <div><dt>到期（本地時間）</dt><dd>{{ formatDateTime(deviceToken.expires_at) }}</dd></div>
+            </dl>
+            <p class="warn">
+              在 feicui 倉執行 <code>ops/feicui-sync-20261115/k-auth/save-token.py</code>（腳本會提示粘貼令牌）。
+              令牌是<b>憑證</b>：勿入版本庫、勿貼群、勿截圖外傳。
+            </p>
+            <div class="token-box__head">
+              <button class="btn btn--ghost" type="button" data-action="feicui-device-clear" @click="clearDeviceToken">關閉並清除</button>
+            </div>
+          </div>
+          <p v-else-if="!deviceBusy && !deviceError" class="hint">按右上角【簽發設備令牌】取得令牌；僅管理員可簽發。</p>
+
+          <p v-if="deviceError" class="error" role="alert">{{ deviceError }}</p>
         </div>
       </section>
 
