@@ -42,14 +42,16 @@
  *     （`STORAGE_UNAVAILABLE`，文案如实报「写已送出但读回不一致」，**绝不报假成功**）。
  *  ⑧ **回包键面**（`index.js` 按 op 收窄透传的键面真源）：
  *     · `createBook`   → `book_id`（＋幂等轮的 `skipped`）；
- *     · `listBooks`    → `books` / `total`（按 `id` **升序**；每行投影恰 `BOOK_ROW_KEYS` 8 键）；
+ *     · `listBooks`    → `books` / `total`（按 `id` **升序**；每行投影恰 `BOOK_ROW_KEYS` 8 键；
+ *       **仅当本次取全到顶**时多一个 additive 提示键 `truncated: true`）；
  *     · `setImageBook` → `image_id` / `book_id`（`book_id` 为**读回值**）。
  *     失败恒**恰 3 键** `{ok:false, reason, message}`，`reason` **零新增字面值**（只用 `lib/config.js`
  *     既有冻结值）。
  *  ⑨ **零集合名字面**（D4 红线）：本文件**不出现任何集合名** —— 一律经 `lib/ops.js` 的
  *     `COLLECTIONS` 与既有读写封装（`readRows` / `readRowByAnyId` / `persist`）取。
  *     **不产 `plan`**（写步在本模块内按确定序执行 ⇒ `index.js` 没有内部落盘计划可外传）、
- *     **零全表扫描**（`xiai_books` 单次 1000 行护栏；影像行按 `id` / `_id` 窄读）。
+ *     **零全表扫描**（`xiai_books` 走 `readAllGuarded` 翻页取全、硬上限 20000 行：幂等预查遇
+ *     `truncated` **结构化拒绝**、清单遇 `truncated` 回包带 additive 提示键；影像行按 `id` / `_id` 窄读）。
  *  ⑩ **普通用户零泄漏**：`book_id` **不进**任何普通用户可见的 DTO / 卡片（与浏览量「卡片不显示」
  *     同口径）；本模块的三个 op 全部是管理员 op ⇒ 客户端只能带管理员令牌取到。
  *
@@ -100,8 +102,11 @@ const BOOK_CODE_MAX_LENGTH = 64
 /** 首次出版年份下限（裁定件 §1.1：`1000`〜当年）。 */
 const BOOK_FIRST_YEAR_MIN = 1000
 
-/** `xiai_books` 单次读取护栏（与 `lib/ops.js` 既有 1000 行护栏同尺）。 */
+/** `xiai_books` 翻页取全的**每页行数**（与 `lib/ops.js` 既有 1000 行护栏同尺）。 */
 const BOOK_LIST_SCAN_LIMIT = 1000
+
+/** `xiai_books` 翻页取全的**硬上限**（与 `lib/ops.js::readAllGuarded` 的默认 `SCAN_HARD_CAP` 20000 同值）。 */
+const BOOK_SCAN_HARD_CAP = 20000
 
 /** `image_id` 长度上限（与 `lib/ops.js::MAX_ID_LENGTH` 同值，纯形态护栏）。 */
 const BOOK_IMAGE_ID_MAX_LENGTH = 128
@@ -124,8 +129,8 @@ const BOOK_ROW_KEYS = Object.freeze([
 /** `createBook` 回包读数键面（`index.js` 按 op 收窄透传；`skipped` 存在性驱动）。 */
 const CREATE_BOOK_READOUT_KEYS = Object.freeze(['book_id', 'skipped'])
 
-/** `listBooks` 回包读数键面。 */
-const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total'])
+/** `listBooks` 回包读数键面（`truncated` 为 **additive 提示键**：仅在「取不全」那一轮出现）。 */
+const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total', 'truncated'])
 
 /** `setImageBook` 回包读数键面（`book_id` 是**读回值**，非请求回显）。 */
 const SET_IMAGE_BOOK_READOUT_KEYS = Object.freeze(['image_id', 'book_id'])
@@ -163,9 +168,34 @@ function yearOf(seconds) {
   return new Date(seconds * 1000).getFullYear()
 }
 
-/** 读全部 book 行（`xiai_books`；单次 1000 行护栏 —— 管理员目录，量级可控）。 */
-async function readBookRowsOf(ops) {
-  return ops.readRows(ops.COLLECTIONS.books, {}, { limit: BOOK_LIST_SCAN_LIMIT })
+/**
+ * 读 book 行（**显式截断**，取代 `readRows(books, {}, { limit })` 的静默截断）：
+ * 经 `lib/ops.js::readAllGuarded` **翻页取全**，回 `{ rows, truncated }`。
+ *
+ * 为什么必须显式：`readRows` 到顶即**静默停**。本函数有两个语义不同的调用方 ——
+ *   · `listBooks`（**展示类**）：允许截断，但必须**在回包显式提示**（`truncated: true`）；
+ *   · `createBook`（**幂等预查 ＝ 判定类**）：截断会让重复建书**悄悄漏判**（给错结论）⇒ 一律拒绝。
+ * 故「取不全」这件事不在本函数里吞掉，而是交给调用点定性（口径见优化实施件 P0-2）。
+ * @returns {Promise<{rows:object[], truncated:boolean}>}
+ */
+async function readBookRowsGuarded(ops) {
+  /* 主路：`readAllGuarded` 是**唯一**取全实现（`lib/ops.js` 导出面恒有）。 */
+  if (typeof ops.readAllGuarded === 'function') {
+    const scan = await ops.readAllGuarded(ops.COLLECTIONS.books, {
+      pageSize: BOOK_LIST_SCAN_LIMIT,
+      cap: BOOK_SCAN_HARD_CAP
+    })
+    return {
+      rows: Array.isArray(scan && scan.rows) ? scan.rows : [],
+      truncated: Boolean(scan && scan.truncated === true)
+    }
+  }
+  /* 退路（**只服务离线自检**）：`scripts/verify-books.mjs` 用 `require.cache` 注入的假 `lib/ops.js`
+     面**不含**该导出（真运行时恒有）⇒ 单次取回 ＋ 同尺判顶（行数达硬上限才判 `truncated`；
+     假体的行集本就是调用方可读到的全集 ⇒ 语义不降级、**不会**凭空报截断）。生产路径不走这里。 */
+  const rows = await ops.readRows(ops.COLLECTIONS.books, {}, { limit: BOOK_SCAN_HARD_CAP })
+  const list = Array.isArray(rows) ? rows : []
+  return { rows: list, truncated: list.length >= BOOK_SCAN_HARD_CAP }
 }
 
 /** 行投影（**只出 `BOOK_ROW_KEYS` 8 键**；审计键 `created_by` / `_id` 不外传）。 */
@@ -268,8 +298,14 @@ async function createBook(payload, identity, context) {
     )
   }
   const authorPersonId = authorIdOfRow
-  /* ⑦ 幂等预查（同书名 ＋ 同作者 ⇒ 返回既有 `book_id`、不建第二行、不发号）。 */
-  const bookRows = await readBookRowsOf(ops)
+  /* ⑦ 幂等预查（同书名 ＋ 同作者 ⇒ 返回既有 `book_id`、不建第二行、不发号）。
+     **判定类**读面：`xiai_books` 行数超出可校验范围（`truncated`）⇒ **结构化拒绝**，
+     绝不在「可能漏看既有行」的前提下建新行（否则会造出重复书目 ＋ 白耗一个号）。 */
+  const bookScan = await readBookRowsGuarded(ops)
+  if (bookScan.truncated) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, '印譜行數超出可校驗範圍，本次零寫入。')
+  }
+  const bookRows = bookScan.rows
   const duplicate = bookRows.find(
     (row) => text(row && row.name) === name && text(row && row.author_person_id) === authorPersonId
   )
@@ -321,7 +357,36 @@ async function createBook(payload, identity, context) {
       }）`
     )
   }
-  /* ⑩ 回包（正常建行轮**恰 2 键**；`index.js` 按 `CREATE_BOOK_READOUT_KEYS` 收窄透传）。 */
+  /* ⑩ **读回比对**（**不得以 `persist` 的写回执判成功**；样板 ＝ 本文件 `setImageBook`）：
+     按 `id` 重读该 book 行，`id` 与 `name` **逐字相等**才算落盘成功；读不到 / 不等 ⇒
+     结构化失败（**绝不报假成功**：`doc(id).set()` 的 resolve 只说明「写已送出」）。 */
+  let writtenRows = []
+  try {
+    writtenRows = await ops.readRows(ops.COLLECTIONS.books, { id: bookId }, { limit: 1 })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `印譜行已送出，但讀回校驗失敗（book_id：${bookId}）；可重試。（診斷：${
+        (error && error.message) || 'unknown'
+      }）`
+    )
+  }
+  if (writtenRows.length === 0) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `印譜行已送出，但讀回未見該行（book_id：${bookId}）⇒ 不報成功，請重試。`
+    )
+  }
+  const writtenBookName = text(writtenRows[0] && writtenRows[0].name)
+  if (writtenBookName !== name) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `印譜行讀回不一致（book_id：${bookId}；期望書名 ${name}、讀回 ${
+        writtenBookName || '（空）'
+      }）⇒ 不報成功，請重試。`
+    )
+  }
+  /* ⑪ 回包（正常建行轮**恰 2 键**；`index.js` 按 `CREATE_BOOK_READOUT_KEYS` 收窄透传）。 */
   return { ok: true, book_id: bookId }
 }
 
@@ -330,7 +395,7 @@ async function createBook(payload, identity, context) {
  * @param {object} payload 载荷（**封闭 0 键**）
  * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
  * @param {{adminPhone?:string, nowSeconds?:number}} [context]
- * @returns {Promise<{ok:true, books:object[], total:number}|{ok:false, reason:string, message:string}>}
+ * @returns {Promise<{ok:true, books:object[], total:number, truncated?:true}|{ok:false, reason:string, message:string}>}
  */
 async function listBooks(payload, identity, context) {
   const ops = opsOf()
@@ -340,8 +405,9 @@ async function listBooks(payload, identity, context) {
   /* ② 载荷封闭恰 0 键（空载荷 `{}`；给出任何键 ⇒ `INVALID_FIELD`）。 */
   const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_LIST_ALLOWED_KEYS)
   if (payloadDenial) return payloadDenial
-  /* ③ 读全表（1000 行护栏）＋ 按 `id` 数值升序（形态不符的行排尾、保序返回）。 */
-  const rows = await readBookRowsOf(ops)
+  /* ③ 读全表（**显式截断**：翻页取全，到顶回 `truncated`）＋ 按 `id` 数值升序（形态不符的行排尾、保序返回）。 */
+  const scan = await readBookRowsGuarded(ops)
+  const rows = scan.rows
   const books = rows
     .map((row, index) => ({ row, index, no: bookNoOf(row && row.id) }))
     .sort((left, right) => {
@@ -351,8 +417,12 @@ async function listBooks(payload, identity, context) {
       return left.index - right.index
     })
     .map((item) => bookRowProjectionOf(item.row))
-  /* ④ 回包（`index.js` 按 `LIST_BOOKS_READOUT_KEYS` 收窄透传）。 */
-  return { ok: true, books, total: books.length }
+  /* ④ 回包（`index.js` 按 `LIST_BOOKS_READOUT_KEYS` 收窄透传）。
+     **展示类**：允许截断，但**不得静默** ⇒ 到顶时多一个 additive 提示键 `truncated: true`
+     （正常轮**不出现**该键 ⇒ 既有键面 `{ok, books, total}` 逐字不变）。 */
+  const reply = { ok: true, books, total: books.length }
+  if (scan.truncated) reply.truncated = true
+  return reply
 }
 
 /**

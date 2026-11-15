@@ -168,6 +168,8 @@ const SET_BASE_FACE_READOUT_KEYS = Object.freeze(['ok', 'face_id', 'previous_bas
 
 /** 章内 / 全库面行扫描护栏（口径同仓内既有 1000 行护栏）。 */
 const FACE_LAYER_FACE_SCAN_LIMIT = 1000
+/** **全库面行**翻页取全的硬上限（与 `lib/ops.js::readAllGuarded` 的默认 `SCAN_HARD_CAP` 20000 同值）。 */
+const FACE_LAYER_SCAN_HARD_CAP = 20000
 /** `stamp_id` / `image_id` / `face_id` 长度上限（与其余 id 类载荷同尺）。 */
 const FACE_LAYER_MAX_ID_LENGTH = 64
 
@@ -193,7 +195,13 @@ async function readEdgeFaceWindow(ops, after, windowSize) {
  * 章内面行读点（三 op 共用；`sealId` 为主、空集再按 `stamp_id` 兜底）
  * --------------------------------------------------------------------------- */
 
-/** 读该章全部面行（`sealId` → `stamp_id` 两形态；空集 ⇒ 空数组，**不抛**）。 */
+/**
+ * 读该章全部面行（`sealId` → `stamp_id` 两形态；空集 ⇒ 空数组，**不抛**）。
+ *
+ * **两读串行**（不是 N+1）：第二读只在第一读**空集**时才发生（因果依赖：先看 `sealId` 形态有没有行，
+ * 再决定要不要按 `stamp_id` 兜底）⇒ 不得并行、也无从合并（两种检索式不同）。
+ * **本读点仍带 1000 行护栏**（章内面行是**有界小集合**：一枚印的印面数量级是个位〜十位；口径见报告）。
+ */
 async function readChapterFaceRows(ops, stampId) {
   let rows = await ops.readRows(ops.COLLECTIONS.faces, { sealId: stampId }, { limit: FACE_LAYER_FACE_SCAN_LIMIT })
   if (rows.length === 0) {
@@ -203,14 +211,38 @@ async function readChapterFaceRows(ops, stampId) {
 }
 
 /**
+ * **全库面行读点（判定类；显式截断）** —— 旧写法 `readRows(faces, {}, { limit })` 到顶即**静默**只看
+ * 前 N 行 ⇒ 「影像是否仍被任何印面引用」的判定会**悄悄漏判**（漏判 ⇒ 误删仍被引用的影像）。
+ * 故走 `lib/ops.js::readAllGuarded` 翻页取全，并把「取不全」原样回给调用点**结构化拒绝**。
+ * @returns {Promise<{rows:object[], truncated:boolean}>}
+ */
+async function readAllFaceRowsGuarded(ops) {
+  const scan = await ops.readAllGuarded(ops.COLLECTIONS.faces, {
+    pageSize: FACE_LAYER_FACE_SCAN_LIMIT,
+    cap: FACE_LAYER_SCAN_HARD_CAP
+  })
+  return {
+    rows: Array.isArray(scan && scan.rows) ? scan.rows : [],
+    truncated: Boolean(scan && scan.truncated === true)
+  }
+}
+
+/**
  * **重算并写回该章 `face_count`**（A 的第 ③ 步）：读该章全部面行、数 `kind === 'FACE'` 的条数，
  * 写体**只含 `face_count` 一个键**（不碰其它字段、不写 `updated_at`）。
- * 章行不存在 / 写失败 ⇒ **抛错**（由调用方如实记 `failed`，不吞、不编造）。
- * @returns {Promise<number>} 写回的 `face_count`
+ * 章行不存在 / 写失败 / **读回不一致** ⇒ **抛错**（由调用方如实记 `failed`，不吞、不编造）。
+ *
+ * **回执判据（P1-6）**：写完之后**按同一检索式重读章行**，`face_count` 逐字等于写值才算成功 ——
+ * `expectAtLeast: 1` 只是「写的最小断言」（真 driver 读不出命中数时它**不生效**），
+ * 不得拿它判成功（样板 ＝ `lib/books.js::setImageBook`）。
+ * @param {object} ops `lib/ops.js` 导出面
+ * @param {string} stampId 章标识
+ * @param {object|null} [prefetchedSealRow] 已读到的章行（**批量预取用**：同章多行时省掉重复读）
+ * @returns {Promise<number>} 写回并**读回确认**的 `face_count`
  */
-async function rewriteFaceCountOfSeal(ops, stampId) {
-  const sealRow = await ops.readSealRowByAnyId(stampId)
-  if (sealRow === null) throw new Error(`SEAL_ROW_MISSING:${stampId}`)
+async function rewriteFaceCountOfSeal(ops, stampId, prefetchedSealRow) {
+  const sealRow = prefetchedSealRow === undefined ? await ops.readSealRowByAnyId(stampId) : prefetchedSealRow
+  if (!sealRow) throw new Error(`SEAL_ROW_MISSING:${stampId}`)
   const faces = await readChapterFaceRows(ops, stampId)
   const faceCount = faces.filter((row) => isFaceRow(row)).length
   const sealDocId = text(sealRow._id)
@@ -226,6 +258,12 @@ async function rewriteFaceCountOfSeal(ops, stampId) {
       }
     ]
   })
+  /* **读回比对**（同一检索式重读）：读不到 / `face_count` 不等 ⇒ 抛错（不上报假成功）。 */
+  const readback = await ops.readRows(ops.COLLECTIONS.seals, match, { limit: 1 })
+  const written = readback.length > 0 ? readback[0] : null
+  if (!written || Number(written.face_count) !== faceCount) {
+    throw new Error(`FACE_COUNT_READBACK_MISMATCH:${stampId}`)
+  }
   return faceCount
 }
 
@@ -316,7 +354,17 @@ async function migrateEdgeFaces(payload, identity, context) {
     /* `dry_run` ⇒ **零写**、`written` 恒 0（不得虚报）；回包仍恒恰 7 键。 */
     return { ok: true, scanned, eligible, written: 0, failed, samples, next_cursor: nextCursor }
   }
-  /* ⑤ 真写：逐行「改面行 → 重算该章 face_count」；单行失败不中断整批。 */
+  /* ⑤ 真写：逐行「改面行 → 重算该章 face_count」；单行失败不中断整批。
+     **N+1 批量化（P1-5）**：同一章在本窗口内可能有多条 EDGE 行 ⇒ 章行（`xiai_seals`）**每章只读一次**
+     （`Map<章标识, 章行>` 查表；章行本 op 不改 ⇒ 缓存不失效）。
+     **面行不缓存**：每迁一行 `face_count` 都变 ⇒ 必须写后重读（那是**语义**要求，不是漏批量化）。 */
+  const sealRowCache = new Map()
+  const sealRowOf = async (stampId) => {
+    if (sealRowCache.has(stampId)) return sealRowCache.get(stampId)
+    const row = await ops.readSealRowByAnyId(stampId)
+    sealRowCache.set(stampId, row)
+    return row
+  }
   for (const target of targets) {
     try {
       await ops.persist({
@@ -345,7 +393,7 @@ async function migrateEdgeFaces(payload, identity, context) {
       continue
     }
     try {
-      await rewriteFaceCountOfSeal(ops, target.sealId)
+      await rewriteFaceCountOfSeal(ops, target.sealId, await sealRowOf(target.sealId))
     } catch (error) {
       /* 面行已迁、章行计数未落 ⇒ **如实进 `failed`**（不谎称成功）。 */
       console.warn(
@@ -451,8 +499,14 @@ async function deleteWholeSealImage(payload, identity, context) {
       `該影像不屬於此印章（image_id：${imageId}；行上 stamp_id：${text(imageRow.stamp_id) || '（空）'}，載荷 stamp_id：${stampId}）；本次零寫入。`
     )
   }
-  /* ③-③ **未被任何面行引用**（`face_image_id` 等值 或 任一 `edge_image_ids` 含它）⇒ 才可删。 */
-  const allFaces = await ops.readRows(ops.COLLECTIONS.faces, {}, { limit: FACE_LAYER_FACE_SCAN_LIMIT })
+  /* ③-③ **未被任何面行引用**（`face_image_id` 等值 或 任一 `edge_image_ids` 含它）⇒ 才可删。
+     **判定类读面 ＋ 显式截断**：全库面行翻页取全；`truncated === true`（超硬上限）⇒ **结构化拒绝**
+     —— 宁可拒绝，也不在「可能没看到引用行」的前提下删图（旧写法到顶静默截断 ⇒ 漏判 ⇒ 误删）。 */
+  const faceScan = await readAllFaceRowsGuarded(ops)
+  if (faceScan.truncated) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, '印面行數超出可校驗範圍，本次零寫入。')
+  }
+  const allFaces = faceScan.rows
   const referencedByFace = allFaces.some((row) => referencedImageIdsOf(row).indexOf(imageId) !== -1)
   if (referencedByFace) {
     return deny(
@@ -470,6 +524,28 @@ async function deleteWholeSealImage(payload, identity, context) {
       `影像行刪除失敗（image_id：${imageId}）；對象未刪除、影像行仍在，可重試。（診斷：${
         text(error && error.message) || 'unknown'
       }）`
+    )
+  }
+  /* ④-② **读回比对**（**不得以 `deleteRow` 的 resolve 判成功**：引擎对「行不存在」回
+     `deleted: 0` 且**不抛错** ⇒ resolve 只说明「删已送出」）。按同一行标识重读影像行：
+     **读不到**才算真删；仍能读到 / 读回失败 ⇒ 结构化失败（**绝不报假成功**），且**不删对象**
+     —— 行还在时删对象会立刻造成「悬空图」（行指向已不存在的对象）。 */
+  const deleteMatch = text(imageRow._id) ? { _id: text(imageRow._id) } : { id: text(imageRow.id) || imageId }
+  let remaining = []
+  try {
+    remaining = await ops.readRows(ops.COLLECTIONS.images, deleteMatch, { limit: 1 })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `影像行刪除已送出，但讀回校驗失敗（image_id：${imageId}）；對象未刪除、請重試。（診斷：${
+        text(error && error.message) || 'unknown'
+      }）`
+    )
+  }
+  if (remaining.length > 0) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `影像行刪除未確認（image_id：${imageId}；讀回仍見該行）⇒ 對象未刪除，請重試。`
     )
   }
   const deletedObjects = await ops.deleteImageObjectsOfRow(imageRow)
@@ -616,7 +692,46 @@ async function setBaseFace(payload, identity, context) {
       `主印面切換失敗（face_id：${faceId}）⇒ 已把舊主印面回滾為 true、主印面未變，可重試。（診斷：${diagnosis}）`
     )
   }
-  /* ⑤ 成功恰 3 键。 */
+  /* ⑤ **读回比对**（**不得以 `persist` 的写回执判成功**；样板 ＝ `lib/books.js::setImageBook`）：
+     重读该章，必须**恰一枚** `is_primary === true` 且正是目标行 —— 否则「切主印面」的契约
+     （每章恰一枚）没达成（多 base / 零 base / 目标没 opening）⇒ 把目标关回 `false`、旧 base 还原
+     `true`（恢复调用前状态）后结构化失败。读回本身失败同按此处置（状态未知 ⇒ 宁可回滚到原状）。 */
+  let verifiedFaces = []
+  let verifyReadFailed = false
+  try {
+    verifiedFaces = await readChapterFaceRows(ops, stampId)
+  } catch {
+    verifyReadFailed = true
+  }
+  const verifiedBaseKeys = verifiedFaces.filter((row) => row && row.is_primary === true).map(rowKeyOf)
+  if (verifyReadFailed || verifiedBaseKeys.length !== 1 || verifiedBaseKeys[0] !== targetKey) {
+    const unrestored = []
+    try {
+      await writeFlagOf(faceRow, false)
+    } catch {
+      unrestored.push(targetKey)
+    }
+    for (const row of cleared) {
+      try {
+        await writeFlagOf(row, true)
+      } catch {
+        unrestored.push(rowKeyOf(row))
+      }
+    }
+    if (unrestored.length > 0) {
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `主印面切換讀回校驗未通過（face_id：${faceId}），且回滾未完全成功（未還原：${unrestored.join('、')}）⇒ 該章可能暫無主印面，請重放本操作自愈。`
+      )
+    }
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `主印面切換讀回校驗未通過（face_id：${faceId}；讀回 base：${
+        verifiedBaseKeys.length === 0 ? '（無）' : verifiedBaseKeys.join('、')
+      }）⇒ 已回滾到原狀（主印面未變），可重試。`
+    )
+  }
+  /* ⑥ 成功恰 3 键。 */
   return { ok: true, face_id: faceId, previous_base_face_id: previousBaseFaceId }
 }
 

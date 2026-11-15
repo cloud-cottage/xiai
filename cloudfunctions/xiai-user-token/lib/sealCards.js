@@ -91,6 +91,12 @@
  *     `image_storage_key`」时不发生（两样都齐 ⇒ 封面键可由面行直接派生，不必读影像行）。
  *   · **关键词 `q` 不新增任何读点**：它只是 `xiai_seals` 的 `where` 片段（`$or` 子句），
  *     与四维筛选同沉一次窗口读 ＋ 一次 `count()`；**绝不在服务端拉全表回内存过滤**。
+ *   · **查询次数不变、往返变短（P1-4）**：`count()` 只依赖已定型的 `sealMatch`，与
+ *     「窗口读 → 面读 → 影像读」那条因果链无依赖 ⇒ **与整条链并行发出**（2 路）；
+ *     每页少一个往返，读次数与命中集口径一字未改。
+ *   · **中间层只搬用得上的键（P2-9）**：窗口印章行按 `CARD_SEAL_PROJECTION_KEYS`、影像行按
+ *     `CARD_IMAGE_PROJECTION_KEYS` **当场收窄**（印文 / 转录 / 印主 / `bytes` /
+ *     容器事实字段不进内存）；**回包仍是那条 14 键卡片 DTO**，键名与取值规则一字未改。
  *   · `has_more` **不由客户端推算**：本轮多取 1 枚卡片（`limit + 1`）作为判据；窗口耗尽且无
  *     多余枚 ⇒ `false`。
  *
@@ -126,6 +132,28 @@ function rowsOfReply(reply) {
   if (data && Array.isArray(data.data)) return data.data
   if (Array.isArray(reply.list)) return reply.list
   return []
+}
+
+/**
+ * 行 ⇒ **投影子集**（P2-9：只留下游真读的键；缺键**不补** `undefined`）。
+ * 下游一律 `text(row[key])` / `Number(row[key])` 取用 ⇒ 缺键与空值同义，故「不补键」
+ * 既不放宽也不收紧任何判定（只减内存与 Map 里搬来搬去的字段）。
+ * @param {object} row 整行
+ * @param {Array<string>} keys 投影键面（见 `CARD_SEAL_PROJECTION_KEYS`）
+ * @returns {object} 新对象（**不改原行**）
+ */
+function projectRowOf(row, keys) {
+  if (!row || typeof row !== 'object') return row
+  const out = {}
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(row, key)) out[key] = row[key]
+  }
+  return out
+}
+
+/** 行数组投影（同一键面；非数组 ⇒ `[]`，**明确空集、不猜**）。 */
+function projectRowsOf(rows, keys) {
+  return (Array.isArray(rows) ? rows : []).map((row) => projectRowOf(row, keys))
 }
 
 /* --------------------------------------------------------------------------
@@ -288,6 +316,44 @@ const CARD_FACE_CANDIDATE_CHUNK = 400
 const CARD_IMAGE_BATCH_MAX = 60
 /** 退路读面（假体无 `command` / `orderBy` / `skip`）的单次扫描上限（**只服务离线自检**）。 */
 const CARD_FALLBACK_SCAN_CAP = 5000
+
+/**
+ * **投影键面（P2-9 传输瘦身；本文件内部约定，不是回包契约 —— 回包仍是 14 键卡片 DTO）**
+ * ============================================================================
+ * 列表读面把整行搬进内存之前先按这里收窄：下游（`cardDetailsOfSealRows` /
+ * `primaryMatches` / `coverKeysOf`）只读这些键，其余字段一律不进内存、也不随 Map 流转。
+ *   · 印章行：`sealKeyOf` 的四级取键（`stamp_id` → `sid` → `id` → `_id`）＋ 卡片四字段
+ *     （`seal_name` / `name` / `dynasty` / `category`）；印文 / 转录 / 印主等检索字段
+ *     （`seal_wen*` / `transcription` / `seal_yz*`）只在 DB 侧 `where` 用，**不必读回**；
+ *   · 影像行：`id` / `_id`（`image_id` 查表键）＋ 摘要 / 容器 / 像素尺寸 ＋ 封面派生两键
+ *     （`storage` / `storage_key`）—— `bytes` / `stamp_id` / `kind` / `seq` / `updated_at`
+ *     与影像的容器事实字段（`palette*` / `colorType` / `bitDepth` / `neutral`）**一概不搬**
+ *     （展示面零用途）。
+ * **面行不投影**：`primaryMatches` 以**面筛选键面**（当前的 `seal_type` / `face_style`，
+ * 与载荷封闭键面同源）动态取键 ⇒ 投影要与那张筛选表再耦一处，收益又只是几个标量字段，
+ * 得不偿失（面行本身不带任何配色 / 容器类大字段）。
+ * **新增消费键 ⇒ 必须同步加到这里**（否则投影后该键恒缺 ＝ 静默丢字段）。
+ */
+const CARD_SEAL_PROJECTION_KEYS = Object.freeze([
+  'stamp_id',
+  'sid',
+  'id',
+  '_id',
+  'seal_name',
+  'name',
+  'dynasty',
+  'category'
+])
+const CARD_IMAGE_PROJECTION_KEYS = Object.freeze([
+  'id',
+  '_id',
+  'sha256',
+  'mime',
+  'width',
+  'height',
+  'storage',
+  'storage_key'
+])
 
 /** 展示件 / 缩略图对象键的**唯一**派生处（形如 `xiai/images/<sha 前兩位>/<sha>.png`）。 */
 const CARD_OBJECT_KEY_PREFIX = 'xiai/images'
@@ -997,12 +1063,17 @@ async function cardDetailsOfSealRows(db, sealRows) {
   const imageById = new Map()
   if (pending.length > 0) {
     const unique = [...new Set(pending)].slice(0, CARD_IMAGE_BATCH_MAX)
-    const imageRows = await readOrderedWindow(db, ops.COLLECTIONS.images, {
-      match: {},
-      idField: 'id',
-      idIn: unique,
-      limit: unique.length
-    })
+    /* **影像行当场收窄**（P2-9）：只留 `CARD_IMAGE_PROJECTION_KEYS`，整行（`bytes` /
+       容器事实字段等展示无关键）既不进 `imageById`、也不在内存里多留一份。 */
+    const imageRows = projectRowsOf(
+      await readOrderedWindow(db, ops.COLLECTIONS.images, {
+        match: {},
+        idField: 'id',
+        idIn: unique,
+        limit: unique.length
+      }),
+      CARD_IMAGE_PROJECTION_KEYS
+    )
     for (const doc of imageRows) {
       const key = text(doc && doc.id) || text(doc && doc._id)
       if (key !== '') imageById.set(key, doc)
@@ -1125,18 +1196,34 @@ async function listSealCards(payload) {
   const positions = []
   let scanOffset = offset
   let exhausted = false
+  /* **P1-4 热路径并行化（2 路）**：`total` 的 `count()` 只依赖上面已定型的印章侧
+     `sealMatch`，与本轮「印章窗口读 → 该页面行 → 主印面影像行」这条**有因果链**
+     （面行按印章键取、影像行按主印面 `face_image_id` 取）**没有任何依赖** ⇒ 在页面起点
+     先发出去，与整条链并行跑完。改前是「窗口 → 面 → 影像 → 计数」四段串行；改后计数与
+     前三段重叠 ⇒ 每页少一个往返。`countRows` 自带「计数面不可用 ⇒ 有界读回计数」的退路，
+     两态都在这里落袋（`then` 双分支）⇒ 窗口读先抛时本 promise 也**不会**变成
+     unhandled rejection；错误留到最后 `await` 处原样抛出（与改前「先读页、后计数」同语义）。 */
+  const totalPending = countRows(db, ops.COLLECTIONS.seals, sealMatch).then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, error })
+  )
   /* **全态同一热度序**（`CARD_SEAL_SORT_KEYS`：`view_count desc → created_at desc → stamp_id desc`）
      ＋ 印章侧偏移窗口（`skip(offset) → limit(windowSize)`）。面筛选（`seal_type` / `face_style`）
      不再「先读面候选」，而是按裁定 §3 **反转为「先按热度读印章页 → 批量读该页 FACE 行 →
      按主印面命中过滤」**（热度序必须由印章侧决定）。窗口因子 / 上限 / 轮数沿用现值；
      候选未尽而轮数用尽 ⇒ `has_more` 如实为真，**绝不谎报「已到底」**。 */
   for (let round = 0; round < CARD_SEAL_WINDOW_ROUNDS && cards.length < wanted; round += 1) {
-    const sealRows = await readSortedOffsetWindow(db, ops.COLLECTIONS.seals, {
-      match: sealMatch,
-      sortKeys: CARD_SEAL_SORT_KEYS,
-      skip: scanOffset,
-      limit: windowSize
-    })
+    /* 印章窗口行**当场收窄**（P2-9）：只留 `CARD_SEAL_PROJECTION_KEYS`（本窗最多 180 行，
+       印文 / 转录 / 印主等大字段不再跟着窗口在内存里流转）。 */
+    const sealRows = projectRowsOf(
+      await readSortedOffsetWindow(db, ops.COLLECTIONS.seals, {
+        match: sealMatch,
+        sortKeys: CARD_SEAL_SORT_KEYS,
+        skip: scanOffset,
+        limit: windowSize
+      }),
+      CARD_SEAL_PROJECTION_KEYS
+    )
     if (sealRows.length === 0) {
       exhausted = true
       break
@@ -1165,7 +1252,9 @@ async function listSealCards(payload) {
      （服务端计数、不传行）。**零面章与未回填的历史章不计入**（本单修「共 1251 枚、只能加载
      1042 枚」的真因：`total` 曾把不可展示的零面章也算进去）。面维度筛选（`seal_type` /
      `face_style`）只决定 `rows` 与 `has_more`，仍不参与 `total`。 */
-  const total = await countRows(db, ops.COLLECTIONS.seals, sealMatch)
+  const totalReply = await totalPending
+  if (!totalReply.ok) throw totalReply.error
+  const total = totalReply.value
   return {
     ok: true,
     rows: pageRows,
@@ -1865,10 +1954,21 @@ async function suggestAuthors(payload) {
     /* `is_current` ＝ 该人是否为**当前这枚印面的作者引用**（由真源派生、不编造）。
        旧形态 `PR…` 先经本地 `card_id` 映射（候选的 `person_id` 是 CARD 主库编号）。 */
     currentPersonId = text(face.author_person_id)
+    /* **P1-4（2 路）**：下面两枚派生读都只吃**已读回的面行**，彼此**无因果依赖** ——
+       ① 旧形态 `PR…` 编号 ⇒ CARD 编号映射（读 `xiai_persons`）；
+       ② 回源取作者名（`faces.author` 空时读所属印章 `xiai_seals`）。
+       并行取后再组装；**只有两者都真会发生的形态才并行**（`PR…` 编号），其余形态仍是
+       一次读 —— 不为了并行凭空多打查询。 */
     if (currentPersonId !== '' && !isCardPersonId(currentPersonId)) {
-      currentPersonId = (await cardIdOfLocalPerson(db, currentPersonId)) || currentPersonId
+      const [mappedCardId, authorText] = await Promise.all([
+        cardIdOfLocalPerson(db, currentPersonId),
+        authorTextFromFaceOf(db, face)
+      ])
+      currentPersonId = mappedCardId || currentPersonId
+      queryRaw = authorText
+    } else {
+      queryRaw = await authorTextFromFaceOf(db, face)
     }
-    queryRaw = await authorTextFromFaceOf(db, face)
     if (queryRaw === '') {
       return deny(REASONS.MISSING_REQUIRED, '該印面與其所屬印章皆無作者名 ⇒ 無從匹配；本次零讀取。')
     }
@@ -2063,11 +2163,69 @@ async function repairAuthorPersonId(payload, identity, context) {
     }
   }
   /* ⑦ 印章级补条（**幂等**）：只补**读回确认已回填**的面；同 (印章, 印人, `kind`) 已有 ⇒ 零新增。 */
+  /* **P1-5**：预查原本在循环内逐目标 `await` 读 `xiai_seal_links`（N+1）⇒ 先按印章去重
+     批量预取一次（批宽 8，见 `prefetchSealLinkRowsOf`），循环内只查 `Map`、**零读库**；
+     写仍逐条串行（写后再读的判据不在这里，补条本身是幂等 `set`）。 */
+  const linkRowsBySeal = await prefetchSealLinkRowsOf(writtenTargets.map((target) => target.sealId))
   for (const target of writtenTargets) {
-    await ensureSealLinkOf(db, target, at)
+    await ensureSealLinkOf(db, target, at, linkRowsBySeal)
   }
   /* 回包恰 7 键；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`（不是最后一条被写的）。 */
   return { ok: true, scanned, eligible, matched, written, failed, next_cursor: nextCursor }
+}
+
+/**
+ * 印章级补条的**预查批宽**（同一印章一次读；**批内并行、批间串行**）。
+ * 8 路是保守上限：单次查询形态仍是既有的 `source_seal_id` 等值 ＋ `limit: 500`，
+ * 只是把「逐目标一次」的 N+1 摊成「按印章去重后的 ⌈M/8⌉ 波」—— 既不放大单条查询，
+ * 也不会把 500 枚目标一次打成 500 条并发查询（免得上游限流）。
+ */
+const SEAL_LINK_PREFETCH_CONCURRENCY = 8
+
+/**
+ * **循环外批量预取（P1-5：N+1 → 批量化）**：把「逐目标 `await` 读 `xiai_seal_links`」
+ * 收成「按 `sealId` 去重后分批并行取一次 ＋ `Map` 查表」。
+ *
+ * 每枚印章的检索式与上限**逐字沿用**原实现（`{ source_seal_id }` 等值、`limit: 500`）：
+ * 只改**时机**（写前一次，而非每个目标写前各一次）与**并发**（≤ `SEAL_LINK_PREFETCH_CONCURRENCY`），
+ * 不换读法 ⇒ 幂等判据（同 (`source_seal_id`, `ref_id`, `kind`) 已有行 ⇒ 零新增）**一字不改**。
+ * **为什么不用 `where in` 一次取全**：`ops.readRows` 只吃等值条件；要跨印章批量取，
+ * 得自己拼 `command.in` ＋ 一个「每章行数未知」的 `limit` —— CloudBase 单查询有行数硬顶，
+ * 取到顶**无法区分「就这么多」与「被截断」**，而这是**判定类**读（缺一行 ⇒ 重复插条）。
+ * 判定类读宁可多打几次查询，也不许拿可能被截断的结果下结论（P0-2 同一纪律），故按印章去重。
+ *
+ * 错误语义逐条对齐原实现：
+ *   · 集合不存在 ⇒ 视作零行（幂等预查语义：尚无行 ＝ 尚无重复）；
+ *   · 其它读失败 ⇒ 该印章记 `null`（**预查不可得**）＋ 告警，其目标**照旧零写**（不猜）。
+ * @param {Array<string>} sealIds 印章键列表（重复项去重；空串丢弃）
+ * @returns {Promise<Map<string, Array<object>|null>>} `sealId` ⇒ 已存关联行 / `null`（不可得）
+ */
+async function prefetchSealLinkRowsOf(sealIds) {
+  const ops = opsOf()
+  const unique = [...new Set((Array.isArray(sealIds) ? sealIds : []).map((id) => text(id)).filter((id) => id !== ''))]
+  const table = new Map()
+  for (let start = 0; start < unique.length; start += SEAL_LINK_PREFETCH_CONCURRENCY) {
+    const chunk = unique.slice(start, start + SEAL_LINK_PREFETCH_CONCURRENCY)
+    await Promise.all(
+      chunk.map(async (sealId) => {
+        try {
+          const rows = await ops.readRows(ops.COLLECTIONS.sealLinks, { source_seal_id: sealId }, { limit: 500 })
+          /* 存**副本**：同印章的多个目标共享这条数组，写成功后往里补一行「刚落」的记录
+             （见 `ensureSealLinkOf`），原读回结果不被别人改。 */
+          table.set(sealId, (Array.isArray(rows) ? rows : []).slice())
+        } catch (error) {
+          if (isCollectionNotExistError(error)) {
+            /* 集合尚未创建 ⇒ 视作零行（幂等预查语义：尚无行 = 尚无重复）。 */
+            table.set(sealId, [])
+            return
+          }
+          console.warn(`[xiai] repairAuthorPersonId 補條預查失敗（印章：${sealId}）：`, text(error && error.message))
+          table.set(sealId, null)
+        }
+      })
+    )
+  }
+  return table
 }
 
 /**
@@ -2075,20 +2233,32 @@ async function repairAuthorPersonId(payload, identity, context) {
  * `id`/`source`/`unresolved`/`created_at` ＋ 标记键 `kind:'印人'`）。
  * 幂等判据 ＝ 同 (`source_seal_id`, `ref_id`, `kind='印人'`) 已有行 ⇒ 零新增。
  * 单条失败**不中断整批**（面行回填是主面；补条失败如实告警）。
+ * @param {object} db DB 句柄
+ * @param {object} target 已读回确认回填的目标（`sealId` / `personId` / `displayName`）
+ * @param {string} at 时间戳（ISO）
+ * @param {Map<string, Array<object>|null>} [prefetched] 循环外批量预取表（命中 ⇒ **零读**；
+ *   记 `null` ⇒ 该印章预查不可得 ⇒ 照旧零写）
  */
-async function ensureSealLinkOf(db, target, at) {
+async function ensureSealLinkOf(db, target, at, prefetched) {
   const ops = opsOf()
   if (target.sealId === '' || target.personId === '') return
   let existing = []
-  try {
-    existing = await ops.readRows(ops.COLLECTIONS.sealLinks, { source_seal_id: target.sealId }, { limit: 500 })
-  } catch (error) {
-    if (!isCollectionNotExistError(error)) {
-      console.warn(`[xiai] repairAuthorPersonId 補條預查失敗（印章：${target.sealId}）：`, text(error && error.message))
-      return
+  if (prefetched instanceof Map && prefetched.has(target.sealId)) {
+    /* **命中预查表 ⇒ 零读**（P1-5：N+1 已在循环外批量取，见 `prefetchSealLinkRowsOf`）。 */
+    const rows = prefetched.get(target.sealId)
+    if (!Array.isArray(rows)) return /* 预查不可得（已告警）⇒ 不写、不猜。 */
+    existing = rows
+  } else {
+    try {
+      existing = await ops.readRows(ops.COLLECTIONS.sealLinks, { source_seal_id: target.sealId }, { limit: 500 })
+    } catch (error) {
+      if (!isCollectionNotExistError(error)) {
+        console.warn(`[xiai] repairAuthorPersonId 補條預查失敗（印章：${target.sealId}）：`, text(error && error.message))
+        return
+      }
+      /* 集合尚未创建 ⇒ 视作零行（幂等预查语义：尚无行 = 尚无重复）。 */
+      existing = []
     }
-    /* 集合尚未创建 ⇒ 视作零行（幂等预查语义：尚无行 = 尚无重复）。 */
-    existing = []
   }
   const duplicate = existing.some(
     (row) => row && text(row.ref_id) === target.personId && text(row.kind) === authorMatch.SEAL_LINK_KIND
@@ -2108,6 +2278,10 @@ async function ensureSealLinkOf(db, target, at) {
   })
   try {
     await ops.persist({ writes: [{ kind: 'set', collection: ops.COLLECTIONS.sealLinks, id, doc }] })
+    /* **同印章后续目标要看见刚落的一行**（改前靠「下一条目标再读一次库」自然看见；
+       改后共用预查数组 ⇒ 在这里补一条等价记录）。命中同一 (`sealId`, `personId`) 的
+       后续目标 ⇒ 走上面 `duplicate` 早退、零重复写（幂等判据不变）。 */
+    existing.push({ ref_id: target.personId, kind: authorMatch.SEAL_LINK_KIND })
   } catch (error) {
     console.warn(
       `[xiai] repairAuthorPersonId 補條失敗（印章：${target.sealId}、印人：${target.personId}；不中斷整批）：`,

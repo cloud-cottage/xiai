@@ -1488,6 +1488,12 @@ async function readRows(collection, match, options) {
     if (Number.isFinite(limit) && limit > 0 && chain && typeof chain.limit === 'function') {
       chain = chain.limit(Math.floor(limit))
     }
+    /* **可选翻页偏移（2026-11-15 优化单｜纯增量）**：`options.offset` 给出时拼 `skip`；
+       既有调用方一律不传 ⇒ 本句零效果、行为逐字不变。供 `readAllGuarded` 翻页取全用。 */
+    const offset = Number(options && options.offset)
+    if (Number.isFinite(offset) && offset > 0 && chain && typeof chain.skip === 'function') {
+      chain = chain.skip(Math.floor(offset))
+    }
     if (withOrder && orderField && chain && typeof chain.orderBy === 'function') {
       chain = chain.orderBy(orderField, 'desc')
     }
@@ -1554,6 +1560,70 @@ async function readRoleRow(uid) {
   }
   if (rowsByDoc.length > 0) return rowsByDoc[0]
   return null
+}
+
+/**
+ * **翻页取全（2026-11-15 优化单｜取代 14 处 `readRows(x, {}, { limit })` 的静默截断）**
+ * ============================================================================
+ * 旧写法到 `limit` 即**静默停**：查重 / 引用存在性这类**判定类**读面在集合行数超限后
+ * 会**悄悄漏判**（不报错、给错结论）。本函数把「取不全」这件事变成**回包里的 `truncated`**，
+ * 由调用方按语义决定：判定类 ⇒ 拒绝；展示类 ⇒ 上屏「僅統計前 N 行」。
+ *
+ * 口径（照 `docs/xiai-user-token-optimization-plan-2026-11-15.md` P0-2）：
+ *   · 按批翻页（默认 1000 行/批，`options.offset` 已由 `readRows` 支持）；
+ *   · 硬上限 `SCAN_HARD_CAP`（20000）—— 到顶回 `truncated: true`，**不抛错**（由调用方定语义）；
+ *   · 抛错语义与 `readRows` 逐字一致（`STORAGE_UNAVAILABLE` 由 `index.js` 统一转）；
+ *   · **不改变任何既有调用**：本函数是新增点，既有 `readRows` 调用面零改动。
+ *
+ * @param {string} collection 集合名（一律经 `COLLECTIONS`）
+ * @param {{ match?: object, pageSize?: number, cap?: number, orderByDesc?: string }} [options]
+ * @returns {Promise<{ ok: true, rows: object[], truncated: boolean, scanned: number }>}
+ */
+async function readAllGuarded(collection, options) {
+  const opts = options || {}
+  const match = opts.match && typeof opts.match === 'object' ? opts.match : {}
+  const pageSize = Number(opts.pageSize) > 0 ? Math.min(Math.floor(Number(opts.pageSize)), 1000) : 1000
+  const capRaw = Number(opts.cap) > 0 ? Math.floor(Number(opts.cap)) : SCAN_HARD_CAP
+  const cap = Math.min(capRaw, SCAN_HARD_CAP)
+  const rows = []
+  let offset = 0
+  for (;;) {
+    const batch = await readRows(collection, match, {
+      limit: Math.min(pageSize, cap - rows.length),
+      offset,
+      orderByDesc: opts.orderByDesc
+    })
+    rows.push(...batch)
+    if (batch.length < pageSize) return { ok: true, rows, truncated: false, scanned: rows.length }
+    offset += batch.length
+    if (rows.length >= cap) return { ok: true, rows, truncated: true, scanned: rows.length }
+  }
+}
+
+/** **判定类读面「取不全」的统一文案（P0-2）**：与口径件 §P0-2 逐字对齐 —— 判定类读面（查重 /
+ *  发号换号 / 引用存在性 / 删除前置校验）宁可**拒绝**，也绝不拿「取不全」的行集给错结论。 */
+const TRUNCATED_SCAN_MESSAGE = '集合行數超出可校驗範圍（>20000 行），本次零寫入；請縮小範圍後重試。'
+
+/** **判定类读面「取不全」的结构化拒绝**（`STORAGE_UNAVAILABLE`；回包键面与既有 `deny` 同形）。 */
+function truncatedScanDenial() {
+  return deny(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+}
+
+/** **判定类读面「取不全」的抛错形态**：供返回**纯值**（数 / 布尔 / Set）的内部单点用 ——
+ *  这些单点被 `lib/books.js` / `lib/addSealFace.js` / `lib/sealDelete.js` 直接取用、返回形态不得变，
+ *  故以抛错表达拒绝（`index.js` 统一转 `STORAGE_UNAVAILABLE`，文案进 `診斷`）。 */
+function truncatedScanError() {
+  const error = new Error(TRUNCATED_SCAN_MESSAGE)
+  error.reason = REASONS.STORAGE_UNAVAILABLE
+  return error
+}
+
+/** **判定类翻页取全**：`readAllGuarded` 之上加「取不全即抛」—— 调用方保持原返回形态
+ *  （数组）与后续逻辑逐字不变，只在「取不全」时变成**结构化失败**而非静默少读。 */
+async function guardedRowsOf(collection, options) {
+  const scan = await readAllGuarded(collection, options)
+  if (scan.truncated) throw truncatedScanError()
+  return scan.rows
 }
 
 /**
@@ -2239,6 +2309,52 @@ function updatedCountOf(result) {
   return null
 }
 
+/* ---------------------------------------------------------------------------
+   **回执判据统一（2026-11-15 优化单｜P1-6）**：写回执（`updated` / `deleted` 计数）只说明
+   「服务端回了什么」，**不说明行真的成了什么样** —— 回执读不出（`null`）时旧式一律当成功
+   ⇒ 写没生效也报 `ok:true`（假成功）。以下单点把「写成功」的判据统一到**读回比对**
+   （样板 ＝ `lib/books.js::setImageBook`）：按**同一检索式**重读，命中行里必须有一行的写入键
+   **逐字等于**目标值；读不到 / 不一致 ⇒ 抛错（`index.js` 转 `STORAGE_UNAVAILABLE`），
+   **绝不报假成功**。
+   --------------------------------------------------------------------------- */
+
+/** 写入值是否**可读回比对**：字符串 / 有限数 / 布尔 / 空值 / 由这些组成的基本值数组可比值；
+ *  其余（命令对象 `db.command.inc()` 之类服务端算子、嵌套物件）**跳过该键**、不据此判负。 */
+function isComparableWriteValue(value) {
+  if (value === null || value === undefined) return true
+  const type = typeof value
+  if (type === 'string' || type === 'number' || type === 'boolean') return true
+  if (Array.isArray(value)) return value.every((item) => isComparableWriteValue(item))
+  return false
+}
+
+/** 单值**逐字比对**（读回值 vs 写入值）：字符串按原样、数按数值、布尔按严格相等、
+ *  数组逐元素、空值认可「`null` / `undefined` / 空串」三形态（平台侧清空写法不统一）。 */
+function sameWrittenValue(actual, expected) {
+  if (expected === null || expected === undefined) {
+    return actual === null || actual === undefined || actual === ''
+  }
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return false
+    return expected.every((item, index) => sameWrittenValue(actual[index], item))
+  }
+  if (typeof expected === 'number') {
+    const actualNumber = Number(actual)
+    return Number.isFinite(actualNumber) && actualNumber === expected
+  }
+  if (typeof expected === 'boolean') return actual === expected
+  return String(actual) === String(expected)
+}
+
+/** **读回比对判据**：命中行里必须**有一行**的每个可比值都与写入体逐字一致（无命中 / 不一致 ⇒ `false`）。 */
+function readbackMatchesDocOf(rows, doc) {
+  const list = Array.isArray(rows) ? rows : []
+  const source = doc && typeof doc === 'object' ? doc : {}
+  const keys = Object.keys(source).filter((key) => isComparableWriteValue(source[key]))
+  if (keys.length === 0) return list.length > 0
+  return list.some((row) => row !== null && typeof row === 'object' && keys.every((key) => sameWrittenValue(row[key], source[key])))
+}
+
 /** 归一化一行 `where(...).get()` / `doc(...).get()` 的返回（兼容 `{data:[...]}` 与裸数组）。 */
 function rowsOf(result) {
   if (Array.isArray(result)) return result
@@ -2278,7 +2394,8 @@ const COUNTER_MAX_ATTEMPTS = 8
 async function counterSeedBaseOf(kind) {
   let base = 0
   if (kind === 'seal') {
-    const seals = await readRows(COLLECTIONS.seals, {}, { limit: 1000 })
+    /* **判定类**（发号播种）：取不全 ⇒ 基线偏低 ⇒ 后续发号撞既有号 ⇒ **结构化拒绝**（抛错）。 */
+    const seals = await guardedRowsOf(COLLECTIONS.seals)
     seals.forEach((row) => {
       const own = Number(row && row.seal_no)
       if (Number.isInteger(own) && own > base) base = own
@@ -2286,14 +2403,16 @@ async function counterSeedBaseOf(kind) {
   } else if (kind === 'book') {
     /* **印譜（本單）**：既有 book 行的 `id` 即号值（五位定长十进制 ⇒ `Number('00001') === 1`）；
        取不到整数的脏行不计入基线（**不猜、不补编**）。集合不存在 ⇒ `readRows` 按可选读面
-       白名单降级为 `[]`（新建集合首建时基线为 0）。 */
-    const books = await readRows(COLLECTIONS.books, {}, { limit: 1000 })
+       白名单降级为 `[]`（新建集合首建时基线为 0）。
+       **判定类**（发号播种）：取不全 ⇒ 基线偏低 ⇒ 发号撞号 ⇒ **结构化拒绝**（抛错）。 */
+    const books = await guardedRowsOf(COLLECTIONS.books)
     books.forEach((row) => {
       const own = Number(row && row.id)
       if (Number.isInteger(own) && own > base) base = own
     })
   } else {
-    const faces = await readRows(COLLECTIONS.faces, {}, { limit: 1000 })
+    /* **判定类**（发号播种）：同 `seal` 支。 */
+    const faces = await guardedRowsOf(COLLECTIONS.faces)
     faces.forEach((row) => {
       const own = Number(row && row.face_no)
       if (Number.isInteger(own) && own > base) base = own
@@ -2318,8 +2437,12 @@ function normalizeReleased(value) {
   return out.sort((a, b) => a - b)
 }
 
-/** 释放号取用时的**占用扫描护栏**（单次读取上限；口径同既有 1000 行护栏）。 */
-const RELEASE_SCAN_LIMIT = 1000
+/** **翻页取全的硬上限（2026-11-15 优化单）**：超过即回 `truncated: true`，由调用方定语义
+ *  （判定类拒绝 / 展示类提示），**绝不静默**。取值 20000 ＝ 现库最大集合（`xiai_images` 6446）的 3 倍余量。 */
+const SCAN_HARD_CAP = 20000
+
+/* **已撤除** `RELEASE_SCAN_LIMIT`（原「释放号占用扫描单次 1000 行护栏」）：`occupiedNosOf` 已改
+   `guardedRowsOf` 翻页取全，单次上限概念由 `SCAN_HARD_CAP` 取代（取不全 ⇒ 结构化拒绝）。 */
 /** 释放号 CAS 未命中的**回落上限**（命中 0 行连续 2 次 ⇒ 本次调用改走 `seq+1`，不让发号卡死）。 */
 const RELEASE_CAS_MAX_MISSES = 2
 
@@ -2336,13 +2459,59 @@ async function occupiedNosOf(kind) {
   const collection =
     kind === 'seal' ? COLLECTIONS.seals : kind === 'book' ? COLLECTIONS.books : COLLECTIONS.faces
   const field = kind === 'seal' ? 'seal_no' : kind === 'book' ? 'id' : 'face_no'
-  const rows = await readRows(collection, {}, { limit: RELEASE_SCAN_LIMIT })
+  /* **判定类**（发号换号 / 占号判定）：取不全 ⇒ 占用集缺号 ⇒ 释放号会被重复发出（AC §6.4 红线）
+     ⇒ **结构化拒绝**（抛错；返回形态仍是 `Set`，调用方逐字不变）。 */
+  const rows = await guardedRowsOf(collection)
   const used = new Set()
   rows.forEach((row) => {
     const n = Number(row && row[field])
     if (Number.isInteger(n) && n > 0) used.add(n)
   })
   return used
+}
+
+/**
+ * 发号 CAS 的**读回判据①**（`seq+1` 路）：计数文档 `seq` 是否**已越过**旧值（`> seqBefore`）。
+ * 回执说 `updated === 1` 也不足以发号 —— 读不到 / 未越过 ⇒ **不认**（调用方重读重试）。
+ * @param {string} counterId 计数文档 `_id`
+ * @param {number} seqBefore 本次 CAS 锁住的旧值
+ * @returns {Promise<boolean>}
+ */
+async function counterSeqAdvancedOnServer(counterId, seqBefore) {
+  try {
+    const rows = await readRows(COUNTERS_COLLECTION, { _id: counterId }, { limit: 1 })
+    if (rows.length === 0) return false
+    const seqNow = Number(rows[0] && rows[0].seq)
+    const before = Number(seqBefore)
+    if (!Number.isFinite(seqNow) || !Number.isFinite(before)) return false
+    return seqNow > before
+  } catch (error) {
+    /* 读回失败 ⇒ **不认**（宁留空洞、绝不发重号）。 */
+    return false
+  }
+}
+
+/**
+ * 发号 CAS 的**读回判据②**（释放号路）：释放名单里 `no` 是否**确已领走**（不在名单里）且
+ * `seq` 未倒退。读不到 / 仍在名单里 ⇒ **不认**（调用方记一次未命中并重读重试）。
+ * @param {string} counterId 计数文档 `_id`
+ * @param {number} no 本次认领的释放号
+ * @param {number} seqBefore 本次 CAS 锁住的 `seq` 旧值
+ * @returns {Promise<boolean>}
+ */
+async function releasedNoClaimedOnServer(counterId, no, seqBefore) {
+  try {
+    const rows = await readRows(COUNTERS_COLLECTION, { _id: counterId }, { limit: 1 })
+    if (rows.length === 0) return false
+    const row = rows[0] || {}
+    if (normalizeReleased(row.released).indexOf(Number(no)) !== -1) return false
+    const seqNow = Number(row.seq)
+    const before = Number(seqBefore)
+    if (Number.isFinite(seqNow) && Number.isFinite(before) && seqNow < before) return false
+    return true
+  } catch (error) {
+    return false
+  }
 }
 
 /**
@@ -2418,7 +2587,14 @@ async function issueCodeNumber(kind) {
           .where({ _id: id, seq: current, released })
           .update({ released: nextReleased, updated_at: text(new Date().toISOString()) })
         const releaseUpdated = updatedCountOf(releaseReply)
-        if (releaseUpdated === 1) return { ok: true, no: pick }
+        if (releaseUpdated === 1) {
+          /* **P1-6 读回判据（不以回执判成功）**：回执说「改成了」仍不足以发号 —— 按同一 `_id`
+             重读计数文档，名单里必须**已经没有** `pick` 且 `seq` 未倒退才算领到；读不到 /
+             仍在名单里 ⇒ 不认（记一次未命中并重读重试，**绝不把没领到的号发出去**）。 */
+          if (await releasedNoClaimedOnServer(id, pick, current)) return { ok: true, no: pick }
+          releasedCasMisses += 1
+          continue
+        }
         releasedCasMisses += 1
         continue /* 重读重试（或达到回落上限后改走 seq+1） */
       }
@@ -2431,7 +2607,12 @@ async function issueCodeNumber(kind) {
       .where({ _id: id, seq: current })
       .update({ seq: increment, updated_at: text(new Date().toISOString()) })
     const updated = updatedCountOf(reply)
-    if (updated === 1) return { ok: true, no: current + 1 }
+    if (updated === 1) {
+      /* **P1-6 读回判据**：重读计数文档，`seq` 必须**已越过旧值**（`> current`）才认领成功；
+         读不到 / 未越过 ⇒ 不认（继续重读重试；宁留空洞，**绝不把同一个号发给两路**）。 */
+      if (await counterSeqAdvancedOnServer(id, current)) return { ok: true, no: current + 1 }
+      continue
+    }
     if (updated === null) {
       /* 计数读不出 ⇒ **按失败重读**（宁留空洞、不发重号）。 */
       continue
@@ -5023,7 +5204,10 @@ const FACE_IMAGE_DELETE_READOUT_KEYS = Object.freeze(['face_id', 'image_id', 're
 /** 印面行检索窄读上限（`id` → `_id` 两形态；形如「命中即取首行」）。 */
 const FACE_IMAGE_DELETE_FACE_SCAN_LIMIT = 8
 
-/** 引用面 / 全量印面扫描护栏（单次读取上限；口径同仓内既有 1000 行护栏）。 */
+/** 引用面 / 全量印面扫描护栏（单次读取上限；口径同仓内既有 1000 行护栏）。
+ *  **2026-11-15 优化单**：两处「全量印面」判定读（`imageSharedByOtherFaces` /
+ *  `deleteFaceImage` 共用保护）已改 `readAllGuarded` 翻页取全（取不全 ⇒ 结构化拒绝），
+ *  本常量**不再参与**那两处；保留声明以免既有静态断言漂移（零行为）。 */
 const FACE_IMAGE_DELETE_SCAN_LIMIT = 1000
 
 /** 影像行检索窄读上限（按 `id` / `_id` 取首行）。 */
@@ -5203,14 +5387,18 @@ function faceImageOwnershipOf(faceRow, imageId) {
  */
 async function imageSharedByOtherFaces(faceId, imageId) {
   const isTargetFace = (row) => text(row && row.id) === faceId || text(row && row._id) === faceId
-  const allFaces = await readRows(COLLECTIONS.faces, {}, { limit: FACE_IMAGE_DELETE_SCAN_LIMIT })
-  return allFaces.some(
+  /* **判定类**（删除前置校验 · 共用保护）：取不全 ⇒ 可能漏掉「仍有人引用」的印面 ⇒ 误删共用影像。
+     故返回 `{shared, truncated}`：`truncated === true` 由调用方**结构化拒绝**、零写入。 */
+  const scan = await readAllGuarded(COLLECTIONS.faces)
+  if (scan.truncated) return { shared: false, truncated: true }
+  const shared = scan.rows.some(
     (row) =>
       !isTargetFace(row) &&
       (text(row && row.face_image_id) === imageId ||
         (Array.isArray(row && row.edge_image_ids) &&
           row.edge_image_ids.some((edgeId) => text(edgeId) === imageId)))
   )
+  return { shared, truncated: false }
 }
 
 /** **占位图行判据**（与 `deleteFaceImage` 同口径：占位图行不删、只清引用）。 */
@@ -5289,7 +5477,9 @@ async function applyImageCorrectionAcceptance(row, at) {
 
   if (action === 'delete') {
     /* ③ **共用保护**：其它印面仍引用 ⇒ 拒绝（文案含「已被印面引用」）＋ 零写入 ＋ 状态仍 `PENDING`。 */
-    if (await imageSharedByOtherFaces(faceId, imageId)) {
+    const sharedScan = await imageSharedByOtherFaces(faceId, imageId)
+    if (sharedScan.truncated) return truncatedScanDenial()
+    if (sharedScan.shared) {
       return deny(
         REASONS.INVALID_VALUE,
         `該影像已被印面引用（其它印面行的 face_image_id / edge_image_ids 命中 ${imageId}），共用保護下不可刪除；` +
@@ -5348,7 +5538,10 @@ async function applyImageCorrectionAcceptance(row, at) {
       )
     }
     /* 共用保护（**先判、后写**）：旧图仍被其它印面引用 ⇒ 不删旧图、只改指向。 */
-    const sharedByOthers = await imageSharedByOtherFaces(faceId, imageId)
+    const sharedScan = await imageSharedByOtherFaces(faceId, imageId)
+    /* **判定类**：取不全 ⇒ 无法确定旧图是否被共用 ⇒ 结构化拒绝、零写入（状态仍 `PENDING`）。 */
+    if (sharedScan.truncated) return truncatedScanDenial()
+    const sharedByOthers = sharedScan.shared
     /* ② 印面指向新图（既有 `face_image_id` ／ `edge_image_ids[]` 写面语义）。 */
     const faceDoc = { updated_at: at }
     if (ownership.ownedByFace) faceDoc.face_image_id = newImageId
@@ -6194,13 +6387,20 @@ const ADMIN_OPS = Object.freeze({
       dryRun = input.dry_run
     }
 
-    /* ② 只读扫描（五个集合；单次上限 1000 行，分页护栏口径同既有 op）。 */
-    const readAll = (collection) => readRows(collection, {}, { limit: 1000 })
-    const seals = await readAll(COLLECTIONS.seals)
-    const faces = await readAll(COLLECTIONS.faces)
-    const images = await readAll(COLLECTIONS.images)
-    const corrections = await readAll(COLLECTIONS.corrections)
-    const publics = await readAll(COLLECTIONS.correctionsPublic)
+    /* ② 只读扫描（五个集合；**翻页取全 ＋ 显式截断**）。**判定类**：本 op 的判定是「全库号面」
+       语义（幂等查重 ＋ 号分配 ＋ 全量重写映射）—— 取不全 ⇒ 映射必错 ⇒ **结构化拒绝、零写入**。 */
+    const scans = []
+    for (const collection of [
+      COLLECTIONS.seals,
+      COLLECTIONS.faces,
+      COLLECTIONS.images,
+      COLLECTIONS.corrections,
+      COLLECTIONS.correctionsPublic
+    ]) {
+      scans.push(await readAllGuarded(collection))
+    }
+    if (scans.some((scan) => scan.truncated)) return truncatedScanDenial()
+    const [seals, faces, images, corrections, publics] = scans.map((scan) => scan.rows)
 
     const scanned = {
       seals: seals.length,
@@ -8289,8 +8489,11 @@ const ADMIN_OPS = Object.freeze({
       imageRows.push(buildDirectImageRow(face, at))
       pendingImageFaces.push(face)
     }
-    /* ⑥ **幂等读**（`source` ＋ `source_seal_id`；命中 ⇒ 零新增行、**不改写既有行**、**无 `plan`**）。 */
-    const seals = await readRows(COLLECTIONS.seals, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    /* ⑥ **幂等读**（`source` ＋ `source_seal_id`；命中 ⇒ 零新增行、**不改写既有行**、**无 `plan`**）。
+       **判定类**（幂等查重 ＋ 撞号避让）：取不全 ⇒ 可能漏掉既有行而重复建行 ⇒ **结构化拒绝、零写入**。 */
+    const sealScan = await readAllGuarded(COLLECTIONS.seals)
+    if (sealScan.truncated) return truncatedScanDenial()
+    const seals = sealScan.rows
     const existing = seals.find(
       (item) => text(item && item.source_seal_id) === sourceId && text(item && item.source) === source
     )
@@ -8304,7 +8507,10 @@ const ADMIN_OPS = Object.freeze({
     }
     /* ⑧ 复用构造器（**行构造 ＋ 原子发号**一次搞定）；影像引用经登记行覆蓋層解析（尚未落库）。 */
     const importRow = { ...pickSealImportSealFields(payload), source, source_seal_id: sourceId, faces }
-    const faceRows = await readRows(COLLECTIONS.faces, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    /* **判定类**（撞号避让 ＋ `seq` 分配）：印面行取不全 ⇒ 可能重号 ⇒ 结构化拒绝、零写入。 */
+    const faceScan = await readAllGuarded(COLLECTIONS.faces)
+    if (faceScan.truncated) return truncatedScanDenial()
+    const faceRows = faceScan.rows
     const built = await buildSealAcceptanceFromImport(importRow, seals, faceRows, identity, at, imageRows)
     if (!built.ok) {
       return built.reason
@@ -9291,7 +9497,10 @@ const ADMIN_OPS = Object.freeze({
     /* ⑥ **共用保护**：全部印面里除本印面外仍有人引用该影像 ⇒ 拒（文案点名）＋ 零写入。
        判据与 `lib/sealDelete.js` 的共用判定同形（`face_image_id` 等值 ／ `edge_image_ids` 数组含）。 */
     const isTargetFace = (row) => text(row && row.id) === faceId || text(row && row._id) === faceId
-    const allFaces = await readRows(COLLECTIONS.faces, {}, { limit: FACE_IMAGE_DELETE_SCAN_LIMIT })
+    /* **判定类**（删除前置校验 · 共用保护）：取不全 ⇒ 可能漏掉仍引用该影像的印面 ⇒ **结构化拒绝**。 */
+    const faceScan = await readAllGuarded(COLLECTIONS.faces)
+    if (faceScan.truncated) return truncatedScanDenial()
+    const allFaces = faceScan.rows
     const sharedByOthers = allFaces.some(
       (row) =>
         !isTargetFace(row) &&
@@ -9618,8 +9827,11 @@ const ADMIN_OPS = Object.freeze({
       /* **此刻不带 `seq`**：`stamp_id` 尚未发号 ⇒ `seq` 由构造器按单点分配器补齐。 */
       imageRows.push(buildDirectImageRow(face, at))
     }
-    /* ⑧ 幂等读（同 `client_request_id` ⇒ 零新增、不改写既有行、无 `plan`）＋ 撞号避让读数。 */
-    const seals = await readRows(COLLECTIONS.seals, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    /* ⑧ 幂等读（同 `client_request_id` ⇒ 零新增、不改写既有行、无 `plan`）＋ 撞号避让读数。
+       **判定类**：取不全 ⇒ 幂等可能失效 / 撞号 ⇒ 结构化拒绝、零写入。 */
+    const sealScan = await readAllGuarded(COLLECTIONS.seals)
+    if (sealScan.truncated) return truncatedScanDenial()
+    const seals = sealScan.rows
     const existing = seals.find((item) => text(item && item.client_request_id) === requestId)
     if (existing) {
       const readouts = await sealUploadReadoutsOf(existing)
@@ -9633,7 +9845,10 @@ const ADMIN_OPS = Object.freeze({
       }
     }
     /* ⑨ 复用构造器（行构造 ＋ **服务端原子发号** ＋ 影像 `seq` 单点分配）。 */
-    const faceRows = await readRows(COLLECTIONS.faces, {}, { limit: DIRECT_WRITE_READ_LIMIT })
+    /* **判定类**（撞号避让 ＋ `seq` 分配）：印面行取不全 ⇒ 可能重号 ⇒ 结构化拒绝、零写入。 */
+    const faceScan = await readAllGuarded(COLLECTIONS.faces)
+    if (faceScan.truncated) return truncatedScanDenial()
+    const faceRows = faceScan.rows
     const importRow = { ...pickSealImportSealFields(payload), source: SEAL_UPLOAD_SOURCE, faces }
     const built = await buildSealAcceptanceFromImport(importRow, seals, faceRows, identity, at, imageRows)
     if (!built.ok) {
@@ -10319,10 +10534,16 @@ async function persist(plan) {
           if (typeof step.expectAtLeast === 'number' && updated !== null && updated < step.expectAtLeast) {
             throw new Error(`update-matched-too-few:${updated}`)
           }
-          if (!primary) {
-            const hit = await db.collection(step.collection).where(step.match).get()
-            const rows = rowsOf(hit)
-            if (rows.length > 0) primary = text(rows[0]._id) || text(rows[0].id)
+          /* **P1-6 回执判据统一（读回比对）**：`updated` **读不出**（`null`）时旧式**不判** ⇒
+             写没生效也当成功（假成功真因）。此处按**同一检索式**重读，命中行里必须有一行的写入键
+             **逐字等于**目标值；读不到 / 不一致 ⇒ 抛错（`index.js` 转 `STORAGE_UNAVAILABLE`，
+             并如实挂上进度读数），**绝不报假成功**。这次读兼任下面 `primary` 取值 ⇒ **零额外读**。 */
+          const readbackRows = rowsOf(await db.collection(step.collection).where(step.match).get())
+          if (!readbackMatchesDocOf(readbackRows, step.doc)) {
+            throw new Error(`update-readback-mismatch:${text(step.collection)}`)
+          }
+          if (!primary && readbackRows.length > 0) {
+            primary = text(readbackRows[0]._id) || text(readbackRows[0].id)
           }
           completedSteps += 1
           continue
@@ -10362,6 +10583,11 @@ async function persist(plan) {
 async function deleteRow(collection, docId) {
   const db = resolveDb()
   await db.collection(collection).doc(docId).delete()
+  /* **P1-6 回执判据统一（读回比对）**：`delete()` 对**不存在的行**不抛错（平台回 `deleted: 0`）
+     ⇒ 旧式把「没删掉」也当成功、回包谎报件数（`removed.rows` / `deleted_rows`）。改按 `_id`
+     重读：行**仍在** ⇒ 抛错（结构化失败，`index.js` 转 `STORAGE_UNAVAILABLE`），绝不谎报已删。 */
+  const still = rowsOf(await db.collection(collection).where({ _id: docId }).get())
+  if (still.length > 0) throw new Error(`delete-readback-still-present:${text(collection)}`)
 }
 
 /**
@@ -10657,6 +10883,9 @@ module.exports = {
   /* **AI 修復（§3.68）離線自檢**：`lib/aiEnhance.js` 經此讀點取影像行（本文件既有函數，
      只補登記到導出面 —— 實現零改）。 */
   readRows,
+  /* **翻页取全（2026-11-15 优化单）**：取代 `readRows(x, {}, { limit })` 的静默截断 ——
+     回包带 `truncated`，判定类调用点据此拒绝、展示类据此提示（口径见优化实施件 P0-2）。 */
+  readAllGuarded,
   /* **升序游标窗口读单点（本单：D4 持久化路径封闭）**：集合名词 ＋ 等值 match ＋ 游标 ⇒ 一窗行
      （`_id` 升序、严格大于游标、前 `limit` 行）。主路范围查询、退路整桶内存收口 —— 与
      `readStorageRepairWindow` 两路同形；`lib/faceLayerOps.js` 的 EDGE 窗口经此读（**零自建集合句柄**）。 */
