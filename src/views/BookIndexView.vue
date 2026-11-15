@@ -60,11 +60,24 @@ const booksState = ref('idle') // idle / loading / ready / failed / unavailable
 const booksMessage = ref('')
 const version = ref(0)
 
-/** 作者人名：单点走 `persons.personNameOfId`（未命中 ⇒ 明示「未收錄」，不编造）。 */
+/**
+ * 作者人名：**服务端快照优先**（`book.author_name`，`listBooks` 行上带回），
+ * 服务端没带再退本机印人快照（`persons.personNameOfId`），两者皆无 ⇒ 明示「未收錄」。
+ *
+ * 为什么先吃行上快照：本机印人快照（`xiai:v1:persons`）在新设备/未水合的会话里可能为空，
+ * 那时整表都会误显示「未收錄於印人庫」（实测 1,745 行全中招）。行上 `author_name`
+ * 由服务端单点落盘 ⇒ 与本机快照是否就绪无关。
+ */
 function authorNameOf(book) {
   const id = book && book.author_person_id ? String(book.author_person_id) : ''
+  const snapshot = book && book.author_name ? String(book.author_name).trim() : ''
+  if (id) {
+    const resolved = persons.personNameOfId(id)
+    if (resolved) return resolved
+  }
+  if (snapshot) return snapshot
   if (!id) return '（未著錄）'
-  return persons.personNameOfId(id) || '（未收錄於印人庫）'
+  return '（未收錄於印人庫）'
 }
 
 /* 影像行（只在管理员态读）：关联影像数从影像行 `book_id` 统计，不另造统计接口。 */

@@ -42,7 +42,7 @@
  *     （`STORAGE_UNAVAILABLE`，文案如实报「写已送出但读回不一致」，**绝不报假成功**）。
  *  ⑧ **回包键面**（`index.js` 按 op 收窄透传的键面真源）：
  *     · `createBook`   → `book_id`（＋幂等轮的 `skipped`）；
- *     · `listBooks`    → `books` / `total`（按 `id` **升序**；每行投影恰 `BOOK_ROW_KEYS` 8 键；
+ *     · `listBooks`    → `books` / `total`（按 `id` **升序**；每行投影恰 `BOOK_ROW_KEYS` 10 鍵（`author_name` 為**服務端回的作者顯示名快照**，供列表免讀本機印人快照）；
  *       **仅当本次取全到顶**时多一个 additive 提示键 `truncated: true`）；
  *     · `setImageBook` → `image_id` / `book_id`（`book_id` 为**读回值**）。
  *     失败恒**恰 3 键** `{ok:false, reason, message}`，`reason` **零新增字面值**（只用 `lib/config.js`
@@ -124,6 +124,7 @@ const BOOK_ROW_KEYS = Object.freeze([
   'cip',
   'publisher',
   'author_person_id',
+  'author_name',
   'first_publish_year',
   'created_at',
   'updated_at'
@@ -201,7 +202,7 @@ async function readBookRowsGuarded(ops) {
   return { rows: list, truncated: list.length >= BOOK_SCAN_HARD_CAP }
 }
 
-/** 行投影（**只出 `BOOK_ROW_KEYS` 8 键**；审计键 `created_by` / `_id` 不外传）。 */
+/** 行投影（**只出 `BOOK_ROW_KEYS` 10 键**；审计键 `created_by` / `_id` / `legacy_*` 不外传）。 */
 function bookRowProjectionOf(row) {
   const source = row && typeof row === 'object' ? row : {}
   const out = {}

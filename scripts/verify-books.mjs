@@ -17,7 +17,7 @@
  *
  * 判据分段：
  *   A 数据模型与写面：三 op 在 `ADMIN_OPS`（恰 47）、载荷封闭键面、必填 / 可空 / 年份值域、
- *     作者引用门、`listBooks` 行投影 8 键与升序、`setImageBook` 形态门与 `null` 取消、
+ *     作者引用门、`listBooks` 行投影 10 键与升序、`setImageBook` 形态门与 `null` 取消、
  *     幂等、发号（`issueCodeNumberAvoiding('book', isTaken)` ＋ `padStart(5)`）、`index.js` 读出面收窄。
  *   B 静态红线：`lib/books.js` 零集合名字面、`lib/ops.js` 三 op 薄委派、
  *     `reason` 仍 13 值 ＋ `[data-admin-action]` 仍 12 值。
@@ -543,7 +543,7 @@ async function probeList(mod) {
 /* =============================== 静态判据 =============================== */
 const ADMIN_ACTIONS = 12
 const REASON_COUNT = 13
-const BOOK_ROW_KEY_COUNT = 9
+const BOOK_ROW_KEY_COUNT = 10
 
 function judgeSidebar(raw) {
   const clean = stripComments(raw, { line: true })
@@ -831,7 +831,7 @@ check('A4', '作者**引用型**门：未收录 id / 自由文本人名 / `tmp-`
 
 const listProbe = await probeList(booksModule0())
 
-check('A5', '`listBooks`：`books` / `total` 键面；行投影**恰 `BOOK_ROW_KEYS` 9 键**（2026-11-15 增 publisher）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
+check('A5', '`listBooks`：`books` / `total` 键面；行投影**恰 `BOOK_ROW_KEYS` 10 键**（2026-11-15 增 publisher ＋ author_name）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
   responseKeys: ['books', 'ok', 'total'],
   total: 3,
   count: 3,
