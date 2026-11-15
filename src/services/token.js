@@ -21,18 +21,33 @@
  *   · **身份不由前端自称**：令牌里只带**服务端验签过的手机号**（`sub`），uid 由服务端派生；
  *     载荷里的身份类键由服务端拒（`INVALID_FIELD`）。
  *
- * 存储位置：**只在内存**（每条通道一个模块级闭包变量）。
- *   理由（Phase 1 口径，本单沿用且不扩大）：`src/data/storage.js` 是全工程**唯一**允许直接触碰
- *   浏览器存储的模块，而令牌**不进 `localStorage` / `sessionStorage`** 是硬约束
- *   （减少 XSS 长期驻留面）⇒ 页面刷新即重新取票（已登记为「未覆盖项」）。
+ * 存储位置（**R-L10 / P3，2026-11-15 起**）：**内存 ＋ 持久化**（每条通道一份）。
+ *   · 内存：模块级闭包 `state`（本文件，与改前同一处）；
+ *   · 持久化：**键与读写都只在本文件**（`TOKEN_PERSIST_KEYS` 是唯一键表）；真正触碰浏览器存储仍
+ *     只经 `src/data/storage.js`（全工程唯一底座）⇒ 落点为 `xiai:v1:user-token` /
+ *     `xiai:v1:admin-token`，值恒为 `{token, expiresAt, sub, ver}`；
+ *   · 读回**只信形态与本地时效**（坏 JSON / 缺字段 / 已过期 ⇒ **整条丢弃、绝不抛错**），
+ *     是否真成立**仍一律以云函数回传为准**（本地读回只省一次取票，不产出任何授权结论）；
+ *   · TTL 30 天（**服务端 TTL 由环境变量控制 ⇒ 前端不自作主张放宽**：持久化里的 `expiresAt`
+ *     恒以服务端回包为准；每次 `verify` 成功按回包的 `renewedExpiresAt` 滑动续期并回写）；
+ *   · 撤销面不变：`XIAI_USER_TOKEN_VERSION` / `XIAI_ADMIN_TOKEN_VERSION` 一改即全体旧令牌失效；
+ *     前端遇撤销类拒绝（`FORBIDDEN` / `TOKEN_INVALID` …）⇒ **清持久化 ＋ 引导重新登录**，
+ *     **不得**用同一枚令牌无限重试；
+ *   · 登出（`services/auth.js::logout`）**清持久化**（`clear()` 是唯一清点）。
  *
- * 时钟：**不在客户端判时效**（本地时间只用于「要不要先取票」的体验判断，不作判据）；
- *   令牌是否过期**一律以云函数回传为准**（过期 ⇒ 服务端 `FORBIDDEN` + 明确文案）。
+ * 时钟：**不在客户端判时效**（本地时间只用于「要不要先取票 / 读回的值是否还值得留」的体验判断，
+ *   不作判据）；令牌是否过期**一律以云函数回传为准**（过期 ⇒ 服务端 `FORBIDDEN` + 明确文案）。
  */
 
 import { callCloudFunction, setCloudFunctionTransport } from '../data/cloudbaseFn.js'
+/* **R-L10 / P3**：令牌持久化的**唯一**存储通道（`src/data/storage.js` 是全工程唯一底座
+   ⇒ 本文件不直接触碰 `window.localStorage`）。`readKey` 对坏 JSON 恒回 `null`（内部 try/catch）。 */
+import { readKey, writeKey, removeKey, hasKey } from '../data/storage.js'
 import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 import { currentUser } from '../data/session.js'
+/* **P1c（管理面收口，2026-11-15）**：管理员通道的签发凭据改為「當前登入會話的平台 `access_token`」
+   ⇒ 这里只取**憑證串**（`otpAuth()` 的 `getSession()`），**不打印、不落盤、不上屏**。 */
+import { otpSessionAccessToken } from '../data/cloudbaseAuth.js'
 
 /** 云函数名（**唯一一处定义点**；`adminToken.js` / `userToken.js` 从这里转口）。 */
 export const ADMIN_TOKEN_FUNCTION = 'xiai-admin-token'
@@ -53,6 +68,33 @@ export const PUBLIC_WRITE_ACTION = 'public-write'
 
 /** 形态标注（上屏 / 报告用）。 */
 export const TOKEN_MODES = Object.freeze({ CLOUD: 'cloud', LOCAL_DEV: 'local-dev' })
+
+/**
+ * **令牌持久化键表（R-L10 单点定义 —— 全工程只此一处）**。
+ *
+ * 键值是交给 `src/data/storage.js` 的**命名空间内键名**（真正落点 ＝ `xiai:v1:<键值>`）；
+ * 值是 `{token, expiresAt, sub, ver}` 四键信封（**不含 uid / 手机号原文**：`sub` 已是服务端
+ * 验签过的手机号，与令牌本体同密级）。
+ * 两条通道**各占一个键** ⇒ 管理员令牌不会覆盖用户令牌、反之亦然。
+ */
+export const TOKEN_PERSIST_KEYS = Object.freeze({
+  [USER_TOKEN_FUNCTION]: 'user-token',
+  [ADMIN_TOKEN_FUNCTION]: 'admin-token'
+})
+
+/**
+ * **撤销类 reason**（服务端判「令牌不成立 / 已过期 / 版本已被撤销」时的落点）：
+ * 一旦收到，**清内存 ＋ 清持久化 ＋ 引导重新登录**，且**不得**拿同一枚令牌重试。
+ * 取值面只收既有冻结字面值（`FORBIDDEN` 是云函数对全部令牌侧失败的统一落点；
+ * `TOKEN_INVALID` 系只读会话验签面（`lib/verifySession.js` / `lib/feicuiToken.js`）的同义落点）。
+ * **`STORAGE_UNAVAILABLE` 不在表内**：「内部不可用」≠「令牌无效」⇒ 不清任何令牌。
+ */
+export const TOKEN_REVOKE_REASONS = Object.freeze(['FORBIDDEN', 'TOKEN_INVALID'])
+
+/** 撤销类判定（纯函数、零副作用）。 */
+function isRevokeReason(reason) {
+  return typeof reason === 'string' && TOKEN_REVOKE_REASONS.indexOf(reason) !== -1
+}
 
 /* 兼容别名（Phase 1 的既有导出名；**不得删** —— 既有导入方与 58 条自检在用）。 */
 export const ADMIN_TOKEN_ACTIONS = TOKEN_ACTIONS
@@ -78,15 +120,43 @@ function trimmed(value) {
 }
 
 /**
+ * `action:'issue'` 的**默認**入參構造。
+ *
+ * **P1c（管理面收口，2026-11-15）**：改前的逐字形態是 `{ phone, code }`（`code` ＝ 服務端環境變數裡的
+ * 全站固定碼）—— 那等於「任何知道碼的人都能換管理員令牌」⇒ 已作廢。現在**兩條通道同形**：
+ * `{ phone, platformAccessToken }`（平台短訊登錄簽發的 `access_token`；服務端拿去驗簽取號，
+ * **前端不持有任何固定碼**）。`code` 一概不再出現在任何請求體裡。
+ * @param {{phone?:string, platformAccessToken?:string}} credentials
+ * @returns {{phone:string, platformAccessToken:string}}
+ */
+function defaultIssueBody(credentials) {
+  return { phone: trimmed(credentials.phone), platformAccessToken: trimmed(credentials.platformAccessToken) }
+}
+
+/**
  * 建一条令牌通道（**同一套机制 / 同一套失败形态**）。
- * @param {{functionName:string, subject:string, candidate?:string}} profile
+ * @param {{functionName:string, subject:string, candidate?:string, persistKey?:string,
+ *          issueBody?:(credentials:object)=>{phone:string, platformAccessToken:string},
+ *          resolvePlatformSession?:()=>Promise<string>}} profile
  *   `functionName` ＝ 云函数名；`subject` ＝ 文案主语（`管理員` / `用戶`）；
- *   `candidate` ＝ dev / 离线形态下「本地角色门」允许的角色候选（管理员通道用；用户通道为空）
+ *   `candidate` ＝ dev / 离线形态下「本地角色门」允许的角色候选（管理员通道用；用户通道为空）；
+ *   `issueBody` ＝ `action:'issue'` 的入参构造（**缺省与两条通道一律** `{phone, platformAccessToken}`）；
+ *   `resolvePlatformSession` ＝ **凭据兜底取数器**（P1c）：调用方没显式给
+ *   `platformAccessToken` 时，就地取「當前登入會話」的平台凭證（管理员通道 ＝ `otpSessionAccessToken`）。
+ *   **取不到 ⇒ 结构化拒绝 ＋ 重新登入引导，绝不回退任何固定码**。用户通道不声明它
+ *   （登录流程本就拿着刚签下的凭證，P1b 行为逐字不变）。
+ *   `persistKey` ＝ **持久化键**（R-L10；缺省按 `TOKEN_PERSIST_KEYS` 由 `functionName` 查出；
+ *   空串 ⇒ 该通道不持久化）。
  * @returns {object} 通道（方法见下）
  */
 export function createTokenChannel(profile) {
   const functionName = profile.functionName
   const subject = profile.subject
+  const issueBodyOf = typeof profile.issueBody === 'function' ? profile.issueBody : defaultIssueBody
+  const resolvePlatformSession = typeof profile.resolvePlatformSession === 'function' ? profile.resolvePlatformSession : null
+  const persistKey = typeof profile.persistKey === 'string'
+    ? profile.persistKey
+    : (Object.prototype.hasOwnProperty.call(TOKEN_PERSIST_KEYS, functionName) ? TOKEN_PERSIST_KEYS[functionName] : '')
 
   /** 令牌缓存（**内存**；`token` 不对外暴露原文）。 */
   const state = {
@@ -97,11 +167,75 @@ export function createTokenChannel(profile) {
     uid: '',
     issuedAt: 0,
     renewals: 0,
-    lastReason: ''
+    lastReason: '',
+    /* 本次进程是否已尝试过读回（**只读一次**：读回失败也记为已读 ⇒ 不反复打存储）。 */
+    restored: false,
+    /* 当前这枚令牌是否来自持久化读回（诊断读数用，**不作判据**）。 */
+    restoredFromStorage: false
+  }
+
+  /**
+   * **持久化回写**（R-L10）：`{token, expiresAt, sub, ver}` 四键信封。
+   * **恒不抛**（`storage.js::writeKey` 内部 try/catch）—— 持久化失败等于「下次刷新要重新取票」，
+   * 属**降级**而非错误，故不改变任何调用方语义。
+   * @returns {boolean} 是否写成功（`false` ⇒ 本次仅内存）
+   */
+  function persistNow() {
+    if (persistKey === '' || state.token === '') return false
+    return writeKey(persistKey, {
+      token: state.token,
+      expiresAt: Math.floor(state.expiresAt),
+      sub: state.sub,
+      ver: state.ver
+    })
+  }
+
+  /**
+   * **读回持久化令牌**（R-L10；本进程只尝试一次）。
+   *
+   * 校验四件事，任一不成立即**整条丢弃并删键**（**绝不抛错** —— 坏数据只等于「没有令牌」）：
+   *   ① 形态：值必须是普通对象（数组 / 标量 / 坏 JSON ⇒ `storage.js::readKey` 回 `null`）；
+   *   ② `token` 必须是非空字符串；
+   *   ③ `expiresAt` 必须是有限数字且**尚未过期**（本地时间只在体验层，判据仍是服务端）；
+   *   ④ `sub` / `ver` 只在是字符串时采纳（缺省为空串 —— 不猜、不补）。
+   * 读回**不产出任何授权结论**：过门仍必须由云函数回 `ok:true`。
+   */
+  function restoreOnce() {
+    if (state.restored) return
+    state.restored = true
+    if (persistKey === '') return
+    /* 内存里已有令牌（同进程刚签发过）⇒ 持久化不会更权威，跳过读回。 */
+    if (state.token !== '') return
+    const stored = readKey(persistKey)
+    if (stored === null || stored === undefined) {
+      /* `readKey` 对**坏 JSON** 与**键不存在**都回 `null` ⇒ 用 `hasKey` 区分：
+         键在、内容不可解析 ⇒ **当场删掉**（垃圾不留；等于「无令牌」）。 */
+      if (hasKey(persistKey)) removeKey(persistKey)
+      return
+    }
+    if (typeof stored !== 'object' || Array.isArray(stored)) {
+      removeKey(persistKey)
+      return
+    }
+    const token = typeof stored.token === 'string' ? stored.token.trim() : ''
+    const expiresAt = Number(stored.expiresAt)
+    const sub = typeof stored.sub === 'string' ? stored.sub : ''
+    const ver = typeof stored.ver === 'string' ? stored.ver : ''
+    const usable = token !== '' && Number.isFinite(expiresAt) && Math.floor(expiresAt) > nowSeconds()
+    if (!usable) {
+      removeKey(persistKey)
+      return
+    }
+    state.token = token
+    state.expiresAt = Math.floor(expiresAt)
+    state.sub = sub
+    state.ver = ver
+    state.restoredFromStorage = true
   }
 
   /** 令牌读数（**不含令牌原文**；只有长度与指纹 ⇒ 可直接进报告 / 日志）。 */
   function snapshot() {
+    restoreOnce()
     const remaining = state.token ? Math.max(0, state.expiresAt - nowSeconds()) : 0
     return {
       channel: functionName,
@@ -118,15 +252,21 @@ export function createTokenChannel(profile) {
       tokenLength: state.token.length,
       tokenFingerprint: state.token ? fingerprint(state.token) : '',
       slidingRenewals: state.renewals,
-      lastReason: state.lastReason
+      lastReason: state.lastReason,
+      /* **持久化面（R-L10 读数）**：是否有持久化键 / 本枚令牌是否读回自持久化。 */
+      persisted: persistKey !== '',
+      restoredFromStorage: state.restoredFromStorage
     }
   }
 
   function present() {
+    restoreOnce()
     return state.token !== ''
   }
 
-  /** 清空缓存令牌（登出 / 授权判定失败时调用）。 */
+  /**
+   * 清空令牌（**内存 ＋ 持久化**；登出 / 撤销类拒绝时调用 —— 本函数是全文件唯一的清点）。
+   */
   function clear() {
     state.token = ''
     state.expiresAt = 0
@@ -134,6 +274,9 @@ export function createTokenChannel(profile) {
     state.sub = ''
     state.uid = ''
     state.issuedAt = 0
+    state.restoredFromStorage = false
+    /* 持久化同清（**登出/撤销后不得留任何可复用凭据**）；`removeKey` 恒不抛。 */
+    if (persistKey !== '') removeKey(persistKey)
     return snapshot()
   }
 
@@ -147,17 +290,40 @@ export function createTokenChannel(profile) {
   }
 
   /**
-   * 取票：手机号 + 验证码 ⇒ 短期令牌（**服务端验签是唯一判据 ⇒ 这里只做携带**）。
-   * @param {{phone?:string, code?:string}} credentials
+   * 取票：手机号 + 凭据 ⇒ 短期令牌（**服务端验签是唯一判据 ⇒ 这里只做携带**）。
+   *
+   * 凭据形态**按通道**（`issueBodyOf`）：**P1c 起两条通道同形** ——
+   * `{ phone, platformAccessToken }`（平台原生会话的 `access_token`；**不再有任何固定码**）。
+   * 通道声明了 `resolvePlatformSession` 且调用方没给凭据 ⇒ 就地取当前会话凭證；
+   * 取不到 ⇒ **结构化拒绝 ＋ 重新登入引导**（**零请求、零固定码回退**）。
+   * @param {{phone?:string, platformAccessToken?:string}} credentials
    * @returns {Promise<{ok:true, expiresAt:number, ttlSeconds:number, sub:string, uid:string, ver:string,
    *                    serverNow:number, tokenLength:number, tokenFingerprint:string}
    *                  |{ok:false, reason:string, message:string}>}
    */
   async function request(credentials = {}) {
+    const source = credentials && typeof credentials === 'object' ? credentials : {}
+    const body = issueBodyOf(source)
+    if (resolvePlatformSession && trimmed(body.platformAccessToken) === '') {
+      /* **凭据兜底**：只取「當前登入會話」的凭證；取不到就拒绝（**不發請求、不回退固定碼**）。 */
+      let resolved = ''
+      try {
+        resolved = await resolvePlatformSession()
+      } catch {
+        resolved = ''
+      }
+      if (trimmed(resolved) === '') {
+        return {
+          ok: false,
+          reason: 'FORBIDDEN',
+          message: `未取得平台登入會話，無法換取${subject}令牌；請以手機號＋短訊驗證碼重新登入後再試；本次零寫入。`
+        }
+      }
+      body.platformAccessToken = trimmed(resolved)
+    }
     const reply = await callCloudFunction(functionName, {
       action: TOKEN_ACTIONS.ISSUE,
-      phone: trimmed(credentials.phone),
-      code: trimmed(credentials.code)
+      ...body
     })
     /* 传输层失败 ⇒ 原样（`STORAGE_UNAVAILABLE`）；业务拒绝 ⇒ 原样透传。 */
     if (!reply.ok) return reply
@@ -180,6 +346,9 @@ export function createTokenChannel(profile) {
     state.uid = typeof result.uid === 'string' ? result.uid : ''
     state.renewals = 0
     state.lastReason = ''
+    state.restoredFromStorage = false
+    /* **R-L10**：签发成功即回写持久化（下次刷新免重登）；写失败只降级、不影响本次结果。 */
+    persistNow()
     return {
       ok: true,
       /* **不回吐令牌原文**（调用方无需它；减少误打印面）。 */
@@ -196,9 +365,13 @@ export function createTokenChannel(profile) {
 
   /**
    * 保证「本次写操作有一枚可携带的令牌」——给页面用的最小入口（云端模式下才需要）。
-   * @param {{code?:string, phone?:string}} input 验证码**必要时**才需要（已有未过期令牌 ⇒ 直接复用）
+   * @param {{phone?:string, platformAccessToken?:string}} input
+   *   凭据**必要時**才需要（已有未过期令牌 ⇒ 直接复用）；形态按通道（`issueBodyOf`）。
+   *   **P1c 起没有任何 `code` 入参**（固定码已退出授权判定）。
    */
   async function ensureWriteSession(input = {}) {
+    /* **R-L10**：先尝试读回持久化令牌（失败/过期/坏数据 ⇒ 视为无令牌，继续走取票）。 */
+    restoreOnce()
     if (writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV) {
       return {
         ok: true,
@@ -219,7 +392,8 @@ export function createTokenChannel(profile) {
     }
     const user = currentUser()
     const target = trimmed(input.phone || (user && user.phone) || '')
-    const issued = await request({ phone: target, code: input.code })
+    /* **P1c**：只带 `{ phone, platformAccessToken }`；没带凭證时由通道的 `resolvePlatformSession` 兜底。 */
+    const issued = await request({ phone: target, platformAccessToken: input.platformAccessToken })
     if (!issued.ok) return issued
     return {
       ok: true,
@@ -253,6 +427,9 @@ export function createTokenChannel(profile) {
          且本形态**明确标注为非正式写入路径**（见 `writeFaceModeLabel()`）。 */
       return { ok: true, mode: TOKEN_MODES.LOCAL_DEV, dev: true, message: 'dev / 離線形態：未經雲端驗簽。' }
     }
+    /* **R-L10**：云端形态先尝试读回持久化令牌（刷新后免重登）；读回的值只当「待验令牌」，
+       过门仍必须由云函数回 `ok:true`。 */
+    restoreOnce()
     /* 云端形态：**不预判、不短路** —— 一律把请求交给云函数（前端不产出授权结论）。
        **超时透传（本單「超時預算」）**：`options.timeoutMs` 逐字下传 —— 这是「按 op 放宽超时」
        的**唯一通道**；未传 ⇒ `undefined` ⇒ `callCloudFunction` 内部回落全局默认 15000 ms
@@ -276,7 +453,13 @@ export function createTokenChannel(profile) {
         state.expiresAt = Number(result.renewedExpiresAt) || state.expiresAt
         state.ver = typeof result.ver === 'string' ? result.ver : state.ver
         state.renewals += 1
+        state.restoredFromStorage = false
+      } else if (Number.isFinite(Number(result.renewedExpiresAt)) && Number(result.renewedExpiresAt) > state.expiresAt) {
+        /* 极端兼容：服务端只回了新时效（未回新令牌）⇒ **只往后延**，绝不由前端自行放宽。 */
+        state.expiresAt = Math.floor(Number(result.renewedExpiresAt))
       }
+      /* **R-L10**：续期成功后**回写持久化**（TTL 恒以服务端回包为准 —— 前端不自行放宽）。 */
+      if (state.token !== '') persistNow()
       if (result.identity && typeof result.identity.uid === 'string') state.uid = result.identity.uid
       state.lastReason = ''
       const envelope = {
@@ -343,7 +526,10 @@ export function createTokenChannel(profile) {
     if (result && result.ok === false && typeof result.reason === 'string' && typeof result.message === 'string') {
       /* **服务端结构化拒绝原样透传**（`reason` / `message` 一个都不改写）。 */
       state.lastReason = result.reason
-      if (result.reason === 'FORBIDDEN') clear()
+      /* **撤销面（R-L10 第 3 条）**：`FORBIDDEN` / `TOKEN_INVALID` ⇒ **内存 ＋ 持久化全清**
+         （`clear()` 是唯一清点）⇒ 下一次写会因「无令牌」被 `ensureUserTokenForWrite` 结构性拒绝，
+         **不会**拿同一枚废令牌无限重试。`STORAGE_UNAVAILABLE`（内部不可用）**不清**。 */
+      if (isRevokeReason(result.reason)) clear()
       const denial = { ok: false, reason: result.reason, message: result.message }
       /* **`refunded` additive 透传（本单「人工智能修復」）**：失败回包**确有该键**（布尔）才逐字
          叠出 —— 退费与否只由服务端说了算（如 `ai-enhance-face` 的失败回包带 `refunded`）。
@@ -405,11 +591,40 @@ export function createTokenChannel(profile) {
    两条通道（**同一份实现**；只有函数名与文案主语不同）
    --------------------------------------------------------------------------- */
 
-/** 管理员写面通道（Phase 1 已上线口径，逐字沿用）。 */
-export const adminTokenChannel = createTokenChannel({ functionName: ADMIN_TOKEN_FUNCTION, subject: '管理員' })
+/**
+ * 管理员写面通道。
+ *
+ * **P1c（管理面收口，2026-11-15）**：`issue` 入参由 `{phone, code}`（全站固定码）改为
+ * `{ phone, platformAccessToken }` —— 与用户通道**同形、同判据**（服务端验签取号 ＋ 白名单）；
+ * 没显式给凭證时经 `resolvePlatformSession`（＝ `otpSessionAccessToken`）取**當前登入會話**的
+ * 平台 `access_token`；取不到 ⇒ 结构化拒绝 ＋ 重新登入引导（**零固定码回退**）。
+ */
+export const adminTokenChannel = createTokenChannel({
+  functionName: ADMIN_TOKEN_FUNCTION,
+  subject: '管理員',
+  resolvePlatformSession: otpSessionAccessToken,
+  issueBody: (credentials) => ({
+    phone: trimmed(credentials.phone),
+    platformAccessToken: trimmed(credentials.platformAccessToken)
+  })
+})
 
-/** 普通用户写面通道（Phase A 新增；机制 / 失败形态与管理员通道**共用同一份实现**）。 */
-export const userTokenChannel = createTokenChannel({ functionName: USER_TOKEN_FUNCTION, subject: '用戶' })
+/**
+ * 普通用户写面通道（Phase A 新增；机制 / 失败形态与管理员通道**共用同一份实现**）。
+ *
+ * **冻结契约 R-L1（P1b）**：`xiai-user-token` 的 `action:'issue'` 入参改为
+ * `{ phone, platformAccessToken }`（**不再收 `code`**：驗證碼驗在平台側，服務端只認平台簽發的令牌）。
+ * **P1c 起管理员通道同形**（同一份 `issueBody`、同一判据）；两条通道的差别只剩
+ * 函数名 / 文案主语，以及管理员通道多一个「凭據兜底取數器」（`resolvePlatformSession`）。
+ */
+export const userTokenChannel = createTokenChannel({
+  functionName: USER_TOKEN_FUNCTION,
+  subject: '用戶',
+  issueBody: (credentials) => ({
+    phone: trimmed(credentials.phone),
+    platformAccessToken: trimmed(credentials.platformAccessToken)
+  })
+})
 
 /* ---------------------------------------------------------------------------
    传输注入缝（**两条通道共用同一条缝** —— 同一个云函数调用层；离线自检 / 宿主用）
@@ -444,12 +659,21 @@ export function clearAdminToken() {
   return adminTokenChannel.clear()
 }
 
-export function requestAdminToken(phone, code) {
-  return adminTokenChannel.request({ phone, code })
+/**
+ * 取管理员令牌（**P1c**：`issue` 收 `{phone, platformAccessToken}`；**不再有 `code`**）。
+ * @param {string} phone 手機號
+ * @param {string} [platformAccessToken] 平台會話凭證；**省略 ⇒ 自動取當前登入會話的凭證**
+ */
+export function requestAdminToken(phone, platformAccessToken) {
+  return adminTokenChannel.request({ phone, platformAccessToken })
 }
 
-export function ensureAdminWriteSession(code, phone) {
-  return adminTokenChannel.ensureWriteSession({ code, phone })
+/**
+ * 保证管理员写面有令牌（**P1c：入参只剩手機號** —— 校驗碼入参已撤除）。
+ * @param {string} [phone] 手機號（省略 ⇒ 取本地會話裡的當前用戶號）
+ */
+export function ensureAdminWriteSession(phone) {
+  return adminTokenChannel.ensureWriteSession({ phone })
 }
 
 export function adminGate(op, payload) {
@@ -479,12 +703,22 @@ export function clearUserToken() {
   return userTokenChannel.clear()
 }
 
-export function requestUserToken(phone, code) {
-  return userTokenChannel.request({ phone, code })
+/**
+ * 取用户令牌（**冻结契约 R-L1**：`issue` 收 `{phone, platformAccessToken}`）。
+ * @param {string} phone 手機號
+ * @param {string} platformAccessToken 平台原生會話的 `access_token`（**憑證，不打印、不落盤**）
+ */
+export function requestUserToken(phone, platformAccessToken) {
+  return userTokenChannel.request({ phone, platformAccessToken })
 }
 
-export function ensureUserWriteSession(code, phone) {
-  return userTokenChannel.ensureWriteSession({ code, phone })
+/**
+ * 保证用户写面有令牌（**位置参数顺序同族于管理员侧**：凭据在前、手机号在后）。
+ * @param {string} platformAccessToken 平台原生會話的 `access_token`
+ * @param {string} phone 手機號
+ */
+export function ensureUserWriteSession(platformAccessToken, phone) {
+  return userTokenChannel.ensureWriteSession({ platformAccessToken, phone })
 }
 
 export function userGate(op, payload, options) {

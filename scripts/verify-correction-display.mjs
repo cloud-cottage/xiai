@@ -26,9 +26,12 @@
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
- * 用法（手机号 / 验证码 / 密钥只从**环境变量**传入）：
- *   XIAI_ADMIN_PHONE=… XIAI_ADMIN_SMS_CODE=… XIAI_ADMIN_TOKEN_SECRET=… \
- *     node scripts/verify-correction-display.mjs
+ * 用法（手机号 / **令牌签发密钥**只从**环境变量**传入；脚本内零字面值）：
+ *   XIAI_ADMIN_PHONE=… XIAI_USER_TOKEN_SECRET=… node scripts/verify-correction-display.mjs
+ *   **R-L3′**：登录已改真短訊 OTP ⇒ 本脚本不再收验证码（`XIAI_ADMIN_SMS_CODE` 已退出判定面）；
+ *   令牌由 `scripts/lib/sign-test-token.mjs` **本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）
+ *   并经**传输缝**注入（`action:'issue'` 就地回签发回包），**不出网**。
+ *   缺密钥 / 缺手机号 ⇒ 打印 `SKIP（缺 <VAR>，本脚本未验证）` 并 **exit 0**（不假绿）。
  */
 /* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
    若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
@@ -41,6 +44,8 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 ⇒ SKIP（exit 0）。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, TestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -102,27 +107,26 @@ const sorted = (list) => (Array.isArray(list) ? list.slice().sort() : list)
    2. 环境（手机号 / 验证码 / 密钥只从环境变量来；脚本内零字面值）
    --------------------------------------------------------------------------- */
 const PHONE = String(process.env.XIAI_ADMIN_PHONE || '').trim()
-const CODE = String(process.env.XIAI_ADMIN_SMS_CODE || '').trim()
-const SECRET = String(process.env.XIAI_ADMIN_TOKEN_SECRET || '').trim()
-if (PHONE === '' || CODE === '' || SECRET === '') {
-  console.log(
-    JSON.stringify({
-      fatal: 'MISSING_TEST_ENV',
-      need: ['XIAI_ADMIN_PHONE', 'XIAI_ADMIN_SMS_CODE', 'XIAI_ADMIN_TOKEN_SECRET'],
-      note: '三个值只从环境变量读入；本脚本绝不回显它们的值，也不把它们写进脚本'
-    })
-  )
-  process.exit(2)
+/* **R-L3′**：登录已改真短訊 OTP（云函数 `issue` 收 `{phone, platformAccessToken}`），
+   `XIAI_ADMIN_SMS_CODE` / 固定码整条退出判定面 ⇒ 本脚本不再索要验证码；
+   令牌改「**本地现签 ＋ 传输缝注入**」，签发密钥**只从环境变量 `XIAI_USER_TOKEN_SECRET` 读**。
+   缺密钥 / 缺夹具手机号 ⇒ 打印 `SKIP（缺 <VAR>，本脚本未验证）` 并 exit 0（**不假绿、不报红**）。 */
+const PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
+let SIGNED_USER_TOKEN = null
+try {
+  if (PHONE === '') throw new TestTokenSkip(['XIAI_ADMIN_PHONE'])
+  requireSecretOrSkip(USER_SECRET_ENV)
+  SIGNED_USER_TOKEN = signUserToken({ phone: PHONE })
+} catch (error) {
+  handleTestTokenSkip(error)
 }
 process.env.XIAI_ADMIN_PHONE = PHONE
-process.env.XIAI_ADMIN_SMS_CODE = CODE
-process.env.XIAI_ADMIN_TOKEN_SECRET = SECRET
 process.env.XIAI_ADMIN_TOKEN_VERSION = process.env.XIAI_ADMIN_TOKEN_VERSION || '1'
 process.env.XIAI_ADMIN_TOKEN_TTL_SECONDS = process.env.XIAI_ADMIN_TOKEN_TTL_SECONDS || '900'
-/* **R-2 适配**：把同一组值映射到**用户函数**的环境变量名（`XIAI_USER_*` ＋ 白名单 `XIAI_ADMIN_PHONE`）。
-   采纳写面已迁到 `xiai-user-token`：服务端验签用户（登录）令牌 ＋「手机号 ∈ `XIAI_ADMIN_PHONE`」。 */
-process.env.XIAI_USER_SMS_CODE = CODE
-process.env.XIAI_USER_TOKEN_SECRET = SECRET
+/* **R-2 适配**：把同一组夹具映射到**用户函数**的环境变量名（`XIAI_USER_*` ＋ 白名单 `XIAI_ADMIN_PHONE`）。
+   采纳写面已迁到 `xiai-user-token`：服务端验签用户（登录）令牌 ＋「手机号 ∈ `XIAI_ADMIN_PHONE`」。
+   **密钥不在此处转写**：`XIAI_USER_TOKEN_SECRET` 由调用方直接经环境变量提供（`requireSecretOrSkip`
+   是唯一读取点，本脚本不复制、不回显、不落盘）。 */
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
@@ -131,7 +135,6 @@ const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_
    自检用**客户端实现**算，再与服务端 `config.uidOf` 逐字比对 ⇒ 机械证明「两侧同值」。 */
 const uidUtil = await import(path.join(ROOT, 'src/data/uid.js'))
 const uidOfPhone = (phone) => uidUtil.uidOf(phone)
-const nowS = () => Math.floor(Date.now() / 1000)
 const shapeOf = (value) => Object.keys(value || {}).sort().join(',')
 const isDenial = (value) =>
   value && value.ok === false && shapeOf(value) === 'message,ok,reason' && FROZEN_REASONS.indexOf(value.reason) !== -1
@@ -143,8 +146,8 @@ const NON_WHITELIST_PHONE = '139' + String(0).repeat(8) + '1'
    --------------------------------------------------------------------------- */
 const fn = require(path.join(FUNCTION_DIR, 'index.js'))
 const ops = require(path.join(FUNCTION_DIR, 'lib/ops.js'))
-/* 用户（登录）令牌库（`xiai-user-token/lib/token.js`；与管理员令牌库逐字节相同）。 */
-const userLib = require(path.join(FUNCTION_DIR, 'lib/token.js'))
+/* **R-L3′**：令牌不再由本脚本直接签发 —— 签发真源（`lib/token.js::issueToken`）只经
+   `scripts/lib/sign-test-token.mjs` 使用（单点，避免两处漂移）。 */
 
 /* 假 DB（内存；按 `doc(id).set()` 的 CloudBase 语义补 `_id`）——「零写入」的判据就是它的写计数。 */
 function createStore(seed) {
@@ -306,6 +309,10 @@ const USER = { id: 'u-13800000002', phone: '13800000002', role: 'user', nickname
 const calls = []
 let transportMode = 'fn'
 userTokenSvc.setUserTokenTransport(async (name, data) => {
+  /* **R-L3′ 取票注入缝**：`issue` 已收「平台原生凭据」，自检不出网 ⇒ 在本缝回**本地现签令牌**的
+     签发回包（形状 ＝ 云函数 `handleIssue` 成功回包）。**不进 `calls`**：该数组只记云端
+     **op** 往返（`C1b` / `C4b` 的「零往返」判据不被取票污染）。 */
+  if (data && data.action === 'issue') return { result: issueReplyOf(SIGNED_USER_TOKEN) }
   calls.push({ name, action: data && data.action, token: data && data.token, op: data && data.op, payloadKeys: data && data.payload ? sorted(Object.keys(data.payload)) : null })
   if (transportMode === 'down') throw new Error('network-down')
   return { result: await fn.main(data) }
@@ -313,7 +320,7 @@ userTokenSvc.setUserTokenTransport(async (name, data) => {
 
 writeFace.setWriteFaceModeOverride('cloud')
 session.setUser(ADMIN)
-const issued = await userTokenSvc.ensureUserWriteSession(CODE, PHONE)
+const issued = await userTokenSvc.ensureUserWriteSession(PLATFORM_CREDENTIAL, PHONE)
 if (!issued.ok) {
   console.log(JSON.stringify({ fatal: 'TOKEN_ISSUE_FAILED', reason: issued.reason, message: issued.message }))
   process.exit(2)
@@ -336,7 +343,8 @@ const tokenSnap = userTokenSvc.userTokenSnapshot()
 check('A7c', '令牌已进入内存缓存（读数不含令牌原文）', true, tokenSnap.present === true && tokenSnap.tokenLength > 0 && typeof tokenSnap.tokenFingerprint === 'string')
 {
   store.load(CLOUD_SEED)
-  const direct = userLib.issueToken({ sub: PHONE, secret: SECRET, nowSeconds: nowS(), ttlSeconds: 900, version: '1', role: 'user' })
+  /* 直调服务端时用**同一枚本地现签用户令牌**（真源算法签出；`SECRET` 不再在本脚本里出现）。 */
+  const direct = SIGNED_USER_TOKEN
   /* 负向：客户端**曾用的旧键面** `{id:…}` ⇒ 服务端 INVALID_FIELD ＋ 零写入。 */
   const legacyKey = await fn.main({ action: 'verify', token: direct.token, op: 'reviewCorrection', payload: { id: 'cr-name', decision: 'ACCEPTED' } })
   check('A8', '**旧键面** `{id:…}` ⇒ 服务端 INVALID_FIELD（A2 的负向对照）', true, isDenial(legacyKey) && legacyKey.reason === 'INVALID_FIELD')
@@ -360,7 +368,7 @@ store.load(CLOUD_SEED)
 resetLocal()
 calls.length = 0
 userTokenSvc.clearUserToken()
-await userTokenSvc.ensureUserWriteSession(CODE, PHONE)
+await userTokenSvc.ensureUserWriteSession(PLATFORM_CREDENTIAL, PHONE)
 
 const sealBefore = sealsSvc.getSealById(SEAL_ID)
 const faceBefore = sealsSvc.getFaceById(FACE_ID)

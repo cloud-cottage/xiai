@@ -5,9 +5,15 @@
  * 口径（逐条）：
  *   ① **本文件不写任何密钥 / 手机号 / 验证码字面值** ✗ —— 一律从环境变量读；
  *      `ADMIN_PHONE` 的**工程真源**仍是 `src/data/seed.js:39`，本处是**同一真源的注入点**（非第二处定义点）。
- *   ② **配置缺失 ⇒ 拒绝、不静默降级**：缺 `XIAI_ADMIN_PHONE` / `XIAI_ADMIN_SMS_CODE` / `XIAI_ADMIN_TOKEN_SECRET`
+ *   ② **配置缺失 ⇒ 拒绝、不静默降级**：缺 `XIAI_ADMIN_PHONE` / `XIAI_ADMIN_TOKEN_SECRET`
  *      一律返回结构化拒绝，`reason` 取**既有冻结字面值** `STORAGE_UNAVAILABLE`
  *      （语义 ＝ 权威存储 / 内部不可用；**属「内部不可用」，不是「越权」⇒ 不得用 `FORBIDDEN` 冒充**）。
+ *      **P1c（管理面收口，2026-11-15）**：`XIAI_ADMIN_SMS_CODE` **已退出 `ready` 必填集** —— 全站固定码
+ *      不再参与任何授权判定（改由 `lib/platformAuth.js` 拿平台 `access_token` 换手机号）；环境变量本身
+ *      **仍然保留**（运维排障 / 其它引用），但**不得再用于任何授权判定**，故本文件只读出「是否仍配置」
+ *      这个布尔读数（`legacySmsCodeConfigured`），**不回传其值**。
+ *      `XIAI_ADMIN_TOKEN_SECRET` **仍必填**；`XIAI_ADMIN_PHONE` **仍必填**（白名单真源：缺 / 空 ⇒
+ *      结构化拒绝 ＋ 零写入，**不得因未配置而放行**）。
  *   ③ **本文件不打印任何密钥 / 令牌**；`fingerprint()` 只给不可逆摘要前 12 位（诊断用）。
  */
 
@@ -25,6 +31,11 @@ const REASONS = Object.freeze({
 /** 环境变量名（唯一一处定义点）。 */
 const ENV_NAMES = Object.freeze({
   PHONE: 'XIAI_ADMIN_PHONE',
+  /**
+   * **已下线的全站固定码**（W-43 ⇒ P1c 收口，2026-11-15）：起**不再参与授权判定**，
+   * 也**不在 `ready` 必填集**里。变量名保留（其它代码可能引用 / 运维排障需要），
+   * 本文件只读「是否仍配置」的布尔读数，**绝不用其值判权**。逐字值不再是任何授权依据。
+   */
   SMS_CODE: 'XIAI_ADMIN_SMS_CODE',
   SECRET: 'XIAI_ADMIN_TOKEN_SECRET',
   VERSION: 'XIAI_ADMIN_TOKEN_VERSION',
@@ -55,6 +66,36 @@ const UID_HEX_LENGTH = 16
  * 工程纪律「envId 不在代码里写死」照旧成立）。
  */
 const ENV_ID_NAMES = Object.freeze(['TCB_ENV', 'SCF_NAMESPACE', 'CLOUDBASE_ENV_ID'])
+
+/**
+ * **平台 auth 区域参数化（R-L9，2026-11-15）** —— 与 `lib/platformAuth.js` 的区域常量**同值同序**；
+ * 本文件是「配置面唯一真源」，`platformAuth.js` 只在**没收到显式 `region` 参数**时才自行读环境
+ * （`index.js` 恒显式传入 `readConfig().authRegion` ⇒ 生产只有这一条取值路）。
+ * 区域**不是判定输入**（只决定打到哪个区域的 auth 端点）⇒ 它**不参与 `ready` 判定**。
+ */
+const AUTH_REGION_NAMES = Object.freeze(['XIAI_AUTH_REGION', 'TCB_REGION'])
+
+/** 区域默认值（＝参数化之前硬编码的生产区域 ⇒ 不配环境变量时行为逐字等价）。 */
+const DEFAULT_AUTH_REGION = 'ap-shanghai'
+
+/** 区域形态（小写字母 / 数字 / 连字符；**不含点与斜杠** ⇒ 拼不出别的域）。 */
+const AUTH_REGION_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/
+
+/**
+ * 读区域（`XIAI_AUTH_REGION` → 回退 `TCB_REGION` → 默认 `ap-shanghai`）。
+ * 形态不成立 ⇒ **跳过该候选**，最终回落默认值（绝不把不合格串拼进 host）。
+ * @param {object} [env] 环境（缺省 `process.env`）
+ * @returns {string} 区域（恒非空、形态成立）
+ */
+function readAuthRegion(env) {
+  const source = env || process.env
+  for (const name of AUTH_REGION_NAMES) {
+    const value = readString(source, name).toLowerCase()
+    if (value === '') continue
+    if (AUTH_REGION_PATTERN.test(value)) return value
+  }
+  return DEFAULT_AUTH_REGION
+}
 
 /**
  * 结构化拒绝（**恰 3 键**：`{ok:false, reason, message}` —— 与工程既有拒绝形态同形，不加旁路字段）。
@@ -125,19 +166,24 @@ function readEnvId(env) {
 
 /**
  * 读配置。
+ *
+ * **P1c（管理面收口，2026-11-15）**：`ready` 必填集**只剩 `XIAI_ADMIN_PHONE` ＋ `XIAI_ADMIN_TOKEN_SECRET`**。
+ * `XIAI_ADMIN_SMS_CODE` 已下线（不再参与签发判定）⇒ 缺它**不得**让整个函数 `STORAGE_UNAVAILABLE`
+ * （否则变量一下线管理员就再也签不出令牌）；但仍读出「是否仍配置」的布尔读数，供运维在日志里看到
+ * 「遗留变量还在」这一事实 —— **不回传其值、不作任何判定输入**。
  * @param {object} [env] 环境（缺省 `process.env`；测试可注入）
- * @returns {{ready:true, phone:string, smsCode:string, secret:string, version:string,
- *            ttlSeconds:number, leewaySeconds:number}
+ * @returns {{ready:true, phone:string, legacySmsCodeConfigured:boolean, secret:string, version:string,
+ *            ttlSeconds:number, leewaySeconds:number, envId:string, authRegion:string}
  *          |{ready:false, reason:string, message:string}}
  */
 function readConfig(env) {
   const source = env || process.env
   const phone = normalizePhone(readString(source, ENV_NAMES.PHONE))
-  const smsCode = readString(source, ENV_NAMES.SMS_CODE)
+  /* 遗留全站固定码：**只读存在性**（布尔），值既不回传也不参与判定。 */
+  const legacySmsCodeConfigured = readString(source, ENV_NAMES.SMS_CODE) !== ''
   const secret = readString(source, ENV_NAMES.SECRET)
   const missing = []
   if (!phone) missing.push(ENV_NAMES.PHONE)
-  if (!smsCode) missing.push(ENV_NAMES.SMS_CODE)
   if (!secret) missing.push(ENV_NAMES.SECRET)
   if (missing.length > 0) {
     return {
@@ -150,12 +196,14 @@ function readConfig(env) {
   return {
     ready: true,
     phone,
-    smsCode,
+    legacySmsCodeConfigured,
     secret,
     version: readString(source, ENV_NAMES.VERSION) || DEFAULT_VERSION,
     ttlSeconds: readInteger(source, ENV_NAMES.TTL_SECONDS, DEFAULT_TTL_SECONDS),
     leewaySeconds: readInteger(source, ENV_NAMES.LEEWAY_SECONDS, DEFAULT_LEEWAY_SECONDS),
-    envId: readEnvId(source)
+    envId: readEnvId(source),
+    /* **R-L9**：平台 auth 区域（显式交给 `verifyPlatformSession` 的唯一取值路）。 */
+    authRegion: readAuthRegion(source)
   }
 }
 
@@ -186,6 +234,9 @@ module.exports = {
   REASONS,
   ENV_NAMES,
   ENV_ID_NAMES,
+  AUTH_REGION_NAMES,
+  DEFAULT_AUTH_REGION,
+  AUTH_REGION_PATTERN,
   DEFAULT_TTL_SECONDS,
   DEFAULT_LEEWAY_SECONDS,
   DEFAULT_VERSION,
@@ -197,6 +248,7 @@ module.exports = {
   isPhoneLike,
   uidOf,
   readEnvId,
+  readAuthRegion,
   fingerprint,
   maskedPhone,
   isDocNotExistError,

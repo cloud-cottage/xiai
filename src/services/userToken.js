@@ -47,12 +47,17 @@ export {
  *
  * 语义与 `ensureWriteSession` **不同**：登录**必须**由服务端验证这一次（**不复用缓存令牌**），
  * 否则「先服务端验证再写 session」就退化成了「沿用旧令牌」。
+ *
+ * **凭据形态（冻结契约 R-L1 / P1b）**：不再收客户端验证码，改收**平台原生会话的
+ * `access_token`** —— 驗證碼只在平台側（`getVerification` → `verify` → `signIn`）驗一次，
+ * 後端只認平台簽發的令牌。前端**不持有**驗證碼以外的任何密鑰。
+ *
  * @param {string} phone 手机号（服务端判形态）
- * @param {string} code 验证码（**服务端判**；前端不硬编码）
+ * @param {string} platformAccessToken 平台會話憑證（**不打印、不落盤、不回包**）
  * @returns {Promise<{ok:true, mode:string, expiresAt:number, uid:string, sub:string, message:string}
  *                  |{ok:false, reason:string, message:string}>}
  */
-export async function ensureUserLoginToken(phone, code) {
+export async function ensureUserLoginToken(phone, platformAccessToken) {
   if (writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV) {
     return {
       ok: true,
@@ -63,7 +68,15 @@ export async function ensureUserLoginToken(phone, code) {
       message: 'dev / 離線形態：未經雲端驗證（**非正式登錄路徑**）。'
     }
   }
-  const issued = await requestUserToken(phone, code)
+  const platformToken = String(platformAccessToken === undefined || platformAccessToken === null ? '' : platformAccessToken).trim()
+  if (platformToken === '') {
+    /* 沒有平台憑證 ⇒ **不發請求**（發一個空憑證只會換來一句含糊的拒）。 */
+    return {
+      ok: false,
+      message: '未取得平台會話憑證，無法換取寫入令牌；本次未登入、零寫入。'
+    }
+  }
+  const issued = await requestUserToken(phone, platformToken)
   if (!issued.ok) return issued
   return {
     ok: true,

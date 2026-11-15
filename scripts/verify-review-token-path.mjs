@@ -13,8 +13,10 @@
  *      白名单手机号（正对照）⇒ 放行且确有落盘。
  *   C. **缺 env 安全拒（关键安全默认 ＋ 不误伤）**：缺 `XIAI_ADMIN_PHONE` ⇒ **管理员类 op 全拒**
  *      （`STORAGE_UNAVAILABLE`）＋ 零写入；而**普通用户写面（`submitCorrection`）不受影响仍可用**。
- *   D. **自愈**：无令牌 ＋ **有会话** ⇒ 流程**先 issue 补签、后 verify**，最终 ok；
- *      无令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ 零写入（且**零往返**，连补签都不发）。
+ *   D. **不再静默补签（P1 批次裁定 R-L8）**：无令牌 ＋ **有会话** ⇒ **结构化拒绝**
+ *      （`FORBIDDEN` ＋ 「重新登錄」引导 ＋ 零写入 ＋ **零往返**、不伪造令牌）—— 会话不再是补签凭据；
+ *      无令牌 ＋ **无会话** ⇒ 同为结构化拒绝 ＋ 零写入（且**零往返**）。
+ *      「有令牌 ⇒ 写面正常」的正面对照在 A 段（A1〜A3）与 B 段（B1〜B1d）。
  *   E. **本机镜像更正（云端权威优先）**：云端已落盘而本机 `writeCorrectionDecision` 未成功
  *      （`ALREADY_REVIEWED` 等）⇒ 返回 `ok:true` ＋ `reconciled:true`，本机行按服务端权威行更正。
  *   F. **`[data-admin-action]` 去重取值集合现实值**（11 值 / 归并 10 类，v1.73 钩子族扩充：＋edit-ai-upstream）＋ canary 正 / 负对照。
@@ -37,6 +39,14 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import {
+  requireSecretOrSkip,
+  signUserToken,
+  issueReplyOf,
+  handleTestTokenSkip,
+  USER_SECRET_ENV
+} from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -96,7 +106,14 @@ const sorted = (list) => (Array.isArray(list) ? list.slice().sort() : list)
    2. 环境（**合成值**；脚本内零真实凭据字面值）
    --------------------------------------------------------------------------- */
 const PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000001').trim()
-const SECRET = String(process.env.XIAI_ADMIN_TOKEN_SECRET || 'synthetic-selfcheck-secret').trim()
+/* **R-L3′**：签发密钥**只从当前 shell 环境变量读**（不合成、不落盘、不打印）；缺 ⇒ SKIP、exit 0。
+   改前回落的 `'synthetic-selfcheck-secret'` 字面值已删（那等于脚本内置密钥）。 */
+let SECRET = ''
+try {
+  SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 const NON_WHITELIST_PHONE = '139' + String(0).repeat(8) + '1' // 合成「非白名单」号；不写成 11 位字面值
 process.env.XIAI_ADMIN_PHONE = PHONE
 process.env.XIAI_USER_TOKEN_SECRET = SECRET
@@ -216,9 +233,11 @@ const adminSvc = await import(path.join(ROOT, 'src/services/admin.js'))
 const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const userWriteSvc = await import(path.join(ROOT, 'src/services/userWrite.js'))
 
-/* 用户函数验证码：取公开演示码（自愈路径与生产不变量一致）。 */
-const USER_CODE = authSvc.DEMO_SMS_CODE
-process.env.XIAI_USER_SMS_CODE = USER_CODE
+/* **R-L3′**：登录已改真短訊 OTP（`issue` 收 `{phone, platformAccessToken}`）⇒ 取票改走
+   「**本地现签令牌注入**」：`issue` 这一步由**本地现签回包**顶替（回包键面与服务端同形），
+   `verify` 一步仍交给**真实云函数体**。`auth.js::DEMO_SMS_CODE` 已整体删除。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
+const SIGNED_USER_TOKEN = signUserToken({ phone: PHONE })
 
 db.ensureSeed()
 
@@ -260,6 +279,8 @@ let transportMode = 'fn'
 userTokenSvc.setUserTokenTransport(async (name, data) => {
   calls.push({ name, action: data && data.action, op: data && data.op })
   if (transportMode === 'down') throw new Error('network-down')
+  /* **R-L3′ 现签注入**：签发这一步由本地现签令牌顶替（回包键面与服务端同形）。 */
+  if (data && data.action === 'issue') return { result: issueReplyOf(SIGNED_USER_TOKEN) }
   return { result: await fn.main(data) }
 })
 const resetCalls = () => {
@@ -280,7 +301,7 @@ resetLocal('PENDING')
 console.log(JSON.stringify({ section: 'A', title: '登录令牌直通：零第二码、零弹窗、两处落盘' }))
 /* A0：登录令牌预取（模拟登录已换令牌；本段不测取票，只测直通）。 */
 userTokenSvc.clearUserToken()
-const login = await userTokenSvc.ensureUserWriteSession(USER_CODE, PHONE)
+const login = await userTokenSvc.ensureUserWriteSession(OFFLINE_PLATFORM_CREDENTIAL, PHONE)
 check('A0', '登录令牌已入内存（登录已过服务端验证）', true, login.ok === true && userTokenSvc.userTokenSnapshot().present === true)
 check('A0b', '令牌读数只给长度 / 指纹（无原文）', true, userTokenSvc.userTokenSnapshot().tokenLength > 0 && userTokenSvc.userTokenSnapshot().tokenFingerprint.length === 8)
 
@@ -355,20 +376,38 @@ delete process.env.XIAI_ADMIN_PHONE
 process.env.XIAI_ADMIN_PHONE = savedAdminPhone
 
 /* ===========================================================================
-   D 段：自愈（刷新后令牌即丢 ⇒ 有会话则静默补签；无会话则拒）
+   D 段：**无令牌 ⇒ 拒绝 ＋ 重新登錄引导 ＋ 零往返 ＋ 零写入**（P1 批次裁定 R-L8）
+   ---------------------------------------------------------------------------
+   上一版这里测「无令牌 ＋ 有会话 ⇒ 静默补签（先 issue 后 verify）」—— 那条路已**有意删除**
+   （真短訊碼无法静默补签）⇒ 本段改测它**已不存在**：会话在场也必须
+   `{ok:false, reason:'FORBIDDEN'}` ＋ 「重新登錄」引导 ＋ **零写入** ＋ **零云函数往返**
+   （`issue` 与业务 op 都不得发出）＋ **不伪造令牌**。
+   「有令牌 ⇒ 写面正常」的**正面对照**保留在 A 段（A1〜A3，直通采纳）与 B 段（B1〜B1d）。
    =========================================================================== */
-console.log(JSON.stringify({ section: 'D', title: '自愈：有会话先补签、无会话则拒' }))
-/* D0：清令牌 ＋ 有会话 ⇒ 先 issue 后 verify，最终 ok。 */
+console.log(JSON.stringify({ section: 'D', title: '无令牌 ⇒ 拒绝 ＋ 重新登錄引导 ＋ 零往返（无静默补签）' }))
+/* D0：清令牌 ＋ **有会话** ⇒ 结构化拒绝（会话在场也不是补签凭据）。 */
 store.load(CLOUD_SEED)
 resetLocal('PENDING')
 userTokenSvc.clearUserToken()
 session.setUser(ADMIN)
 resetCalls()
 const healed = await corrections.review(ADMIN, CORRECTION_ID, 'ACCEPTED')
-check('D0', '清令牌 ＋ **有会话** ⇒ 采纳成功（ok:true）', true, healed.ok === true && healed.accepted === true)
-check('D0b', '自愈顺序：**先 issue 补签、后 verify**', true, firstIndex('issue') !== -1 && firstIndex('verify') !== -1 && firstIndex('issue') < firstIndex('verify'))
-check('D0c', '自愈后令牌已入内存（present＝true）', true, userTokenSvc.userTokenSnapshot().present === true)
-check('D0d', '自愈写：服务端恰落盘 3 处（公开投影 ＋ 私有状态 ＋ 值级公开摘要）', 3, store.stats.writes.length)
+check('D0', '清令牌 ＋ **有会话** ⇒ 结构化拒绝（FORBIDDEN ＋ 含「重新登錄」引导 ＋ 会话确实在场）', { ok: false, reason: 'FORBIDDEN', guide: true, sessionPresent: true }, {
+  ok: healed.ok,
+  reason: healed.reason,
+  guide: /重新登錄/.test(String(healed.message || '')),
+  sessionPresent: !!(session.currentUser() && session.currentUser().phone === PHONE)
+})
+check('D0b', '清令牌 ＋ 有会话 ⇒ **零云函数往返**（`issue` 与业务 op 都未发出）', { total: 0, issue: 0, verify: 0 }, {
+  total: calls.length,
+  issue: calls.filter((call) => call.action === 'issue').length,
+  verify: calls.filter((call) => call.action === 'verify').length
+})
+check('D0c', '清令牌 ＋ 有会话 ⇒ **未伪造令牌**（present 仍 false）', false, userTokenSvc.userTokenSnapshot().present)
+check('D0d', '清令牌 ＋ 有会话 ⇒ **零写入**（服务端 0 处落盘 ＋ 本机行仍 PENDING）', { writes: 0, localStatus: 'PENDING' }, {
+  writes: store.stats.writes.length,
+  localStatus: localCorrection().status
+})
 /* D1（负向）：清令牌 ＋ 无会话 ⇒ 结构化拒绝 ＋ 零写入 ＋ 零往返。 */
 userTokenSvc.clearUserToken()
 session.setUser(null)
@@ -390,7 +429,7 @@ session.setUser(ADMIN)
    =========================================================================== */
 console.log(JSON.stringify({ section: 'E', title: '云端权威优先：本机镜像更正' }))
 /* E0：预置登录令牌（E 段走直通，避免自愈干扰计数）。 */
-await userTokenSvc.ensureUserWriteSession(USER_CODE, PHONE)
+await userTokenSvc.ensureUserWriteSession(OFFLINE_PLATFORM_CREDENTIAL, PHONE)
 /* E1：本机已 ACCEPTED ＋ 云端 PENDING ⇒ 云端 ok 而本机 writeCorrectionDecision 回 ALREADY_REVIEWED。 */
 store.load(CLOUD_SEED)
 resetLocal('ACCEPTED')
@@ -529,9 +568,13 @@ check('G2', '负对照：纯繁体串不命中', [], simplifiedHits('這裏說�
    =========================================================================== */
 console.log(JSON.stringify({ section: 'H', title: 'gate 回包白名单：display 分组透传（正 / 负对照）' }))
 /* 与第 3 段同一真实传输缝（H 段结束后原样还原；H 段内用 stub 只替 display 回包形状）。 */
-const realTransport = async (name, data) => ({ result: await fn.main(data) })
+const realTransport = async (name, data) => {
+  /* **R-L3′ 现签注入**（同一缝的还原版本）：签发仍由本地现签令牌顶替。 */
+  if (data && data.action === 'issue') return { result: issueReplyOf(SIGNED_USER_TOKEN) }
+  return { result: await fn.main(data) }
+}
 /* H0：前置 —— 内存有登录令牌（cloud 形态 gate 可直测；复用 / 补签同一机制）。 */
-await userTokenSvc.ensureUserWriteSession(USER_CODE, PHONE)
+await userTokenSvc.ensureUserWriteSession(OFFLINE_PLATFORM_CREDENTIAL, PHONE)
 check('H0', '前置：内存有登录令牌（cloud 形态 gate 可直测）', true, userTokenSvc.userTokenSnapshot().present === true)
 /* H1（正向）：注入**带 display 分组**的服务端回包 ⇒ gate 逐字透传（与注入回包同构）。 */
 const injectedDisplay = { sha256: 'f'.repeat(64), displayKey: 'display/xiai/fx/fx-display.webp', bytesLength: 1234, width: 320, height: 240 }

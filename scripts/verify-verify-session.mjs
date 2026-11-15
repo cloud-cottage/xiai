@@ -24,8 +24,9 @@
  *   E 既有面不受影响（未知 action 仍旧 FORBIDDEN / 未知 op 仍旧 INVALID_FIELD /
  *     `sessionProbe` 仍旧恰 8 键）。
  *
- * 纪律：**不打印密钥 / 令牌原文**（只给长度与 sha256 前 12 位指纹）；密钥与手机号一律
- * 运行期构造（**仓内零密钥字面值、零手机号字面值**）。
+ * 纪律：**不打印密钥 / 令牌原文**（只给长度与 sha256 前 12 位指纹）；**令牌密钥只从当前 shell
+ * 环境变量 `XIAI_USER_TOKEN_SECRET` 读**（缺 ⇒ `SKIP（缺 …，本脚本未验证）` ＋ exit 0；
+ * 不合成、不落盘），手机号一律运行期构造（**仓内零密钥字面值、零手机号字面值**）。
  */
 process.env.XIAI_NO_REAL_CARD = '1'
 
@@ -34,6 +35,8 @@ import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -75,16 +78,21 @@ const countIn = (source, needle) => String(source).split(needle).length - 1
    ------------------------------------------------------------------------- */
 
 const randomDigits = (length) => Array.from({ length }, () => String(randomInt(0, 10))).join('')
-const SECRET = randomBytes(32).toString('hex')
+/* **令牌密钥只从当前 shell 环境变量读**（缺 ⇒ `SKIP（缺 XIAI_USER_TOKEN_SECRET，本脚本未验证）`
+   ＋ exit 0；**不合成、不落盘、不打印**）。`OTHER_SECRET` 是「别把密钥」的对照，运行期随机构造。 */
+let SECRET = ''
+try {
+  SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 const OTHER_SECRET = randomBytes(32).toString('hex')
-const SMS_CODE = 'code-' + randomBytes(4).toString('hex')
 const PHONE = '13' + randomDigits(9)
 const NOT_PHONE = 'x-' + randomDigits(6)
 const VERSION = '7'
 const NOW = Math.floor(Date.now() / 1000)
 
 process.env.XIAI_USER_TOKEN_SECRET = SECRET
-process.env.XIAI_USER_SMS_CODE = SMS_CODE
 process.env.XIAI_USER_TOKEN_VERSION = VERSION
 delete process.env.XIAI_SESSION_AUTHORITY /* ⇒ 会话通道 off：既有令牌路行为可判负（零联网） */
 
@@ -362,8 +370,9 @@ check('E1', '未知 action 仍走原路：FORBIDDEN ＋ 恰 3 键 ＋ 原文案�
   mentionsUnknown: String(cUnknownAction.message).includes('未知的操作')
 })
 
-const issued = await call({ action: 'issue', phone: PHONE, code: SMS_CODE })
-const cUnknownOp = await call({ action: 'verify', token: issued.token, op: 'no-such-op', payload: {} })
+/* **R-L3′**：`action:'issue'` 已改为平台会话验签（不再收固定码）⇒ 本段直接用**已现签的
+   有效令牌**打未知 op（判的是 `verify` 的值域，与签发面无关）。 */
+const cUnknownOp = await call({ action: 'verify', token: VALID, op: 'no-such-op', payload: {} })
 check('E2', 'action:verify 未知 op 仍 INVALID_FIELD（写面值域判定未被改动）', 'INVALID_FIELD', cUnknownOp.reason)
 
 const probe = await call({ action: 'verify', op: 'sessionProbe' })

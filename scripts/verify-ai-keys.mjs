@@ -47,16 +47,21 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const FN_DIR = path.join(ROOT, 'cloudfunctions/xiai-user-token')
 
-/* 合成测试环境（缺省才写；**脚本内不写任何真实密钥** —— secret 走运行期随机）。 */
-process.env.XIAI_USER_SMS_CODE = String(process.env.XIAI_USER_SMS_CODE || '729341').trim()
-if (!process.env.XIAI_USER_TOKEN_SECRET) process.env.XIAI_USER_TOKEN_SECRET = randomHex('user-secret')
-process.env.XIAI_USER_TOKEN_SECRET = String(process.env.XIAI_USER_TOKEN_SECRET).trim()
+/* **R-L3′**：令牌签发密钥**只从当前 shell 环境变量读**（不合成、不落盘、不打印）；缺 ⇒ SKIP、exit 0。
+   `UPSTREAM_SECRET` 是「AI 上游密钥加密」的**夹具值**（不是令牌签发密钥），仍走运行期随机。 */
+try {
+  process.env.XIAI_USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_ADMIN_PHONE = String(process.env.XIAI_ADMIN_PHONE || '13800000001').trim()
 const UPSTREAM_SECRET = randomHex('upstream-secret')
@@ -892,8 +897,10 @@ section('D', '信封：7 个新 op 回包键集不多不少 / 身份键 INVALID_
 
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000099').trim()
 const ADMIN_PHONE = process.env.XIAI_ADMIN_PHONE
-const userToken = (await fn.main({ action: 'issue', phone: PHONE, code: process.env.XIAI_USER_SMS_CODE })).token
-const adminToken = (await fn.main({ action: 'issue', phone: ADMIN_PHONE, code: process.env.XIAI_USER_SMS_CODE })).token
+/* **R-L3′ 现签注入**：两枚令牌都由**本地现签**取得（用户函数接受 `sub` ∈ 白名单手机号的 user 令牌
+   走管理员 op —— 与改前 `issue` 得到的令牌同一形态/同一判定链）；不再走登录签发面。 */
+const userToken = signUserToken({ phone: PHONE }).token
+const adminToken = signUserToken({ phone: ADMIN_PHONE }).token
 
 /** 信封基座键（令牌路成功回包的既有键面；**逐字不因新 op 改变**）。 */
 const BASE_ENVELOPE_KEYS = [

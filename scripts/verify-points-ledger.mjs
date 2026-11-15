@@ -50,21 +50,22 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const FN_DIR = path.join(ROOT, 'cloudfunctions/xiai-user-token')
 
-/* 合成测试环境（缺省才写；**脚本内不写任何真实密钥** —— secret 走运行期随机）。 */
-process.env.XIAI_USER_SMS_CODE = String(process.env.XIAI_USER_SMS_CODE || '729341').trim()
-if (!process.env.XIAI_USER_TOKEN_SECRET) process.env.XIAI_USER_TOKEN_SECRET = randomBytesHex()
-process.env.XIAI_USER_TOKEN_SECRET = String(process.env.XIAI_USER_TOKEN_SECRET).trim()
-process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
-
-function randomBytesHex() {
-  return createHash('sha256').update(`${Date.now()}-${Math.random()}`).digest('hex')
+/* **R-L3′**：令牌签发密钥**只从当前 shell 环境变量读**（不合成、不落盘、不打印）；
+   缺失 ⇒ 打印 `SKIP（缺 XIAI_USER_TOKEN_SECRET，本脚本未验证）` 并 exit 0。 */
+try {
+  process.env.XIAI_USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
 }
+process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 
 const ledger = require(path.join(FN_DIR, 'lib/ledger.js'))
 const ops = require(path.join(FN_DIR, 'lib/ops.js'))
@@ -519,9 +520,13 @@ ledger.setLedgerStoreProvider(null) /* 清除账本直注 ⇒ 走 ops.resolveLed
 ops.setOpsDbProvider(() => fakeDb)
 
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000099').trim()
-const issued = await fn.main({ action: 'issue', phone: PHONE, code: process.env.XIAI_USER_SMS_CODE })
+/* **R-L3′**：令牌由**本地现签**取得（真源算法 ＋ 环境里的密钥）；不再走 `action:'issue'`
+   （登录签发面已改为平台 `access_token` 验签，自检不得依赖真短讯、也不得留固定码后门）。 */
+const issued = signUserToken({ phone: PHONE })
 const token = issued.token
-const envelopeUid = issued.uid
+const envelopeUid = userConfig.uidOf(PHONE)
+check('B0x', '现签令牌与 uid（本地现签；只印长度 / 指纹，不印原文）', { tokenParts: 2, uidShape: true, sub: PHONE },
+  { tokenParts: token.split('.').length, uidShape: /^u-[0-9a-f]{16}$/.test(envelopeUid), sub: String(issued.claims.sub) })
 
 /* B0：先经账本给该用户落一笔扣费（制造多行流水）。 */
 await ledger.chargePoints({ uid: envelopeUid, amount: 5, kind: 'CHARGE', ref_type: 'SEAL_DOWNLOAD', ref_id: 'XA000000007', idem_key: KEY('b0') })

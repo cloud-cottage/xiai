@@ -15,9 +15,18 @@
  *   · **零网络**（传输注入 ＋ 本地函数调用）；**不碰任何服务**；
  *   · 任何一条断言失败 ⇒ 退出码非 0（失败即终止）。
  *
- * 用法（密钥 / 手机号 / 验证码从**环境变量**传入，绝不落在命令行历史里的字面值中）：
- *   XIAI_ADMIN_PHONE=… XIAI_ADMIN_SMS_CODE=… XIAI_ADMIN_TOKEN_SECRET=… \
+ * 用法（密钥 / 手机号从**环境变量**传入，绝不落在命令行历史里的字面值中）：
+ *   XIAI_ADMIN_PHONE=… XIAI_ADMIN_TOKEN_SECRET=… XIAI_USER_TOKEN_SECRET=… \
  *     node scripts/verify-writeface-p1.mjs
+ *
+ * **R-L3′（2026-11-15）**：登录已改为**真短讯 OTP**（`action:'issue'` 入参
+ * `{ phone, platformAccessToken }`）—— 全站固定码已退出授权判定 ⇒ 本脚本改走
+ * 「**本地现签令牌注入**」（真源＝云函数 `lib/token.js::issueToken`）：
+ *   · A 段签发分支改测 `handleIssue(event, readConfig(), 假平台传输)`（假传输只回
+ *     `{ok:true,status:200,body:{phone_number:<声明号>}}`，**零网络**）；
+ *   · B 段的签发一步（`action:'issue'`）在执行注入的传输缝里由**现签回包**顶替；
+ *     `verify` 一步仍交给**真实云函数体**；
+ *   · **缺密钥 ⇒ 打印 `SKIP（缺 <VAR>，本脚本未验证）` 并 exit 0**（不假绿、不报红）。
  */
 /* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
    若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
@@ -29,6 +38,15 @@ import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import {
+  requireSecretOrSkip,
+  signUserToken,
+  issueReplyOf,
+  handleTestTokenSkip,
+  USER_SECRET_ENV,
+  ADMIN_SECRET_ENV
+} from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -118,25 +136,52 @@ const tokenLib = require(path.join(ROOT, 'cloudfunctions/xiai-admin-token/lib/to
 const userTokenFunction = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/index.js'))
 const userTokenLib = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/token.js'))
 
-const PHONE = String(process.env.XIAI_ADMIN_PHONE || '').trim()
-const CODE = String(process.env.XIAI_ADMIN_SMS_CODE || '').trim()
-const SECRET = String(process.env.XIAI_ADMIN_TOKEN_SECRET || '').trim()
-
-if (PHONE === '' || CODE === '' || SECRET === '') {
-  console.error(
-    JSON.stringify({
-      fatal: 'MISSING_TEST_ENV',
-      need: ['XIAI_ADMIN_PHONE', 'XIAI_ADMIN_SMS_CODE', 'XIAI_ADMIN_TOKEN_SECRET'],
-      note: '三个值只从环境变量读入；本脚本绝不回显它们的值'
-    })
-  )
-  process.exit(2)
+const PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000001').trim()
+/* **R-L3′**：密钥只从当前 shell 环境变量读；缺 ⇒ `SKIP（缺 <VAR>…）` ＋ exit 0（**不假绿**）。 */
+let SECRET = ''
+let USER_SECRET = ''
+try {
+  SECRET = requireSecretOrSkip(ADMIN_SECRET_ENV)
+  USER_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
 }
+/* **合成平台 envId**：`lib/config.js::readEnvId` 只做形态门（验签走注入的假传输 ⇒ 零网络）；
+   缺它会让验签判 `ENV_MISSING` ⇒ `STORAGE_UNAVAILABLE`，与断言无关的噪声。 */
+process.env.TCB_ENV = process.env.TCB_ENV || 'offline-harness-env'
+process.env.XIAI_ADMIN_PHONE = PHONE
+process.env.XIAI_ADMIN_TOKEN_SECRET = SECRET
+process.env.XIAI_ADMIN_TOKEN_VERSION = process.env.XIAI_ADMIN_TOKEN_VERSION || '1'
+process.env.XIAI_USER_TOKEN_SECRET = USER_SECRET
+process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
+process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
+
+/* **占位平台凭据**（非真实令牌；只用于过「凭证在场」前置门 ＋ 注入的假传输）。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
+/* **本地现签的用户令牌**（B 段的签发一步由它顶替；真源＝云函数 `issueToken`）。 */
+const SIGNED_USER_TOKEN = signUserToken({ phone: PHONE })
 
 const main = adminTokenFunction.main
 const userMain = userTokenFunction.main
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 const NON_WHITELIST_PHONE = '13900000001'
+/* 管理员函数配置面（与 `main()` 内部同一读法）——供 A 段直调 `handleIssue` 注入假平台传输。 */
+const adminConfigLib = require(path.join(ROOT, 'cloudfunctions/xiai-admin-token/lib/config.js'))
+
+/**
+ * **假平台传输**（`lib/platformAuth.js::verifyPlatformSession` 的注入缝）：
+ * 回 `{ok:true, status:200, body:{phone_number}}` ⇒ 服务端视为「验签成立、号＝该值」。**零网络**。
+ * @param {string} phone 平台要回的号（可以是声明号，也可以是非白名单号）
+ */
+const platformSessionOf = (phone) => async () => ({ ok: true, status: 200, body: { phone_number: phone } })
+
+/** A 段直调签发分支（携带占位凭据 ＋ 指定平台传输）。 */
+const issueWith = (declaredPhone, transport) =>
+  adminTokenFunction.handleIssue(
+    { action: 'issue', phone: declaredPhone, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL },
+    adminConfigLib.readConfig(),
+    transport
+  )
 
 console.log(
   JSON.stringify({
@@ -144,29 +189,27 @@ console.log(
     title: '云函数本体（本地调用，零网络）',
     env: {
       phoneLength: PHONE.length,
-      phoneFingerprint: fingerprint(PHONE),
-      codeLength: CODE.length,
       secretLength: SECRET.length,
-      secretFingerprint: fingerprint(SECRET)
+      userSecretLength: USER_SECRET.length
     }
   })
 )
 
-/* A1 签发成功（白名单手机号 ＋ 正确验证码） */
-const issued = await main({ action: 'issue', phone: PHONE, code: CODE })
-check('A1', 'issue ok（白名单手机号 + 正确验证码）', true, issued.ok === true)
+/* A1 签发成功（白名单手机号 ＋ 平台会话验签成立） */
+const issued = await issueWith(PHONE, platformSessionOf(PHONE))
+check('A1', 'issue ok（白名单手机号 + 平台会话验签成立）', true, issued.ok === true)
 check('A1b', 'issue 回传的令牌形态（长度 > 0 且含恰 1 个分隔点）', true, typeof issued.token === 'string' && issued.token.split('.').length === 2)
 check('A1c', 'issue TTL = 900 秒（15 分钟）', 900, issued.expiresAt - issued.issuedAt)
 console.log(JSON.stringify({ A1_token_readout: { length: issued.token.length, fingerprint: fingerprint(issued.token) } }))
 
-/* A2 非白名单手机号 ⇒ FORBIDDEN */
-const badPhone = await main({ action: 'issue', phone: NON_WHITELIST_PHONE, code: CODE })
+/* A2 非白名单手机号（平台验签回该号）⇒ 在白名单门被拒 ⇒ FORBIDDEN */
+const badPhone = await issueWith(NON_WHITELIST_PHONE, platformSessionOf(NON_WHITELIST_PHONE))
 check('A2', 'issue 非白名单手机号 ⇒ 拒绝', 'FORBIDDEN', badPhone.reason)
 check('A2b', 'A2 失败形状 = 恰 3 键 + 冻结字面值', 'OK', failureShape(badPhone))
 
-/* A3 验证码错误 ⇒ FORBIDDEN */
-const badCode = await main({ action: 'issue', phone: PHONE, code: '0000' })
-check('A3', 'issue 验证码错误 ⇒ 拒绝', 'FORBIDDEN', badCode.reason)
+/* A3 平台凭证无效（固定码下线后取代原「验证码错」）⇒ 平台明确判否 ⇒ FORBIDDEN */
+const badCredential = await issueWith(PHONE, async () => ({ ok: true, status: 200, body: { code: 'INVALID_ACCESS_TOKEN' } }))
+check('A3', 'issue 平台凭证无效 ⇒ 拒绝', 'FORBIDDEN', badCredential.reason)
 
 /* A4 无令牌 ⇒ FORBIDDEN */
 const noToken = await main({ action: 'verify', token: '', op: 'setInviteReward', payload: { value: 3 } })
@@ -240,18 +283,15 @@ check('A12b', 'A12 失败形状 = 恰 3 键 + 冻结字面值', 'OK', failureSha
 const badAction = await main({ action: 'grant-me-admin' })
 check('A13', '未知 action ⇒ 拒绝', 'FORBIDDEN', badAction.reason)
 
-/* A14 配置缺失（清空三个环境变量）⇒ STORAGE_UNAVAILABLE（**不得伪装 FORBIDDEN**） */
+/* A14 配置缺失（清空手机号 ＋ 密钥）⇒ STORAGE_UNAVAILABLE（**不得伪装 FORBIDDEN**） */
 const savedEnv = {
   phone: process.env.XIAI_ADMIN_PHONE,
-  code: process.env.XIAI_ADMIN_SMS_CODE,
   secret: process.env.XIAI_ADMIN_TOKEN_SECRET
 }
 delete process.env.XIAI_ADMIN_PHONE
-delete process.env.XIAI_ADMIN_SMS_CODE
 delete process.env.XIAI_ADMIN_TOKEN_SECRET
-const unconfigured = await main({ action: 'issue', phone: PHONE, code: CODE })
+const unconfigured = await main({ action: 'issue', phone: PHONE, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL })
 process.env.XIAI_ADMIN_PHONE = savedEnv.phone
-process.env.XIAI_ADMIN_SMS_CODE = savedEnv.code
 process.env.XIAI_ADMIN_TOKEN_SECRET = savedEnv.secret
 check('A14', '配置缺失 ⇒ STORAGE_UNAVAILABLE（不是 FORBIDDEN）', 'STORAGE_UNAVAILABLE', unconfigured.reason)
 check('A14b', 'A14 失败形状 = 恰 3 键 + 冻结字面值', 'OK', failureShape(unconfigured))
@@ -277,23 +317,47 @@ console.log(JSON.stringify({ section: 'B', title: '客户端管道 + 垂直切�
 const session = await import(path.join(ROOT, 'src/data/session.js'))
 const storage = await import(path.join(ROOT, 'src/data/storage.js'))
 const writeFace = await import(path.join(ROOT, 'src/data/writeFaceMode.js'))
-const authService = await import(path.join(ROOT, 'src/services/auth.js'))
 /* **R-2 适配**：`setInviteReward` 改走**登录令牌写面门**（云函数 `xiai-user-token`），
    不再是 `xiai-admin-token` ⇒ B 段的客户端通道 = userToken、函数体 = userMain。 */
 const userToken = await import(path.join(ROOT, 'src/services/userToken.js'))
 const adminService = await import(path.join(ROOT, 'src/services/admin.js'))
 
-/* 用户函数的环境变量（同一组值映射；验证码取**公开演示码** —— 自愈路径需要它与服务端一致）。 */
-const USER_CODE = authService.DEMO_SMS_CODE
+/* 用户函数的环境变量（同一组值映射；**P1c 起不再有任何固定码** —— 签发凭据是平台会话令牌，
+   本脚本用「本地现签回包」顶替那一步，见下面的 `installLocalFunctionTransport`）。 */
 process.env.XIAI_ADMIN_PHONE = PHONE
-process.env.XIAI_USER_SMS_CODE = USER_CODE
-process.env.XIAI_USER_TOKEN_SECRET = SECRET
+process.env.XIAI_USER_TOKEN_SECRET = USER_SECRET
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
-/** 注入「真实函数体的本地调用」实现（生产走 SDK；此处只为离线可复现）。 */
+/* 传输缝上的**往返计数**（B1c / B1n3 的判据）。计在**唯一传输缝**上 ⇒ 每一次出站往返都被数到。
+   **按 action 分桶**（`issue` / `verify`）：P1 收口后「无令牌」必须**连 issue 都不发** ⇒ 两桶皆 0
+   （B1c 判据从「恰 2 次补签＋校验」改为「issue 0 ＋ verify 0」）。 */
+let wireCalls = 0
+let wireIssue = 0
+let wireVerify = 0
+const resetWire = () => {
+  wireCalls = 0
+  wireIssue = 0
+  wireVerify = 0
+}
+const wireByAction = () => ({ issue: wireIssue, verify: wireVerify })
+
+/**
+ * 注入「真实函数体的本地调用」实现（生产走 SDK；此处只为离线可复现）。
+ *
+ * **R-L3′**：`action:'issue'` 一律由**本地现签回包**顶替（`issueReplyOf(signUserToken(...))`，
+ * 键面与服务端同形）—— 登录已改真短讯 OTP，自检**不得**依赖真短讯、**不得**发网络；
+ * `verify` 仍交给**真实云函数体**。
+ * @param {null|function(string, object): Promise<object>} patch 仅覆盖非 issue 的往返
+ */
 function installLocalFunctionTransport(patch) {
   userToken.setUserTokenTransport(async (name, data) => {
+    wireCalls += 1
+    if (data && data.action === 'issue') {
+      wireIssue += 1
+      return { ok: true, result: issueReplyOf(SIGNED_USER_TOKEN) }
+    }
+    wireVerify += 1
     if (typeof patch === 'function') return patch(name, data)
     const result = await userMain(data)
     return { ok: true, result }
@@ -310,34 +374,46 @@ check('B0', '云端形态：writeFaceMode()', 'cloud', writeFace.writeFaceMode()
 check('B0b', '云端形态：本地写入口门 ⇒ 结构化拒绝（非 null）', 'FORBIDDEN', (writeFace.localWriteDenial() || {}).reason)
 check('B0c', '云端形态：本地写入口门文案含「dev / 離線形態」标注', true, String((writeFace.localWriteDenial() || {}).message || '').includes('dev / 離線形態'))
 
-/* B1 **V3 自愈**：无令牌 ＋ **有会话** ⇒ 流程**先 issue 补签、再 verify**，最终写入成功。
-   改前断言「无令牌 ⇒ FORBIDDEN」已随 V3（写面收敛到一枚登录令牌 ＋ 自愈）失效。 */
+/* B1 **R-L11（P1 收口后的负向语义）** —— 与 B1n 同族、**并列保留**：
+   云端形态下「无令牌」一律**结构化拒绝**（`{ok:false, reason:'FORBIDDEN'}` ＋「重新登錄」引导），
+   **有无会话皆同** —— `src/services/userWrite.js::ensureUserTokenForWrite` 已整段删除
+   「无令牌 ＋ 有会话 ⇒ 静默补签」这条路（P1）⇒ 本组断言随之改为负向：
+   · B1  ＝ 有会话一侧仍是结构化拒绝（无会话一侧见 B1n）；
+   · B1b ＝ 拒绝文案含「重新登錄」引导 ＋ **零写入**；
+   · B1c ＝ **零云函数往返**（issue 0 ＋ verify 0：连补签都不发）。 */
 session.setUser({ id: 'u-harness-admin', role: 'admin', phone: PHONE })
 userToken.clearUserToken()
-let wireCalls = 0
-installLocalFunctionTransport(async (name, data) => {
-  wireCalls += 1
-  return { ok: true, result: await userMain(data) }
-})
-const before = readRewardKey()
-const healedWrite = await adminService.setInviteReward(null, 11)
-check('B1', 'V3 自愈：无令牌 ＋ **有会话** ⇒ 写成功（ok:true）', true, healedWrite.ok === true)
-check('B1b', '自愈写落盘：配置键值 = 11', JSON.stringify({ invite_reward: 11 }), readRewardKey())
-check('B1c', '自愈顺序：先 issue 补签、后 verify（恰 2 次往返）', 2, wireCalls)
+resetWire()
+installLocalFunctionTransport(null)
+const deniedWrite = await adminService.setInviteReward(null, 11)
+check(
+  'B1',
+  '无令牌 ＋ **有会话** ⇒ 结构化拒绝 {ok:false, reason:FORBIDDEN}（不静默补签；无会话一侧见 B1n）',
+  { ok: false, reason: 'FORBIDDEN' },
+  { ok: deniedWrite.ok === true, reason: deniedWrite.reason }
+)
+check(
+  'B1b',
+  '拒绝文案含「重新登錄」引导 ＋ 零写入（配置键仍不存在）',
+  { guide: true, value: null },
+  { guide: String(deniedWrite.message || '').includes('重新登錄'), value: readRewardKey() }
+)
+check('B1c', '零云函数往返：issue 0 ＋ verify 0（不静默补签、不试探服务端）', { issue: 0, verify: 0 }, wireByAction())
+console.log(JSON.stringify({ B1_readout: { shape: { ok: deniedWrite.ok, reason: deniedWrite.reason }, wire: wireByAction(), wireTotal: wireCalls, rewardValue: readRewardKey() } }))
 
 /* B1n **负向**：无令牌 ＋ **无会话** ⇒ 结构化拒绝 ＋ 零写入（且**零往返**：连补签都不发）。 */
 userToken.clearUserToken()
 session.setUser(null)
-wireCalls = 0
+resetWire()
 const beforeB1n = readRewardKey()
 const anonWrite = await adminService.setInviteReward(null, 12)
 check('B1n', '无令牌 ＋ **无会话** ⇒ 结构化拒绝（FORBIDDEN）', 'FORBIDDEN', anonWrite.reason)
 check('B1n2', '无会话 ⇒ 零写入（配置键未变）', beforeB1n, readRewardKey())
 check('B1n3', '无会话 ⇒ 零往返（不发 issue，证明「不得静默」）', 0, wireCalls)
 
-/* B2 取票（签发 → 缓存） */
-const issuedSession = await userToken.ensureUserWriteSession(USER_CODE, PHONE)
-check('B2', '取票成功（手机号取自登录用户，验证码来自输入）', true, issuedSession.ok === true)
+/* B2 取票（签发 → 缓存）：凭据＝占位平台令牌（`ensureUserWriteSession(凭据, 手机号)` 形参顺序不变） */
+const issuedSession = await userToken.ensureUserWriteSession(OFFLINE_PLATFORM_CREDENTIAL, PHONE)
+check('B2', '取票成功（手机号取自登录用户，平台凭据来自输入）', true, issuedSession.ok === true)
 check('B2b', '令牌进入缓存（只给长度 / 指纹，不给原文）', true, userToken.userTokenSnapshot().present === true)
 console.log(JSON.stringify({ B2_readout: userToken.userTokenSnapshot() }))
 
@@ -367,16 +443,14 @@ check('B5d', '传输失败不清令牌（「未知」≠「无效」）', true, 
 /* B6 过期令牌（注入「verify 时替换成已过期用户令牌」的传输）⇒ FORBIDDEN ＋ 零写入 */
 const staleUser = userTokenLib.issueToken({
   sub: PHONE,
-  secret: SECRET,
+  secret: USER_SECRET,
   nowSeconds: nowSeconds() - 7200,
   ttlSeconds: 900,
   version: process.env.XIAI_USER_TOKEN_VERSION || '1',
   role: 'user'
 })
+/* issue 一步仍由传输缝的**本地现签回包**顶替（见 `installLocalFunctionTransport`）⇒ patch 只管 verify。 */
 installLocalFunctionTransport(async (name, data) => {
-  if (data.action === 'issue') {
-    return { ok: true, result: await userMain({ action: 'issue', phone: PHONE, code: USER_CODE }) }
-  }
   return { ok: true, result: await userMain({ ...data, token: staleUser.token }) }
 })
 const afterB3b = readRewardKey()

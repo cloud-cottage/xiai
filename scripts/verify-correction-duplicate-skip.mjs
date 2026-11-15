@@ -43,7 +43,9 @@ process.env.XIAI_NO_REAL_CARD = '1'
 import { createRequire } from 'node:module'
 import { readFileSync, writeFileSync, cpSync, rmSync, existsSync, mkdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -123,12 +125,18 @@ const DENIAL_KEYS = ['message', 'ok', 'reason']
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000001').trim()
 const OTHER_PHONE = '13800000002'
 const ADMIN_PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000001').trim()
-/* 验证码取**客户端公开演示码**（`auth.js::DEMO_SMS_CODE`；生产不变量，非放宽）。 */
-const authForCode = await import(path.join(ROOT, 'src/services/auth.js'))
-const SMS_CODE = String(authForCode.DEMO_SMS_CODE)
-const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || randomBytes(32).toString('hex')).trim()
-process.env.XIAI_USER_SMS_CODE = SMS_CODE
+/* **R-L3′**：登录已改真短訊 OTP（`issue` 收 `{phone, platformAccessToken}`）⇒ 取票改走
+   「**本地现签令牌注入**」；`auth.js::DEMO_SMS_CODE` 已整体删除，签发密钥**只从环境变量读**。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
+let SECRET = ''
+try {
+  SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 process.env.XIAI_USER_TOKEN_SECRET = SECRET
+/* **现签令牌**（本地按真源算法签出；供取票注入缝回包用，**不打印原文**）。 */
+const SIGNED_USER_TOKEN = signUserToken({ phone: PHONE })
 process.env.XIAI_ADMIN_PHONE = ADMIN_PHONE
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
@@ -360,12 +368,14 @@ const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const transportCalls = []
 userTokenSvc.setUserTokenTransport(async (name, data) => {
   transportCalls.push({ name, action: data && data.action, op: data && data.op })
+  /* **R-L3′ 现签注入**：签发这一步由本地现签令牌顶替（回包键面与服务端同形）。 */
+  if (data && data.action === 'issue') return { result: issueReplyOf(SIGNED_USER_TOKEN) }
   return { result: await fn.main(data) }
 })
 writeFace.setWriteFaceModeOverride('cloud')
 db.ensureSeed()
 
-const login = await userTokenSvc.ensureUserLoginToken(PHONE, SMS_CODE)
+const login = await userTokenSvc.ensureUserLoginToken(PHONE, OFFLINE_PLATFORM_CREDENTIAL)
 check('B0', '前置：云端形态 ＋ 登录取票成功（注入式传输 → 真实云函数体）', true, login.ok === true && writeFace.writeFaceMode() === 'cloud')
 
 const USER = { id: UID_ME, phone: PHONE, role: 'user', nickname: '自檢用戶' }

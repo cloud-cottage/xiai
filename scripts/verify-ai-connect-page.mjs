@@ -35,9 +35,27 @@ process.env.XIAI_NO_REAL_CARD = '1'
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
+
+/* ---------------------------------------------------------------------------
+   0a. **令牌密钥（R-L3′）**：只从当前 shell 环境变量读；缺 ⇒ `SKIP（缺 …，本脚本未验证）` ＋ exit 0。
+   `action:'issue'` 已改为平台会话验签（固定码 / 静默补签均已下线）⇒ 本套件的「已登录」态改为
+   **显式取票**（令牌由真源算法本地现签，经传输缝回给客户端通道；不伪造令牌、不改判定）。
+   --------------------------------------------------------------------------- */
+let USER_TOKEN = null
+try {
+  process.env.XIAI_USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+  process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
+  USER_TOKEN = signUserToken({ phone: process.env.XIAI_USER_PHONE || '13900000001' })
+} catch (error) {
+  handleTestTokenSkip(error)
+}
+/* **平台会话凭据占位值**：只交给注入式传输（假传输不校验它）；真凭据不入仓。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-credential-not-a-real-token'
 
 /* ---------------------------------------------------------------------------
    0. localStorage / window 假体（只为让服务层 ESM 真源在本机 Node 下可导入）
@@ -324,19 +342,9 @@ const UPSTREAM_REPLY = { base_url: 'https://api.example.com/v1', model: 'qa-mode
   userTokenSvc.setUserTokenTransport(async (name, data) => {
     calls.push({ name, action: data && data.action, op: data && data.op })
     if (data && data.action === 'issue') {
-      return {
-        result: {
-          ok: true,
-          token: 'qa-user-token-in-memory',
-          ttlSeconds: 900,
-          expiresAt: nowS() + 900,
-          issuedAt: nowS(),
-          serverNow: nowS(),
-          sub: '13900000001',
-          uid: 'u-qa00000000000000',
-          ver: '1'
-        }
-      }
+      /* **R-L3′**：签发面已改为平台会话验签 ⇒ 传输缝回**本地现签**令牌的成功信封
+         （真源算法签出；键面与云函数 `handleIssue` 同形）。 */
+      return { result: issueReplyOf(USER_TOKEN) }
     }
     const op = (data && data.op) || ''
     const payload = (data && data.payload) || {}

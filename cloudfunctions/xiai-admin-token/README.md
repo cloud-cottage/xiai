@@ -4,7 +4,7 @@
 
 | | 内容 |
 |---|---|
-| **做** | ① `action:'issue'` 签发短期令牌（**手机号白名单 + 验证码**双重判定，**HMAC-SHA256** 签名，**TTL 15 分钟**）；② `action:'verify'` 校验令牌（验签 → 有效期 → 手机号白名单 → `op` 值域 / 字段门）并**滑动续期**（成功回吐新令牌） |
+| **做** | ① `action:'issue'` 签发短期令牌（**P1c 起：平台会话 `access_token` 验签取号 + 手机号白名单**双重判定，**HMAC-SHA256** 签名，**TTL 15 分钟**）；② `action:'verify'` 校验令牌（验签 → 有效期 → 手机号白名单 → `op` 值域 / 字段门）并**滑动续期**（成功回吐新令牌） |
 | **做（Phase 2）** | `op:'reviewCorrection'`（勘误审核）：**服务端验签后权威落盘两处** —— ① 私有集合 `xiai_corrections` 的审核状态（`status` / `reviewed_at` / `reviewer_id`，驳回另加 `review_note`）；② 新公开只读集合 `xiai_corrections_public` 的**脱敏投影行**（**零身份字段**，供全站只读展示「勘误采纳后的展示值」）。**判定全部在写之前**（拒绝 ⇒ 零写入） |
 | **不做** | `setInviteReward`（Phase 1）**仍不做持久化写入**（落盘在客户端 `ok:true` 之后）；`reviewCorrection` **不覆盖**印章 / 印面原始数据、**不发奖**（发奖仍在客户端服务层）；不碰 `liwu` 任何集合 / 函数（集合名一律 `^xiai_`） |
 
@@ -13,7 +13,7 @@
 | 名称 | 必填 | 说明 |
 |---|---|---|
 | `XIAI_ADMIN_PHONE` | ✓ | 管理员手机号白名单。**工程真源仍是 `src/data/seed.js:39` 的 `ADMIN_PHONE`**，此处是同一真源的**注入点**（非第二处定义点） |
-| `XIAI_ADMIN_SMS_CODE` | ✓ | 管理端验证码（环境注入；**不得**写进代码或构建产物 —— `W-43` 未裁，本函数不代裁认人方式） |
+| `XIAI_ADMIN_SMS_CODE` | ✗（**已退出必填集与授权判定**） | **全站固定码已下线**（P1c，2026-11-15）：缺它不影响 `ready`，但其值**不再参与任何授权判定**（`lib/config.js` 只读存在性布尔 `legacySmsCodeConfigured`，**不回传值**）。变量保留只为运维排障 |
 | `XIAI_ADMIN_TOKEN_SECRET` | ✓ | HMAC 密钥，**随机生成**；只存函数环境变量，**不入仓 / 不入构建产物 / 不进日志** |
 | `XIAI_ADMIN_TOKEN_VERSION` | ✗ | 密钥版本（撤销面）：递增 ⇒ **全体旧令牌即刻失效**。缺省 `1` |
 | `XIAI_ADMIN_TOKEN_TTL_SECONDS` | ✗ | 令牌 TTL 秒数，缺省 `900`（15 分钟） |
@@ -25,9 +25,12 @@
 ## 调用契约
 
 ```
-签发  { action:'issue',  phone:'<11 位>', code:'<验证码>' }
+签发  { action:'issue',  phone:'<11 位>', platformAccessToken:'<平台会话 access_token>' }
   → { ok:true, token, sub(masked), subFingerprint, issuedAt, expiresAt, ttlSeconds, ver, serverNow }
-  → { ok:false, reason, message }            // 手机号或验证码不符 ⇒ FORBIDDEN（不区分两者，防枚举）
+  → { ok:false, reason, message }            // 号形态不合 / 无凭证 / 验签判否 / 验签号≠声明号 /
+                                             //   验签号不在白名单 ⇒ 一律 FORBIDDEN（同文案，防枚举）
+                                             // 平台或网络不可用 ⇒ STORAGE_UNAVAILABLE（绝不伪装 FORBIDDEN）
+// `platformAccessToken` 只进请求头：不进日志 / 不进回包 / 不进审计字段
 
 校验  { action:'verify', token:'<令牌>', op:'setInviteReward', payload:{ value:<非负整数> } }
   → { ok:true, op, value, sub, serverNow, renewedToken, renewedExpiresAt, renewedTtlSeconds, ver }
@@ -39,6 +42,16 @@
   → { ok:false, reason, message }            // 无令牌 / 验签失败 / 过期 / 手机号不符 / 未知 op /
                                              //   未知单号 / 已审终态（不可重复）/ 决定值域不符 /
                                              //   采纳值超出冻结值域 / 存储不可用
+```
+
+### `lib/platformAuth.js` 同源条（**逐字相同**）
+
+`lib/platformAuth.js` 与 **`cloudfunctions/xiai-user-token/lib/platformAuth.js`** **逐字相同**
+（`diff` 为空）。云函数**各自独立打包 ⇒ 不能跨函数 `require`**，故各存一份；
+**改一处必须同改另一处**（改后必须 `diff` 两处仍为空）。核对命令：
+
+```bash
+diff cloudfunctions/xiai-user-token/lib/platformAuth.js cloudfunctions/xiai-admin-token/lib/platformAuth.js && echo IDENTICAL
 ```
 
 `reviewCorrection` 的落点（**服务端权威**）：
@@ -62,8 +75,8 @@ SECRET=$(openssl rand -hex 32)
 #    形如：
 #    { "envId": "<envId>", "functionRoot": "<本目录的绝对路径>",
 #      "functions": [{ "name": "xiai-admin-token", "timeout": 10, "memorySize": 256,
-#        "envVariables": { "XIAI_ADMIN_PHONE": "...", "XIAI_ADMIN_SMS_CODE": "...",
-#                          "XIAI_ADMIN_TOKEN_SECRET": "$SECRET" } }] }
+#        "envVariables": { "XIAI_ADMIN_PHONE": "...", "XIAI_ADMIN_TOKEN_SECRET": "$SECRET" } }] }
+#    （`XIAI_ADMIN_SMS_CODE` 已退出授权判定；如仍在平台侧配置，函数不会读它的值判权）
 
 # ③ 部署（在该临时目录里执行，cloudbaserc.json 与 cwd 同层）
 cloudbase functions:deploy xiai-admin-token -e <envId>

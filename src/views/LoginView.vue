@@ -1,6 +1,6 @@
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { auth } from '../services/index.js'
 import { currentUser } from '../data/session.js'
@@ -10,38 +10,117 @@ const router = useRouter()
 
 const phone = ref('')
 const code = ref('')
+/* 取碼成功（＝短訊已下發）後為 true；**只用來提示「請查收短訊」，不含任何碼值**。 */
 const codeSent = ref(false)
+/* 取碼請求在飛（防連點；與冷卻倒計時是兩件事）。 */
+const sending = ref(false)
+/* 重發冷卻剩餘秒數（0 ＝ 可再取）；頻控時按平台回的 `retryAfter` 設定。 */
+const cooldown = ref(0)
 const feedback = ref('')
+let cooldownTimer = null
 
-/* **兩條登入路並存**（人類已定：演示碼入口一字不動地保留）：`code` = 手機號 + 驗證碼（演示碼）；
-   `password` = 手機號 + 密碼（平台原生身份）。兩者共用同一個手機號輸入值。 */
+/* **兩條登入路並存**：`code` = 手機號 + 短訊驗證碼（真發短訊）；`password` = 手機號 + 密碼。
+   兩者共用同一個手機號輸入值。 */
 const mode = ref('code')
 const password = ref('')
-/* 平台原生登入成功後取到的**平台會話 uid**（供後續寫面使用；本單只需能取到並可見）。 */
-const platformUid = ref('')
+/* 密碼模式下的兩個階段：`login`（登入）／`reset`（忘記密碼 ⇒ 短訊驗證 ⇒ 重設）。
+   **重置走的是同一條取碼通道**（`auth.requestCode`）⇒ 60s 冷卻與頻控原文兩處一致。 */
+const passwordStage = ref('login')
+const resetCode = ref('')
+const newPassword = ref('')
+const confirmPassword = ref('')
+const submitting = ref(false)
+const resetting = ref(false)
+/* 新密碼規則的一句人話（與服務層判據同源 ⇒ 不會出現「提示說 8 位、校驗卻要 10 位」）。 */
+const passwordHint = auth.passwordRuleHint()
 
 const user = computed(() => currentUser())
 
-/* 验证码提示由服务层给出（演示環境共用演示碼；按鈕點下即自動填入 ⇒ 提示只说这一步，不自稱取值）。 */
+/* 驗證碼提示由服務層給出（真短訊 / 有頻控 / 有每日上限 ⇒ 如實說明，不自稱任何取值）。 */
 const codeHint = auth.loginCodeHint()
+
+/* 按鈕文案：冷卻中標剩餘秒數（**冷卻期間禁用**，避免「點了沒反應」）。 */
+const codeButtonLabel = computed(() => {
+  if (cooldown.value > 0) return `重新獲取（${cooldown.value}s）`
+  if (sending.value) return '發送中…'
+  return '獲取驗證碼'
+})
+const codeButtonDisabled = computed(() => sending.value || cooldown.value > 0)
+
+function stopCooldown() {
+  if (cooldownTimer) {
+    clearInterval(cooldownTimer)
+    cooldownTimer = null
+  }
+}
+
+/** 進入冷卻（秒數取平台建議值或前端預設 60s；**只是體驗層，真正的頻控在平台側**）。 */
+function startCooldown(seconds) {
+  const total = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60
+  cooldown.value = Math.min(total, 3600)
+  stopCooldown()
+  cooldownTimer = setInterval(() => {
+    cooldown.value -= 1
+    if (cooldown.value <= 0) {
+      cooldown.value = 0
+      stopCooldown()
+    }
+  }, 1000)
+}
+
+onUnmounted(stopCooldown)
 
 function switchMode(next) {
   mode.value = next === 'password' ? 'password' : 'code'
+  passwordStage.value = 'login'
   feedback.value = ''
 }
 
-function sendCode() {
-  const result = auth.requestCode(phone.value)
-  codeSent.value = result.ok
-  feedback.value = result.message
-  /* 同 jiazu 登录页做法：取碼成功后把演示碼**自動填入**驗證碼欄（免手輸，直接可登錄）。 */
-  if (result.ok && result.code) {
-    code.value = result.code
+/** 進入「忘記密碼」：手機號沿用當前輸入值；**不在頁面上保留任何已輸入的密碼**。 */
+function openReset() {
+  passwordStage.value = 'reset'
+  password.value = ''
+  resetCode.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+  feedback.value = ''
+}
+
+function leaveReset() {
+  passwordStage.value = 'login'
+  resetCode.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+  feedback.value = ''
+}
+
+/**
+ * 取碼：**真發短訊**（服務層調平台 `getVerification`）。
+ *
+ * 兩個硬點：
+ *   ① 回包**不含任何碼值** ⇒ 這裡不可能、也不允許把碼填進輸入框（舊版「取碼即回填」的做法已刪）；
+ *   ② 失敗時**平台原文上屏**（頻控 `RATE_LIMITED` 帶 `retryAfter` 時，按它設冷卻）。
+ */
+async function sendCode() {
+  if (codeButtonDisabled.value) return
+  sending.value = true
+  try {
+    const result = await auth.requestCode(phone.value)
+    codeSent.value = result.ok === true
+    feedback.value = result.message || ''
+    if (result.ok) {
+      startCooldown(result.cooldownSeconds || 60)
+      return
+    }
+    /* 頻控：按平台建議秒數進冷卻（文案已在 `result.message` 原文上屏）。 */
+    if (result.retryAfter) startCooldown(result.retryAfter)
+  } finally {
+    sending.value = false
   }
 }
 
 async function submit() {
-  /* 写面 Phase A：`auth.login` 改为 `async`（**先服务端验证并拿到用户令牌，再写 session**）⇒ 本处 `await`。 */
+  /* 写面 Phase A：`auth.login` 已 `async`，且順序為「平台驗碼 → 換 xiai 令牌 → 才落本地」。 */
   const result = await auth.login(phone.value, code.value)
   if (!result.ok) {
     feedback.value = result.message
@@ -52,17 +131,58 @@ async function submit() {
   router.replace(redirect || { name: 'square' })
 }
 
-/* **手機號 + 密碼（平台原生身份）**：本單只做「能登入 ＋ 能取到平台會話 uid」——
-   成功不寫本機 session（那是演示碼那條路的職責）。失敗一律上屏可見文案。 */
+/* **手機號 + 密碼（平台原生身份）**：完整鏈路（平台登入 ⇒ 取 access_token ⇒ 換 xiai 令牌 ⇒
+   共用收尾建號/初始金/邀請結算/寫 session）。失敗一律上屏可見文案（平台原文透傳）。 */
 async function submitPassword() {
-  const result = await auth.loginWithPassword(phone.value, password.value)
-  if (!result.ok) {
-    platformUid.value = ''
-    feedback.value = result.message
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    const result = await auth.loginWithPassword(phone.value, password.value)
+    if (!result.ok) {
+      feedback.value = result.message
+      return
+    }
+    password.value = ''
+    feedback.value = `歡迎回來，${result.user.nickname}`
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
+    router.replace(redirect || { name: 'square' })
+  } finally {
+    submitting.value = false
+  }
+}
+
+/**
+ * 重置密碼（忘記密碼流程的提交）：驗證碼 + 新密碼（兩次一致）。
+ *
+ * 服務層保證**零副作用**：密碼不合規 / 碼錯 / 碼過期 / 平台拒 ⇒ 舊密碼一字不動、
+ * 不建本地賬號行、不寫 session、不發金。本函數只負責把結果**如實上屏**。
+ */
+async function submitReset() {
+  if (resetting.value) return
+  if (newPassword.value !== confirmPassword.value) {
+    feedback.value = '兩次輸入的新密碼不一致，請重新輸入。'
     return
   }
-  platformUid.value = result.uid
-  feedback.value = `已登入平台（手機號 ${phone.value.trim()}）`
+  resetting.value = true
+  try {
+    const result = await auth.resetPasswordByOtp(phone.value, resetCode.value, newPassword.value)
+    feedback.value = result.message || ''
+    if (!result.ok) return
+    /* 成功：先把敏感輸入清掉（不留在 DOM / 組件狀態裡）。 */
+    resetCode.value = ''
+    newPassword.value = ''
+    confirmPassword.value = ''
+    password.value = ''
+    if (result.loggedIn && result.user) {
+      const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
+      router.replace(redirect || { name: 'square' })
+      return
+    }
+    /* 密碼已重設但自動登錄未成 ⇒ 回到登入態，讓用戶用新密碼登入（文案已上屏）。 */
+    passwordStage.value = 'login'
+  } finally {
+    resetting.value = false
+  }
 }
 
 function signOut() {
@@ -70,6 +190,13 @@ function signOut() {
   phone.value = ''
   code.value = ''
   codeSent.value = false
+  cooldown.value = 0
+  password.value = ''
+  resetCode.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+  passwordStage.value = 'login'
+  stopCooldown()
   feedback.value = '已退出登錄'
 }
 </script>
@@ -121,8 +248,15 @@ function signOut() {
           <div class="field">
             <label for="login-code">驗證碼</label>
             <div class="login__code-row">
-              <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="6" placeholder="請輸入驗證碼" />
-              <button class="btn btn--ghost" type="button" @click="sendCode">獲取驗證碼</button>
+              <input id="login-code" v-model="code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="請輸入短訊驗證碼" />
+              <button
+                class="btn btn--ghost login__code-btn"
+                type="button"
+                :disabled="codeButtonDisabled"
+                :aria-disabled="codeButtonDisabled ? 'true' : 'false'"
+                data-code-cooldown
+                @click="sendCode"
+              >{{ codeButtonLabel }}</button>
             </div>
             <span class="field__hint">{{ codeHint }}</span>
           </div>
@@ -130,7 +264,7 @@ function signOut() {
           <button class="btn btn--primary login__submit" type="submit">登錄</button>
         </form>
 
-        <form v-else class="login__form" @submit.prevent="submitPassword">
+        <form v-else-if="passwordStage === 'login'" class="login__form" @submit.prevent="submitPassword">
           <div class="field">
             <label for="login-phone-password">手機號</label>
             <input id="login-phone-password" v-model="phone" type="tel" inputmode="numeric" maxlength="11" placeholder="請輸入 11 位手機號" />
@@ -141,13 +275,52 @@ function signOut() {
             <input id="login-password" v-model="password" type="password" autocomplete="current-password" placeholder="請輸入密碼" />
           </div>
 
-          <button class="btn btn--primary login__submit" type="submit">登錄</button>
+          <button class="btn btn--primary login__submit" type="submit" :disabled="submitting">登錄</button>
+          <button class="login__link" type="button" data-login-forgot @click="openReset">忘記密碼？</button>
+        </form>
+
+        <form v-else class="login__form" @submit.prevent="submitReset">
+          <p class="login__reset-lede">用短訊驗證碼確認是本機主，然後設定新密碼。</p>
+
+          <div class="field">
+            <label for="reset-phone">手機號</label>
+            <input id="reset-phone" v-model="phone" type="tel" inputmode="numeric" maxlength="11" placeholder="請輸入 11 位手機號" />
+          </div>
+
+          <div class="field">
+            <label for="reset-code">驗證碼</label>
+            <div class="login__code-row">
+              <input id="reset-code" v-model="resetCode" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="請輸入短訊驗證碼" />
+              <button
+                class="btn btn--ghost login__code-btn"
+                type="button"
+                :disabled="codeButtonDisabled"
+                :aria-disabled="codeButtonDisabled ? 'true' : 'false'"
+                data-reset-code-cooldown
+                @click="sendCode"
+              >{{ codeButtonLabel }}</button>
+            </div>
+            <span class="field__hint">{{ codeHint }}</span>
+          </div>
+
+          <div class="field">
+            <label for="reset-password">新密碼</label>
+            <input id="reset-password" v-model="newPassword" type="password" autocomplete="new-password" placeholder="請輸入新密碼" />
+            <span class="field__hint">{{ passwordHint }}</span>
+          </div>
+
+          <div class="field">
+            <label for="reset-password-confirm">確認新密碼</label>
+            <input id="reset-password-confirm" v-model="confirmPassword" type="password" autocomplete="new-password" placeholder="請再次輸入新密碼" />
+          </div>
+
+          <button class="btn btn--primary login__submit" type="submit" :disabled="resetting" data-reset-submit>重設密碼</button>
+          <button class="login__link" type="button" data-reset-back @click="leaveReset">返回登錄</button>
         </form>
       </template>
 
       <p v-if="feedback" class="login__feedback">{{ feedback }}</p>
-      <p v-if="codeSent" class="login__sent">驗證碼已自動填入，請直接點「登錄」。</p>
-      <p v-if="platformUid" class="login__sent" data-platform-uid>平台會話 UID：{{ platformUid }}</p>
+      <p v-if="codeSent" class="login__sent">短訊已發送，請查收後填寫驗證碼；如未收到，請待倒計時結束後重新獲取。</p>
     </section>
   </div>
 </template>
@@ -226,9 +399,39 @@ function signOut() {
   flex: 1 1 auto;
 }
 
+/* 取碼鈕：冷卻期間禁用（**不只變灰**：disabled ＋ aria-disabled ＋ 文案帶剩餘秒數）。 */
+.login__code-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.login__code-btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .login__submit {
   width: 100%;
   margin-top: var(--s-2);
+}
+
+/* 形式上的次级入口（忘記密碼／返回登錄）：**不是**主按鈕，但可键盘聚焦、看得见。 */
+.login__link {
+  display: block;
+  margin: var(--s-3) auto 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--c-brand);
+  font-size: var(--t-sm);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.login__reset-lede {
+  margin-bottom: var(--s-4);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
 }
 
 .login__feedback {
@@ -238,6 +441,7 @@ function signOut() {
   border-radius: var(--r-md);
   color: var(--c-text);
   font-size: var(--t-sm);
+  white-space: pre-line;
 }
 
 .login__sent {

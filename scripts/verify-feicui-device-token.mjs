@@ -21,8 +21,9 @@
  *   G 零泄露 ＋ 回包白名单（真密钥串扫回包 / 日志命中 0；挑拣纯函数按 op 收窄；零写零新集合）；
  *   H 端到端（真 `index.js::main` 信封 ＋ 真审计日志：令牌路 admin 签发 / 非 admin 拒绝）。
  *
- * 纪律：**不打印密钥 / 令牌原文**（只给长度与 sha256 前 12 位指纹）；测试密钥与手机号一律
- * 运行期构造（**仓内零密钥字面值**）。
+ * 纪律：**不打印密钥 / 令牌原文**（只给长度与 sha256 前 12 位指纹）；**用户令牌密钥只从当前 shell
+ * 环境变量 `XIAI_USER_TOKEN_SECRET` 读**（缺 ⇒ `SKIP（缺 …，本脚本未验证）` ＋ exit 0；不合成、
+ * 不落盘），其余测试密钥与手机号一律运行期构造（**仓内零密钥字面值**）。
  */
 process.env.XIAI_NO_REAL_CARD = '1'
 
@@ -30,6 +31,8 @@ import { createRequire } from 'node:module'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -85,16 +88,21 @@ function isDenial(reply) {
 const SECRET_IN_COLLECTION = randomBytes(32).toString('hex')
 const SECRET_IN_ENV = randomBytes(32).toString('hex')
 const SECRET_STRANGER = randomBytes(32).toString('hex')
-const USER_TOKEN_SECRET = randomBytes(32).toString('hex')
-const SMS_CODE = 'code-' + randomBytes(4).toString('hex')
+/* **R-L3′**：用户令牌密钥**只从当前 shell 环境变量读**（缺 ⇒ `SKIP（缺 …，本脚本未验证）` ＋ exit 0；
+   不合成、不落盘、不打印）。 */
+let USER_TOKEN_SECRET = ''
+try {
+  USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 const ADMIN_PHONE = '138' + '00000000'
 const OTHER_PHONE = '139' + '11111111'
 const NOW = 1_800_000_000
 const UID_ADMIN = 'u-' + randomBytes(8).toString('hex')
 const UID_OTHER = 'u-' + randomBytes(8).toString('hex')
-/* 手机号白名单 env 与用户令牌配置：**离线假值**（真值不在仓内、也不在本进程环境里）。 */
+/* 手机号白名单 env 与用户令牌配置：**离线假值**（真值不在仓内；密钥只来自环境）。 */
 process.env.XIAI_USER_TOKEN_SECRET = USER_TOKEN_SECRET
-process.env.XIAI_USER_SMS_CODE = SMS_CODE
 process.env.XIAI_ADMIN_PHONE = ADMIN_PHONE
 delete process.env.XIAI_SESSION_AUTHORITY /* ⇒ 会话通道 off，走既有令牌路（零联网） */
 delete process.env.SHADOW_TOKEN_SECRET /* 每段显式设定，避免继承外部环境 */
@@ -539,9 +547,11 @@ section('H', '端到端：index.js::main（令牌路）admin ⇒ 信封带 token
   process.env.SHADOW_TOKEN_SECRET = SECRET_IN_ENV
   store.resetStats()
 
-  const adminLogin = await fn.main({ action: 'issue', phone: ADMIN_PHONE, code: SMS_CODE })
-  const otherLogin = await fn.main({ action: 'issue', phone: OTHER_PHONE, code: SMS_CODE })
-  check('H1', '前置：管理员手机号可登录（离线假验证码）', true, adminLogin.ok === true && typeof adminLogin.token === 'string')
+  /* **R-L3′**：管理员 / 非白名单两枚令牌**本地现签**（`issue` 已改为平台会话验签，不再收固定码）；
+     H1 的「可登录」语义 ＝ 该手机号能拿到一枚有效用户令牌。 */
+  const adminLogin = signUserToken({ phone: ADMIN_PHONE })
+  const otherLogin = signUserToken({ phone: OTHER_PHONE })
+  check('H1', '前置：管理员手机号可取得有效用户令牌（本地现签）', true, adminLogin.ok === true && typeof adminLogin.token === 'string')
 
   let readsBeforeOther = 0
   const captured = await withCapturedConsole(async () => {

@@ -3,8 +3,12 @@
  * 玺爱 · 管理员令牌云函数（写面 Phase 1｜CloudBase 事件型函数）
  * ============================================================================
  * 职责（本单范围）两条，**只此两条**：
- *   ① **签发**：校验「手机号 ∈ 白名单（环境变量注入）」＋「验证码 ＝ 环境变量注入的码」之后，
- *      签发一枚 **HMAC-SHA256 签名 + 15 分钟 TTL** 的短期令牌；**滑动续期**（每次校验通过回吐新令牌）。
+ *   ① **签发**：**P1c（管理面收口，2026-11-15）** 起，签发凭据**不再是全站固定码** —— 入参改为
+ *      `{ phone, platformAccessToken }`：服务端拿平台 `access_token` 去平台 auth 端点**验签取回该会话
+ *      的真实手机号**（`lib/platformAuth.js`，与 `xiai-user-token/lib/platformAuth.js` **逐字相同**），
+ *      与该会话手机号**严格相等**、**且**等于白名单手机号（`XIAI_ADMIN_PHONE`）才签发一枚
+ *      **HMAC-SHA256 签名 + 15 分钟 TTL** 的短期令牌；**滑动续期**（每次校验通过回吐新令牌）。
+ *      `XIAI_ADMIN_SMS_CODE` **退出必填集与授权判定**（变量本身保留，只读存在性布尔）。
  *   ② **校验**：供**写函数复用**（本单：同一函数的 `verify` 动作即 Phase-1 垂直切片的服务端判据；
  *      判定逻辑抽在 `lib/token.js` ⇒ Phase 2 的写函数直接 `require` 它即可，不必复制）。
  *
@@ -38,6 +42,15 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
+/* **P1c（管理面收口）**：平台会话验签（服务端权威取手机号）。判定链 / 判别码 / 失败归口**逐条同构**
+   于 `xiai-user-token/lib/platformAuth.js`（云函数各自独立打包 ⇒ 不能跨函数 require ⇒ 逐字复制一份；
+   两文件**逐字相同**，改一处必须同改另一处 —— 见 `README.md` 的「同源」条）。 */
+const {
+  DETAILS: PLATFORM_DETAILS,
+  normalizePlatformPhone,
+  isMainlandPhone,
+  verifyPlatformSession
+} = require('./lib/platformAuth.js')
 const { OPS: ADMIN_OPS, persist, readRoleRow } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
@@ -145,25 +158,93 @@ function errorFingerprint(error) {
 
 /**
  * 动作：签发。
- * 判定顺序（**两条都必须在任何签发之前**）：① 手机号白名单；② 验证码。
- * 两者不合一律 `FORBIDDEN`（**不区分「号不对」与「码不对」** ⇒ 防枚举）。
+ *
+ * **P1c（管理面收口，2026-11-15）**：凭据 ＝ 平台会话 `access_token`（**不再收固定码**）。
+ * 判定顺序（**全部判定都在任何签发之前**；任一环不合 ⇒ 结构化拒绝 ＋ 零写入）：
+ *   ① 手机号形态 ＋ 凭证在场（**零网络前置门**）；
+ *   ② 平台会话验签（服务端权威取号；纯函数、不自抛）；
+ *   ③ 验签所得号 **严格等于** 客户端声明号（不猜格式、不做前缀 / 长度容错）；
+ *   ④ 该号 **等于白名单**（`XIAI_ADMIN_PHONE`；缺 / 空白名单在 `readConfig()` 已结构化拒绝）；
+ *   ⑤ 签令牌（TTL / 版本 / 回包键面**逐字不变**）。
+ * ①〜④ 的全部失败**一律同一句 `FORBIDDEN`**（**不区分「号不对」「凭证不对」「不在白名单」** ⇒ 防枚举）；
+ * 平台 / 网络 / 内部不可用 ⇒ `STORAGE_UNAVAILABLE`（**绝不把内部故障说成「凭证不对」**，R-WF2）。
+ * 审计字段**零令牌原文 / 零号码原文**（只给布尔、掩码、不可逆指纹、内部判别码）。
+ * @param {object} event `{action:'issue', phone, platformAccessToken}`
+ * @param {object} config `readConfig()` 的 ready 结果
+ * @param {Function} [transport] **仅供离线自测注入**的传输实现（生产不传 ⇒ 内置 https）
+ * @returns {Promise<object>} 成功 `{ok:true, token, ...}` ｜ 拒绝 `{ok:false, reason, message}`
  */
-function handleIssue(event, config) {
+async function handleIssue(event, config, transport) {
   const now = serverNowSeconds()
-  const phone = normalizePhone(event.phone)
-  const code = typeof event.code === 'string' ? event.code.trim() : ''
-  const phoneOk = phone !== '' && phone === config.phone
-  const codeOk = code !== '' && code === config.smsCode
-  if (!phoneOk || !codeOk) {
-    audit({
-      action: 'issue',
+  const input = event && typeof event === 'object' ? event : {}
+  /* 声明号与服务端「平台回的号」走**同一归一函数**再严格比对（`+86 ` 形态不误拒；归一 ≠ 模糊匹配）。 */
+  const phone = normalizePlatformPhone(input.phone)
+  const platformAccessToken = typeof input.platformAccessToken === 'string' ? input.platformAccessToken.trim() : ''
+  const phoneOk = isMainlandPhone(phone)
+  const credentialPresent = platformAccessToken !== ''
+  const auditBase = {
+    action: 'issue',
+    phoneFingerprint: fingerprint(phone),
+    phoneMasked: maskedPhone(phone),
+    phoneOk,
+    credentialPresent,
+    serverNow: now
+  }
+  /* ① 前置门：形态不合 / 无凭证 ⇒ 直接判否（**零网络、零写入**）。 */
+  if (!phoneOk || !credentialPresent) {
+    audit(Object.assign({}, auditBase, { outcome: REASONS.FORBIDDEN, stage: 'precheck' }))
+    return deny(REASONS.FORBIDDEN, '僅管理員可以取得寫入令牌（手機號或驗證碼不正確）；本次零寫入。')
+  }
+  /* ② 平台会话验签（服务端权威；纯函数、不自抛）。 */
+  const verified = await verifyPlatformSession({
+    envId: config.envId,
+    /* **R-L9（区域参数化）**：区域只从 `lib/config.js::readConfig().authRegion` 取
+       （＝`XIAI_AUTH_REGION` → 回退 `TCB_REGION` → 默认 `ap-shanghai`）；本文件不写任何区域字面值。 */
+    region: config.authRegion,
+    accessToken: platformAccessToken,
+    transport
+  })
+  /* ③ 失败归口：凭证族 ⇒ FORBIDDEN；内部不可用（含 envId 缺失 / 非法、网络 / 超时 / 未知码）⇒
+     `STORAGE_UNAVAILABLE` —— **判据链与 `xiai-user-token/index.js::handleIssue` 逐条同构**。 */
+  if (!verified.ok) {
+    const isAuthSide = verified.detail === PLATFORM_DETAILS.AUTH_REJECTED ||
+      verified.detail === PLATFORM_DETAILS.PHONE_MISSING ||
+      verified.detail === PLATFORM_DETAILS.TOKEN_MISSING
+    if (isAuthSide) {
+      audit(Object.assign({}, auditBase, {
+        outcome: REASONS.FORBIDDEN,
+        stage: 'platform',
+        platformDetail: verified.detail
+      }))
+      return deny(REASONS.FORBIDDEN, '僅管理員可以取得寫入令牌（手機號或驗證碼不正確）；本次零寫入。')
+    }
+    audit(Object.assign({}, auditBase, {
+      outcome: REASONS.STORAGE_UNAVAILABLE,
+      stage: 'platform',
+      platformDetail: verified.detail
+    }))
+    return deny(REASONS.STORAGE_UNAVAILABLE, '管理員令牌服務內部錯誤；本次零寫入。')
+  }
+  /* ④ 声明号 与 验签所得号 **严格相等**。 */
+  const phoneMatched = verified.phone === phone
+  if (!phoneMatched) {
+    audit(Object.assign({}, auditBase, {
       outcome: REASONS.FORBIDDEN,
-      phoneFingerprint: fingerprint(phone),
-      phoneMasked: maskedPhone(phone),
-      phoneMatch: phoneOk,
-      codeMatch: codeOk,
-      serverNow: now
-    })
+      stage: 'match',
+      phoneMatched
+    }))
+    return deny(REASONS.FORBIDDEN, '僅管理員可以取得寫入令牌（手機號或驗證碼不正確）；本次零寫入。')
+  }
+  /* ⑤ 白名单（**服务端唯一判据**：验签所得号必须逐字等于注入的白名单号）。缺 / 空白名单不会走到
+     这里（`readConfig()` 已 `ready:false` ⇒ 结构化拒绝 ＋ 零写入）—— 此处仍显式判，纵深防御。 */
+  const whitelisted = config.phone !== '' && verified.phone === config.phone
+  if (!whitelisted) {
+    audit(Object.assign({}, auditBase, {
+      outcome: REASONS.FORBIDDEN,
+      stage: 'whitelist',
+      whitelisted,
+      subFingerprint: fingerprint(verified.phone)
+    }))
     return deny(REASONS.FORBIDDEN, '僅管理員可以取得寫入令牌（手機號或驗證碼不正確）；本次零寫入。')
   }
   const issued = issueToken({
@@ -178,6 +259,7 @@ function handleIssue(event, config) {
   audit({
     action: 'issue',
     outcome: 'ok',
+    stage: 'issued',
     subFingerprint: fingerprint(config.phone),
     exp: issued.claims.exp,
     jti: issued.claims.jti,
@@ -399,7 +481,8 @@ exports.main = async function main(event, context) {
     return deny(config.reason, config.message)
   }
   try {
-    if (action === 'issue') return handleIssue(input, config)
+    /* `issue` 现为异步（平台会话验签是网络往返）⇒ **必须 `await`**（漏掉会把 Promise 当回包返回）。 */
+    if (action === 'issue') return await handleIssue(input, config)
     if (action === 'verify') return await handleVerify(input, config, context)
     return deny(REASONS.FORBIDDEN, `未知的操作（action）：${action || '（空）'}；本次零寫入。`)
   } catch {
@@ -414,3 +497,8 @@ exports.OPS = OPS
 exports.ADMIN_OPS = ADMIN_OPS
 exports.DENIAL_MESSAGES = DENIAL_MESSAGES
 exports.ENV_NAMES = ENV_NAMES
+/* **P1c 签发面（`action:'issue'`｜管理面收口）**：供离线自测注入传输、断言负向归口
+   （**生产路径 `main()` 不传 `transport` ⇒ 恒走内置 https**；注入缝只用于「无真实 access_token 时
+   验判否逻辑」，不改变任何生产行为）。 */
+exports.handleIssue = handleIssue
+exports.PLATFORM_DETAILS = PLATFORM_DETAILS

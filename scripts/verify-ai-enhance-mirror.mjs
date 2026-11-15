@@ -38,9 +38,27 @@ process.env.XIAI_NO_REAL_CARD = '1'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌本地现签（真源算法）＋ 缺密钥 `SKIP（缺 <VAR>，本脚本未验证）` ⇒ exit 0。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
+
+/* --------------------------------------------------------------------------- *
+  R-L3′：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 ⇒ SKIP（exit 0）
+  —— 登录已改真短訊 OTP（`issue` 收 `{phone, platformAccessToken}`），自检不出网、不依赖真短讯，
+     也不再有任何固定码；写面门（`userWriteGate`）无令牌即拒 ⇒ 本套**先种一枚现签令牌**再跑 M 段。
+ * --------------------------------------------------------------------------- */
+const SESSION_PHONE = '13800000000'
+/** 占位平台凭据（**不是密钥**、不出进程：`action:'issue'` 已在假传输里拦下并回现签回包）。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
+let SIGNED_USER_TOKEN = null
+try {
+  requireSecretOrSkip(USER_SECRET_ENV)
+  SIGNED_USER_TOKEN = signUserToken({ phone: SESSION_PHONE })
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 
 /* --------------------------------------------------------------------------- *
   断言 / 读数（与既有 verify-*.mjs 同形）
@@ -110,7 +128,7 @@ const aiEnhance = await import(pathToFileURL(path.join(ROOT, 'src/services/aiEnh
 
 /* 云端形态（否则 `writeFaceMode()` 回落 local-dev ⇒ 门直接拒，测不到镜像步）＋ 已登录管理员。 */
 writeFaceMode.setWriteFaceModeOverride(writeFaceMode.WRITE_FACE_MODES.CLOUD)
-session.setUser({ id: 'u-mirror-selfcheck-0001', phone: '13800000000', role: 'admin' })
+session.setUser({ id: 'u-mirror-selfcheck-0001', phone: SESSION_PHONE, role: 'admin' })
 userTokenSvc.clearUserToken()
 
 /* --------------------------------------------------------------------------- *
@@ -139,7 +157,7 @@ const PREEXIST = {
   （`issue` 出令牌；`ai-enhance-submit` 恰五键；`ai-enhance-status` 恰六键 READY；
    未知 op ⇒ 结构化拒绝；**任何 op 都不回 `row`**）
  * --------------------------------------------------------------------------- */
-const TRANSPORT_TOKEN = 'offline-selfcheck-token-not-a-secret'
+const TRANSPORT_TOKEN = SIGNED_USER_TOKEN.token
 let transportCalls = []
 
 /* 服务端假账本（幂等判据：同 `request_id` 只扣一次、只回原回包）。 */
@@ -161,21 +179,9 @@ cloudbaseFn.setCloudFunctionTransport(async (name, data) => {
   transportCalls.push({ name, action: data && data.action, op: data && data.op })
   const action = data && typeof data.action === 'string' ? data.action : ''
   if (action === 'issue') {
-    /* 取票回包（`token.js::request` 要求 `token` 为非空字符串，否则判「形状不可辨識」）。 */
-    const now = Math.floor(Date.now() / 1000)
-    return {
-      result: {
-        ok: true,
-        token: TRANSPORT_TOKEN,
-        expiresAt: now + 900,
-        issuedAt: now,
-        ttlSeconds: 900,
-        ver: '1',
-        sub: 'user',
-        uid: 'u-mirror-selfcheck-0001',
-        serverNow: now
-      }
-    }
+    /* **R-L3′ 取票回包**：不再自造令牌 —— 回「**本地现签令牌**」的签发回包（形状与云函数
+       `handleIssue` 成功回包逐字同键；`token.js::request` 只要求 `token` 为非空字符串）。 */
+    return { result: issueReplyOf(SIGNED_USER_TOKEN) }
   }
   const op = data && typeof data.op === 'string' ? data.op : ''
   const payload = (data && data.payload) || {}
@@ -265,6 +271,19 @@ async function stableEnhance() {
   } finally {
     Math.random = originalRandom
     Date.now = originalNow
+  }
+}
+
+/* =========================================================================== *
+   M 段前置：**种一枚现签令牌进内存缓存**（R-L3′｜P1b 起 `userWriteGate` 不再「静默补签」：
+   无令牌 ⇒ 门直接 `FORBIDDEN`，M1〜M4 会连锁红）。取票仍走**真源通道**
+   （`token.js::request` → 传输缝 `action:'issue'` → 本地现签回包），不另造令牌、不打印令牌。
+ * =========================================================================== */
+{
+  const seeded = await userTokenSvc.requestUserToken(SESSION_PHONE, OFFLINE_PLATFORM_CREDENTIAL)
+  if (!seeded.ok) {
+    console.log(JSON.stringify({ fatal: 'TOKEN_SEED_FAILED', reason: seeded.reason, message: seeded.message }))
+    process.exit(2)
   }
 }
 
@@ -475,6 +494,7 @@ console.log(
     summary: { total, passed, failed: total - passed },
     sections: sectionStats,
     failed_ids: failedIds,
+    token: { length: TRANSPORT_TOKEN.length },
     note: '离线自检：注入 setCloudFunctionTransport（按 action/op 分派的异步回包，零 row）＋ setAiEnhanceMirrorStore（假镜像存储）；零网络、零云端、零生产数据；不打印任何令牌原文。'
   })
 )

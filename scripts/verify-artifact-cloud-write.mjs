@@ -30,9 +30,11 @@ process.env.XIAI_NO_REAL_CARD = '1'
 
 import { createRequire } from 'node:module'
 import { readFileSync, readdirSync } from 'node:fs'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -89,13 +91,18 @@ function check(id, label, expected, actual) {
    2. 环境（密钥只从环境变量来；缺省合成一次性假环境）
    --------------------------------------------------------------------------- */
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000001').trim()
-const authForCode = await import(path.join(ROOT, 'src/services/auth.js'))
-const SMSCode = String(authForCode.DEMO_SMS_CODE)
-const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || randomBytes(32).toString('hex')).trim()
-process.env.XIAI_USER_SMS_CODE = SMSCode
-process.env.XIAI_USER_TOKEN_SECRET = SECRET
+/* **R-L3′**：令牌签发密钥**只从当前 shell 环境变量读**（不合成、不落盘、不打印）；缺 ⇒ SKIP、exit 0。 */
+try {
+  process.env.XIAI_USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
+/* **现签令牌**（本地按真源算法签出；供 `userWriteGate` 携带）。**假传输**不校验此占位值 ——
+   真平台 `access_token` 不入仓、不进环境。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-credential-not-a-real-token'
+const USER_TOKEN = signUserToken({ phone: PHONE })
 
 const FROZEN_REASONS = [
   'FORBIDDEN',
@@ -204,6 +211,9 @@ let transportMutate = null
 userTokenSvc.setUserTokenTransport(async (name, data) => {
   fnCalls.push({ name, data })
   if (name !== 'xiai-user-token') return { ok: false, reason: 'FORBIDDEN', message: 'harness: wrong function' }
+  /* **R-L3′ 现签注入**：签发这一步由本地现签令牌顶替（键面与服务端签发回包同形）；
+     `verify` 一步仍交给**真实云函数体**（判定链一字不改）。 */
+  if (data && data.action === 'issue') return { result: issueReplyOf(USER_TOKEN) }
   const result = await fn.main(data)
   return { result: transportMutate ? transportMutate(result) : result }
 })
@@ -251,8 +261,8 @@ globalThis.fetch = async (url, init) => {
 
 /* 令牌：先经真实函数签发（走注入传输），供 `userWriteGate` 携带 */
 writeFace.setWriteFaceModeOverride('cloud')
-const login = await userTokenSvc.requestUserToken(PHONE, SMSCode)
-check('Z0', 'harness：经真实函数体取得用户令牌（不打印原文）', true, login.ok === true)
+const login = await userTokenSvc.requestUserToken(PHONE, OFFLINE_PLATFORM_CREDENTIAL)
+check('Z0', 'harness：经注入缝取得**现签**用户令牌（不打印原文）', true, login.ok === true && userTokenSvc.userTokenSnapshot().tokenLength > 0)
 console.log(JSON.stringify({ Z0_readout: { token: { length: userTokenSvc.userTokenSnapshot().tokenLength }, mode: writeFace.writeFaceMode() } }))
 
 const TIFF = makeTiffBytes(0x5a, 0)
@@ -270,8 +280,7 @@ check('Z2b', '对象键前两位 ≡ 摘要前两位', TIFF_DIGEST.slice(0, 2), 
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'A', title: '云函数 op registerArtifact（回读覆核）' }))
 
-const issued = await fn.main({ action: 'issue', phone: PHONE, code: SMSCode })
-const token = issued.token
+const token = USER_TOKEN.token
 const callOp = (payload) => fn.main({ action: 'verify', token, op: 'registerArtifact', payload })
 
 /* A0 正向：桶内字节与声称值逐字一致 ⇒ ok ＋ 扁平回包 */

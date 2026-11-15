@@ -52,9 +52,18 @@ process.env.XIAI_NO_REAL_CARD = '1'
 
 import { createRequire } from 'node:module'
 import { readFileSync, readdirSync } from 'node:fs'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import {
+  requireSecretOrSkip,
+  signUserToken,
+  signAdminToken,
+  handleTestTokenSkip,
+  USER_SECRET_ENV,
+  ADMIN_SECRET_ENV
+} from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -89,22 +98,25 @@ function check(id, label, expected, actual) {
 }
 
 /* ---------------------------------------------------------------------------
-   1. 环境（**密钥 / 验证码只从环境变量来；缺省合成一次性假环境，绝不写进仓**）
+   1. 环境（**令牌密钥只从当前 shell 环境变量读；缺 ⇒ SKIP ＋ exit 0**）
    --------------------------------------------------------------------------- */
 const ADMIN_PHONE = String(process.env.XIAI_ADMIN_PHONE || '16600001656').trim()
-const ADMIN_CODE = String(process.env.XIAI_ADMIN_SMS_CODE || '729341')
-const ADMIN_SECRET = String(process.env.XIAI_ADMIN_TOKEN_SECRET || randomBytes(32).toString('hex'))
-
-const authForCode = await import(path.join(ROOT, 'src/services/auth.js'))
-const USER_CODE = String(authForCode.DEMO_SMS_CODE)
 const USER_PHONE = String(process.env.XIAI_USER_PHONE || '13800000001').trim()
-const USER_SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || randomBytes(32).toString('hex'))
+
+/* **R-L3′**：`action:'issue'` 已改为「平台 `access_token` 验签取号」（不再收固定码）
+   ⇒ 两把令牌密钥**只从环境读**，令牌由**真源算法本地现签**；缺任一 ⇒ SKIP（不假绿、不报红）。 */
+let ADMIN_SECRET = ''
+let USER_SECRET = ''
+try {
+  ADMIN_SECRET = requireSecretOrSkip(ADMIN_SECRET_ENV)
+  USER_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 
 process.env.XIAI_ADMIN_PHONE = ADMIN_PHONE
-process.env.XIAI_ADMIN_SMS_CODE = ADMIN_CODE
 process.env.XIAI_ADMIN_TOKEN_SECRET = ADMIN_SECRET
 process.env.XIAI_ADMIN_TOKEN_VERSION = process.env.XIAI_ADMIN_TOKEN_VERSION || '1'
-process.env.XIAI_USER_SMS_CODE = USER_CODE
 process.env.XIAI_USER_TOKEN_SECRET = USER_SECRET
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 
@@ -407,9 +419,9 @@ setAuthChannel(NULL_CHANNEL_PROVIDER)
    =========================================================================== */
 console.log(JSON.stringify({ section: 'B', title: '管理员写面：会话优先 + fail-closed + 回落' }))
 
-/* B0：无会话 ⇒ 回落令牌路（先签发管理员令牌） */
+/* B0：无会话 ⇒ 回落令牌路（先取得管理员令牌：**本地现签**，真源算法 ＋ 环境密钥） */
 resetWorld()
-const adminIssued = await adminFn.main({ action: 'issue', phone: ADMIN_PHONE, code: ADMIN_CODE })
+const adminIssued = signAdminToken({ phone: ADMIN_PHONE })
 const adminToken = adminIssued.token
 check('B0', '令牌路签发成功（回落基线）', true, adminIssued.ok === true)
 
@@ -566,7 +578,8 @@ const VALID_SUBMIT = { faceId: 'fc-sess', sealId: 'XA000000001', stampId: 'XA000
 /* C1：会话（user 角色）⇒ submitCorrection 成功，落 identity_source:'SESSION' */
 resetWorld()
 currentSession = { uid: USER_UID }
-const userIssued = await userFn.main({ action: 'issue', phone: USER_PHONE, code: USER_CODE })
+/* **R-L3′**：用户令牌**本地现签**（`issue` 已改为平台会话验签，不再收固定码）。 */
+const userIssued = signUserToken({ phone: USER_PHONE })
 const userToken = userIssued.token
 resetWorld()
 currentSession = { uid: USER_UID }

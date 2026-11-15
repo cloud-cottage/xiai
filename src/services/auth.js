@@ -1,11 +1,27 @@
 /**
- * 玺爱 · 登录服务（手机号 + 验证码）
+ * 玺爱 · 登录服务（手機號 + 短訊驗證碼 / 手機號 + 密碼）
  *
- * 演示（固定）验证码的**唯一取值真源** = 部署云函数 `xiai-user-token` 的环境变量
- * `XIAI_USER_SMS_CODE`（W-43 已接受风险：固定值，暂缓）。客户端按「同型做法」
- * （jiazu 登录页：点「获取验证码」后把服务端演示码 `dev_code` 直接写进验证码栏）
- * 在点击「獲取驗證碼」后**自动填入**该演示码。
- * 零后端（dev / 離線形態）：登录只在本机 localStorage 内完成，不发起任何外部请求。
+ * **短訊驗證碼（本輪 P1b 起的唯一取碼路徑）**：真發短訊，由**雲開發平台原生身份**承擔 ——
+ *   · 取碼：`auth.getVerification({ phone_number, target: 'USER' })` ⇒ 平台下發短訊，
+ *     回包帶 `verification_id`（純 11 位手機號由 SDK 自動補 `"+86 "` 前綴）；
+ *   · 驗碼：`auth.verify({ verification_id, verification_code })` ⇒ 回包帶 `verification_token`；
+ *   · 登入：`auth.signIn({ username: <+86 形態手機號>, verification_token })` ⇒ 取 `access_token`；
+ *   · 換令牌：把該平台憑證交後端（凍結契約）`ensureUserLoginToken(phone, platformAccessToken)`。
+ *
+ * **密碼（P2 起的第二條正式路徑）**：手機號 ＋ 密碼 ⇒ 平台 `signInWithPassword` ⇒ 取 `access_token`
+ * ⇒ 同一條 `ensureUserLoginToken` 換令牌 ⇒ **同一個收尾** `finalizeLogin()`（兩條路共用一份）。
+ * 忘記密碼 ⇒ `requestCode()` 取碼 ⇒ `verify` ⇒ `resetPassword({phone_number,new_password,verification_token})`
+ * ⇒ 重置成功即用新密碼自動登錄（全流程見 `resetPasswordByOtp` 的頭注，含 SDK 源碼位置）。
+ *
+ * **硬紅線（逐條）**：
+ *   ① 本文件**不持有、不產生、不回包任何驗證碼**（沒有固定碼常量、沒有取碼回填、沒有本地碼門）；
+ *   ② 任一步失敗 ⇒ **零半成品**：不建本地賬號行、不寫 session、不發初始金、不結算邀請；
+ *   ③ 頻控錯誤（`RATE_LIMITED`，錯誤對象帶 `retryAfter`）**原文如實上屏**，不折成通用提示；
+ *   ④ 平台會話走**獨立 app 實例 ＋ 內存持久化**（見 `data/cloudbaseAuth.js` 檔案頭），
+ *      不覆蓋讀面的匿名會話。
+ *
+ * dev / 離線形態（本機未配置雲端）：**不得**回退到任何固定碼。僅在 `import.meta.env.DEV`
+ * 構建下允許「本地調試登入」這一條**非正式路徑**（不驗碼、也不回包任何碼；生產構建不存在該分支）。
  */
 
 import { listUserRows, saveUserRows } from '../data/db.js'
@@ -16,95 +32,313 @@ import { ADMIN_PHONE, ADMIN_NICKNAME } from '../data/seed.js'
 import { uidOf } from '../data/uid.js'
 import { grantInitialGold, settleInviteReward } from './points.js'
 /* **写面 Phase A（用户写面）**：登录改为「**先服务端验证并拿到用户令牌，再写 session**」——
-   云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。
-   dev / 离线形态（无云写入面）仍走改前的本地形态，并明确标注为非正式路径。 */
+   云端形态下身份判据在服务端（`xiai-user-token` 的 `action:'issue'`），本地只落 `userId` 镜像。 */
 import { ensureUserLoginToken } from './userToken.js'
-/* **平台原生身份（手機號 ＋ 密碼）**：复用**仓内既有的 SDK 装载缝** —— `data/cloudbaseFn.js::cloudBaseApp()`
-   （它与读面共用 `cloudbaseSdk.js::loadCloudBaseSdk()`、同一份构建期配置、同一条匿名登录，
-   `persistence:'local'` 的 auth 实例也由该缝建立）⇒ **不新开初始化路径、不新增第二套 SDK 装配**。 */
-import { cloudBaseApp } from '../data/cloudbaseFn.js'
+/* **R-L10（P3）**：登出清持久化令牌（同一份 `token.js` 的 `clear()`；不新建第二套清点）。 */
+import { clearUserToken, clearAdminToken } from './token.js'
+/* **短訊驗證碼 / 密碼登錄的 SDK 裝配單點**（獨立 app 實例 ＋ 內存持久化 ⇒ 不覆蓋讀面匿名會話）。 */
+import { otpAuth, resetOtpAuth } from '../data/cloudbaseAuth.js'
+import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 
-/* **演示碼常量**：值 = 部署雲函數 `xiai-user-token` 環境變量 `XIAI_USER_SMS_CODE` 的**現值**
-   （唯一真源見檔案頭；本處只是它的**鏡像**）。
-   ⚠️ **它實際上是公開的** ✗ —— 隨前端包（`dist/assets/*.js`）一併下發，任何訪客都讀得到 ⇒
-   它**不是**機密，也不得當機密用：把它公開發布，效果 ＝ **任何人可登錄任意手機號（含管理員手機號）**。
-   值指紋（sha256 前 12 位；僅用於與環境變量核對「是否漂移」，不可逆）＝ '4ef5c38bac71'。
-   改環境變量後**必須同步改此處**，否則登錄會被服務端以 `FORBIDDEN`（手機號或驗證碼不正確）拒絕。 */
-export const DEMO_SMS_CODE = '729341'
-/** 兼容既有引用點（本地碼門沿用舊名）。 */
-export const DEV_SMS_CODE = DEMO_SMS_CODE
 export const GOLD_INITIAL = 50
+
+/** 取碼冷卻秒數（前端體驗層；**不是**服務端頻控判據 —— 真正的頻控以平台回包為準）。 */
+export const CODE_RESEND_SECONDS = 60
+
+/** 驗證碼位數（平台固定 6 位；留 4〜8 的容錯窗，不因此放寬任何判據）。 */
+const CODE_PATTERN = /^\d{4,8}$/
+
+/* ---------------------------------------------------------------------------
+   **密碼規則（P2；預設值，一句話可改）**
+   ---------------------------------------------------------------------------
+   8–20 位、必須同時含字母與數字。**前端先就地拒**（不合規則不發請求、零副作用），
+   但**平台的判據才是最終判據**：平台若回「密碼太弱」一類錯誤，**原文透傳**上屏。
+   --------------------------------------------------------------------------- */
+
+export const PASSWORD_MIN_LENGTH = 8
+export const PASSWORD_MAX_LENGTH = 20
+
+const PASSWORD_LETTER = /[A-Za-z]/
+const PASSWORD_DIGIT = /\d/
+
+/** 密碼規則的一句人話（上屏用；與 `passwordPolicyError` 的判據**同源**）。 */
+export function passwordRuleHint() {
+  return `密碼 ${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} 位，且須同時包含字母與數字。`
+}
+
+/**
+ * 密碼規則校驗（**只回文案、不回包密碼**；空串 ＝ 合規）。
+ * @param {string} password
+ * @returns {string} 不合規 ⇒ 可讀繁體說明；合規 ⇒ `''`
+ */
+export function passwordPolicyError(password) {
+  const value = String(password === undefined || password === null ? '' : password)
+  if (value === '') return '請輸入新密碼。'
+  if (value.length < PASSWORD_MIN_LENGTH || value.length > PASSWORD_MAX_LENGTH) {
+    return `密碼長度應為 ${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} 位（當前 ${value.length} 位）。`
+  }
+  if (!PASSWORD_LETTER.test(value)) return '密碼須包含至少一個字母（A–Z / a–z）。'
+  if (!PASSWORD_DIGIT.test(value)) return '密碼須包含至少一個數字（0–9）。'
+  return ''
+}
+
+/**
+ * 是否為 **DEV 構建**（`import.meta.env.DEV`）。
+ *
+ * 只有它為 `true` 且寫面形態為 `local-dev` 時，才允許「本地調試登入」這條非正式路徑。
+ * 生產構建裡此常量恆 `false` ⇒ 那段分支不可達。
+ */
+const DEV_BUILD = (() => {
+  try {
+    if (typeof import.meta === 'undefined') return false
+    const env = import.meta.env
+    return !!(env && env.DEV === true)
+  } catch {
+    return false
+  }
+})()
+
+/**
+ * 本次會話待驗證的 `verification_id`（模塊內暫存）。
+ *
+ * **不上屏、不外傳、不落盤**：它只是一個一次性的服務端句柄，值本身不是憑證；
+ * 但按「驗證碼不進日誌 / 報告」的紀律，這裡同樣只在內存裡與手機號配對使用。
+ */
+let pendingVerification = { phone: '', verificationId: '' }
 
 export function isPhoneLike(phone) {
   return /^1[3-9]\d{9}$/.test(String(phone || '').trim())
 }
 
-/**
- * 演示态取码：不发送任何真实短信，把共用演示码交给调用方（登录页据此**自动填入**验证码栏）。
- * @returns {{ok:boolean, message:string, code?:string}} `code` 仅在取码成功时出现
- */
-export function requestCode(phone) {
-  if (!isPhoneLike(phone)) {
-    return { ok: false, message: '請輸入 11 位手機號' }
-  }
-  return { ok: true, message: loginCodeHint(), code: DEMO_SMS_CODE }
+/** 平台手機號形態（與 SDK `getVerification` 的 `"+86 "` 前綴**逐字同形**）。 */
+function platformPhoneOf(phone) {
+  return `+86 ${phone}`
 }
 
 /**
- * 验证码提示（**形态如实，不得静默 / 不得假称**）：演示環境下验证码为**共用演示码**，且
- * 点「獲取驗證碼」后**自動填入**驗證碼欄（同 jiazu 登录页做法）⇒ 提示如实说明这一步。
- * **明文**：本函数**不**回传、**不**内嵌验证码取值（值只经 `DEMO_SMS_CODE` / `requestCode().code` 出去）。
- * @returns {string} 上屏提示（繁體）
+ * 平台失敗 ⇒ 可讀結果（**發碼路徑專用：原文如實**）。
+ *
+ * 平台已把技術錯誤歸一化成可讀中文（`Error.message`），並在頻控時帶 `retryAfter`
+ * ⇒ 本函數**不改寫、不折疊**，只把需要的讀數（`retryAfter`）疊出來供倒計時使用。
+ * @param {*} error 平台拋出的錯誤對象
+ * @returns {{ok:false, message:string, retryAfter?:number, category?:string}}
  */
-export function loginCodeHint() {
-  return '當前爲演示環境：點「獲取驗證碼」即自動填入演示碼。'
+function otpFailureVerbatim(error) {
+  const original = String((error && error.message) || '').trim()
+  const category = String((error && (error.category || error.code || error.error_code)) || '').trim()
+  const retryRaw = Number(error && (error.retryAfter || error.retry_after))
+  const retryAfter = Number.isFinite(retryRaw) && retryRaw > 0 ? Math.ceil(retryRaw) : 0
+  let message = original !== '' ? original : '短訊驗證服務暫時不可用，請稍後重試。'
+  if (retryAfter > 0) message = `${message}\n（平台建議等待 ${retryAfter} 秒後重發。）`
+  const result = { ok: false, message }
+  if (retryAfter > 0) result.retryAfter = retryAfter
+  if (category !== '') result.category = category
+  return result
 }
+
 /**
- * 登录（＝註冊成功路径的**唯一入口**：老账号登录 / 新账号建号 + 初始赠送）。
+ * 平台失敗 ⇒ 可讀結果（**驗碼 / 登入路徑專用**）。
  *
- * **邀请结算钩（v1.21 新增｜§5.1 ⑦）**：触发时点**恰为「被邀请人註冊成功」** ——
- * 即本函数**新建账号**那一次；调用方可经 `options.inviterId` 提供邀请人用户 id
- * （邀请入口 / 邀请码的形态属 §11 W-23 待裁 ⇒ 本单**只接结算钩、不新增任何邀请入口形态**）。
- * 老账号登录**不触发**结算（不以「邀请人登录」等其它条件触发）。
- *
- * @param {string} phone 手机号
- * @param {string} code 验证码（**云端形态下由服务端判**；dev / 離線形態仍走本機演示碼門）
- * @param {{inviterId?:string}} [options]
- * @returns {Promise<{ok:boolean, user?:object, message?:string, invite?:object, reason?:string}>}
- *
- * **写面 Phase A（2026-09-30）**：本入口由**同步**改为 **`async`**，判定顺序改为：
- *   ① **服务端验证登录（云端形态下的唯一身份判据）**：`ensureUserLoginToken(phone, code)`
- *      ⇒ 云函数 `xiai-user-token` 的 `action:'issue'`（手机号形态 → 验证码 → 签发短 TTL 用户令牌）；
- *      不过门 ⇒ **原样透传结构化拒绝（恰 3 键）＋ 零半成品**（**不建本地账号行、不写 session、不发初始金**）；
- *   ② **dev / 离线形态**（无云写入面）：沿用改前的本地验证码门，**明确标注为非正式路径**；
- *   ③ 过门后才落本地：账号行 / 初始金 / session（**本地库是镜像面**：身份真源在服务端）。
+ * 這兩步失敗的用戶可處置動作只有一個（重新取碼），因此給**短文案**；
+ * 平台的長篇自助說明不適合上屏。`RATE_LIMITED` 等仍走 `otpFailureVerbatim`（原文）。
+ * @param {*} error
+ * @param {string} fallback
  */
-export async function login(phone, code, options = {}) {
+function otpFailureFriendly(error, fallback) {
+  const category = String((error && (error.category || error.code || error.error_code)) || '').trim()
+  if (category === 'RATE_LIMITED') return otpFailureVerbatim(error)
+  const result = { ok: false, message: fallback }
+  if (category !== '') result.category = category
+  return result
+}
+
+/** 只取需要的键（`undefined` 不进返回体，避免上屏出现 `undefined`）。 */
+function denialOf(source) {
+  const out = { ok: false, message: source && source.message ? source.message : '操作未完成，請稍後重試。' }
+  if (source && source.reason) out.reason = source.reason
+  if (source && source.retryAfter) out.retryAfter = source.retryAfter
+  if (source && source.category) out.category = source.category
+  return out
+}
+
+/**
+ * **取驗證碼（真發短訊）**。
+ *
+ * 硬紅線：回包**不含任何 code 字段**（不是「沒用到」，而是**不返回**）——
+ * 任何「取碼即得碼」的形態都把驗證碼變成公開秘密。
+ *
+ * @param {string} phone 11 位手機號
+ * @returns {Promise<{ok:true, message:string, cooldownSeconds:number}
+ *                  |{ok:false, message:string, reason?:string, retryAfter?:number, category?:string}>}
+ */
+export async function requestCode(phone) {
   const normalized = String(phone || '').trim()
   if (!isPhoneLike(normalized)) {
     return { ok: false, message: '請輸入 11 位手機號' }
   }
-  /* ① 服务端验证登录（**云端形态下这是唯一身份判据**；dev / 離線形態返回放行标记 ＋ `mode`）。 */
-  const verified = await ensureUserLoginToken(normalized, code)
-  if (!verified.ok) {
-    return { ok: false, reason: verified.reason, message: verified.message }
+  const auth = await otpAuth()
+  if (!auth || typeof auth.getVerification !== 'function') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '短訊驗證碼暫不可用（未配置雲端資料源）；本次未發送任何短訊。'
+    }
   }
-  /* ② dev / 離線形態：沿用改前的本地验证码门（**不得**当作正式登录路径）。 */
-  if (verified.mode === 'local-dev' && String(code || '').trim() !== DEV_SMS_CODE) {
-    return { ok: false, message: '驗證碼不正確' }
+  let body = null
+  try {
+    body = await auth.getVerification({ phone_number: normalized, target: 'USER' })
+  } catch (error) {
+    /* 頻控 / 風控 / 未開啟短訊登入 ⇒ **平台原文如實上屏**（含 `retryAfter`）。 */
+    return otpFailureVerbatim(error)
   }
+  const verificationId = String((body && (body.verification_id || body.verificationId)) || '').trim()
+  if (verificationId === '') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '短訊發送回包形狀不可辨識，請稍後重試。'
+    }
+  }
+  pendingVerification = { phone: normalized, verificationId }
+  return {
+    ok: true,
+    message: '驗證碼已發送至你填寫的手機號，請查收短訊。',
+    cooldownSeconds: CODE_RESEND_SECONDS
+  }
+}
 
+/**
+ * 验证码提示（**形态如实，不得静默 / 不得假称**）：真短訊、有頻控、有每日上限。
+ * @returns {string} 上屏提示（繁體）
+ */
+export function loginCodeHint() {
+  return '驗證碼由雲開發平台以短訊下發至你填寫的手機號；同一號碼 60 秒內只能重發一次，平台按號碼設有每日發送上限，超限時會如實提示。'
+}
+
+/** 從平台會話取 `access_token`（**只作憑證交後端**；不打印、不落盤、不上屏）。 */
+async function platformAccessTokenOf(auth) {
+  try {
+    if (typeof auth.getSession === 'function') {
+      const reply = await auth.getSession()
+      const session = reply && reply.data ? reply.data.session : null
+      const token = String((session && (session.access_token || session.accessToken)) || '').trim()
+      if (token !== '') return token
+    }
+  } catch {
+    /* 落到 `getLoginState()` */
+  }
+  try {
+    if (typeof auth.getLoginState === 'function') {
+      const state = await auth.getLoginState()
+      const credentials = state && (state.credentials || state)
+      const token = String((credentials && (credentials.access_token || credentials.accessToken)) || '').trim()
+      if (token !== '') return token
+    }
+  } catch {
+    /* 取不到 ⇒ 空串（調用方給結構化拒絕） */
+  }
+  return ''
+}
+
+/**
+ * **本地調試登入**（**非正式路徑**）：僅 `DEV` 構建 ＋ 本機無雲（`local-dev`）時可用。
+ *
+ * 它**不驗任何驗證碼、也不回包任何碼** —— 本機根本沒有短信通道，任何「碼」都只能是假的；
+ * 與其留一個假碼門，不如把這件事標成「本地調試」並只在 DEV 構建裡存在（生產構建不可達）。
+ * @returns {boolean}
+ */
+function localDevLoginAllowed() {
+  return DEV_BUILD && writeFaceMode() === WRITE_FACE_MODES.LOCAL_DEV
+}
+
+/**
+ * 平台驗證（取碼 → 驗碼 → 登入 → 平台會話憑證）。
+ * @param {string} phone 已歸一的 11 位手機號
+ * @param {string} code 用戶輸入的驗證碼
+ * @returns {Promise<{ok:true, mode:'cloud'|'local-dev', accessToken:string}
+ *                  |{ok:false, message:string, reason?:string, retryAfter?:number, category?:string}>}
+ */
+async function verifyPlatformOtp(phone, code) {
+  if (localDevLoginAllowed()) {
+    return { ok: true, mode: WRITE_FACE_MODES.LOCAL_DEV, accessToken: '' }
+  }
+  const typed = String(code || '').replace(/\s+/g, '')
+  if (typed === '') return { ok: false, message: '請輸入短訊驗證碼' }
+  if (!CODE_PATTERN.test(typed)) return { ok: false, message: '驗證碼應為 6 位數字' }
+  const verificationId =
+    pendingVerification && pendingVerification.phone === phone ? pendingVerification.verificationId : ''
+  if (verificationId === '') {
+    return { ok: false, message: '請先點「獲取驗證碼」，收到短訊後再輸入。' }
+  }
+  const auth = await otpAuth()
+  if (!auth || typeof auth.verify !== 'function') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '短訊驗證暫不可用（未配置雲端資料源）；本次未登入、零寫入。'
+    }
+  }
+  let verified = null
+  try {
+    verified = await auth.verify({ verification_id: verificationId, verification_code: typed })
+  } catch (error) {
+    return otpFailureFriendly(error, '驗證碼不正確或已過期，請重新獲取驗證碼。')
+  }
+  const verificationToken = String((verified && verified.verification_token) || '').trim()
+  if (verificationToken === '') {
+    /* v2 形態的容錯：`verify` 直接把會話簽下來（不給 `verification_token`）⇒ 直接取會話憑證。 */
+    const direct = await platformAccessTokenOf(auth)
+    if (direct !== '') {
+      pendingVerification = { phone: '', verificationId: '' }
+      return { ok: true, mode: 'cloud', accessToken: direct }
+    }
+    return { ok: false, message: '驗證回包形狀不可辨識，請重新獲取驗證碼。' }
+  }
+  try {
+    await auth.signIn({ username: platformPhoneOf(phone), verification_token: verificationToken })
+  } catch (error) {
+    return otpFailureFriendly(error, '登入未完成，請重新獲取驗證碼後再試。')
+  }
+  const accessToken = await platformAccessTokenOf(auth)
+  if (accessToken === '') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '登入未取得平台會話憑證，請稍後重試；本次未登入、零寫入。'
+    }
+  }
+  /* 一次性：驗過即作廢（重放同一 `verification_id` 沒有意義）。 */
+  pendingVerification = { phone: '', verificationId: '' }
+  return { ok: true, mode: 'cloud', accessToken }
+}
+
+/**
+ * **登錄收尾（兩條登錄路共用的唯一一份）** —— P2 抽出。
+ *
+ * 為什麼要抽：短訊驗證碼路（`login`）與密碼路（`loginWithPassword`）在**平台側**是兩套憑據
+ * （一個是 `verification_token`，一個是密碼），但**過了「換到 xiai 令牌」這一步之後，
+ * 語義必須逐字相同**：老賬號登錄 / 新賬號建號 + 初始金 + 邀請結算 + 寫 session。
+ * 兩份實現必然漂移（一邊加了初始金、另一邊漏了邀請結算）⇒ 只留這一份。
+ *
+ * 硬口徑：**只被「已經通過服務端換票」的調用方調用**（本函數自己不做任何驗證）；
+ * 它只寫本地鏡像面（賬號行 / 初始金 / session / 邀請結算），身份真源仍在服務端。
+ *
+ * @param {string} phone 已歸一的 11 位手機號
+ * @param {{inviterId?:string}} [options]
+ * @returns {{ok:true, user:object, invite:object, registered:boolean}}
+ */
+function finalizeLogin(phone, options = {}) {
   const users = listUserRows()
-  let user = users.find((u) => u.phone === normalized)
+  let user = users.find((u) => u.phone === phone)
   let registered = false
   if (!user) {
     /* 管理员手机号（数据层唯一真源 ADMIN_PHONE）建号即为 admin；其余一律普通用户。
        正常路径下数据层引导已按同一常量建好管理员账号，此处仅作兜底。 */
-    const isAdminPhone = normalized === ADMIN_PHONE
+    const isAdminPhone = phone === ADMIN_PHONE
     user = {
-      id: uidOf(normalized),
-      phone: normalized,
-      nickname: isAdminPhone ? ADMIN_NICKNAME : `印友${normalized.slice(-4)}`,
+      id: uidOf(phone),
+      phone,
+      nickname: isAdminPhone ? ADMIN_NICKNAME : `印友${phone.slice(-4)}`,
       role: isAdminPhone ? 'admin' : 'user',
       points: GOLD_INITIAL,
       created_at: new Date().toISOString()
@@ -126,28 +360,71 @@ export async function login(phone, code, options = {}) {
 }
 
 /**
- * **手機號 ＋ 密碼登入（平台原生身份；與演示碼登入**並存**）**
+ * 登录（＝註冊成功路径的**唯一入口**：老账号登录 / 新账号建号 + 初始赠送）。
+ *
+ * **邀请结算钩（v1.21 新增｜§5.1 ⑦）**：触发时点**恰为「被邀请人註冊成功」** ——
+ * 即本函数**新建账号**那一次；调用方可经 `options.inviterId` 提供邀请人用户 id。
+ * 老账号登录**不触发**结算（不以「邀请人登录」等其它条件触发）。
+ *
+ * @param {string} phone 手机号
+ * @param {string} code 短訊驗證碼（**平台判**；前端不持有、不生成、不回包）
+ * @param {{inviterId?:string}} [options]
+ * @returns {Promise<{ok:boolean, user?:object, message?:string, invite?:object, reason?:string}>}
+ *
+ * 判定顺序（**任一步失敗即整體失敗、零半成品**）：
+ *   ① 平台短訊驗證（`getVerification` → `verify` → `signIn` → `access_token`）；
+ *   ② 把平台憑證交後端換 xiai 令牌（凍結契約：`issue` 收 `{phone, platformAccessToken}`）；
+ *   ③ 過①②之後才落本地鏡像：賬號行 / 初始金 / session / 邀請結算 —— 走**共用收尾**
+ *      `finalizeLogin()`（與密碼登錄**同一份**；既有語義一字不改）。
+ */
+export async function login(phone, code, options = {}) {
+  const normalized = String(phone || '').trim()
+  if (!isPhoneLike(normalized)) {
+    return { ok: false, message: '請輸入 11 位手機號' }
+  }
+  /* ① 平台短訊驗證（真發碼路徑下的唯一身份判據）。 */
+  const platform = await verifyPlatformOtp(normalized, code)
+  if (!platform.ok) return denialOf(platform)
+  /* ② 平台憑證 ⇒ xiai 令牌（服務端驗的是平台簽發的令牌，前端不自稱身份）。 */
+  if (platform.mode === 'cloud') {
+    const exchanged = await ensureUserLoginToken(normalized, platform.accessToken)
+    if (!exchanged.ok) return denialOf(exchanged)
+  }
+
+  /* ③ 共用收尾（本地庫是鏡像面，身份真源在服務端）。 */
+  return finalizeLogin(normalized, options)
+}
+
+/**
+ * **手機號 ＋ 密碼登入（平台原生身份；與短訊驗證碼登入**並存**｜P2 正式化）**
  * ----------------------------------------------------------------------------
- * 形态：用户名 = 用户填的 **11 位手機號**（過渡賬號由人類在控制台手動建立，密碼由人類設定）
+ * 形态：用户名 = 用户填的 **11 位手機號**（賬號由人類在雲開發控制台建立，密碼由人類設定）
  * ⇒ 調平台原生 `auth.signInWithPassword({ username, password })`。
  *
- * **SDK 實例與持久化沿用既有裝載縫**：`cloudBaseApp()` 回的是**读面/写面同一個** app 實例
- * （`persistence:'local'`），本函數只在其上取 auth ⇒ 不新開 `init` 路徑。
+ * **SDK 實例**：走 `data/cloudbaseAuth.js::otpAuth()`（**內存持久化** `persistence:'none'`），
+ * 與短訊驗證碼路**同一個實例** —— 這不是細節：`persistence:'local'` 上殘留的**匿名會話**
+ * 會讓「用 try/catch 判成功」得到假綠（本函數的成敗判據見下）；內存實例天然沒有這份殘留。
  *
- * ⚠️ **該版 SDK 的 auth 方法不拋異常、統一返回 `{data, error}`** ⇒ 判成敗**必須檢查 `error`**
- * （用 try/catch 判成功會得到假綠：`persistence:'local'` 裡殘留的**匿名會話**會被當成登入成功）。
- * 故：`error` 為真 ⇒ 失敗；`error` 為假**且**取到 uid ⇒ 才報成功。
+ * ⚠️ **該版 SDK 的 `signInWithPassword` 不拋異常、統一返回 `{data, error}`** ⇒ 判成敗
+ * **必須檢查 `error`**（源碼位置：`dist/index.esm.js` 偏移 233585，`case 3: return r=i.sent(),
+ * (o=new un(r,{method:"signInWithPassword"}))`）。故：`error` 為真 ⇒ 失敗；
+ * `error` 為假**且**取到會話/user ⇒ 才報成功；並額外拒 `is_anonymous === true` 的會話。
  *
- * 本函數**只做到「能登入 ＋ 能取到平台會話 uid」**：不寫本機 session、不建業務行、不發金
- * （那是演示碼那條路的職責；寫面另開單）。
+ * **完整鏈路（與短訊驗證碼路同語義，P2 起）**：
+ *   ① 平台 `signInWithPassword`（本函數）；
+ *   ② 取平台會話 `access_token`（**只作憑證交後端**；不打印、不落盤、不上屏）；
+ *   ③ `ensureUserLoginToken(phone, accessToken)` 換 xiai 令牌（服務端驗簽取號，前端不自稱身份）；
+ *   ④ **共用收尾** `finalizeLogin()`：賬號行 / 初始金 / 邀請結算 / session —— **與 `login()` 同一份**。
+ * 任一步失敗 ⇒ **零半成品**（不建本地賬號行、不寫 session、不發金、不結算邀請）。
  *
  * @param {string} phone 手機號（＝用戶名）
  * @param {string} password 密碼
- * @returns {Promise<{ok:boolean, uid?:string, message:string, code?:string}>}
- *          失敗一律回**可見**的繁體 `message`（沿用登入頁既有口型）；
- *          **不新增 reason 字面值**（`code` 只是平台原樣讀數，供排障，非判據）。
+ * @param {{inviterId?:string}} [options]
+ * @returns {Promise<{ok:true, user:object, invite:object, registered:boolean, mode:string}
+ *                  |{ok:false, message:string, reason?:string, code?:string}>}
+ *          失敗一律回**可見**的繁體 `message`；**不新增 reason 字面值**（`code` 只是平台原樣讀數）。
  */
-export async function loginWithPassword(phone, password) {
+export async function loginWithPassword(phone, password, options = {}) {
   const normalized = String(phone || '').trim()
   const secret = String(password || '')
   if (!isPhoneLike(normalized)) {
@@ -156,47 +433,247 @@ export async function loginWithPassword(phone, password) {
   if (secret === '') {
     return { ok: false, message: '請輸入密碼' }
   }
-  const app = await cloudBaseApp()
-  if (!app || typeof app.auth !== 'function') {
-    return { ok: false, message: '雲端登入暫不可用（未配置資料源），請改用演示碼登入。' }
-  }
-  const auth = app.auth({ persistence: 'local' })
+  const auth = await otpAuth()
   if (!auth || typeof auth.signInWithPassword !== 'function') {
-    return { ok: false, message: '雲端登入暫不可用（SDK 不支援密碼登入）。' }
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '密碼登錄暫不可用（未配置雲端資料源）；本次未登錄、零寫入，可改用「手機號 + 驗證碼」登錄。'
+    }
   }
-  let reply = null
-  try {
-    reply = await auth.signInWithPassword({ username: normalized, password: secret })
-  } catch (error) {
-    /* 契約上不該走到這裡（該版 SDK 不拋）——留作最後一道結構化失敗，不讓異常外逸。 */
-    return { ok: false, message: '網絡異常，登入失敗，請稍後再試。', code: String((error && error.code) || '') }
+  /* ① 平台密碼登錄（判據全在平台側）。 */
+  const signed = await signInWithPlatformPassword(auth, normalized, secret)
+  if (!signed.ok) return signed.denial
+  /* ② 平台會話憑證。 */
+  const accessToken = await platformAccessTokenOf(auth)
+  if (accessToken === '') {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '登錄未取得平台會話憑證，請稍後重試；本次未登錄、零寫入。'
+    }
   }
-  const error = reply && reply.error
-  if (error) {
-    return { ok: false, ...passwordLoginFailure(error) }
-  }
-  const uid = String(
-    (reply && reply.data && reply.data.user && reply.data.user.uid) ||
-      (auth.currentUser && auth.currentUser.uid) ||
-      ''
-  ).trim()
-  if (!uid) {
-    return { ok: false, message: '登入未取得平台會話，請稍後再試。' }
-  }
-  return { ok: true, uid, message: '' }
+  /* ③ 平台憑證 ⇒ xiai 令牌（與短訊驗證碼路**同一判據**）。 */
+  const exchanged = await ensureUserLoginToken(normalized, accessToken)
+  if (!exchanged.ok) return denialOf(exchanged)
+  /* ④ 共用收尾（與 `login()` **同一份**）。 */
+  const finalized = finalizeLogin(normalized, options)
+  return { ...finalized, mode: exchanged.mode }
 }
 
-/** 平台登入失敗 ⇒ 可見繁體文案（**不新增工程 reason 字面值**；`code` 只作原樣讀數）。 */
-function passwordLoginFailure(error) {
-  const code = String((error && (error.code || error.error_code)) || '').trim()
-  if (code === 'invalid_username_or_password') {
-    return { message: '手機號或密碼不正確', code }
+/**
+ * 平台密碼登錄的一次嘗試（**只在「用戶名形態不對」時換形態重試一次**）。
+ *
+ * 為什麼要有形態重試：控制台建賬號時 `username` 可能填 **11 位號碼**，也可能被建成
+ * **手機號身份**（平台內部記為 `"+86 138…"`）。兩者平台都認，但填錯形態會得到
+ * 「用戶不存在」—— 那不是密碼錯，不該讓用戶去猜。
+ *
+ * 硬邊界：
+ *   · **只在 `USER_NOT_FOUND` 這一類錯誤時**換形態（密碼錯／頻控／驗證碼 一律**不重試**，
+ *     避免把「猜密碼」變成兩次嘗試）；
+ *   · 每一次嘗試都**只交本人密碼**給平台，前端不保存、不派生任何憑據。
+ *
+ * @returns {Promise<{ok:true}|{ok:false, denial:object}>} 失敗 ⇒ `denial` 即可上屏的結構化結果
+ */
+async function signInWithPlatformPassword(auth, phone, secret) {
+  const forms = [phone, platformPhoneOf(phone)]
+  let lastError = null
+  for (let index = 0; index < forms.length; index += 1) {
+    let reply = null
+    try {
+      reply = await auth.signInWithPassword({ username: forms[index], password: secret })
+    } catch (error) {
+      /* 契約上不該走到這裡（該版 SDK 不拋）——留作最後一道結構化失敗，不讓異常外逸。 */
+      return { ok: false, denial: passwordLoginFailure(error) }
+    }
+    const error = reply && reply.error
+    if (!error) {
+      /* `error` 為假仍要驗會話：匿名會話 / 空會話都不算登錄成功。 */
+      const session = platformSessionOf(reply)
+      if (session.present && !session.anonymous) return { ok: true }
+      return {
+        ok: false,
+        denial: { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '登錄未取得有效的平台會話，請稍後重試；本次未登錄、零寫入。' }
+      }
+    }
+    lastError = error
+    if (!platformUserMissing(error)) break
   }
-  return { message: '登入失敗，請稍後再試。', code }
+  return { ok: false, denial: passwordLoginFailure(lastError) }
+}
+
+/** 平台回包裡的會話讀數（只取「有沒有」與「是不是匿名」，**不取令牌原文**）。 */
+function platformSessionOf(reply) {
+  const data = reply && reply.data ? reply.data : null
+  const session = data && data.session ? data.session : null
+  const user = data && data.user ? data.user : null
+  const present = !!(session || user)
+  const anonymous = !!(session && (session.is_anonymous === true || session.isAnonymous === true))
+  return { present, anonymous }
+}
+
+/** 平台是否回「用戶不存在」（**只有這一類**才值得換用戶名形態重試）。 */
+function platformUserMissing(error) {
+  const text = `${String((error && error.code) || '')} ${String((error && error.category) || '')}`.toLowerCase()
+  return text.indexOf('user_not_found') !== -1 || text.indexOf('user_not_exists') !== -1
+}
+
+/**
+ * 平台登入失敗 ⇒ 可見繁體文案（**不新增工程 reason 字面值**；`code` 只作原樣讀數）。
+ *
+ * 口型：
+ *   · 憑據錯（`invalid_username_or_password` 等）⇒ **短文案**「手機號或密碼不正確」
+ *     （平台對這兩種錯**故意不區分**，前端也不得替它區分）；
+ *   · 頻控 / 未開啟 / 需人機校驗 / 服務異常 ⇒ **平台原文透傳**（`otpFailureVerbatim`），
+ *     因為這幾類的可處置動作各不相同，折成通用提示等於把用戶晾在原地；
+ *   · 其餘 ⇒ 原文（有 `message` 就用），沒有才回落通用文案。
+ */
+function passwordLoginFailure(error) {
+  const code = String((error && (error.code || error.error_code)) || '').trim().toLowerCase()
+  const category = String((error && error.category) || '').trim()
+  /* 憑據錯**先判**（平台故意不區分「查無此人」與「密碼錯」；前端也不替它區分，
+     更不得把平台的長篇排障說明當成用戶提示）。 */
+  if (code === 'invalid_username_or_password' || code === 'invalid_credentials' || code === 'invalid_password') {
+    return {
+      ok: false,
+      message: '手機號或密碼不正確，請重新輸入；如忘記密碼，可點「忘記密碼？」重設。',
+      code
+    }
+  }
+  /* 頻控 / 未開啟 / 需人機校驗 / 服務異常 ⇒ **平台原文**（可處置動作各不相同）。 */
+  if (
+    category === 'RATE_LIMITED' ||
+    category === 'PROVIDER_NOT_ENABLED' ||
+    category === 'CAPTCHA_REQUIRED' ||
+    category === 'MFA_REQUIRED' ||
+    code === 'user_not_found'
+  ) {
+    return otpFailureVerbatim(error)
+  }
+  const message = String((error && error.message) || '').trim()
+  if (message !== '') return { ok: false, message, code }
+  return { ok: false, message: '登錄失敗，請稍後再試。', code }
+}
+
+/**
+ * **忘記密碼 ⇒ 短訊驗證碼驗證 ⇒ 重置密碼（P2 自助流程）**
+ * ============================================================================
+ * **契約以 SDK 源碼為準（`node_modules/@cloudbase/js-sdk/dist/index.esm.js`，實裝 2.32.0）**：
+ *   · `resetPasswordForEmail(emailOrPhone, options)`（偏移 240860）自己就是一條**兩步**通道：
+ *     先 `getVerification({phone_number, target:'USER'})`（**自己發碼**）⇒ 回包給
+ *     `{data:{updateUser}}`；再 `updateUser({nonce, password})` ⇒ `verify({verification_id,
+ *     verification_code:nonce})` ⇒ `oauthInstance.authApi.resetPassword({phone_number,
+ *     new_password, verification_token})` ⇒ 自動 `signInWithPassword`。
+ *   · 因此**重置 ＝ 先驗碼拿 `verification_token`，再 `resetPassword`**（兩步，缺一不可）；
+ *   · `resetPassword(body)`（偏移 269017）＝ `authApi.resetPassword`（偏移 197712）⇒
+ *     POST `/auth/v1/reset`，body **原樣上送** ⇒ 必填三鍵
+ *     `{ phone_number, new_password, verification_token }`；
+ *   · `setPassword(body)`（偏移 265121）⇒ **PATCH** `/auth/v1/user/password`，
+ *     要 `{ sudo_token, new_password }`；`sudo({password|verification_token})`（偏移 269359）
+ *     ⇒ POST `/auth/v1/user/sudo` 換 `sudo_token`。那是「**已登錄後改密**」的第二形態，
+ *     **本流程不用它**（忘記密碼時沒有會話，且它需要另一條 sudo 支路）。
+ *
+ * **為什麼不用 `resetPasswordForEmail` 一把梭**：它會**自己再發一條短訊**——
+ * 那會繞過本頁的 60s 冷卻與頻控原文上屏（同一號碼被兩個入口各發一次 ⇒ 用戶收到兩條、
+ * 平台的每日上限被吃掉兩條）。所以本流程用**同一個 `requestCode()` 的 `verification_id`**
+ * 去 `verify`，再自己 `resetPassword`：**一步一碼、一碼一用**。
+ *
+ * **零副作用（逐條）**：密碼不合規 ⇒ 不發請求；碼錯 / 碼過期 ⇒ `verify` 失敗即返回，
+ * **`resetPassword` 根本沒被調用** ⇒ 平台上的舊密碼一字不動；`resetPassword` 被平台拒 ⇒
+ * 舊密碼同樣不動；本地 session / 賬號行 / 金 / 邀請結算**只在重置成功且重新登錄成功後**
+ * 由共用收尾 `finalizeLogin()` 落。
+ *
+ * @param {string} phone 11 位手機號（**必須與取碼時同一號**）
+ * @param {string} code 用戶收到的短訊驗證碼（平台判；前端不持有、不回包）
+ * @param {string} newPassword 新密碼（規則見 `passwordPolicyError`）
+ * @param {{inviterId?:string}} [options] 重置後自動登錄的邀請人（新賬號場景）
+ * @returns {Promise<{ok:true, loggedIn:boolean, message:string, user?:object, invite?:object, registered?:boolean}
+ *                  |{ok:false, message:string, reason?:string, retryAfter?:number, category?:string}>}
+ */
+export async function resetPasswordByOtp(phone, code, newPassword, options = {}) {
+  const normalized = String(phone || '').trim()
+  if (!isPhoneLike(normalized)) {
+    return { ok: false, message: '請輸入 11 位手機號' }
+  }
+  /* ① 新密碼規則：不合規**就地拒**（零請求、零副作用）。 */
+  const policyError = passwordPolicyError(newPassword)
+  if (policyError !== '') {
+    return { ok: false, reason: 'WEAK_PASSWORD', message: policyError }
+  }
+  /* ② 驗證碼形態：不到位就不發請求。 */
+  const typed = String(code || '').replace(/\s+/g, '')
+  if (typed === '') return { ok: false, message: '請輸入短訊驗證碼' }
+  if (!CODE_PATTERN.test(typed)) return { ok: false, message: '驗證碼應為 6 位數字' }
+  const verificationId = pendingVerification && pendingVerification.phone === normalized
+    ? pendingVerification.verificationId
+    : ''
+  if (verificationId === '') {
+    return { ok: false, message: '請先點「獲取驗證碼」，收到短訊後再輸入。' }
+  }
+  const auth = await otpAuth()
+  if (
+    !auth ||
+    typeof auth.verify !== 'function' ||
+    typeof auth.resetPassword !== 'function'
+  ) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '重置密碼暫不可用（未配置雲端資料源或 SDK 不支援）；本次未改動任何密碼。'
+    }
+  }
+  /* ③ 第一步：驗碼 ⇒ `verification_token`（失敗 ⇒ 原文上屏；**舊密碼未被觸碰**）。 */
+  let verified = null
+  try {
+    verified = await auth.verify({ verification_id: verificationId, verification_code: typed })
+  } catch (error) {
+    return otpFailureVerbatim(error)
+  }
+  const verificationToken = String((verified && verified.verification_token) || '').trim()
+  if (verificationToken === '') {
+    return { ok: false, message: '驗證回包形狀不可辨識，請重新獲取驗證碼；本次未改動任何密碼。' }
+  }
+  /* ④ 第二步：帶 token 重置（平台錯誤**原文透傳**，不折成通用提示）。 */
+  try {
+    await auth.resetPassword({
+      phone_number: normalized,
+      new_password: String(newPassword),
+      verification_token: verificationToken
+    })
+  } catch (error) {
+    return otpFailureVerbatim(error)
+  }
+  /* 一次性句柄：用過即作廢。 */
+  pendingVerification = { phone: '', verificationId: '' }
+  /* ⑤ 重置成功 ⇒ 立刻用新密碼登錄（等於「重設即登入」）。
+     這一步失敗**不影響已完成的密碼重設** ⇒ 回 `ok:true, loggedIn:false` 並如實說明。 */
+  const relogin = await loginWithPassword(normalized, newPassword, options)
+  if (relogin.ok) {
+    return {
+      ok: true,
+      loggedIn: true,
+      user: relogin.user,
+      invite: relogin.invite,
+      registered: relogin.registered,
+      message: '密碼已重設，已用新密碼自動登錄。'
+    }
+  }
+  return {
+    ok: true,
+    loggedIn: false,
+    message: `密碼已重設，請用新密碼登錄。${relogin.message ? `（${relogin.message}）` : ''}`
+  }
 }
 
 export function logout() {
   setUser(null)
+  /* **R-L10（P3）**：登出必須**清持久化令牌**（兩條通道各一個键；`clear()` 是唯一清点）。
+     顺序：先丢令牌、再丢平台会话 —— 后者作废后无法再换票，故令牌必须此前清掉。 */
+  clearUserToken()
+  clearAdminToken()
+  /* 同時丟掉**平台會話**（`persistence:'none'` ⇒ 只存在內存裡；作廢實例即等於清掉它）。
+     不影響讀面 / 寫面那兩個 app 實例的匿名會話。 */
+  resetOtpAuth()
   return { ok: true }
 }
 

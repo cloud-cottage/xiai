@@ -26,7 +26,8 @@
  *   J. **静态**：三处取行式按 `status = …PENDING` 过滤 ＋ 限量化在位。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文；不碰任何服务；断言失败 ⇒ 退出码非 0。
- * 用法：`node scripts/verify-adopt-atomicity.mjs`
+ * 用法：`XIAI_USER_TOKEN_SECRET=… node scripts/verify-adopt-atomicity.mjs`
+ *   （令牌**本地现签**；缺 `XIAI_USER_TOKEN_SECRET` ⇒ `SKIP（缺 …）` ＋ exit 0）
  */
 /* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
    若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
@@ -38,6 +39,8 @@ import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -45,15 +48,23 @@ const ROOT = path.resolve(HERE, '..')
 const FUNCTION_DIR = path.join(ROOT, 'cloudfunctions/xiai-user-token')
 
 /* ---------------------------------------------------------------------------
-   0. 环境（**合成值**；脚本内零真实凭据字面值）
+   0. 环境（**令牌密钥只从当前 shell 环境变量读；缺 ⇒ SKIP ＋ exit 0**）
    --------------------------------------------------------------------------- */
 const PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000002').trim()
-process.env.XIAI_USER_TOKEN_SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || 'synthetic-adopt-atomicity-secret').trim()
-process.env.XIAI_USER_SMS_CODE = String(process.env.XIAI_USER_SMS_CODE || '246810').trim()
+try {
+  process.env.XIAI_USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 process.env.XIAI_ADMIN_PHONE = PHONE
 const NON_WHITELIST_PHONE = '139' + String(0).repeat(8) + '7'
+
+/* **现签用户令牌**（`action:'issue'` 已改为平台会话验签 ⇒ 自检不再依赖固定码 / 真短訊；
+   令牌由真源算法本地签出，与云函数签发的**同形态、同 TTL、同 version**）。 */
+const USER_TOKEN = signUserToken({ phone: PHONE })
+const TOKEN_FOR_HARNESS = USER_TOKEN.token
 
 /* ---------------------------------------------------------------------------
    1. 断言与读数
@@ -285,8 +296,8 @@ console.log(JSON.stringify({ section: 'B', title: 'I-3 待审取行（真因）'
 
 /* 三通道同型：批内已无待审行 ⇒ 经 `index.js` 回**成功空结果**，不得 `STORAGE_UNAVAILABLE`。 */
 {
-  const issue = await fn.main({ action: 'issue', phone: PHONE, code: process.env.XIAI_USER_SMS_CODE })
-  const TOKEN = issue.token
+  /* **R-L3′**：令牌本地现签（`action:'issue'` 已改为平台会话验签 ⇒ 不再收固定码）。 */
+  const TOKEN = TOKEN_FOR_HARNESS
   for (const channel of CHANNELS) {
     const store = createStore([
       Object.assign({ __collection: channel.importCollection }, importRowOf(channel, { id: `${channel.key}-done`, sourceKey: `${channel.key}-DONE`, status: IMPORT_STATUS.ACCEPTED }))
@@ -304,8 +315,8 @@ console.log(JSON.stringify({ section: 'B', title: 'I-3 待审取行（真因）'
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'C', title: 'I-1 采纳原子性（失败步如实报告）' }))
 {
-  const issue = await fn.main({ action: 'issue', phone: PHONE, code: process.env.XIAI_USER_SMS_CODE })
-  const TOKEN = issue.token
+  /* **R-L3′**：令牌本地现签（`action:'issue'` 已改为平台会话验签 ⇒ 不再收固定码）。 */
+  const TOKEN = TOKEN_FOR_HARNESS
   const store = createStore([{ __collection: 'xiai_person_imports' }])
   /* 真实导入行（带幂等键）⇒ 采纳 ⇒ 计划 ＝ [set xiai_persons, update xiai_person_imports]。 */
   const row = importRowOf({ key: 'person', idKey: 'source_person_id' }, { id: 'pi-half', sourceKey: 'HALF-1' })
@@ -481,8 +492,8 @@ console.log(JSON.stringify({ section: 'F', title: 'I-2 门面与零写入' }))
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'H', title: '包封透传（按 op 收窄）' }))
 {
-  const issue = await fn.main({ action: 'issue', phone: PHONE, code: process.env.XIAI_USER_SMS_CODE })
-  const TOKEN = issue.token
+  /* **R-L3′**：令牌本地现签（`action:'issue'` 已改为平台会话验签 ⇒ 不再收固定码）。 */
+  const TOKEN = TOKEN_FOR_HARNESS
   const READOUT = ['dry_run', 'scanned', 'orphan', 'changed', 'samples', 'idempotent']
   const keysOf = (res) => READOUT.filter((key) => Object.prototype.hasOwnProperty.call(res, key))
 

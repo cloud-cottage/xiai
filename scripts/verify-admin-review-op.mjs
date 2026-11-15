@@ -20,9 +20,14 @@
  *
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
- * 用法（手机号 / 验证码 / 密钥只从**环境变量**传入，脚本内零字面值）：
- *   XIAI_ADMIN_PHONE=… XIAI_ADMIN_SMS_CODE=… XIAI_ADMIN_TOKEN_SECRET=… \
+ * 用法（手机号 / 密钥只从**环境变量**传入，脚本内零字面值）：
+ *   XIAI_ADMIN_PHONE=… XIAI_ADMIN_TOKEN_SECRET=… \
  *     node scripts/verify-admin-review-op.mjs
+ *
+ * **R-L3′（2026-11-15）**：登录已改为**真短讯 OTP**（`action:'issue'` 入参
+ * `{ phone, platformAccessToken }`）—— 全站固定码已退出授权判定 ⇒ 本脚本的签发分支改测
+ * `handleIssue(event, readConfig(), 假平台传输)`（假传输零网络）；**缺密钥 ⇒ 打印
+ * `SKIP（缺 <VAR>，本脚本未验证）` 并 exit 0**（不假绿、不报红）。
  */
 /* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
    若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
@@ -35,6 +40,8 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：密钥只从当前 shell 环境变量读；缺 ⇒ `SKIP（缺 <VAR>…）` ＋ exit 0（**不假绿**）。 */
+import { requireSecretOrSkip, handleTestTokenSkip, ADMIN_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -91,24 +98,24 @@ function check(id, label, expected, actual) {
 /* ---------------------------------------------------------------------------
    2. 环境（**手机号 / 验证码 / 密钥只从环境变量来；脚本内零字面值**）
    --------------------------------------------------------------------------- */
-const PHONE = String(process.env.XIAI_ADMIN_PHONE || '').trim()
-const CODE = String(process.env.XIAI_ADMIN_SMS_CODE || '').trim()
-const SECRET = String(process.env.XIAI_ADMIN_TOKEN_SECRET || '').trim()
-if (PHONE === '' || CODE === '' || SECRET === '') {
-  console.log(
-    JSON.stringify({
-      fatal: 'MISSING_TEST_ENV',
-      need: ['XIAI_ADMIN_PHONE', 'XIAI_ADMIN_SMS_CODE', 'XIAI_ADMIN_TOKEN_SECRET'],
-      note: '三个值只从环境变量读入；本脚本绝不回显它们的值，也不把它们写进脚本'
-    })
-  )
-  process.exit(2)
+const PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000001').trim()
+/* **R-L3′**：密钥只从环境变量读；缺 ⇒ `SKIP（缺 <VAR>…）` ＋ exit 0（不假绿、不报红）。 */
+let SECRET = ''
+try {
+  SECRET = requireSecretOrSkip(ADMIN_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
 }
+/* **合成平台 envId**：`lib/config.js::readEnvId` 只做形态门（验签走注入的假传输 ⇒ 零网络）；
+   缺它会让验签判 `ENV_MISSING` ⇒ `STORAGE_UNAVAILABLE`，与断言无关的噪声。 */
+process.env.TCB_ENV = process.env.TCB_ENV || 'offline-harness-env'
 process.env.XIAI_ADMIN_PHONE = PHONE
-process.env.XIAI_ADMIN_SMS_CODE = CODE
 process.env.XIAI_ADMIN_TOKEN_SECRET = SECRET
 process.env.XIAI_ADMIN_TOKEN_VERSION = process.env.XIAI_ADMIN_TOKEN_VERSION || '1'
 process.env.XIAI_ADMIN_TOKEN_TTL_SECONDS = process.env.XIAI_ADMIN_TOKEN_TTL_SECONDS || '900'
+
+/* **占位平台凭据**（非真实令牌；只用于过「凭证在场」前置门 ＋ 注入的假传输）。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
 
 const NON_WHITELIST_PHONE = '139' + String(0).repeat(8) + '1' // 合成「非白名单」号；不写成 11 位字面值
 const FROZEN_REASONS = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE']
@@ -217,28 +224,45 @@ ops.setOpsDbProvider(store.provider)
    --------------------------------------------------------------------------- */
 console.log(JSON.stringify({ section: 'A', title: '云函数 xiai-admin-token 本体：签发 / 校验判定' }))
 
+/**
+ * **假平台传输**（`lib/platformAuth.js::verifyPlatformSession` 的注入缝）：回
+ * `{ok:true,status:200,body:{phone_number}}` ⇒ 服务端视为「验签成立、号＝该值」。**零网络**。
+ * @param {string} phone 平台要回的号
+ */
+const platformSessionOf = (phone) => async () => ({ ok: true, status: 200, body: { phone_number: phone } })
+
+/** 直调签发分支（占位凭据 ＋ 指定平台传输；`main()` 的生产路径不传 transport ⇒ 恒走内置 https）。 */
+const issueWith = (declaredPhone, transport) =>
+  fn.handleIssue(
+    { action: 'issue', phone: declaredPhone, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL },
+    adminConfig.readConfig(),
+    transport
+  )
+
 /* A0 配置缺失 ⇒ STORAGE_UNAVAILABLE（**不得伪装 FORBIDDEN**） */
 {
   const saved = process.env.XIAI_ADMIN_TOKEN_SECRET
   delete process.env.XIAI_ADMIN_TOKEN_SECRET
-  const missing = await fn.main({ action: 'issue', phone: PHONE, code: CODE })
+  const missing = await fn.main({ action: 'issue', phone: PHONE, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL })
   process.env.XIAI_ADMIN_TOKEN_SECRET = saved
   check('A0', '环境变量缺失 ⇒ STORAGE_UNAVAILABLE（≠ FORBIDDEN）', 'STORAGE_UNAVAILABLE', missing.reason)
   check('A0b', '环境变量缺失 ⇒ 形状恰 3 键', 'message,ok,reason', shapeOf(missing))
 }
 
-/* A1 签发成功（TTL 900） */
-const issued = await fn.main({ action: 'issue', phone: PHONE, code: CODE })
+/* A1 签发成功（白名单手机号 ＋ 平台会话验签成立，TTL 900） */
+const issued = await issueWith(PHONE, platformSessionOf(PHONE))
 check('A1', '签发成功', true, issued.ok === true)
 check('A1b', 'TTL ＝ 900 s', 900, issued.expiresAt - issued.issuedAt)
 console.log(JSON.stringify({ A1_readout: { token: { length: issued.token.length, fingerprint: fingerprint(issued.token) }, expiresAt: issued.expiresAt } }))
 
-/* A2 验证码错 / 手机号不符 ⇒ FORBIDDEN 且同一条文案（防枚举） */
-const badCode = await fn.main({ action: 'issue', phone: PHONE, code: `${CODE}x` })
-const badPhone = await fn.main({ action: 'issue', phone: NON_WHITELIST_PHONE, code: CODE })
-check('A2', '验证码错 ⇒ FORBIDDEN', 'FORBIDDEN', badCode.reason)
-check('A2b', '手机号不符 ⇒ FORBIDDEN', 'FORBIDDEN', badPhone.reason)
-check('A2c', '两者**同一条文案**（防枚举）', badCode.message, badPhone.message)
+/* A2 平台凭证无效 / 手机号不符（非白名单）⇒ FORBIDDEN 且同一条文案（防枚举）
+   【R-L3′】固定码下线后，「验证码错」这一分支已不存在 ⇒ 改为同族的凭据族判否：
+   ① 平台明确判凭证不成立（`INVALID_ACCESS_TOKEN`）；② 声明号非白名单。 */
+const badCredential = await issueWith(PHONE, async () => ({ ok: true, status: 200, body: { code: 'INVALID_ACCESS_TOKEN' } }))
+const badPhone = await issueWith(NON_WHITELIST_PHONE, platformSessionOf(NON_WHITELIST_PHONE))
+check('A2', '平台凭证无效 ⇒ FORBIDDEN', 'FORBIDDEN', badCredential.reason)
+check('A2b', '手机号不符（非白名单）⇒ FORBIDDEN', 'FORBIDDEN', badPhone.reason)
+check('A2c', '两者**同一条文案**（防枚举）', badCredential.message, badPhone.message)
 
 /* A3 五种令牌面拒绝（含与「无令牌」同文案的防探测） */
 const tokenOk = issued.token
@@ -422,8 +446,23 @@ check('C5', '取句柄的 envId **不写死**（无硬编码环境 id 字面值�
 }
 {
   const allSource = [...sources.values()].join('\n')
-  const elevenDigits = allSource.match(/\b\d{11}\b/g) || []
-  check('C7', '函数源码内**零手机号字面值**（无 11 位数字）', [], elevenDigits)
+  /* **R-L12**：判据从「任意 11 位数字」收紧为**手机号形态** —— 与云函数
+     `lib/config.js::PHONE_PATTERN`（`/^1[3-9]\d{9}$/`）**逐字同源**（直接引用该常量，不复制正则）。
+     理由：11 位数字还可能是**非手机号**的码空间容量常量（如 `lib/codeId.js` 的 `FID_MAX`）。
+     扫描面**不缩小**：先取全部函数文件里所有 11 位数字串，再逐条按同源正则判定。 */
+  const elevenDigitRuns = allSource.match(/(?<!\d)\d{11}(?!\d)/g) || []
+  const phoneShaped = elevenDigitRuns.filter((run) => adminConfig.PHONE_PATTERN.test(run))
+  const nonPhoneRuns = new Set(elevenDigitRuns.filter((run) => !adminConfig.PHONE_PATTERN.test(run)))
+  check(
+    'C7',
+    '函数源码内零**手机号形态**字面值（判据 ＝ 与 config.PHONE_PATTERN 逐字同源的 /^1[3-9]\\d{9}$/）',
+    [],
+    phoneShaped
+  )
+  /* 只给计数（不打印常量取值面）：「11 位数字串」被逐条判定后剩多少条手机号形态。 */
+  console.log(
+    JSON.stringify({ C7_readout: { elevenDigitRuns: elevenDigitRuns.length, phoneShaped: phoneShaped.length, nonPhoneConstants: nonPhoneRuns.size } })
+  )
   const hexLike = allSource.match(/\b[0-9a-f]{64}\b/g) || []
   check('C8', '函数源码内**零密钥字面值**（无 64 位十六进制）', [], hexLike)
   const secretAssign = allSource.match(/(SECRET|CODE|SMS_CODE)\s*=\s*'[^']+'/g) || []
@@ -463,8 +502,20 @@ check('D5', 'reviewer_id 派生与用户写面同约定（u-<手机号>）', tru
   check('D6b', "源码内直写的 `reason:'…'` ⊆ 冻结表", [], inline.filter((item) => FROZEN_REASONS.indexOf(item) === -1))
 }
 {
-  const allSource = [...sources.values()].join('\n')
-  check('D7', '鉴权 / 写面**零域名 / Origin / Referer 字面值**（不与具体域名硬绑定）', false, /https?:\/\/|\bOrigin\b|\bReferer\b/i.test(allSource))
+  /* **R-L13**：`lib/platformAuth.js` 是 P1c **必须**拼平台 auth 端点的唯一一处 ⇒ 逐字豁免**该一个文件**。
+     纪律：豁免按**文件名逐字列出**（`rel()` 全路径字符串相等），**不是通配符、不是目录级豁免**；
+     其余函数文件仍要求零域名。名单内文件必须真实存在（拼错 ⇒ 判红），以免豁免面静默失控。 */
+  const DOMAIN_EXEMPT_FILES = ['cloudfunctions/xiai-admin-token/lib/platformAuth.js']
+  const domainScanned = functionFiles.filter((file) => DOMAIN_EXEMPT_FILES.indexOf(rel(file)) === -1)
+  const domainHits = domainScanned.filter((file) => /https?:\/\/|\bOrigin\b|\bReferer\b/i.test(sources.get(file))).map(rel)
+  const exemptMissing = DOMAIN_EXEMPT_FILES.filter((name) => !functionFiles.some((file) => rel(file) === name))
+  check(
+    'D7',
+    '鉴权 / 写面零域名 / Origin / Referer 字面值（逐字豁免 1 个文件：lib/platformAuth.js，非通配 / 非目录级）',
+    { hits: [], exemptMissing: [] },
+    { hits: domainHits, exemptMissing }
+  )
+  console.log(JSON.stringify({ D7_readout: { scanned: domainScanned.length, exempt: DOMAIN_EXEMPT_FILES.slice(), hits: domainHits } }))
 }
 
 /* ---------------------------------------------------------------------------

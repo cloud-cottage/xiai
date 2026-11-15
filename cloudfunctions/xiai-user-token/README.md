@@ -7,7 +7,7 @@
 
 | 名称 | 必填 | 说明 |
 |---|---|---|
-| `XIAI_USER_SMS_CODE` | ✔ | 验证码（**W-43 已接受风险：固定值，暂缓**；本函数只把它做成注入点） |
+| `XIAI_USER_SMS_CODE` | ✗ | **已下线**（P1a/R-L1，2026-11-15）：固定演示码**不再参与登录授权判定**、**不在必填集**；变量名保留（其它代码可能引用 / 排障），本函数只读「是否仍配置」的布尔读数 |
 | `XIAI_USER_TOKEN_SECRET` | ✔ | HMAC-SHA256 密钥（64 hex；**与管理员函数不是同一把** ⇒ 令牌不跨函数通用） |
 | `XIAI_USER_TOKEN_VERSION` | ✗ | 撤销面版本号（默认 `1`；改值 ⇒ 全体旧令牌立刻失效） |
 | `XIAI_USER_TOKEN_TTL_SECONDS` | ✗ | 令牌 TTL（默认 `900` ＝ 15 分钟，**与管理员令牌同值**） |
@@ -19,11 +19,16 @@ envId 在运行期从 `TCB_ENV` / `SCF_NAMESPACE` / `CLOUDBASE_ENV_ID` 读（**�
 ## 调用契约
 
 ```
-① 签发（服务端验证登录）
-   {action:'issue', phone, code}
+① 签发（服务端验证登录｜**P1a/R-L1，2026-11-15**）
+   {action:'issue', phone, platformAccessToken}
+   判定链：① 手机号形态 → ② 平台会话验签取号
+           （`POST https://<envId>.ap-shanghai.tcb-api.tencentcloudapi.com/auth/v1/user/me?client_id=<envId>`
+            ＋ 请求头 `Authorization: Bearer …`）→ ③ 双向一致（严格相等）→ ④ `uidOf(phone)` 签令牌
    → {ok:true, token, sub:masked, subFingerprint, uid, issuedAt, expiresAt, ttlSeconds, ver, serverNow}
    → {ok:false, reason:'FORBIDDEN',          message:'手機號或驗證碼不正確；本次零寫入。'}
-   → {ok:false, reason:'STORAGE_UNAVAILABLE', message:'…未配置…'}   （环境变量缺位）
+      （凭证不成立 / 回体无手机号 / 号不一致 / 缺参 —— **同一文案，不区分「号不对」与「凭证不对」**）
+   → {ok:false, reason:'STORAGE_UNAVAILABLE', message:'…'}   （缺密钥 / envId 缺 / 网络 / 超时 / 平台回未知错误码）
+   ⚠ 旧入参 `{phone, code}`（固定演示码）**已下线** ⇒ 恒 `FORBIDDEN`（旧客户端必须与后端同批上线，R-L4）
 
 ② 校验 ＋ 权威落盘 ＋ 滑动续期
    {action:'verify', token, op, payload}
@@ -53,7 +58,7 @@ envId 在运行期从 `TCB_ENV` / `SCF_NAMESPACE` / `CLOUDBASE_ENV_ID` 读（**�
 |---|---|---|
 | 无令牌 / 格式错 / **签名错** | `FORBIDDEN` | **三者同一条文案**（防探测） |
 | 令牌过期 / 版本不符 / 手机号不合法 / `role≠user` | `FORBIDDEN` | 各自的繁体可读文案 |
-| 签发时手机号或验证码不符 | `FORBIDDEN` | **不区分「号」与「码」**（防枚举） |
+| 签发时手机号不符 / 平台凭证不成立 / 号不一致 / 缺参 | `FORBIDDEN` | **不区分「号不对」与「凭证不对」**（防枚举） |
 | 未知 `op` / 载荷含未知或身份类字段 | `INVALID_FIELD` | 如實報回，不静默丢键 |
 | 缺 `faceId` / 缺 `value` | `MISSING_REQUIRED` | |
 | 文字超上限 | `INVALID_VALUE` | |
@@ -68,7 +73,7 @@ cloudbase functions:deploy xiai-user-token --force
 
 `cloudbaserc.json` 的该函数条目须含：`runtime: Nodejs18.15`、`installDependency: true`
 （**本函数有依赖** `@cloudbase/node-sdk`，与 P1 的零依赖声明不同 ⇒ 已在报告登记）、
-以及上表 5 个 `envVariables`（**该文件含密钥 ⇒ 不入仓、不进交付目录**）。
+以及上表 `envVariables`（`XIAI_USER_SMS_CODE` **已非必填**，可安全下线；其余按表）。
 
 ## 斐萃（feicui）令牌 —— 管理员签发面（本单改造）
 

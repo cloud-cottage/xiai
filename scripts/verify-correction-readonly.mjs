@@ -44,9 +44,11 @@ process.env.XIAI_NO_REAL_CARD = '1'
 
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -137,12 +139,19 @@ const isDenial = (value) =>
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000001').trim()
 const OTHER_PHONE = '13800000002'
 const ADMIN_PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000001').trim()
-const authForCode = await import(path.join(ROOT, 'src/services/auth.js'))
-const SMS_CODE = String(authForCode.DEMO_SMS_CODE)
-const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || randomBytes(32).toString('hex')).trim()
-process.env.XIAI_USER_SMS_CODE = SMS_CODE
+/* **R-L3′**：登录已改真短訊 OTP（`issue` 收 `{phone, platformAccessToken}`）⇒ 取票改走
+   「**本地现签令牌注入**」；`auth.js::DEMO_SMS_CODE` 已整体删除，签发密钥**只从环境变量读**。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-platform-credential-not-a-real-token'
+let SECRET = ''
+try {
+  SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
 process.env.XIAI_USER_TOKEN_SECRET = SECRET
 process.env.XIAI_ADMIN_PHONE = ADMIN_PHONE
+/* **现签令牌**（本地按真源算法签出；供取票注入缝回包用，**不打印原文**）。 */
+const SIGNED_USER_TOKEN = signUserToken({ phone: PHONE })
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
@@ -608,6 +617,11 @@ const transportCalls = []
 let cloudFailOp = ''
 userTokenSvc.setUserTokenTransport(async (name, data) => {
   const op = data && data.op
+  /* **R-L3′ 取票注入缝**：登录 / 取票已改「平台原生凭据」（`issue` 收 `{phone, platformAccessToken}`），
+     自检不出网、不依赖真短讯 ⇒ 就在本缝回「**本地现签令牌**」（真源算法签出）的签发回包
+     （形状 ＝ 云函数 `handleIssue` 成功回包，键面逐字一致）；**不进 `transportCalls`**
+     （该计数只记云端 **op** 往返，取票不算一次读面往返）。 */
+  if (data && data.action === 'issue') return { result: issueReplyOf(SIGNED_USER_TOKEN) }
   transportCalls.push({ name, op })
   if (cloudFailOp && op === cloudFailOp) {
     return { result: { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '（自检注入）雲端讀取故障。' } }
@@ -619,7 +633,9 @@ writeFace.setWriteFaceModeOverride('cloud')
 db.ensureSeed()
 
 {
-  const login = await userTokenSvc.ensureUserLoginToken(PHONE, SMS_CODE)
+  /* **R-L3′**：登录取票的第二参已由「验证码」改为「**平台原生会话凭据**」；自检用**占位凭据**
+     （不是密钥、不出进程：`action:'issue'` 已在传输缝拦下并回本地现签令牌）。 */
+  const login = await userTokenSvc.ensureUserLoginToken(PHONE, OFFLINE_PLATFORM_CREDENTIAL)
   check('F0', '前置：云端形态 ＋ 登录取票成功（注入式传输 → 真实云函数体）', { ok: true, mode: 'cloud' }, { ok: login.ok === true, mode: writeFace.writeFaceMode() })
   session.setUser({ id: UID_A, phone: PHONE, role: 'user', nickname: '自检甲' })
 }

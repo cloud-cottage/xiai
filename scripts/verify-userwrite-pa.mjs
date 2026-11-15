@@ -15,9 +15,11 @@
  *
  * 纪律：**不打印任何密钥 / 验证码 / 令牌原文**（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
- * 用法（可选环境变量；缺省 ⇒ 脚本自造一次性合成环境 + 取公开演示码，绝不写进仓）：
+ * 用法（**令牌密钥只从当前 shell 环境变量读**；缺 ⇒ `SKIP（缺 …，本脚本未验证）` ＋ exit 0）：
  *   XIAI_USER_TOKEN_SECRET=… XIAI_USER_PHONE=… node scripts/verify-userwrite-pa.mjs
- *   （验证码恒取客户端公开演示码 `auth.js::DEMO_SMS_CODE` —— V3 自愈路径与它同源；生产不变量。）
+ *   （登录面自 P1b 起是**真短訊 OTP ＋ 平台會話換票**：本脚本用 `setOtpAuthProvider` 注入假 auth
+ *    走完 `getVerification → verify → signIn → getSession` 取「平台会话凭据」，令牌由**本地现签**
+ *    经传输缝注入 —— 零真短訊、零固定码、零生产后门。）
  */
 /* **测试环境保护哨兵（硬防线）** —— 本套件只跑离线假 CARD：置 `XIAI_NO_REAL_CARD=1`。
    若哪个调用点漏注入假传输，`lib/cardApi.js` 会**当场抛错、零请求**（绝不悄悄打生产 CARD）。
@@ -27,9 +29,11 @@ process.env.XIAI_NO_REAL_CARD = '1'
 
 import { createRequire } from 'node:module'
 import { readFileSync, readdirSync } from 'node:fs'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import { requireSecretOrSkip, signUserToken, issueReplyOf, handleTestTokenSkip, USER_SECRET_ENV } from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -83,20 +87,32 @@ function check(id, label, expected, actual) {
 }
 
 /* ---------------------------------------------------------------------------
-   2. 环境（**密钥 / 验证码只从环境变量来；缺省合成一次性假环境，绝不写进仓**）
+   2. 环境（**令牌密钥只从当前 shell 环境变量来；缺 ⇒ SKIP 并 exit 0**）
    ---------------------------------------------------------------------------
-   **V3 适配**：验证码必须与客户端公开演示码 `DEMO_SMS_CODE` 一致 —— 自愈路径
-   （`userWrite.js::ensureUserTokenForWrite`）用它静默补签，服务端按
-   `code === 环境变量` 判定；生产里 `XIAI_USER_SMS_CODE` 与它同值（见 `auth.js` 文件头）。
-   ⇒ 本自检**取真源**（不是放宽：该值本就随前端包公开，且是生产不变量）。 */
+   **R-L3′（Zang 裁定）**：登录已改为真短讯 OTP（`issue` 收 `{phone, platformAccessToken}`），
+   自检**不得**依赖真短讯、**不得**在生产留固定码后门 ⇒ 令牌一律**本地现签**：
+   密钥 `XIAI_USER_TOKEN_SECRET` 只从环境读（缺失 ⇒ `SKIP（缺 XIAI_USER_TOKEN_SECRET，本脚本未验证）`
+   ＋ exit 0，不假绿、不报红）；签发算法取云函数 `lib/token.js::issueToken`（**不复制实现**）。
+   平台 OTP 层（`src/data/cloudbaseAuth.js` 的 `setOtpAuthProvider` 注入缝）用**假 auth** 顶替 ——
+   它是仓内既有的「离线自检」缝，只换「auth 实例从哪来」，不改任何判定。 */
 const PHONE = String(process.env.XIAI_USER_PHONE || '13800000001').trim()
-const authForCode = await import(path.join(ROOT, 'src/services/auth.js'))
-const SMSCode = String(authForCode.DEMO_SMS_CODE)
-const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET || randomBytes(32).toString('hex')).trim()
-process.env.XIAI_USER_SMS_CODE = SMSCode
-process.env.XIAI_USER_TOKEN_SECRET = SECRET
+try {
+  process.env.XIAI_USER_TOKEN_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
+const SECRET = String(process.env.XIAI_USER_TOKEN_SECRET).trim()
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
+/* 平台层替身的「会话凭据」占位值：**只交给注入式传输**（假传输不校验它）；真凭据不入仓。 */
+const OFFLINE_PLATFORM_CREDENTIAL = 'offline-harness-credential-not-a-real-token'
+/* 平台 OTP 里「正确验证码」的夹具值（假 auth 自己认，**不是**任何生产固定码）。 */
+const OFFLINE_OTP_CODE = '424242'
+/* **现签用户令牌**（本地按真源算法签出；供本脚本各处「已登录」态使用）。 */
+const USER_TOKEN = signUserToken({ phone: PHONE })
+/* **平台验签端点需要的 envId**（`config.readEnvId` 的三个候选之一）。自检用**合成值**：
+   它只决定 `handleIssue` 拼出的 URL，且本脚本的传输一律注入（**永不真发请求**）。 */
+process.env.TCB_ENV = String(process.env.TCB_ENV || 'offline-harness-env').trim()
 
 const FROZEN_REASONS = [
   'FORBIDDEN',
@@ -218,14 +234,21 @@ console.log(JSON.stringify({ section: 'A', title: '云函数 xiai-user-token 本
 {
   const saved = process.env.XIAI_USER_TOKEN_SECRET
   delete process.env.XIAI_USER_TOKEN_SECRET
-  const missing = await fn.main({ action: 'issue', phone: PHONE, code: SMSCode })
+  const missing = await fn.main({ action: 'issue', phone: PHONE, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL })
   process.env.XIAI_USER_TOKEN_SECRET = saved
   check('A0', '环境变量缺失 ⇒ STORAGE_UNAVAILABLE（≠ FORBIDDEN）', 'STORAGE_UNAVAILABLE', missing.reason)
   check('A0b', '环境变量缺失 ⇒ 形状恰 3 键', 'message,ok,reason', shapeOf(missing))
 }
 
-/* A1：签发成功（TTL / uid 派生 / 不回吐原文） */
-const issuedA1 = await fn.main({ action: 'issue', phone: PHONE, code: SMSCode })
+/* A1：签发成功（TTL / uid 派生 / 不回吐原文）。
+   **R-L3′**：`issue` 的入参已改为 `{phone, platformAccessToken}` ⇒ 走**同一个** `handleIssue`
+   判定链，只把「平台会话验签」这一跳换成注入式传输（仓内既有离线缝；生产不传 `transport`）。 */
+const PLATFORM_TRANSPORT_OK = async () => ({ ok: true, status: 200, body: { phone_number: `+86 ${PHONE}` } })
+const issuedA1 = await fn.handleIssue(
+  { phone: PHONE, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL },
+  config.readConfig(),
+  PLATFORM_TRANSPORT_OK
+)
 check('A1', '签发成功', true, issuedA1.ok === true)
 check('A1b', 'TTL ＝ 900 s（与管理员令牌同值）', 900, issuedA1.ttlSeconds)
 check('A1c', 'uid 由服务端派生 ＝ 不透明 uid（u-＋sha256 前 16 位，不可反推手机号）', uidOfPhone(PHONE), issuedA1.uid)
@@ -244,10 +267,17 @@ console.log(
   })
 )
 
-/* A2：验证码错 / 手机号形态错 ⇒ FORBIDDEN 且**同一条文案**（防枚举） */
-const badCode = await fn.main({ action: 'issue', phone: PHONE, code: `${SMSCode}x` })
-const badPhone = await fn.main({ action: 'issue', phone: '0000000', code: SMSCode })
-check('A2', '验证码错 ⇒ FORBIDDEN', 'FORBIDDEN', badCode.reason)
+/* A2：**凭证不成立** / 手机号形态错 ⇒ FORBIDDEN 且**同一条文案**（防枚举）。
+   `issue` 不再收固定码（该输入面已整体下线）⇒ 等价输入换成「平台会话验签判否」：
+   伪造凭证（平台回 `INVALID_ACCESS_TOKEN`）与手机号形态错，两者都必须落同一条文案。 */
+const PLATFORM_TRANSPORT_REJECT = async () => ({ ok: true, status: 200, body: { code: 'INVALID_ACCESS_TOKEN', message: 'invalid' } })
+const badCode = await fn.handleIssue(
+  { phone: PHONE, platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL },
+  config.readConfig(),
+  PLATFORM_TRANSPORT_REJECT
+)
+const badPhone = await fn.main({ action: 'issue', phone: '0000000', platformAccessToken: OFFLINE_PLATFORM_CREDENTIAL })
+check('A2', '凭证不成立（伪造平台会话）⇒ FORBIDDEN', 'FORBIDDEN', badCode.reason)
 check('A2b', '手机号形态错 ⇒ FORBIDDEN', 'FORBIDDEN', badPhone.reason)
 check('A2c', '两者**同一条文案**（不区分「号」与「码」⇒ 防枚举）', badCode.message, badPhone.message)
 
@@ -519,13 +549,68 @@ const authSvc = await import(path.join(ROOT, 'src/services/auth.js'))
 const adminTokenSvc = await import(path.join(ROOT, 'src/services/adminToken.js'))
 /* **V3 追加**：登录令牌写面门（自愈单点）—— B3 用它做「清令牌 ＋ 有会话 ⇒ 先 issue 后 verify」。 */
 const userWriteSvc = await import(path.join(ROOT, 'src/services/userWrite.js'))
+/* **平台 OTP 层的注入缝**（`data/cloudbaseAuth.js`）—— 只换「auth 实例从哪来」，不改判定。 */
+const { setOtpAuthProvider } = await import(path.join(ROOT, 'src/data/cloudbaseAuth.js'))
 
-/** 传输：把请求交给**真实的云函数体**（离线端到端）。 */
+/** 传输：把请求交给**真实的云函数体**（离线端到端）。
+ *  **`action:'issue'` 的传输缝**（R-L3′）：登录签发面已改为「平台 `access_token` 验签取号」，
+ *  自检不得依赖真短訊、也不得留固定码后门 ⇒ 这一跳由**本地现签令牌**注入（真源算法
+ *  `lib/token.js::issueToken` 签出，包成与云函数**同键形**的成功回包）；
+ *  凭据不成立时**原样交回服务端的真拒绝**（`fn.main` 的同一前置门：FORBIDDEN ＋ 恰 3 键 ＋ 零网络）。 */
 const calls = []
-userTokenSvc.setUserTokenTransport(async (name, data) => {
+async function transportSeam(name, data) {
   calls.push({ name, action: data && data.action, hasToken: !!(data && data.token) })
+  if (data && data.action === 'issue') {
+    if (String(data.platformAccessToken || '') === OFFLINE_PLATFORM_CREDENTIAL) {
+      return { result: issueReplyOf(USER_TOKEN) }
+    }
+    return { result: await fn.main({ action: 'issue', phone: data.phone, platformAccessToken: '' }) }
+  }
   return { result: await fn.main(data) }
+}
+userTokenSvc.setUserTokenTransport(transportSeam)
+
+/* ---------------------------------------------------------------------------
+   **平台 OTP 层替身**（`src/data/cloudbaseAuth.js::setOtpAuthProvider` 注入缝）
+   ---------------------------------------------------------------------------
+   登录面自 P1b 起：`getVerification → verify → signIn → getSession` 取平台会话凭据，
+   再由**服务端**拿它验签取号。自检不得真发短訊 ⇒ 用**假 auth** 顶替平台实例
+   （仓内既有「离线自检」缝，**只换「auth 实例从哪来」**，不改任何判定）：
+   · `OFFLINE_OTP_CODE` 是假 auth 自己认的夹具值（**不是**任何生产固定码）；
+   · 平台会话凭据只在内存（`getSession()` 回读），**不入仓、不打印、不进报告**；
+   · `offlineOtp.rejectSession` ＝ 假「平台会话不被 xiai 服务端认」的开关（演服务端结构化拒绝）。 */
+const OFFLINE_PLATFORM_CREDENTIAL_REJECTED = 'offline-harness-credential-rejected'
+const offlineOtp = { verificationId: '', session: '', rejectSession: false }
+const fakeOtpAuth = async () => ({
+  async getVerification({ phone_number }) {
+    offlineOtp.verificationId = `offline-verification-${Date.now()}`
+    return { verification_id: offlineOtp.verificationId, phone_number }
+  },
+  async verify({ verification_id, verification_code }) {
+    const mismatch = verification_id !== offlineOtp.verificationId || String(verification_code || '') !== OFFLINE_OTP_CODE
+    if (mismatch) {
+      /* 平台判码（生产唯一判据）：码不对 ⇒ 平台当场判否，**不签发会话**。 */
+      throw Object.assign(new Error('驗證碼不正確或已過期，請重新獲取驗證碼。'), { code: 'INVALID_VERIFICATION_CODE' })
+    }
+    offlineOtp.session = offlineOtp.rejectSession === true
+      ? OFFLINE_PLATFORM_CREDENTIAL_REJECTED
+      : OFFLINE_PLATFORM_CREDENTIAL
+    return { verification_token: `offline-verification-token-${offlineOtp.verificationId}` }
+  },
+  async signIn({ username }) {
+    if (offlineOtp.session === '') {
+      throw Object.assign(new Error('登入未完成，請重新獲取驗證碼後再試。'), { code: 'SIGN_IN_FAILED' })
+    }
+    return { ok: true, username }
+  },
+  async getSession() {
+    return { data: { session: { access_token: offlineOtp.session, is_anonymous: offlineOtp.session === '' } } }
+  },
+  async getLoginState() {
+    return { credentials: { access_token: offlineOtp.session } }
+  }
 })
+setOtpAuthProvider(fakeOtpAuth)
 
 writeFace.setWriteFaceModeOverride('cloud')
 check('B0', '云端形态：writeFaceMode()', 'cloud', writeFace.writeFaceMode())
@@ -533,8 +618,9 @@ check('B0b', '管理员通道仍是同一条管道（adminToken.js 转口自 tok
 check('B0c', '用户通道函数名', 'xiai-user-token', userTokenSvc.USER_TOKEN_FUNCTION)
 check('B0d', '两条通道共用同一份实现（同一 setCloudFunctionTransport 缝）', true, typeof tokenSvc.createTokenChannel === 'function')
 
-/* B1：登录 ＝ 先服务端验证（**不复用缓存**）⇒ 拿到用户令牌 */
-const loginToken = await userTokenSvc.ensureUserLoginToken(PHONE, SMSCode)
+/* B1：登录 ＝ 先服务端验证（**不复用缓存**）⇒ 拿到用户令牌
+   **R-L3′**：凭据形态是**平台会话凭据**（`platformAccessToken`），不是任何验证码。 */
+const loginToken = await userTokenSvc.ensureUserLoginToken(PHONE, OFFLINE_PLATFORM_CREDENTIAL)
 check('B1', '登录取票（服务端验证）成功', true, loginToken.ok === true)
 check('B1b', '令牌进入内存缓存（present）', true, userTokenSvc.userTokenSnapshot().present === true)
 check('B1c', '令牌读数只给长度 / 指纹（**无原文**）', true, userTokenSvc.userTokenSnapshot().tokenLength > 0 && userTokenSvc.userTokenSnapshot().tokenFingerprint.length === 8)
@@ -574,14 +660,28 @@ console.log(
   })
 )
 
-/* B3：**V3 自愈**（本单适配）—— 清令牌 ＋ 有会话 ⇒ 流程**先 issue 补签、再 verify 写**，最终 ok。
-   改前断言「清令牌 ⇒ FORBIDDEN」已随 V3 架构（管理员/用户写面收敛到一枚登录令牌 ＋ 自愈）失效。 */
+/* B3：**清令牌 ⇒ 显式重新取票**（本单适配）
+   P1b 起**不再有「固定碼静默补签」**这条路（凭据是平台会话凭据，不是任何常量）
+   ⇒ `userWrite.js::ensureUserTokenForWrite()` 在「云端 ＋ 无令牌」时**结构化拒绝 ＋ 重新登录引导**
+   （零往返、零写入）。故本段拆成两半：
+     ① B3h：清令牌 ＋ **有会话** ⇒ **不得静默放行**（拒绝 ＋ 零写入 ＋ 零往返）；
+     ② B3b 起：**显式重新取票**（`ensureUserLoginToken`）后写成功 —— 顺序断言仍是
+        **先 issue 后 verify**（B3d 逐字保留）。 */
 userTokenSvc.clearUserToken()
 check('B3', '清令牌后：内存无令牌（present＝false）', false, userTokenSvc.userTokenSnapshot().present)
+{
+  const callsBeforeNoHeal = calls.length
+  const beforeNoHeal = bucket.adds.length
+  const noHeal = await corrections.submitCorrection({ faceId: face.id, sealId: face.sealId, field: 'author', value: '測試作者' })
+  check('B3h', '清令牌 ＋ **有会话** ⇒ **不再静默补签**（结构化拒绝 FORBIDDEN ＋ 零写入 ＋ 零往返）', { ok: false, reason: 'FORBIDDEN', rows: 0, calls: 0 }, { ok: noHeal.ok, reason: noHeal.reason, rows: bucket.adds.length - beforeNoHeal, calls: calls.length - callsBeforeNoHeal })
+}
 const callsBeforeB3 = calls.length
 const beforeB3 = bucket.adds.length
+/* 显式重新取票（登录令牌只存内存 ⇒ 清空 / 刷新后必须重新登录换票）。 */
+const reissuedB3 = await userTokenSvc.ensureUserLoginToken(PHONE, OFFLINE_PLATFORM_CREDENTIAL)
+check('B3i', '显式重新取票成功（`ensureUserLoginToken` ⇒ ok:true）', true, reissuedB3.ok === true)
 const healedWrite = await corrections.submitCorrection({ faceId: face.id, sealId: face.sealId, field: 'author', value: '測試作者 自愈' })
-check('B3b', 'V3 自愈：清令牌 ＋ **有会话** ⇒ 写成功（ok:true）', true, healedWrite.ok === true)
+check('B3b', '清令牌 ＋ **显式重新取票** ⇒ 写成功（ok:true）', true, healedWrite.ok === true)
 check('B3c', '自愈权威来源 ＝ SERVER', 'SERVER', healedWrite.authority)
 {
   const seq = calls.slice(callsBeforeB3).map((call) => call.action)
@@ -608,7 +708,7 @@ check('B3n5', '仍零写入', beforeB3n, bucket.adds.length)
 session.setUser(user)
 
 /* B4：负向 —— 传输失败 ⇒ STORAGE_UNAVAILABLE（**不得伪装 FORBIDDEN**）＋ 令牌不清 */
-await userTokenSvc.ensureUserLoginToken(PHONE, SMSCode)
+await userTokenSvc.ensureUserLoginToken(PHONE, OFFLINE_PLATFORM_CREDENTIAL)
 const tokenBeforeB4 = userTokenSvc.userTokenSnapshot().tokenFingerprint
 userTokenSvc.setUserTokenTransport(async () => {
   throw new Error('network-down')
@@ -617,7 +717,7 @@ const netFail = await corrections.submitCorrection({ faceId: face.id, sealId: fa
 check('B4', '传输失败 ⇒ STORAGE_UNAVAILABLE', 'STORAGE_UNAVAILABLE', netFail.reason)
 check('B4b', '传输失败 ≠ FORBIDDEN', true, netFail.reason !== 'FORBIDDEN')
 check('B4c', '「未知」≠「无效」：令牌不清', tokenBeforeB4, userTokenSvc.userTokenSnapshot().tokenFingerprint)
-userTokenSvc.setUserTokenTransport(async (name, data) => ({ result: await fn.main(data) }))
+userTokenSvc.setUserTokenTransport(transportSeam)
 
 /* B5：负向 —— 值域拒绝在**任何网络调用之前**（零写入且零往返） */
 const callsBeforeB5 = calls.length
@@ -630,16 +730,27 @@ session.setUser(null)
 memory.clear()
 seedLocalPersons()
 const usersBefore = (await import(path.join(ROOT, 'src/data/db.js'))).listUserRows().length
-const badLogin = await authSvc.login(PHONE, `${SMSCode}x`)
+await authSvc.requestCode(PHONE)
+const badLogin = await authSvc.login(PHONE, `${OFFLINE_OTP_CODE}x`)
 check('B6', '验证码错 ⇒ 登录失败', false, badLogin.ok)
 check('B6b', '登录失败 ⇒ 零半成品（未建本地账号行）', usersBefore, (await import(path.join(ROOT, 'src/data/db.js'))).listUserRows().length)
 check('B6c', '登录失败 ⇒ 未写 session', null, session.currentUser())
 /* B6f / B6g（Phase A 语义修复的回归断言）：**服务端结构化拒绝必须原样透传** ——
    修复前 `request()` 把「业务拒绝（`ok:false` ＋ `reason` ＋ `message`）」误判为「回传形状不可辨識」，
-   上屏变成 `STORAGE_UNAVAILABLE` ＋「雲端校驗回傳形狀不可辨識…」（**真因被吞、文案变假**）。 */
-check('B6f', '登录失败 ⇒ reason 原样透传（不得折叠成 STORAGE_UNAVAILABLE）', badCode.reason, badLogin.reason)
-check('B6g', '登录失败 ⇒ message 逐字 ＝ 服务端拒因（不是「形狀不可辨識」）', badCode.message, badLogin.message)
-const goodLogin = await authSvc.login(PHONE, SMSCode)
+   上屏变成 `STORAGE_UNAVAILABLE` ＋「雲端校驗回傳形狀不可辨識…」（**真因被吞、文案变假**）。
+   本段把断言**锢在服务端的真拒绝**上：夹具 ＝ `fn.main({action:'issue', phone, platformAccessToken:''})`
+   （同一前置门：凭据不成立 ⇒ `FORBIDDEN` ＋ 恰 3 键 ＋ 零网络）；再让「平台会话不被服务端认」
+   走完 `登录 → 换票 → 服务端拒` 全链，要求上屏逐字等于该真拒绝。 */
+const serverDenial = await fn.main({ action: 'issue', phone: PHONE, platformAccessToken: '' })
+check('B6f0', '服务端真拒绝夹具形状恰 3 键（`message,ok,reason`）', 'message,ok,reason', shapeOf(serverDenial))
+offlineOtp.rejectSession = true
+await authSvc.requestCode(PHONE)
+const serverRejectedLogin = await authSvc.login(PHONE, OFFLINE_OTP_CODE)
+offlineOtp.rejectSession = false
+check('B6f', '登录失败 ⇒ reason 原样透传（不得折叠成 STORAGE_UNAVAILABLE）', serverDenial.reason, serverRejectedLogin.reason)
+check('B6g', '登录失败 ⇒ message 逐字 ＝ 服务端拒因（不是「形狀不可辨識」）', serverDenial.message, serverRejectedLogin.message)
+await authSvc.requestCode(PHONE)
+const goodLogin = await authSvc.login(PHONE, OFFLINE_OTP_CODE)
 check('B6d', '正确验证码 ⇒ 登录成功（服务端验证）', true, goodLogin.ok === true)
 check('B6e', '登录后本机镜像是登录用户', PHONE, (session.currentUser() || {}).phone)
 
@@ -724,9 +835,32 @@ check('D3', '集合白名单全部 `^xiai_` 前缀', true, Object.values(ops.COL
 }
 {
   const authSrc = readFileSync(path.join(ROOT, 'src/services/auth.js'), 'utf8')
-  const fnSrc = functionFiles.map((file) => readFileSync(file, 'utf8')).join('\n')
+  /* **R-L9**（Zang 裁定，与 `scripts/verify-admin-review-op.mjs` 的 D7 **同形**）：
+     `lib/platformAuth.js` 是**必须**拼平台 auth 端点（`https://<envId>.<region>.tcb-api.tencentcloudapi.com/auth/v1/user/me`）
+     的唯一一处，且 host 已收敛为**单一常量** `AUTH_HOST_SUFFIX` ＋区域可配 ⇒ 逐字豁免**该一个文件**。
+     纪律：豁免按**文件名逐字列出**（`rel()` 全路径字符串相等），**不是通配符、不是目录级豁免**；
+     其余函数文件仍要求零域名。名单内文件必须真实存在（拼错 ⇒ 判红），以免豁免面静默失控。 */
+  const rel = (file) => path.relative(ROOT, file)
+  const DOMAIN_EXEMPT_FILES = ['cloudfunctions/xiai-user-token/lib/platformAuth.js']
+  /* 判据面 ＝ **可执行函数源码**（`.js`），与 verify-admin-review-op.mjs 的 D7 逐字同形；
+     `.md` 文档（README 的端点示例）不计入「源码字面值」，但**照样登记输出**（见 D4_readout.docsHits），不静默吞掉。 */
+  const domainSourceFiles = functionFiles.filter((file) => file.endsWith('.js'))
+  const domainScanned = domainSourceFiles.filter((file) => DOMAIN_EXEMPT_FILES.indexOf(rel(file)) === -1)
   const domainPattern = /https?:\/\/|\bOrigin\b|\bReferer\b/i
-  check('D4', '鉴权面**零域名 / Origin / Referer 字面值**（不得与具体域名硬绑定）', false, domainPattern.test(fnSrc))
+  const domainHits = domainScanned.filter((file) => domainPattern.test(sources.get(file))).map(rel)
+  const exemptMissing = DOMAIN_EXEMPT_FILES.filter((name) => !functionFiles.some((file) => rel(file) === name))
+  const docsHits = functionFiles
+    .filter((file) => !file.endsWith('.js') && domainPattern.test(sources.get(file)))
+    .map(rel)
+  check(
+    'D4',
+    '鉴权面零域名 / Origin / Referer 字面值（R-L9：逐字豁免 1 个文件 lib/platformAuth.js —— 平台 auth host 以单一常量 AUTH_HOST_SUFFIX ＋区域可配存在；非通配 / 非目录级）',
+    { hits: [], exemptMissing: [] },
+    { hits: domainHits, exemptMissing }
+  )
+  console.log(
+    JSON.stringify({ D4_readout: { scanned: domainScanned.length, exempt: DOMAIN_EXEMPT_FILES.slice(), hits: domainHits, docsHits } })
+  )
   check('D4b', '客户端登录面零域名硬绑定', false, /https?:\/\//.test(authSrc))
 }
 {

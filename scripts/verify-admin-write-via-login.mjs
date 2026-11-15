@@ -9,7 +9,10 @@
  *   ② 非白名单手机号 ⇒ `FORBIDDEN` ＋ **零写入**（白名单是真授权判据，不是恒放行）；
  *   ③ **缺 `XIAI_ADMIN_PHONE` ⇒ 管理员类 op 全拒（`STORAGE_UNAVAILABLE`）＋ 零写入**，而**普通用户
  *      写面（`submitCorrection` / `endorseCorrection`）不受影响仍可用**（关键安全默认 ＋ 不误伤）；
- *   ④ **自愈**：无令牌 ＋ 有会话 ⇒ 先 `issue` 后 `verify`；无令牌 ＋ 无会话 ⇒ 拒 ＋ 零写入 ＋ 零往返；
+ *   ④ **不再静默补签（P1 批次裁定 R-L8）**：`ensureUserTokenForWrite()` 的真实行为是
+ *      「云端 ＋ 无令牌 ⇒ `{ok:false, reason:'FORBIDDEN'}` ＋ 重新登錄引导 ＋ 零写入」——
+ *      所以「无令牌 ＋ **有会话**」与「无令牌 ＋ **无会话**」**同为拒绝**（会话不再是补签凭据），
+ *      且两者都**零云函数往返**、**零写入**、**不伪造令牌**；「有令牌 ⇒ 写面正常」的正面对照在 B 段；
  *   ⑤ **机械检索**：审核页 / PointsView **无校驗碼输入位**（`data-review-write-code` / `寫入校驗碼`
  *      在 src **码面**（去注释）命中 0）；
  *   ⑥ `[data-admin-action]` 去重集合现实值 **10 值 / 归并 9 类**（v1.54 新增 `person-import-review`；＋ canary 正 / 负对照）；
@@ -45,6 +48,14 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* **R-L3′**：令牌**本地现签**（真源 ＝ 云函数 `lib/token.js::issueToken`）＋ 缺密钥 SKIP。 */
+import {
+  requireSecretOrSkip,
+  signUserToken,
+  handleTestTokenSkip,
+  USER_SECRET_ENV,
+  ADMIN_SECRET_ENV
+} from './lib/sign-test-token.mjs'
 
 const require = createRequire(import.meta.url)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -105,10 +116,22 @@ const sorted = (list) => (Array.isArray(list) ? list.slice().sort() : list)
    2. 环境（**合成值**；脚本内零真实凭据字面值）
    --------------------------------------------------------------------------- */
 const PHONE = String(process.env.XIAI_ADMIN_PHONE || '13000000001').trim()
-const SECRET = String(process.env.XIAI_ADMIN_TOKEN_SECRET || randomBytes(32).toString('hex')).trim()
 const NON_WHITELIST_PHONE = '139' + String(0).repeat(8) + '1' // 合成「非白名单」号；不写成 11 位字面值
 process.env.XIAI_ADMIN_PHONE = PHONE
-process.env.XIAI_USER_TOKEN_SECRET = SECRET
+/* **R-L3′**：两把签发密钥**只从当前 shell 环境变量读**（不合成、不落盘、不打印）；
+   缺任一 ⇒ 打印 `SKIP（缺 <VAR>，本脚本未验证）` 并 exit 0（**不假绿**）。 */
+let ADMIN_SECRET = ''
+let USER_SECRET = ''
+try {
+  ADMIN_SECRET = requireSecretOrSkip(ADMIN_SECRET_ENV)
+  USER_SECRET = requireSecretOrSkip(USER_SECRET_ENV)
+} catch (error) {
+  handleTestTokenSkip(error)
+}
+process.env.XIAI_ADMIN_TOKEN_SECRET = ADMIN_SECRET
+process.env.XIAI_USER_TOKEN_SECRET = USER_SECRET
+/* 令牌签名密钥（本脚本只签**用户**令牌；管理员侧只做口径对账，不签）。 */
+const SECRET = USER_SECRET
 process.env.XIAI_USER_TOKEN_VERSION = process.env.XIAI_USER_TOKEN_VERSION || '1'
 process.env.XIAI_USER_TOKEN_TTL_SECONDS = process.env.XIAI_USER_TOKEN_TTL_SECONDS || '900'
 
@@ -224,11 +247,9 @@ const adminSvc = await import(path.join(ROOT, 'src/services/admin.js'))
 const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const userWriteSvc = await import(path.join(ROOT, 'src/services/userWrite.js'))
 
-const USER_CODE = authSvc.DEMO_SMS_CODE
-process.env.XIAI_USER_SMS_CODE = USER_CODE
-
-const tokenFor = (phone) =>
-  userLib.issueToken({ sub: phone, secret: SECRET, nowSeconds: nowS(), ttlSeconds: 900, version: '1', role: 'user' }).token
+/* **R-L3′**：登录已改真短訊 OTP（`issue` 收 `{phone, platformAccessToken}`）⇒ 取票一律走
+   「**本地现签令牌注入**」；登录签发面已不再提供任何固定码（`auth.js::DEMO_SMS_CODE` 已整体删除）。 */
+const tokenFor = (phone) => signUserToken({ phone }).token
 
 const calls = []
 let transportMode = 'fn'
@@ -441,19 +462,34 @@ delete process.env.XIAI_ADMIN_PHONE
 process.env.XIAI_ADMIN_PHONE = savedAdminPhone
 
 /* ===========================================================================
-   E 段：④ 自愈（有会话先补签、无会话则拒）
+   E 段：④ **无令牌 ⇒ 拒绝 ＋ 重新登錄引导 ＋ 零往返 ＋ 零写入**
+   ---------------------------------------------------------------------------
+   **P1 批次裁定 R-L8**：上一版这里测的是「无令牌 ＋ 有会话 ⇒ 静默补签（先 issue 后 verify）」，
+   而那条路已**有意删除**（真短訊碼无法静默补签）⇒ 本段改为测它**已不存在**：
+   即使**会话仍在场**，也必须 `{ok:false, reason:'FORBIDDEN'}` ＋ 可读的「重新登錄」引导 ＋
+   **零写入** ＋ **零云函数往返**（`issue` 与业务 op 都不得发出）＋ **不伪造令牌**。
+   「有令牌 ⇒ 写面正常」的**正面对照**保留在 B 段（B1〜B5c），id 与条数均未删。
    =========================================================================== */
-console.log(JSON.stringify({ section: 'E', title: '④ 自愈：有会话先 issue 后 verify；无会话拒' }))
-/* E1：无令牌 ＋ 有会话 ⇒ 先 issue 补签、后 verify 成功。 */
+console.log(JSON.stringify({ section: 'E', title: '④ 无令牌 ⇒ 拒绝 ＋ 重新登錄引导 ＋ 零往返（无静默补签）' }))
+/* E1：无令牌 ＋ **有会话** ⇒ 结构化拒绝（会话在场也不是补签凭据）。 */
 userTokenSvc.clearUserToken()
 session.setUser({ id: uidOfPhone(PHONE), phone: PHONE, role: 'admin', nickname: '管理員' })
 resetCalls()
 const beforeE1 = readReward()
 const healed = await adminSvc.setInviteReward(null, 11)
-check('E1', '无令牌 ＋ **有会话** ⇒ 写成功（ok:true）', true, healed.ok === true && healed.value === 11)
-check('E1b', '自愈写落盘（站点配置键 ＝ 11）', { invite_reward: 11 }, readReward())
-check('E1c', '自愈顺序：**先 issue 补签、后 verify**', true, firstIndex('issue') !== -1 && firstIndex('verify') !== -1 && firstIndex('issue') < firstIndex('verify'))
-check('E1d', '自愈后令牌已入内存（present＝true）', true, userTokenSvc.userTokenSnapshot().present === true)
+check('E1', '无令牌 ＋ **有会话** ⇒ 结构化拒绝（FORBIDDEN ＋ 含「重新登錄」引导 ＋ 会话确实在场）', { ok: false, reason: 'FORBIDDEN', guide: true, sessionPresent: true }, {
+  ok: healed.ok,
+  reason: healed.reason,
+  guide: /重新登錄/.test(String(healed.message || '')),
+  sessionPresent: !!(session.currentUser() && session.currentUser().phone === PHONE)
+})
+check('E1b', '无令牌 ＋ 有会话 ⇒ **零写入**（站点配置键未变）', beforeE1, readReward())
+check('E1c', '无令牌 ＋ 有会话 ⇒ **零云函数往返**（`issue` 与业务 op 都未发出）', { total: 0, issue: 0, verify: 0 }, {
+  total: calls.length,
+  issue: calls.filter((call) => call.action === 'issue').length,
+  verify: calls.filter((call) => call.action === 'verify').length
+})
+check('E1d', '无令牌 ＋ 有会话 ⇒ **未伪造令牌**（present 仍 false）', false, userTokenSvc.userTokenSnapshot().present)
 /* E2（负向）：无令牌 ＋ 无会话 ⇒ 结构化拒绝 ＋ 零写入 ＋ 零往返。 */
 userTokenSvc.clearUserToken()
 session.setUser(null)
