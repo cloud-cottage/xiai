@@ -10,6 +10,11 @@ import { isLoggedIn } from '../data/session.js'
  * `/persons`（【印家匯徵】，title 逐字 `印家匯徵`）—— 两条**均不设 `requiresAuth`（公开可达）**。
  * ＋ **本單新增一條**：`/persons/:code`（【印人詳情】，title 逐字 `印人詳情`；由 `/persons` 行點擊進入，
  *   **與名錄同為公開可達**，不發第二條網絡請求 —— 只按 `code` 查名錄已落定的印人快照）。
+ * ＋ **本單新增一條**：`/books`（【印譜匯觀】，`meta.title` 逐字 `印譜匯觀`）——
+ *   **不是**游客 / 普通用户可达页：**页面本体**做管理员门（非管理员 / 未登录 ⇒ 页内显示无权限
+ *   提示且**零 book 数据请求**，不得先取后藏），故**不设 `requiresAuth`**（未登录也要能落到
+ *   「请先登录」提示，而不是被守门静默改写路径）；侧栏入口亦仅管理员渲染
+ *   （`AppSidebar.vue`）。服务端另有管理员门（双门）。口径：`docs/book-catalog-ruling-2026-11-14.md` §二。
  * ＋ **本單新增一條**：`/connect`（【連接斐萃】；`meta.title` 逐字 `斐萃令牌`）—— **頁面現在兼具
  *   「斐萃令牌 ＋ 我的 API」**：斐萃令牌（管理員簽發）＋ 我的 AI 金鑰 / 餘額 / 用量（已登錄用戶）
  *   ＋ 管理員【上游配置】卡片；同样**不设 `requiresAuth`**（未登錄可直达，页内给登录引导）；
@@ -90,6 +95,12 @@ const routes = [
     name: 'personDetail',
     component: () => import('../views/PersonDetailView.vue'),
     meta: { title: '印人詳情' }
+  },
+  {
+    path: '/books',
+    name: 'books',
+    component: () => import('../views/BookIndexView.vue'),
+    meta: { title: '印譜匯觀' }
   },
   /* **本单改造（斐萃令牌）**：`/connect` ＝ 管理员签发 HMAC 令牌页（`api/feicui/v1/*` 转发面用它确权）。
      **本單（我的 API）**：同頁增設「我的 API」用戶區（AI 金鑰 / 餘額 / 用量，已登錄用戶）

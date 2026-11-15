@@ -1,20 +1,26 @@
 
 <script setup>
 import { computed } from 'vue'
-import { isLoggedIn } from '../data/session.js'
+import { isAdmin, isLoggedIn } from '../data/session.js'
 
 /**
- * 侧边菜单 —— **恰四项**（璽印匯類 / 印風匯覽 / 印家匯徵 / 我的雲盤）。
+ * 侧边菜单 —— `璽印匯類` / `印風匯覽` / `印家匯徵` → **（管理员）`印譜匯觀`** → `我的雲盤`。
  * 顺序**逐字**：`璽印匯類`（`square`）→ `印風匯覽`（`styles`）→ `印家匯徵`（`persons`）
- * → `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `盤`。
+ * → `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `譜` / `盤`。
  *
- * 【Slice M1 改版】侧边栏**恰四项**；删去原 `我的勘誤記錄` / `我的實物照片` / `積分中心`
+ * 【印譜匯觀】（2026-11-14 裁定｜`docs/book-catalog-ruling-2026-11-14.md` §二）
+ *   · 该条**仅管理员可见**：非管理员 / 未登录 ⇒ **整条不渲染**（`items` 里根本没有这一项
+ *     ⇒ DOM 零命中；**不得** `disabled` / CSS 隐藏 / 空链接冒充）。判定取法与 AppHeader /
+ *     SquareView 同一处（`data/session.js` 的 `isAdmin` 计算属性），不另造第三种取法。
+ *   · 位置**在 `my-drive` 之前**（菜单第 4 项）。
+ *
+ * 【Slice M1 改版】侧边栏原有四项；删去原 `我的勘誤記錄` / `我的實物照片` / `積分中心`
  * **三个侧边栏条目**，但**三条路由**（`/my/corrections` / `/my/photos` / `/points`）
  * **与三个视图文件一律保留**——顶部弹出菜单（`AppHeader.vue` 的 `go('my-corrections')` /
  * `go('my-photos')` / `go('points')`）仍在用它们。**删入口 ≠ 删路由 / 删页面**。
  *
- * 管理员与普通用户看到**同一套**菜单：管理员的差异体现在页面内的「管理员专属按钮」，
- * 不体现为独立入口（故本组件无需任何角色判断）。
+ * 除【印譜匯觀】外，管理员与普通用户看到**同一套**菜单：管理员的差异主要体现在页面内的
+ * 「管理员专属按钮」，不体现为独立入口。该管理员入口的可见性**只**作用于它自己这一项。
  * 【我的雲盤】是**普通用户能力入口**（不是管理员按钮）⇒ **三态（未登錄 / 普通 / 管理员）
  * 一律渲染**；未登錄点击该项由路由守门重定向 `/login`（带 `redirect`），不静默失败。
  *
@@ -23,12 +29,19 @@ import { isLoggedIn } from '../data/session.js'
  */
 const logged = isLoggedIn
 
-const items = computed(() => [
-  { key: 'square', to: { name: 'square' }, glyph: '匯', label: '璽印匯類' },
-  { key: 'styles', to: { name: 'styles' }, glyph: '風', label: '印風匯覽' },
-  { key: 'persons', to: { name: 'persons' }, glyph: '家', label: '印家匯徵' },
-  { key: 'my-drive', to: { name: 'my-drive' }, glyph: '盤', label: '我的雲盤' }
-])
+const items = computed(() => {
+  const list = [
+    { key: 'square', to: { name: 'square' }, glyph: '匯', label: '璽印匯類' },
+    { key: 'styles', to: { name: 'styles' }, glyph: '風', label: '印風匯覽' },
+    { key: 'persons', to: { name: 'persons' }, glyph: '家', label: '印家匯徵' }
+  ]
+  /* 【印譜匯觀】（管理员专属）：非管理员 / 未登录 ⇒ push 不执行 ⇒ 该项**零渲染**。 */
+  if (isAdmin.value) {
+    list.push({ key: 'books', to: { name: 'books' }, glyph: '譜', label: '印譜匯觀' })
+  }
+  list.push({ key: 'my-drive', to: { name: 'my-drive' }, glyph: '盤', label: '我的雲盤' })
+  return list
+})
 </script>
 
 <template>

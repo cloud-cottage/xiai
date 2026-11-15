@@ -89,6 +89,18 @@ const {
   DELETE_WHOLE_SEAL_IMAGE_READOUT_KEYS,
   SET_BASE_FACE_READOUT_KEYS
 } = require('./lib/faceLayerOps.js')
+/* **印譜（book）三 op（`createBook` / `listBooks` / `setImageBook`｜裁定件
+   `docs/book-catalog-ruling-2026-11-14.md` §3）**：三个读数键面常量是各 op **回包键面的唯一真源**
+   （`lib/books.js` 与该处的 `ADMIN_OPS` 薄委派共用同一份）；本文件只按 `op` **收窄透传**
+   （存在性驱动）⇒ 其余 op 回包逐字不变。
+   · `createBook`   → `book_id`（＋幂等轮的 additive `skipped`）；
+   · `listBooks`    → `books` / `total`；
+   · `setImageBook` → `image_id` / `book_id`（`book_id` 为服务端**读回值**）。 */
+const {
+  CREATE_BOOK_READOUT_KEYS,
+  LIST_BOOKS_READOUT_KEYS,
+  SET_IMAGE_BOOK_READOUT_KEYS
+} = require('./lib/books.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
 
@@ -913,6 +925,32 @@ if (op === 'deleteWholeSealImage') {
 }
 if (op === 'setBaseFace') {
   for (const key of SET_BASE_FACE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+/* **印譜（book）三 op 讀數面（additive 透傳｜**按 op 收窄**｜本單 `createBook` /
+   `listBooks` / `setImageBook`）**：鍵名真源 ＝ `lib/books.js` 的三個 `*_READOUT_KEYS` 常量
+   （`lib/ops.js` 的同名薄委派共用同一份）；逐 op 封閉、存在性驅動：
+   · `createBook`   → `ok / book_id`（冪等輪多一個 `skipped: true`）；
+   · `listBooks`    → `ok / books / total`；
+   · `setImageBook` → `ok / image_id / book_id`（`book_id` 為服務端**讀回值**）。
+   **其餘任何 op 一律不透傳這些鍵**（即使 `opResult` 意外帶同名鍵 —— 例如 `replaceFaceImage` /
+   `deleteFaceImage` 的 `image_id`、`pullImportRows` 的 `rows`、各類 `total` —— 亦一個都不外泄）
+   ⇒ 既有回包**逐字不變**（序列化後亦不新增鍵）。失敗回包（`ok:false`）走上面的早退分支、
+   恒 3 鍵、零讀數鍵；三個 op **均不產 `plan`**（寫步在 op 內按確定序執行）⇒ `plan` 零外傳；
+   既有字段一律不刪、不改。 */
+if (op === 'createBook') {
+  for (const key of CREATE_BOOK_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'listBooks') {
+  for (const key of LIST_BOOKS_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'setImageBook') {
+  for (const key of SET_IMAGE_BOOK_READOUT_KEYS) {
     if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
   }
 }

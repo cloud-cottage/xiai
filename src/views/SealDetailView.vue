@@ -16,6 +16,8 @@ import TextTransformButtons from '../components/TextTransformButtons.vue'
 import SliceImage from '../components/SliceImage.vue'
 import { pipelineNotice, runUploadPipeline } from '../components/uploadPipeline.js'
 import { seals, corrections, endorsements, persons, photos as photoService, points, imageFaces, sealExport, aiEnhance, authorMatch, sealCards } from '../services/index.js'
+/* 印譜（book）服务：`services/books.js` 静态命名空间导入（本页只用 `listBooks` / `setImageBook`）。 */
+import * as bookService from '../services/books.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn, currentUser } from '../data/session.js'
 import { formatBytes } from '../utils/format.js'
@@ -2842,6 +2844,170 @@ onBeforeUnmount(() => {
   /* 在途的 AI 修復请求：作废界面态（回包仍被收取，见 `runAiEnhance`）。 */
   aiEnhanceRequestSeq += 1
 })
+
+/* ============================================================================
+   **所屬印譜（2026-11-14 裁定 §4.2｜本單）**
+   ----------------------------------------------------------------------------
+   · 入口：每張影像旁（**印面圖** ＋ **整枚印章圖**）一个「所屬印譜」下拉；
+     **僅管理員可見**（非管理員 / 游客 ⇒ 整块不渲染，DOM 零命中，且**不請求** `listBooks`）。
+   · 選中即時提交 `setImageBook`（`services/books.js` —— 由**另一单**提供，本文件以
+     `import.meta.glob` 晚綁定：文件未落地時給「服務尚未就緒」的可見反饋，構建照樣通過）。
+   · **成功要讀回確認**：① 回包 `image_id` / `book_id` 須與請求一致；② 再經
+     `seals.imageSourceOf` 重讀影像行，行上帶 `book_id` 時**以讀回值為準**。
+     **不以 `updated >= 1` 判成功**（裁定件 §三）。
+   · **失敗 ⇒ 可見反饋 ＋ 回滾顯示**：本地覆蓋只在成功時寫，失敗即刪；同時把 `<select>`
+     的 DOM 值復位到改前值（否則瀏覽器保留用戶剛選的那一項 ⇒ 假狀態上屏）。
+   · 下拉項來源 `listBooks`（`編號｜書名`）＋「未歸屬」（提交 `book_id: null` ＝ 取消歸屬）。
+   · 隱私：非管理員零渲染零請求；`book_id` 不出現在任何普通用戶可見文本。
+   ============================================================================ */
+/* **静态接线（本批修）**：`services/books.js` 已落地，导入已提到文件头 import 区块 ——
+   不再用 `import.meta.glob` 晚绑定（那是「文件未落地也要能构建」的过渡手段，留着会掩盖真实接线错误）。 */
+let bookApiPromise = null
+/** 取 `services/books.js`（静态导入 ⇒ 恒可用；保留此函数形态以免改动调用面）。 */
+function loadBookApi() {
+  if (!bookApiPromise) bookApiPromise = Promise.resolve(bookService)
+  return bookApiPromise
+}
+
+/** 管理員門：沿用本页既有判定（`canEditFixed` ⇒ `role === 'admin'`），同一把尺子。 */
+const canAssignBook = computed(() => canEditFixed.value)
+/** 可選印譜（`listBooks` 結果）；空 ＋ 失敗態 ⇒ 下拉只剩「未歸屬」並給說明。 */
+const bookOptions = ref([])
+const bookOptionsState = ref('idle') // idle / loading / ready / failed / unavailable
+const bookOptionsMessage = ref('')
+/** 本页写入成功后的本地归属覆盖（影像編號 → 印譜編號；`''` ＝ 未歸屬）。 */
+const imageBookOverrides = reactive({})
+const imageBookBusy = reactive({})
+const imageBookFeedback = reactive({})
+
+async function loadBookOptions() {
+  /* 管理員门前置：非管理員 / 游客 ⇒ **零請求**。 */
+  if (!canAssignBook.value) return
+  bookOptionsState.value = 'loading'
+  bookOptionsMessage.value = ''
+  const api = await loadBookApi()
+  if (!api || typeof api.listBooks !== 'function') {
+    bookOptionsState.value = 'unavailable'
+    bookOptionsMessage.value = '印譜服務尚未就緒（`services/books.js` 未提供 `listBooks`）；下拉暫只可選「未歸屬」。'
+    return
+  }
+  let out = null
+  try {
+    out = await api.listBooks()
+  } catch (err) {
+    out = { ok: false, message: (err && err.message) || '調用異常' }
+  }
+  if (!out || out.ok !== true) {
+    bookOptionsState.value = 'failed'
+    bookOptionsMessage.value = `印譜清單讀取失敗：${(out && (out.message || out.reason)) || '服務未回報原因'}；下拉暫只可選「未歸屬」。`
+    return
+  }
+  bookOptions.value = Array.isArray(out.books) ? out.books : []
+  bookOptionsState.value = 'ready'
+}
+
+/* 會話水合後才成為管理員的情形：`canAssignBook` 翻真時才發第一次請求。 */
+watch(
+  canAssignBook,
+  (isManager) => {
+    if (isManager) {
+      loadBookOptions()
+      return
+    }
+    bookOptions.value = []
+    bookOptionsState.value = 'idle'
+    bookOptionsMessage.value = ''
+  },
+  { immediate: true }
+)
+
+/**
+ * 影像當前所屬印譜編號（`''` ＝ 未歸屬）。
+ * 本地覆蓋優先（本页剛寫成功）；否則讀影像行 `book_id`；行上沒這個欄位 ⇒ `''`。
+ */
+function imageBookIdOf(imageId) {
+  const id = imageId === undefined || imageId === null ? '' : String(imageId)
+  if (!id) return ''
+  if (Object.prototype.hasOwnProperty.call(imageBookOverrides, id)) return imageBookOverrides[id]
+  const images = seal.value && Array.isArray(seal.value.images) ? seal.value.images : []
+  const row = images.find((image) => image && String(image.id) === id)
+  if (!row || !Object.prototype.hasOwnProperty.call(row, 'book_id')) return ''
+  return row.book_id === null || row.book_id === undefined ? '' : String(row.book_id)
+}
+
+/** 印譜编号的可见称呼（未歸屬 / 清單外 —— 不假装存在）。 */
+function bookNameOfId(bookId) {
+  const id = bookId === undefined || bookId === null ? '' : String(bookId)
+  if (!id) return '未歸屬'
+  const book = bookOptions.value.find((row) => row && String(row.id) === id)
+  return book ? `${id}《${book.name || '無書名'}》` : `${id}（清單外）`
+}
+
+/** `<select>` 值復位（失敗回滾的顯示面；不改數據、只把界面拉回改前值）。 */
+function restoreBookSelectValue(event, value) {
+  if (event && event.target) event.target.value = value === undefined || value === null ? '' : String(value)
+}
+
+/**
+ * 選中即提交：`setImageBook({ image_id, book_id })`（`book_id: null` ＝ 取消歸屬）。
+ * 成功 ⇒ 本地覆蓋 ＋ 可見成功反饋；失敗 ⇒ 刪覆蓋 ＋ 可見失敗反饋 ＋ `<select>` 復位。
+ */
+async function onImageBookChange(imageId, event) {
+  const id = imageId === undefined || imageId === null ? '' : String(imageId)
+  const target = event && event.target ? String(event.target.value || '') : ''
+  if (!id) return
+  const previous = imageBookIdOf(id)
+  imageBookFeedback[id] = ''
+  if (target === previous) return
+  if (imageBookBusy[id]) {
+    restoreBookSelectValue(event, previous)
+    return
+  }
+  imageBookBusy[id] = true
+  const api = await loadBookApi()
+  if (!api || typeof api.setImageBook !== 'function') {
+    imageBookBusy[id] = false
+    restoreBookSelectValue(event, previous)
+    imageBookFeedback[id] = '印譜服務尚未就緒（`services/books.js` 未提供 `setImageBook`）；本次未提交，歸屬維持原樣。'
+    return
+  }
+  let out = null
+  try {
+    out = await api.setImageBook({ image_id: id, book_id: target ? target : null })
+  } catch (err) {
+    out = { ok: false, message: (err && err.message) || '調用異常' }
+  }
+  imageBookBusy[id] = false
+  const echoedImage = out && out.image_id !== undefined && out.image_id !== null ? String(out.image_id) : ''
+  const echoedBook = out && out.book_id !== undefined && out.book_id !== null ? String(out.book_id) : ''
+  if (!out || out.ok !== true || (echoedImage && echoedImage !== id) || echoedBook !== target) {
+    delete imageBookOverrides[id]
+    restoreBookSelectValue(event, previous)
+    imageBookFeedback[id] = `保存失敗：${(out && (out.message || out.reason)) || '回包與請求不一致'}；已回滾為原歸屬（${bookNameOfId(previous)}）。`
+    return
+  }
+  /* 讀回確認：影像行帶 `book_id` 時以讀回值為準（行上沒這欄位 ⇒ 以回包为据）。 */
+  let freshBook = null
+  try {
+    const source = seals.imageSourceOf(id)
+    const row = source && source.row ? source.row : null
+    if (row && Object.prototype.hasOwnProperty.call(row, 'book_id')) {
+      freshBook = row.book_id === null || row.book_id === undefined ? '' : String(row.book_id)
+    }
+  } catch (err) {
+    freshBook = null
+  }
+  if (freshBook !== null && freshBook !== target) {
+    delete imageBookOverrides[id]
+    restoreBookSelectValue(event, previous)
+    imageBookFeedback[id] = `讀回不一致（讀回 ${bookNameOfId(freshBook)}，請求 ${bookNameOfId(target)}）；已回滾顯示，請重試。`
+    return
+  }
+  imageBookOverrides[id] = target
+  imageBookFeedback[id] = target
+    ? `已掛上印譜 ${bookNameOfId(target)}（回包與讀回一致）。`
+    : '已取消歸屬（回包與讀回一致）。'
+}
 </script>
 
 <template>
@@ -2981,6 +3147,16 @@ onBeforeUnmount(() => {
     <!-- 人工智能修復的可读反馈（【取】成功 ⇒「影像編號 旧 → 新」；写面失败同样走这里）。 -->
     <p v-if="aiEnhanceFeedback" class="notice detail__notice" data-admin-feedback="ai-enhance-accept">
       {{ aiEnhanceFeedback }}
+    </p>
+
+    <!-- 【所屬印譜】下拉的**清單降級提示**（管理員態 ＋ 服務未就緒 / 讀取失敗時上屏；
+         正常態 / 非管理員態為空串 ⇒ 零噪聲、DOM 零命中）。 -->
+    <p
+      v-if="canAssignBook && bookOptionsMessage"
+      class="notice detail__notice"
+      data-image-book-options="seal-detail"
+    >
+      {{ bookOptionsMessage }}
     </p>
 
     <!-- 印面图上传端的**可读降级提示**（R-93：本常量必须真渲染，不得只定义不用）。
@@ -3216,6 +3392,35 @@ onBeforeUnmount(() => {
               {{ imageErrorOf(face.face_image_id) }}（本機影像庫中暫無該編號的圖象文件。）
             </p>
             <p v-else class="detail__hint">{{ imagePendingHintOf(face.face_image_id) }}</p>
+            <!-- 【所屬印譜】（2026-11-14 裁定 §4.2｜**僅管理員渲染** —— 非管理員 / 游客 ⇒
+                 整块 DOM 零命中；且非管理員不請求 `listBooks`）。選中即時提交 `setImageBook`，
+                 成功後讀回確認；失敗可見反饋並把下拉值復位（不保留假狀態）。
+                 本塊屬新增校驗面：钩子一律 `data-action`（**不得**用 `data-admin-action`
+                 —— 該族取值集合仍恰 12 值）。 -->
+            <div v-if="canAssignBook && face.face_image_id" class="detail__book" data-image-book-block="face">
+              <label :for="`book-face-${face.id}`">所屬印譜</label>
+              <select
+                :id="`book-face-${face.id}`"
+                class="detail__book-select"
+                data-action="assign-face-image-book"
+                :data-book-image="face.face_image_id"
+                :value="imageBookIdOf(face.face_image_id)"
+                :disabled="Boolean(imageBookBusy[face.face_image_id])"
+                @change="onImageBookChange(face.face_image_id, $event)"
+              >
+                <option value="">未歸屬</option>
+                <option v-for="book in bookOptions" :key="book.id" :value="String(book.id)">
+                  {{ book.id }}｜{{ book.name }}
+                </option>
+              </select>
+              <span
+                v-if="imageBookFeedback[face.face_image_id]"
+                class="detail__hint"
+                :data-image-book-feedback="face.face_image_id"
+              >
+                {{ imageBookFeedback[face.face_image_id] }}
+              </span>
+            </div>
             <p v-if="face.faceImage">
               {{ face.faceImage.width }} × {{ face.faceImage.height }} · {{ formatBytes(face.faceImage.bytes) }} · {{ face.faceImage.color_mode }}
             </p>
@@ -3457,6 +3662,33 @@ onBeforeUnmount(() => {
               <template v-if="image.color_mode"> · {{ image.color_mode }}</template>
             </figcaption>
             <p class="detail__sha">{{ digestTextOf(image) }}</p>
+            <!-- 【所屬印譜】（裁定件 §4.2｜**僅管理員渲染**，非管理員 ⇒ DOM 零命中、零請求）：
+                 整枚印章圖同樣可掛書 / 取消（`book_id: null`）。钩子只用 `data-action`
+                 （**不新增 `data-admin-action` 取值**）。 -->
+            <div v-if="canAssignBook" class="detail__book" data-image-book-block="whole-seal">
+              <label :for="`book-whole-${image.id}`">所屬印譜</label>
+              <select
+                :id="`book-whole-${image.id}`"
+                class="detail__book-select"
+                data-action="assign-whole-seal-image-book"
+                :data-book-image="image.id"
+                :value="imageBookIdOf(image.id)"
+                :disabled="Boolean(imageBookBusy[image.id])"
+                @change="onImageBookChange(image.id, $event)"
+              >
+                <option value="">未歸屬</option>
+                <option v-for="book in bookOptions" :key="book.id" :value="String(book.id)">
+                  {{ book.id }}｜{{ book.name }}
+                </option>
+              </select>
+              <span
+                v-if="imageBookFeedback[image.id]"
+                class="detail__hint"
+                :data-image-book-feedback="image.id"
+              >
+                {{ imageBookFeedback[image.id] }}
+              </span>
+            </div>
             <!-- 管理員專屬【刪除】（普通使用者 / 遊客 ⇒ 不渲染，DOM 零命中；**不得** CSS 隱藏 /
                  `disabled` 冒充）：鉤子只用 `data-action="delete-whole-seal-image"` —— **不進**
                  `[data-admin-action]` 族（該族取值集合仍恰 12 值）。二次確認另掛
@@ -5441,5 +5673,33 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
+}
+
+/* 【所屬印譜】下拉（僅管理員渲染）：影像卡内的窄条，與影像說明同層、不搶視線。 */
+.detail__book {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+
+.detail__book label {
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
+}
+
+.detail__book-select {
+  max-width: 240px;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--t-xs);
+}
+
+.detail__book-select:disabled {
+  opacity: 0.6;
 }
 </style>

@@ -691,6 +691,12 @@ export function normalizeImageRow(doc, options = {}) {
     binary_migrated: boolOrFalse(row.binary_migrated),
     source: text(row.source),
     uploaded_by: text(row.uploaded_by),
+    /* **印譜歸屬（裁定件 `docs/book-catalog-ruling-2026-11-14.md` §1.2｜本單）**：
+       `xiai_images.book_id` —— **单值**（一张影像至多一本书；不是数组）。**空值归一为 `null`**
+       （`null` / `''` / 缺键一律 `null` ＝ 未归属），**不猜、不补编**。
+       **仅管理员可见**：本字段只随影像行读出（管理员读面）；**不得**进入任何普通用户可见的
+       卡片 / DTO（与浏览量「卡片不显示」同口径）。 */
+    book_id: text(row.book_id) || null,
     created_at: text(row.created_at)
   }
 }

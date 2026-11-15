@@ -484,7 +484,7 @@ section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 44 项且 `ai-enhance-face` 在册（函数；薄委派）〔2026-11-14 1B/2C/3B 41 → 44：增 `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace`（均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason；字典序位分别在 `deleteSeal` 之后、`migrateSealValueDomains` 之前、`setAiUpstream` 之后）；前一版 41 项由 2026-11-14 詳情頁新增印面單 `addSealFace`（字典序位在首位）带入〕', { count: 44, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 44 项且 `ai-enhance-face` 在册（函数；薄委派）〔2026-11-14 1B/2C/3B 41 → 44：增 `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace`（均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason；字典序位分别在 `deleteSeal` 之后、`migrateSealValueDomains` 之前、`setAiUpstream` 之后）；前一版 41 项由 2026-11-14 詳情頁新增印面單 `addSealFace`（字典序位在首位）带入〕', { count: 47, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
@@ -1934,7 +1934,7 @@ let kSubmitReply = null
     taskRowCount: 1,
     taskRowKeys: 19,
     taskRowKeyList: TASK_ROW_KEYS,
-    adminOpsCount: 44,
+    adminOpsCount: 47,
     taskRowStatus: 'SUBMITTED',
     upstreamTaskId: K_ENQUEUE_TASK_ID,
     deadlineAhead: true,

@@ -524,8 +524,8 @@ section('G', '静态门：ADMIN_OPS 恰 44 项且含 ai-enhance-discard（排序
   const opsSource = readFileSync(path.join(FN_DIR, 'lib/ops.js'), 'utf8')
   const implSource = readFileSync(path.join(FN_DIR, 'lib/aiEnhanceDiscard.js'), 'utf8')
   const adminKeys = Object.keys(ops.ADMIN_OPS)
-  check('G1', '⑦ `ADMIN_OPS` **恰 44 项**、含 `ai-enhance-discard`（函数；薄委派）、排序位在 `ai-enhance-face` 之前〔2026-11-14 1B/2C/3B 41 → 44：增 `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace`（均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason）；前一版 41 项由 2026-11-14 詳情頁新增印面單 `addSealFace`（字典序位在首位、先于 `ai-enhance-discard`）带入〕', {
-    count: 44,
+  check('G1', '⑦ `ADMIN_OPS` **恰 47 项**（2026-11-15 印譜單 +3：`createBook` / `listBooks` / `setImageBook`）、含 `ai-enhance-discard`（函数；薄委派）、排序位在 `ai-enhance-face` 之前〔2026-11-14 1B/2C/3B 41 → 44：增 `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace`（均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason）；前一版 41 项由 2026-11-14 詳情頁新增印面單 `addSealFace`（字典序位在首位、先于 `ai-enhance-discard`）带入〕', {
+    count: 47,
     type: 'function',
     beforeEnhanceFace: true
   }, {

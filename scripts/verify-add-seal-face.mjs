@@ -657,7 +657,17 @@ section('G', '前端静态门（AC-745）：[data-admin-action] 仍恰 12 值（
   /* 剥 HTML 注释后再数钩子（注释里也写了这个字面值 ⇒ 若不剥，计数会把说明文字当成第二个入口）。 */
   const viewSource = viewSourceRaw.replace(/<!--[\s\S]*?-->/g, '')
   const entryAt = viewSource.indexOf('<button\n        v-if="canAddSealFace"')
-  check('G4', '④ 入口按钮 `v-if="canAddSealFace"`（管理员专属条件渲染，非 CSS 隐藏 / `disabled` 冒充）且钩子与 `@click="openAddSealFace"` 同在一枚按钮上', true, entryAt !== -1 && /data-action="add-seal-face"\s*\n?\s*@click="openAddSealFace"/.test(viewSource))
+  /* 判据修正（2026-11-15 管理员按钮样式单带入）：入口按钮新增 `class btn--admin` ＋ `title` / `aria-label`
+     （「僅管理員可見」）⇒ 钩子与 `@click` 之间夹了别的属性，旧判据要求**字面相邻**失准。
+     现判据改为**同一枚 `<button …>` 开标签内两者都在**（语义未放宽：仍要求同一枚按钮、仍要求 `v-if` 门）。 */
+  check('G4', '④ 入口按钮 `v-if="canAddSealFace"`（管理员专属条件渲染，非 CSS 隐藏 / `disabled` 冒充）且钩子与 `@click="openAddSealFace"` 同在一枚按钮开标签内', true, (() => {
+    if (entryAt === -1) return false
+    const openAt = viewSource.lastIndexOf('<button', entryAt)
+    const closeAt = viewSource.indexOf('>', entryAt)
+    if (openAt === -1 || closeAt === -1) return false
+    const tag = viewSource.slice(openAt, closeAt + 1)
+    return tag.includes('canAddSealFace') && tag.includes('data-action="add-seal-face"') && tag.includes('@click="openAddSealFace"')
+  })())
   check('G4b', '④b 入口在「印面列表」区块头（`data-face-list-head`）内、`v-for` 之外且**恰一枚按钮**（不逐块复制）', true, (() => {
     const headAt = viewSource.indexOf('data-face-list-head')
     const loopAt = viewSource.indexOf('v-for="face in faces"', entryAt)

@@ -218,6 +218,13 @@ const COLLECTIONS = Object.freeze({
      / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL` ⇒ 客户端零读面）、**不开放任何直写入口**。 */
   sealLinks: 'xiai_seal_links',
   personRelations: 'xiai_person_relations',
+  /* **印譜（book）集合（裁定件 `docs/book-catalog-ruling-2026-11-14.md` §1.1｜本單）**：
+     `xiai_books` —— 管理员建书的正式落点（`id` ＝ 五位纯数字 `book_id`、服务端发号）。
+     **只在此登记**（集合名仍只活在本文件；实现点 `lib/books.js` 零集合名字面），
+     **不进客户端云读面**（不入 `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`
+     ⇒ 客户端零读面）、**零直写入口**（唯一写点是 `ADMIN_OPS.createBook`）。
+     影像侧关系字段 `book_id` 落在既有 `images`（`xiai_images`）行上，**不新增集合**。 */
+  books: 'xiai_books',
   /* **CARD 主庫憑據（本單）**：`xiai_server_secrets`（`xiai_` 前綴；**服務端專屬私有**）——
      本文件只**讀**其中 `card_api` 文檔的 `key` 字段（CARD API 密鑰明文，本單新建該集合，
      客戶端權限 ＝ 全部不可讀不可寫）。**不進**客戶端雲讀面（不入 `CLOUD_COLLECTIONS` /
@@ -411,7 +418,13 @@ function personCardInputOf(row, code, cardId) {
 const OPTIONAL_READ_COLLECTIONS = Object.freeze([
   COLLECTIONS.endorsements,
   COLLECTIONS.correctionSummaries,
-  COLLECTIONS.correctionsPublic
+  COLLECTIONS.correctionsPublic,
+  /* **印譜（本單）**：`xiai_books` 是**新建集合**（可能尚未被任何写入创建）⇒ 首次 `listBooks` /
+   `createBook` 的幂等预查不能因「集合不存在」整笔失败（`persist` 的 `set` 分支另有建集自愈）。
+   「集合不存在 ≡ 零行」在本集合上是**真语义**（还没有任何书）⇒ 进可选读面白名单；
+   **非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧上抛**（判定单点
+   `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）。 */
+  COLLECTIONS.books
 ])
 
 /**
@@ -2235,15 +2248,20 @@ function rowsOf(result) {
 }
 
 /* ---------------------------------------------------------------------------
-   **识别编码号源（口径件 §3｜R-2）**：`xiai_counters`（`_id` ∈ `seal` / `face`，文档含 `seq`）。
+   **识别编码号源（口径件 §3｜R-2）**：`xiai_counters`（`_id` ∈ `seal` / `face` / `book`，文档含 `seq`）。
    · **服务端专用集合**：**不进** `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`
      （客户端零读面），也**不进**本文件的 `COLLECTIONS`（那是既有 13 个集合的读写面登记表；
      号源只由下面 `issueCodeNumber` 一处读写，单点即审计点）。
    · 号域上限沿编码器容量（`codeId.SID_MAX - 1` / `codeId.FID_MAX - 1`）⇒ 越界结构化拒绝。
    --------------------------------------------------------------------------- */
 const COUNTERS_COLLECTION = 'xiai_counters'
-const COUNTER_IDS = Object.freeze({ seal: 'seal', face: 'face' })
-const COUNTER_CAPACITY = Object.freeze({ seal: codeId.SID_MAX - 1, face: codeId.FID_MAX - 1 })
+const COUNTER_IDS = Object.freeze({ seal: 'seal', face: 'face', book: 'book' })
+/* `book` 号域：**五位定长十进制** ⇒ 可发号 `1…99999`（`'00001'`）；裁定件 §1.1「管理员不可改」。 */
+const COUNTER_CAPACITY = Object.freeze({
+  seal: codeId.SID_MAX - 1,
+  face: codeId.FID_MAX - 1,
+  book: 99999
+})
 const COUNTER_MAX_ATTEMPTS = 8
 
 /**
@@ -2263,6 +2281,15 @@ async function counterSeedBaseOf(kind) {
     const seals = await readRows(COLLECTIONS.seals, {}, { limit: 1000 })
     seals.forEach((row) => {
       const own = Number(row && row.seal_no)
+      if (Number.isInteger(own) && own > base) base = own
+    })
+  } else if (kind === 'book') {
+    /* **印譜（本單）**：既有 book 行的 `id` 即号值（五位定长十进制 ⇒ `Number('00001') === 1`）；
+       取不到整数的脏行不计入基线（**不猜、不补编**）。集合不存在 ⇒ `readRows` 按可选读面
+       白名单降级为 `[]`（新建集合首建时基线为 0）。 */
+    const books = await readRows(COLLECTIONS.books, {}, { limit: 1000 })
+    books.forEach((row) => {
+      const own = Number(row && row.id)
       if (Number.isInteger(own) && own > base) base = own
     })
   } else {
@@ -2297,15 +2324,18 @@ const RELEASE_SCAN_LIMIT = 1000
 const RELEASE_CAS_MAX_MISSES = 2
 
 /**
- * 当前库内**已占用**的号值集（`seal_no` / `face_no`；单次 1000 行护栏）。
+ * 当前库内**已占用**的号值集（`seal_no` / `face_no` / book 行 `id`；单次 1000 行护栏）。
  * 为什么必须扫：`released` 里的号可能**又被人占上了**（计数文档补建、并发采纳、
  * 手工回填）⇒ 直接把释放号发出去就会造出**同一编号两枚印章**（AC §6.4 红线）。
- * @param {'seal'|'face'} kind 号别
+ * **印譜（本單）**：号别 `book` 的占号面是 `xiai_books.id`（五位定长十进制 ⇒ `Number` 即号值）；
+ * 由 `lib/books.js::createBook` 在发号前取用（`isTaken` 判据），**不另立第二套占号扫描**。
+ * @param {'seal'|'face'|'book'} kind 号别
  * @returns {Promise<Set<number>>} 已占用号集合
  */
 async function occupiedNosOf(kind) {
-  const collection = kind === 'seal' ? COLLECTIONS.seals : COLLECTIONS.faces
-  const field = kind === 'seal' ? 'seal_no' : 'face_no'
+  const collection =
+    kind === 'seal' ? COLLECTIONS.seals : kind === 'book' ? COLLECTIONS.books : COLLECTIONS.faces
+  const field = kind === 'seal' ? 'seal_no' : kind === 'book' ? 'id' : 'face_no'
   const rows = await readRows(collection, {}, { limit: RELEASE_SCAN_LIMIT })
   const used = new Set()
   rows.forEach((row) => {
@@ -6897,6 +6927,31 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「影像掛書 / 取消掛書」（`setImageBook`｜一对多、单值 `book_id`）** —— 薄委派：
+   * 业务逻辑单点在 `lib/books.js::setImageBook`（本处零第二套逻辑；`require` 延迟）。
+   * **`ADMIN_OPS` 44 → 47**（本單三 op）；**字典序位在 `setInviteReward` 之前**。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（零读零写地拒）；② 载荷**封闭恰 2 键**
+   * `image_id / book_id`；`book_id` **必须显式出现**（`null` ＝ 取消归属；**缺键 ≠ 取消**
+   * ⇒ `MISSING_REQUIRED`）；③ 判定**全部早于写**：影像行存在（无 ⇒ `INVALID_VALUE`）、
+   * `book_id` 非 null 时目标书必须存在（五位纯数字形态门 ＋ 行存在性）；④ 写体**只含
+   * `book_id` 一个键**（`expectAtLeast: 1`）；⑤ **读回比对**：按同一检索式重读该影像行，
+   * `book_id` 必须与目标值逐字相等（**不得以 `updated >= 1` 判成功**；不等 ⇒ `STORAGE_UNAVAILABLE`
+   * ＋ 如实文案）；⑥ 回包**恰 3 键** `{ok, image_id, book_id}`（`book_id` 为读回值）、失败恰 3 键；
+   * **不级联、不删行、零新集合、`reason` 零新增**、**不产 `plan`**；`book_id` **不进任何普通用户
+   * 可见的 DTO / 卡片**。
+   * 口径真源：`docs/book-catalog-ruling-2026-11-14.md` §1.2 / §3。
+   * @param {object} payload 载荷（封闭两键 `image_id` / `book_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async setImageBook(payload, identity, context) {
+    /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { setImageBook: runSet } = require('./books.js')
+    return runSet(payload, identity, context)
+  },
+
+  /**
    * 设置邀请奖励数值（**管理员写路径**；值域门 ＋ 白名单门，**均在任何写入之前**）。
    * 明文：**本 op 不产出云落盘计划** —— 站点配置键（`xiai:v1:invite-reward`）活在客户端
    * localStorage（链路 `admin.js → drive.js → storage.js`，与管理员函数 Phase 1 同口径）；
@@ -8029,6 +8084,29 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **管理員「印譜清單」（`listBooks`｜只读）** —— 薄委派：业务逻辑单点在 `lib/books.js::listBooks`
+   * （本处零第二套逻辑；`require` 延迟以打破加载环）。**`ADMIN_OPS` 44 → 47**（本單三 op）；
+   * **字典序位在 `listPendingCorrectionsForAdmin` 之前**。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（既有 `adminWhitelistDenial`；非管理员 ⇒ `FORBIDDEN`
+   * ＋ **零读**）；② 载荷**封闭恰 0 键**（空载荷 `{}`；给出任何键 ⇒ `INVALID_FIELD`）；
+   * ③ 回该集合**全部** book 行（单次 1000 行护栏），**按 `id` 升序**，每行投影**恰 8 键**
+   * `id / name / isbn / cip / author_person_id / first_publish_year / created_at / updated_at`
+   * （审计键 `created_by` / `_id` 不外传）；④ 成功回包 `{ok, books, total}`（`books` / `total`
+   * 由 `index.js` 按 op 收窄透传）、失败恒**恰 3 键**；⑤ **只读**（零写入、不产 `plan`）、
+   * `reason` **零新增**、**不落 `PUBLIC_OPS`**（管理员 op，匿名面仍恰 4 成员）。
+   * 口径真源：`docs/book-catalog-ruling-2026-11-14.md` §3。
+   * @param {object} payload 載荷（封閉 0 鍵）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async listBooks(payload, identity, context) {
+    /* 延遲 require：與 `addSealFace` 同法（打破加載環；離線自檢不需要 SDK）。 */
+    const { listBooks: runList } = require('./books.js')
+    return runList(payload, identity, context)
+  },
+
+  /**
    * **待審勘誤行（全部用戶｜本單新增只讀 op｜`listPendingCorrectionsForAdmin`）**：回**跨用户**
    * 的勘误行 `{ok:true, op, rows, count}` —— **零写入**（不产出 `plan` ⇒ `index.js` 落盘分支
    * 不触发；不改写、不新增、不删任何库内行）。
@@ -8059,6 +8137,36 @@ const ADMIN_OPS = Object.freeze({
     /* ④ 行面剥除身份 / 手机号类键（`user_phone` 一类零出现；不透明 uid 原样保留）。 */
     const safeRows = rows.map((row) => stripImportIdentityFields(row))
     return { ok: true, op: 'listPendingCorrectionsForAdmin', rows: safeRows, count: safeRows.length }
+  },
+
+  /**
+   * **管理員「新建印譜」（`createBook`｜`/books` 印譜匯觀页建书入口）** —— 薄委派：业务逻辑
+   * 单点、载荷封闭键面与回包读数键面真源都在 `lib/books.js`（本处零第二套逻辑；`require`
+   * 延迟以打破加载环，照 `addSealFace` / `repairSealViewCount` 的写法）。**`ADMIN_OPS` 44 → 47**
+   * （本單三 op：`createBook` / `listBooks` / `setImageBook`）；**字典序位在 `createSealWithFaceDirect`
+   * 之前**。
+   *
+   * 硬口径（逐条；实现真源 ＝ `lib/books.js` 头注）：① **第一行即管理员门**（既有
+   * `adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋ **零读零写**）；② 载荷**封闭恰 5 键**
+   * `name / isbn / cip / author_person_id / first_publish_year`（未知键与身份类键 ⇒ `INVALID_FIELD`）；
+   * ③ `name` / `author_person_id` 必填（`author_person_id` **必须是已收录印人**，`readPersonRow`
+   * 同门 ⇒ 查不到即拒，不放行自由文本）；`isbn` / `cip` / `first_publish_year` 可空
+   * （年份 `1000`〜当年整数）；④ `book_id` **服务端发号、五位纯数字**，**复用既有发号单点**
+   * `issueCodeNumberAvoiding('book', isTaken)`（本單在既有发号器上**加一个 `'book'` 号别**，
+   * 不写第二套实现；`isTaken` 按 `xiai_books.id` 查重）；⑤ **幂等**：同 `name` ＋ 同
+   * `author_person_id` 已存在 ⇒ 回既有 `book_id`、不建第二行、不发号（additive 键 `skipped`）；
+   * ⑥ 成功回包 `{ok, book_id}`（幂等轮 `{ok, book_id, skipped}`），失败恒**恰 3 键**；
+   * `reason` **零新增**、**零直写影像面**、**不产 `plan`**。
+   * 口径真源：`docs/book-catalog-ruling-2026-11-14.md` §3。
+   * @param {object} payload 載荷（封閉 5 鍵）
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async createBook(payload, identity, context) {
+    /* 延遲 require：與 `addSealFace` 同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/books.js::createBook` 的**第一行**（零读零写地拒）。 */
+    const { createBook: runCreate } = require('./books.js')
+    return runCreate(payload, identity, context)
   },
 
   /**
@@ -10571,6 +10679,9 @@ module.exports = {
      只补登记到导出面（实现零改；`lib/addSealFace.js` 经延迟 `require('./ops.js')` 复用）。 */
   nextFaceIdOf,
   occupiedNosOf,
+  /* **按任意 id 读一行（`id` → `_id` 两形态；本單 `setImageBook` 复用）**：既有单点，只补登记到
+     导出面（实现零改；`lib/books.js` 经延迟 `require('./ops.js')` 复用，**不另立第二套行读**）。 */
+  readRowByAnyId,
   readSealRowByAnyId,
   readRegisteredImageByDigest,
   FACE_IMAGE_REGISTER_KINDS,
