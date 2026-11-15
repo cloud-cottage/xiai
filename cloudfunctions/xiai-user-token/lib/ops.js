@@ -47,7 +47,7 @@ const crypto = require('crypto')
 const { REASONS, ENV_NAMES, deny, normalizePhone, isPhoneLike, uidOf, readEnvId, isDocNotExistError, isCollectionNotExistError } = require('./config.js')
 /* **识别编码（sid / fid）纯函数单点**：`lib/codeId.js` 与前端 `src/utils/codeId.js`
    **逐字节相同**（`scripts/verify-code-id.mjs` 机械断言）；本文件只经它编 / 解码，不自写第二套。 */
-const codeId = require('./codeId.js')
+const codeId = require('./codeId.js'), log = require('./log.js') /* **P2-8**：console 打点一律经单点 `lib/log.js`（硬脱敏）；本行**净增 0 行**（白名单按 ops.js:957 行锚定）。 */
 /* 展示件轉碼器（本單新增；純 JS 零新依賴 —— node:zlib ＋ 自寫 CRC32）。 */
 const { tiffToPng } = require('./tiffToPng.js')
 /* **V6-a**：调用者**平台会话身份**判权（additive）。`IDENTITY_SOURCES` 是身份来源标记的
@@ -1963,7 +1963,7 @@ function imageOverlayRowOf(overlay, sha, key) {
      · `imageSeqsOf(stampId, kind)` ＝ **只读读取包装**：按 `(stamp_id, kind)` 读既有行
        （`limit: 1000` —— 组内唯一 ⇒ 必须看全，否则算小必撞）；**读抛错 ⇒ 按空集**
        （分配**不得阻断写入**；也**不把真故障伪装成「有行」** —— 空集就是空集，且
-       `console.warn` 如实记降级；真故障若最终仍撞键，由各写路径的既有兜底处理）。
+       `log.warn` 如实记降级；真故障若最终仍撞键，由各写路径的既有兜底处理）。
    调用点（三条写行路径，全部经此）：
      ① 印章导入采纳 ＋ 无审核直写（两者共用构造器 `buildSealAcceptanceFromImport`）；
      ② 直写 op 的 `stamp_id` 回填处（`buildDirectImageRow(face, at, seq)` 定稿）；
@@ -2024,7 +2024,7 @@ function nextImageSeqOf(stampId, kind, takenSeqs) {
 /**
  * 读同 `(stamp_id, kind)` 的既有影像行（**只读读取包装**；`limit: 1000` —— 组内唯一 ⇒
  * 必须看全，否则 `seq` 算小必撞）。
- * **读抛错 ⇒ 按空集**（分配不阻断写入；**不把真故障伪装成「有行」**）；降级如实 `console.warn`
+ * **读抛错 ⇒ 按空集**（分配不阻断写入；**不把真故障伪装成「有行」**）；降级如实 `log.warn`
  * （**不进回包** —— 回包键面冻结、零新增键）。
  * @returns {Promise<Array<object>>}
  */
@@ -2033,10 +2033,10 @@ async function imageSeqsOf(stampId, kind) {
     const rows = await readRows(COLLECTIONS.images, { stamp_id: text(stampId), kind: text(kind) }, { limit: 1000 })
     return Array.isArray(rows) ? rows : []
   } catch (error) {
-    console.warn(
-      '[xiai] imageSeqsOf 讀既有影像行失敗 ⇒ 按空集繼續（`seq` 從 1 起算；不阻斷寫入、不把真故障偽裝成「有行」）：',
-      error && error.message ? error.message : error
-    )
+    log.warn('imageSeqs.read.failed', {
+      message: '讀既有影像行失敗 ⇒ 按空集繼續（`seq` 從 1 起算；不阻斷寫入、不把真故障偽裝成「有行」）',
+      errorMessage: error && error.message ? error.message : error
+    })
     return []
   }
 }
@@ -3181,17 +3181,17 @@ const OPS = Object.freeze({
     /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
     const id = buildDirectImageRow({ image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind }, at).id
     /* ⑤ `seq` 单点取号：同 `id` 已有行且属同印 ⇒ 沿用（幂等、不消耗号）；否则经单点分配器。
-       读抛错 ⇒ 按「无既有行」继续（与 `imageSeqsOf` 同一降级口径：如实 `console.warn`）；
+       读抛错 ⇒ 按「无既有行」继续（与 `imageSeqsOf` 同一降级口径：如实 `log.warn`）；
        真故障若最终撞唯一键，由 `index.js` 如实报 `STORAGE_UNAVAILABLE`。 */
     let existing = null
     try {
       const hits = await readRows(COLLECTIONS.images, { id }, { limit: 1 })
       existing = Array.isArray(hits) && hits.length > 0 ? hits[0] : null
     } catch (error) {
-      console.warn(
-        '[xiai] registerCorrectionImage 讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）：',
-        error && error.message ? error.message : error
-      )
+      log.warn('registerCorrectionImage.existingRead.degraded', {
+        message: '讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）',
+        errorMessage: error && error.message ? error.message : error
+      })
     }
     const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
     const seq = sameSealExisting
@@ -8948,7 +8948,11 @@ const ADMIN_OPS = Object.freeze({
         })
       } catch (error) {
         /* **此处不下真伪结论**：回报失败 ≠ 没写成（平台侧可能已生效、响应丢失）⇒ 由下方读回定。 */
-        console.warn(`[xiai] repairImageStorage 單行補寫回報失敗（讀回定真偽；_id：${docId}；不中斷整批）：`, text(error && error.message))
+        log.warn('repairImageStorage.write.reportFailed', {
+          message: `單行補寫回報失敗（讀回定真偽；_id：${docId}；不中斷整批）`,
+          imageId: docId,
+          errorMessage: text(error && error.message)
+        })
       }
     }
     if (attemptedIds.length > 0) {
@@ -8965,7 +8969,11 @@ const ADMIN_OPS = Object.freeze({
           const hit = rowsOf(await resolveDb().collection(COLLECTIONS.images).doc(docId).get())
           if (hit.length > 0) stateById.set(docId, hit[0])
         } catch (error) {
-          console.warn(`[xiai] repairImageStorage 讀回補查失敗（_id：${docId}；不中斷整批）：`, text(error && error.message))
+          log.warn('repairImageStorage.readback.missed', {
+            message: `讀回補查失敗（_id：${docId}；不中斷整批）`,
+            imageId: docId,
+            errorMessage: text(error && error.message)
+          })
         }
       }
       for (const docId of attemptedIds) {
@@ -8974,7 +8982,11 @@ const ADMIN_OPS = Object.freeze({
           written += 1
         } else {
           failed.push({ _id: docId, reason: REASONS.STORAGE_UNAVAILABLE })
-          console.warn(`[xiai] repairImageStorage 單行補寫未生效（讀回非 server；_id：${docId}；不中斷整批）`)
+          log.warn('repairImageStorage.row.notApplied', {
+            message: `單行補寫未生效（讀回非 server；_id：${docId}；不中斷整批）`,
+            imageId: docId,
+            reason: REASONS.STORAGE_UNAVAILABLE
+          })
         }
       }
     }
@@ -9062,17 +9074,17 @@ const ADMIN_OPS = Object.freeze({
     /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
     const id = buildDirectImageRow({ image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind }, at).id
     /* ⑤ `seq` 单点取号：同 `id` 已有行且属同印 ⇒ 沿用（幂等、不消耗号）；否则经单点分配器。
-       读抛错 ⇒ 按「无既有行」继续（与 `imageSeqsOf` 同一降级口径：如实 `console.warn`、
+       读抛错 ⇒ 按「无既有行」继续（与 `imageSeqsOf` 同一降级口径：如实 `log.warn`、
        不把真故障伪装成「有行」；真故障若最终撞唯一键，由 `index.js` 如实报 `STORAGE_UNAVAILABLE`）。 */
     let existing = null
     try {
       const hits = await readRows(COLLECTIONS.images, { id }, { limit: 1 })
       existing = Array.isArray(hits) && hits.length > 0 ? hits[0] : null
     } catch (error) {
-      console.warn(
-        '[xiai] registerFaceImage 讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）：',
-        error && error.message ? error.message : error
-      )
+      log.warn('registerFaceImage.existingRead.degraded', {
+        message: '讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）',
+        errorMessage: error && error.message ? error.message : error
+      })
     }
     const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
     const seq = sameSealExisting
@@ -9344,10 +9356,10 @@ const ADMIN_OPS = Object.freeze({
         }
       }
     } catch (error) {
-      console.warn(
-        '[xiai] replaceFaceImage 讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）：',
-        error && error.message ? error.message : error
-      )
+      log.warn('replaceFaceImage.existingRead.degraded', {
+        message: '讀既有影像行失敗 ⇒ 按無既有行繼續（`seq` 交單點分配器取號）',
+        errorMessage: error && error.message ? error.message : error
+      })
     }
     /* ⑦′ **`seq` 单点取号**（同 `id` 已有行且属同印 ⇒ 沿用；**本 op 不自算号**）。 */
     const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)

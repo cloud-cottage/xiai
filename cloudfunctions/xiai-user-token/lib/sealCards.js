@@ -105,6 +105,8 @@
  */
 
 const { REASONS, deny, isCollectionNotExistError } = require('./config.js')
+/* **P2-8 结构化日志**：打点一律走 `lib/log.js`（单点硬脱敏；本仓别处不再直呼 console）。 */
+const log = require('./log.js')
 /* **CARD 主库客户端**：人物读面（`listPersonCards` / `getPersonCard`）与两个匹配面
    （`suggestAuthors` / `repairAuthorPersonId`）的**首选源**。本文件只调它的读写封装，
    零集合句柄、零域名（见 `lib/cardApi.js` 头注）。 */
@@ -729,7 +731,10 @@ async function readSortedOffsetWindow(db, collection, options) {
   } catch (error) {
     /* 主路不可用（假体 / SDK 不支持多字段 `orderBy` ＋ `skip`）⇒ 落内存退路。
        退路自身再失败会原样上抛 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`（不伪装空页）。 */
-    console.warn('[xiai] 印章頁有序窗口主路不可用（改走內存退路）：', text(error && error.message))
+    log.warn('sealCards.orderedWindow.degraded', {
+      message: '印章頁有序窗口主路不可用（改走內存退路）',
+      errorMessage: text(error && error.message)
+    })
   }
   const rows = await readAllBounded(db, collection, CARD_FALLBACK_SCAN_CAP)
   return sortedOffsetWindowOf(rows, keys, skip, limit, match)
@@ -1495,10 +1500,11 @@ async function repairPrimaryFace(payload, identity, context) {
         ]
       })
     } catch (error) {
-      console.warn(
-        `[xiai] repairPrimaryFace 單行寫回報失敗（讀回定真偽；面行：${target.rowKey}；不中斷整批）：`,
-        text(error && error.message)
-      )
+      log.warn('repairPrimaryFace.write.reportFailed', {
+        message: `單行寫回報失敗（讀回定真偽；面行：${target.rowKey}；不中斷整批）`,
+        faceId: target.rowKey,
+        errorMessage: text(error && error.message)
+      })
     }
   }
   let written = 0
@@ -1514,11 +1520,17 @@ async function repairPrimaryFace(payload, identity, context) {
     for (const target of attempted) {
       const row = stateByKey.get(target.rowKey)
       if (row && row.is_primary === true) written += 1
-      else console.warn(`[xiai] repairPrimaryFace 單行未生效（讀回非 is_primary:true；面行：${target.rowKey}）`)
+      else log.warn('repairPrimaryFace.row.notApplied', {
+        message: `單行未生效（讀回非 is_primary:true；面行：${target.rowKey}）`,
+        faceId: target.rowKey
+      })
     }
   } catch (error) {
     /* 读回失败 ⇒ **不敢称写入**（宁报 0 不虚报）。 */
-    console.warn('[xiai] repairPrimaryFace 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    log.warn('repairPrimaryFace.readback.failed', {
+      message: '讀回失敗（本輪 written 按 0 如實上報）',
+      errorMessage: text(error && error.message)
+    })
     written = 0
   }
   /* 回包恰 6 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`（不是最后一条被写的）。 */
@@ -1661,10 +1673,11 @@ async function repairSealFaceCount(payload, identity, context) {
         ]
       })
     } catch (error) {
-      console.warn(
-        `[xiai] repairSealFaceCount 單章寫回報失敗（讀回定真偽；印章：${target.rowKey}；不中斷整批）：`,
-        text(error && error.message)
-      )
+      log.warn('repairSealFaceCount.write.reportFailed', {
+        message: `單章寫回報失敗（讀回定真偽；印章：${target.rowKey}；不中斷整批）`,
+        sealId: target.rowKey,
+        errorMessage: text(error && error.message)
+      })
     }
   }
   /* ⑦ 读数**以整窗读回为准**（persist 回报 ≠ 行的终态）：同窗重读，只数「`face_count` 已等于
@@ -1682,10 +1695,16 @@ async function repairSealFaceCount(payload, identity, context) {
     for (const target of targets) {
       const row = stateByKey.get(target.rowKey)
       if (row && Number(row.face_count) === target.actual) written += 1
-      else console.warn(`[xiai] repairSealFaceCount 單章未生效（讀回 face_count 不符實況；印章：${target.rowKey}）`)
+      else log.warn('repairSealFaceCount.row.notApplied', {
+        message: `單章未生效（讀回 face_count 不符實況；印章：${target.rowKey}）`,
+        sealId: target.rowKey
+      })
     }
   } catch (error) {
-    console.warn('[xiai] repairSealFaceCount 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    log.warn('repairSealFaceCount.readback.failed', {
+      message: '讀回失敗（本輪 written 按 0 如實上報）',
+      errorMessage: text(error && error.message)
+    })
     written = 0
   }
   /* 回包恒恰 5 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`。 */
@@ -1803,10 +1822,11 @@ async function repairSealViewCount(payload, identity, context) {
         ]
       })
     } catch (error) {
-      console.warn(
-        `[xiai] repairSealViewCount 單章寫回報失敗（讀回定真偽；印章：${target.rowKey}；不中斷整批）：`,
-        text(error && error.message)
-      )
+      log.warn('repairSealViewCount.write.reportFailed', {
+        message: `單章寫回報失敗（讀回定真偽；印章：${target.rowKey}；不中斷整批）`,
+        sealId: target.rowKey,
+        errorMessage: text(error && error.message)
+      })
     }
   }
   /* ⑥ 读数**以整窗读回为准**（persist 回报 ≠ 行的终态）：同窗重读，只数「`view_count` 已落到
@@ -1824,10 +1844,16 @@ async function repairSealViewCount(payload, identity, context) {
     for (const target of targets) {
       const row = stateByKey.get(target.rowKey)
       if (row && Number(row.view_count) === REPAIR_SEAL_VIEW_COUNT_FILL_VALUE) written += 1
-      else console.warn(`[xiai] repairSealViewCount 單章未生效（讀回 view_count 不符回填值；印章：${target.rowKey}）`)
+      else log.warn('repairSealViewCount.row.notApplied', {
+        message: `單章未生效（讀回 view_count 不符回填值；印章：${target.rowKey}）`,
+        sealId: target.rowKey
+      })
     }
   } catch (error) {
-    console.warn('[xiai] repairSealViewCount 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    log.warn('repairSealViewCount.readback.failed', {
+      message: '讀回失敗（本輪 written 按 0 如實上報）',
+      errorMessage: text(error && error.message)
+    })
     written = 0
   }
   /* 回包恒恰 5 键（`dry_run` 与真写同形）；`next_cursor` ＝ 本窗口最后一条被扫描行的 `_id`。 */
@@ -2114,10 +2140,11 @@ async function repairAuthorPersonId(payload, identity, context) {
       })
     } catch (error) {
       /* **此处不下真伪结论**：回报失败 ≠ 没写成 ⇒ 由下方读回定。 */
-      console.warn(
-        `[xiai] repairAuthorPersonId 單行寫回報失敗（讀回定真偽；面行：${target.rowId}；不中斷整批）：`,
-        text(error && error.message)
-      )
+      log.warn('repairAuthorPersonId.write.reportFailed', {
+        message: `單行寫回報失敗（讀回定真偽；面行：${target.rowId}；不中斷整批）`,
+        faceId: target.rowId,
+        errorMessage: text(error && error.message)
+      })
     }
   }
   let written = 0
@@ -2150,16 +2177,27 @@ async function repairAuthorPersonId(payload, identity, context) {
         writtenTargets.push(target)
       } else {
         failed.push({ _id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
-        console.warn(`[xiai] repairAuthorPersonId 單行未生效（讀回不符回填終態；面行：${target.rowId}）`)
+        log.warn('repairAuthorPersonId.row.notApplied', {
+          message: `單行未生效（讀回不符回填終態；面行：${target.rowId}）`,
+          faceId: target.rowId,
+          reason: REASONS.STORAGE_UNAVAILABLE
+        })
       }
     }
   } catch (error) {
     /* 读回失败 ⇒ **不敢称写入**（宁报 0 不虚报；已尝试行逐条如实进 `failed` ＋ 告警）。 */
-    console.warn('[xiai] repairAuthorPersonId 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    log.warn('repairAuthorPersonId.readback.failed', {
+      message: '讀回失敗（本輪 written 按 0 如實上報）',
+      errorMessage: text(error && error.message)
+    })
     written = 0
     for (const target of attempted) {
       failed.push({ _id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
-      console.warn(`[xiai] repairAuthorPersonId 未確認生效（讀回不可得；面行：${target.rowId}）`)
+      log.warn('repairAuthorPersonId.row.unconfirmed', {
+        message: `未確認生效（讀回不可得；面行：${target.rowId}）`,
+        faceId: target.rowId,
+        reason: REASONS.STORAGE_UNAVAILABLE
+      })
     }
   }
   /* ⑦ 印章级补条（**幂等**）：只补**读回确认已回填**的面；同 (印章, 印人, `kind`) 已有 ⇒ 零新增。 */
@@ -2219,7 +2257,11 @@ async function prefetchSealLinkRowsOf(sealIds) {
             table.set(sealId, [])
             return
           }
-          console.warn(`[xiai] repairAuthorPersonId 補條預查失敗（印章：${sealId}）：`, text(error && error.message))
+          log.warn('repairAuthorPersonId.linkPrefetch.failed', {
+            message: `補條預查失敗（印章：${sealId}）`,
+            sealId,
+            errorMessage: text(error && error.message)
+          })
           table.set(sealId, null)
         }
       })
@@ -2253,7 +2295,11 @@ async function ensureSealLinkOf(db, target, at, prefetched) {
       existing = await ops.readRows(ops.COLLECTIONS.sealLinks, { source_seal_id: target.sealId }, { limit: 500 })
     } catch (error) {
       if (!isCollectionNotExistError(error)) {
-        console.warn(`[xiai] repairAuthorPersonId 補條預查失敗（印章：${target.sealId}）：`, text(error && error.message))
+        log.warn('repairAuthorPersonId.linkPrefetch.failed', {
+          message: `補條預查失敗（印章：${target.sealId}）`,
+          sealId: target.sealId,
+          errorMessage: text(error && error.message)
+        })
         return
       }
       /* 集合尚未创建 ⇒ 视作零行（幂等预查语义：尚无行 = 尚无重复）。 */
@@ -2283,10 +2329,12 @@ async function ensureSealLinkOf(db, target, at, prefetched) {
        后续目标 ⇒ 走上面 `duplicate` 早退、零重复写（幂等判据不变）。 */
     existing.push({ ref_id: target.personId, kind: authorMatch.SEAL_LINK_KIND })
   } catch (error) {
-    console.warn(
-      `[xiai] repairAuthorPersonId 補條失敗（印章：${target.sealId}、印人：${target.personId}；不中斷整批）：`,
-      text(error && error.message)
-    )
+    log.warn('repairAuthorPersonId.link.failed', {
+      message: `補條失敗（印章：${target.sealId}、印人：${target.personId}；不中斷整批）`,
+      sealId: target.sealId,
+      personId: target.personId,
+      errorMessage: text(error && error.message)
+    })
   }
 }
 

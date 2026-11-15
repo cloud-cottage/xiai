@@ -78,6 +78,8 @@
  */
 
 const { REASONS, deny } = require('./config.js')
+/* **P2-8 结构化日志**：打点一律走 `lib/log.js`（单点硬脱敏；本仓别处不再直呼 console）。 */
+const log = require('./log.js')
 
 /** 延迟取 `lib/ops.js`（打破加载环；离线自检不需要 SDK）—— 与 `lib/addSealFace.js` 同法。 */
 function opsOf() {
@@ -385,10 +387,13 @@ async function migrateEdgeFaces(payload, identity, context) {
         ]
       })
     } catch (error) {
-      console.warn(
-        `[xiai] migrateEdgeFaces 面行遷移失敗（印章：${target.sealId}；面行：${target.rowId}；不中斷整批）：`,
-        text(error && error.message)
-      )
+      log.warn('migrateEdgeFaces.faceRow.failed', {
+        message: `面行遷移失敗（印章：${target.sealId}；面行：${target.rowId}；不中斷整批）`,
+        sealId: target.sealId,
+        faceId: target.rowId,
+        reason: REASONS.STORAGE_UNAVAILABLE,
+        errorMessage: text(error && error.message)
+      })
       failed.push({ _id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
       continue
     }
@@ -396,10 +401,12 @@ async function migrateEdgeFaces(payload, identity, context) {
       await rewriteFaceCountOfSeal(ops, target.sealId, await sealRowOf(target.sealId))
     } catch (error) {
       /* 面行已迁、章行计数未落 ⇒ **如实进 `failed`**（不谎称成功）。 */
-      console.warn(
-        `[xiai] migrateEdgeFaces 章行 face_count 重算失敗（印章：${target.sealId}；面行：${target.rowId}）：`,
-        text(error && error.message)
-      )
+      log.warn('migrateEdgeFaces.sealFaceCount.failed', {
+        message: `章行 face_count 重算失敗（印章：${target.sealId}；面行：${target.rowId}）`,
+        sealId: target.sealId,
+        faceId: target.rowId,
+        errorMessage: text(error && error.message)
+      })
       failed.push({ _id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
     }
   }
@@ -422,14 +429,21 @@ async function migrateEdgeFaces(payload, identity, context) {
         written += 1
         continue
       }
-      console.warn(`[xiai] migrateEdgeFaces 單行未生效（讀回不符實況；面行：${target.rowId}）`)
+      log.warn('migrateEdgeFaces.row.notApplied', {
+        message: `單行未生效（讀回不符實況；面行：${target.rowId}）`,
+        faceId: target.rowId,
+        reason: REASONS.STORAGE_UNAVAILABLE
+      })
       if (!failedIds.has(target.rowId)) {
         failedIds.add(target.rowId)
         failed.push({ _id: target.rowId, reason: REASONS.STORAGE_UNAVAILABLE })
       }
     }
   } catch (error) {
-    console.warn('[xiai] migrateEdgeFaces 讀回失敗（本輪 written 按 0 如實上報）：', text(error && error.message))
+    log.warn('migrateEdgeFaces.readback.failed', {
+      message: '讀回失敗（本輪 written 按 0 如實上報）',
+      errorMessage: text(error && error.message)
+    })
     written = 0
   }
   /* 回包恒恰 7 键（`dry_run` 与真写同形）。 */

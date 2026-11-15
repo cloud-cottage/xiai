@@ -44,6 +44,8 @@ const {
   readConfig
 } = require('./lib/config.js')
 const { TOKEN_DETAILS, issueToken, verifyToken } = require('./lib/token.js')
+/* **P2-8 结构化日志**：打点一律走 `lib/log.js`（单点硬脱敏；本仓别处不再直呼 console）。 */
+const log = require('./lib/log.js')
 const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, writeStepFingerprintMessageOf, REPAIR_IMAGE_STORAGE_READOUT_KEYS } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
@@ -174,10 +176,15 @@ function pickAiEnhanceReadouts(op, opResult) {
   return picked
 }
 
-/** 结构化审计日志（**不含令牌原文 / 不含密钥 / 不含手机号原文**）。 */
+/**
+ * 结构化审计日志（**不含令牌原文 / 不含密钥 / 不含手机号原文**）。
+ * **P2-8**：落点改为单点 `lib/log.js`（`log.info('audit', record)`）—— 记录面**逐键保留**
+ * （只增 `level` / `event` 两个非敏感键），敏感键（`phone` / `token` / `secret` … ）由单点
+ * 硬黑名单替成 `<redacted>`；条数不变（一次调用仍恰一行）。
+ */
 function audit(record) {
   try {
-    console.log(JSON.stringify(Object.assign({ tag: 'xiai-user-token' }, record)))
+    log.info('audit', record)
   } catch {
     /* 日志失败不得影响判定结果 */
   }
@@ -383,6 +390,17 @@ async function handleVerify(event, config, callContext) {
   /* `context`：**管理员白名单手机号**（唯一真源 ＝ 环境变量 `XIAI_ADMIN_PHONE`）＋ 服务端时钟。
      用户写面 op 忽略它；管理员写面 op 以它作**身份判据**（缺 / 空 ⇒ 结构化拒绝）。 */
   const context = Object.freeze({ adminPhone: config.adminPhone, nowSeconds: now })
+  /* **P2-8 耗时埋点**：op 分发处起表；**每次分发恰一行** —— `durationMs > LOG_SLOW_MS(3000)`
+     ⇒ `log.warn('op.slow', …)`，否则 `log.info('op.done', …)`。字段只有非敏感键
+     （`op` / `durationMs` / `ok` / `reason`）；**只观测、不改回包**（回包键面逐字不变）。 */
+  const opStartedAt = Date.now()
+  const logOpDone = (ok, reason) => {
+    const durationMs = Date.now() - opStartedAt
+    const fields = { op, durationMs, ok }
+    if (reason !== undefined && reason !== null && reason !== '') fields.reason = reason
+    if (durationMs > log.LOG_SLOW_MS) log.warn('op.slow', fields)
+    else log.info('op.done', fields)
+  }
   let opResult = null
   try {
     opResult = userValidator
@@ -399,6 +417,7 @@ async function handleVerify(event, config, callContext) {
       detail: (error && error.message) || 'unknown',
       serverNow: now
     })
+    logOpDone(false, REASONS.STORAGE_UNAVAILABLE)
     return deny(
       REASONS.STORAGE_UNAVAILABLE,
       `用戶寫入服務的權威存儲不可用；本次零寫入。（診斷：${errorFingerprint(error)}）`
@@ -406,6 +425,7 @@ async function handleVerify(event, config, callContext) {
   }
   if (!opResult.ok) {
     audit({ action: 'verify', outcome: opResult.reason, op, uid: identity.uid, serverNow: now })
+    logOpDone(false, opResult.reason)
     return opResult
   }
   /* ⑤ 落盘（**全部判定之后**；失败 ⇒ `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。
@@ -493,6 +513,8 @@ async function handleVerify(event, config, callContext) {
     ver: renewed ? renewed.claims.ver : config.version,
     serverNow: now
   })
+  /* **P2-8**：op 成功收尾 ⇒ 恰一行耗时日志（慢则 `op.slow`）。 */
+  logOpDone(true)
   const response = {
     ok: true,
     op,
@@ -975,14 +997,32 @@ return response
  *   `{ok, rows, next_cursor, has_more, total}`；`listPersonCards` 恰 4 / 降级 5 键；
  *   `getPersonCard` 恰 2 / 降级 3 键）
  */
+/**
+ * **公开面耗时埋点（P2-8 扩面｜父级补）**：与 `handleVerify` 的 `op.done` / `op.slow` **同口径、同阈值**
+ * （`log.LOG_SLOW_MS`）；`kind` 区分读/写面（`public` / `public-write`），`op` 前缀化以免与令牌面同名混淆。
+ * **只观测、零回包改动**；字段只含非敏感键（`op` / `durationMs` / `ok` / `reason`）。
+ * 为什么必须补：P99 的目标面就是首页 `listSealCards` 这条公开读链 —— 不埋点就无法定 P2-7 的超时/内存。
+ */
+function logPublicDone(kind, op, startedAt, ok, reason) {
+  const durationMs = Date.now() - startedAt
+  const fields = { op: `${kind}:${op}`, durationMs, ok }
+  if (reason !== undefined && reason !== null && reason !== '') fields.reason = reason
+  if (durationMs > log.LOG_SLOW_MS) log.warn('op.slow', fields)
+  else log.info('op.done', fields)
+}
+
 async function handlePublic(event) {
   const op = typeof event.op === 'string' ? event.op.trim() : ''
+  const publicStartedAt = Date.now()
   if (!Object.prototype.hasOwnProperty.call(PUBLIC_OPS, op)) {
     return deny(REASONS.FORBIDDEN, `未知的公開讀取操作（op）：${op || '（空）'}；本次零讀取。`)
   }
   try {
-    return await PUBLIC_OPS[op](event.payload)
+    const publicResult = await PUBLIC_OPS[op](event.payload)
+    logPublicDone('public', op, publicStartedAt, Boolean(publicResult && publicResult.ok !== false))
+    return publicResult
   } catch (error) {
+    logPublicDone('public', op, publicStartedAt, false, REASONS.STORAGE_UNAVAILABLE)
     audit({
       action: 'public',
       outcome: REASONS.STORAGE_UNAVAILABLE,
@@ -1016,12 +1056,16 @@ async function handlePublic(event) {
  */
 async function handlePublicWrite(event) {
   const op = typeof event.op === 'string' ? event.op.trim() : ''
+  const publicWriteStartedAt = Date.now()
   if (!Object.prototype.hasOwnProperty.call(PUBLIC_WRITE_OPS, op)) {
     return deny(REASONS.FORBIDDEN, `未知的公開寫入操作（op）：${op || '（空）'}；本次零寫入。`)
   }
   try {
-    return await PUBLIC_WRITE_OPS[op](event.payload)
+    const publicWriteResult = await PUBLIC_WRITE_OPS[op](event.payload)
+    logPublicDone('public-write', op, publicWriteStartedAt, Boolean(publicWriteResult && publicWriteResult.ok !== false))
+    return publicWriteResult
   } catch (error) {
+    logPublicDone('public-write', op, publicWriteStartedAt, false, REASONS.STORAGE_UNAVAILABLE)
     audit({
       action: 'public-write',
       outcome: REASONS.STORAGE_UNAVAILABLE,

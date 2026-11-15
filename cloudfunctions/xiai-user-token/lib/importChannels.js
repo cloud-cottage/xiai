@@ -51,6 +51,8 @@
 
 const crypto = require('crypto')
 const { REASONS, deny, isCollectionNotExistError } = require('./config.js')
+/* **P2-8 结构化日志**：打点一律走 `lib/log.js`（单点硬脱敏；本仓别处不再直呼 console）。 */
+const log = require('./log.js')
 /* 实现单点在 `lib/ops.js`（读点 / 写点 / 对象字节回读 / 集合登记表 / 纯函数）；
    `lib/ops.js` 对本文件的依赖是**延迟 require**（薄委派内）⇒ 加载期无环。 */
 const ops = require('./ops.js')
@@ -151,10 +153,12 @@ async function readRowsOrEmpty(collection, match, label) {
     if (isCollectionNotExistError(error)) {
       if (!warnedMissingCollections.has(collection)) {
         warnedMissingCollections.add(collection)
-        console.warn(
-          `[xiai] ${label} 讀取時集合不存在 ⇒ 按零行繼續（冪等預查語義：尚無行 = 尚無重複）：`,
-          ops.text(error && error.message)
-        )
+        log.warn('importChannels.collectionMissing', {
+          message: `${label} 讀取時集合不存在 ⇒ 按零行繼續（冪等預查語義：尚無行 = 尚無重複）`,
+          label,
+          collection,
+          errorMessage: ops.text(error && error.message)
+        })
       }
       return []
     }
@@ -324,17 +328,21 @@ async function importFaceImages(payload, identity, context) {
         const bytes = await ops.readArtifactBytes(row.storage_key)
         if (!bytes || bytes.length !== row.bytes) {
           failed.push(rowFailure({ sha256: digest }, REASONS.INVALID_VALUE))
-          console.warn(
-            `[xiai] importFaceImages 單條字節數不符（sha256：${digest.slice(0, 12)}…）⇒ 該條不入册（不中斷整批）。`
-          )
+          log.warn('importFaceImages.bytesMismatch', {
+            message: `單條字節數不符（sha256：${digest.slice(0, 12)}…）⇒ 該條不入册（不中斷整批）`,
+            sha256: digest,
+            reason: REASONS.INVALID_VALUE
+          })
           continue
         }
         const actual = crypto.createHash('sha256').update(bytes).digest('hex')
         if (actual !== digest) {
           failed.push(rowFailure({ sha256: digest }, REASONS.INVALID_VALUE))
-          console.warn(
-            `[xiai] importFaceImages 單條摘要不符（聲稱 ${digest.slice(0, 12)}… / 實算 ${actual.slice(0, 12)}…）⇒ 該條不入册（不中斷整批）。`
-          )
+          log.warn('importFaceImages.digestMismatch', {
+            message: `單條摘要不符（聲稱 ${digest.slice(0, 12)}… / 實算 ${actual.slice(0, 12)}…）⇒ 該條不入册（不中斷整批）`,
+            sha256: digest,
+            reason: REASONS.INVALID_VALUE
+          })
           continue
         }
         /* 内容寻址行：`id` 取自既有唯一规则点（`buildDirectImageRow`）⇒ 同图恒同 `_id`。
@@ -372,7 +380,10 @@ async function importFaceImages(payload, identity, context) {
         written += 1
       } catch (error) {
         failed.push(rowFailure({ sha256: reportSha }, REASONS.STORAGE_UNAVAILABLE))
-        console.warn('[xiai] importFaceImages 單條失敗（不中斷整批）：', ops.text(error && error.message))
+        log.warn('importFaceImages.row.failed', {
+          message: '單條失敗（不中斷整批）',
+          errorMessage: ops.text(error && error.message)
+        })
       }
     }
     return { ok: true, written, skipped, failed }
@@ -518,7 +529,10 @@ async function importRelations(payload, identity, context) {
         if (isUnresolved) unresolved += 1
       } catch (error) {
         failed.push(rowFailure({ ref_id: reportRef }, REASONS.STORAGE_UNAVAILABLE))
-        console.warn('[xiai] importRelations 單條失敗（不中斷整批）：', ops.text(error && error.message))
+        log.warn('importRelations.row.failed', {
+          message: '單條失敗（不中斷整批）',
+          errorMessage: ops.text(error && error.message)
+        })
       }
     }
     return { ok: true, written, skipped, unresolved, failed }
