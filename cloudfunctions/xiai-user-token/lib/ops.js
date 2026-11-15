@@ -4373,11 +4373,14 @@ async function countRemainingImportPending(op, batchId) {
 function nextPersonCodeOf(persons) {
   const rows = Array.isArray(persons) ? persons : []
   let max = 0
+  /* **2026-11-15 加固（生产事故第二道锁）**：号既可能落在 `code`、也可能只在 `id`
+     （历史行两者不同步）⇒ **两键都参与取最大号与占用集**，否则会重发已占用的号。 */
+  const codeOf = (item) => text(item && item.code) || text(item && item.id)
   rows.forEach((item) => {
-    const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(text(item && item.code))
+    const matched = new RegExp(`^${PERSON_CODE_PREFIX}(\\d{9})$`).exec(codeOf(item))
     if (matched) max = Math.max(max, Number(matched[1]))
   })
-  const taken = new Set(rows.map((item) => text(item && item.code)))
+  const taken = new Set(rows.map((item) => codeOf(item)).filter((code) => code !== ''))
   let index = max + 1
   while (taken.has(`${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`)) index += 1
   return `${PERSON_CODE_PREFIX}${String(index).padStart(9, '0')}`
@@ -7260,7 +7263,13 @@ const ADMIN_OPS = Object.freeze({
     ]
     let person = null
     if (accepted && !row.target_person_id) {
-      const persons = rowsOfReply(await resolveDb().collection(COLLECTIONS.persons).get())
+      /* **2026-11-15 修（生产事故根因）**：原为无 `limit` 的 `.get()` ⇒ SDK **默认只回前 100 行**
+         ⇒ `nextPersonCodeOf` 把最大号算成 100 ⇒ **重发已占用的 `PR000000101`** ⇒ 本地 `set` 覆盖原行、
+         CARD 按 `sources[xiai=PR…]` 去重命中既有 `100000073` ⇒ **把「陳巨來」改名成「劉垚」**。
+         现改为翻页取全；取不全 ⇒ 结构化拒绝（发号属判定类，宁可拒也不能重号）。 */
+      const personsScan = await readAllGuarded(COLLECTIONS.persons)
+      if (personsScan.truncated) return deny(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+      const persons = personsScan.rows
       const existing = persons.find((item) => text(item && item.proposal_id) === proposalId)
       if (existing) {
         person = existing
@@ -7396,8 +7405,18 @@ const ADMIN_OPS = Object.freeze({
     const skipped = skippedSeed.slice()
     const failed = []
     let personsCache = null
+    let personsScanTruncated = false
     const personsOf = async () => {
-      if (personsCache === null) personsCache = rowsOfReply(await resolveDb().collection(COLLECTIONS.persons).get())
+      if (personsCache === null) {
+        /* **同型缺陷同批修**：无 `limit` 的 `.get()` 只回前 100 行 ⇒ 发号会重号。翻页取全 + 取不全即拒。 */
+        const scan = await readAllGuarded(COLLECTIONS.persons)
+        if (scan.truncated) {
+          personsCache = []
+          personsScanTruncated = true
+          return personsCache
+        }
+        personsCache = scan.rows
+      }
       return personsCache
     }
     for (const row of targets) {
@@ -7422,6 +7441,7 @@ const ADMIN_OPS = Object.freeze({
         continue
       }
       const persons = await personsOf()
+      if (personsScanTruncated) return deny(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
       /* **I-1 顺序（本单硬口径）**：**先落正式行**（按幂等键去重 ⇒ 重跑不产生重复行），
          **后翻导入行状态**（`expectAtLeast:1`）—— 见下方 `writes` 压栈顺序。 */
       const existing = persons.find((item) => text(item && item.source_person_id) === sourceId)
@@ -9821,7 +9841,10 @@ const ADMIN_OPS = Object.freeze({
         )
       }
       if (personsForCode === null) {
-        personsForCode = rowsOfReply(await resolveDb().collection(COLLECTIONS.persons).get())
+        /* **同型缺陷同批修**：无 `limit` 的 `.get()` 只回前 100 行 ⇒ 指针行发号会重号。 */
+        const scan = await readAllGuarded(COLLECTIONS.persons)
+        if (scan.truncated) return deny(REASONS.STORAGE_UNAVAILABLE, TRUNCATED_SCAN_MESSAGE)
+        personsForCode = scan.rows
       }
       const newCode = nextPersonCodeOf(personsForCode)
       const pointerDoc = buildCardRefPersonDoc(ref, newCode, identity, at)
