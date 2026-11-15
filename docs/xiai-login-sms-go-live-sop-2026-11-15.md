@@ -44,18 +44,13 @@ tcb fn code update xiai-admin-token -e liwu-cny1313-d1gb2fukyb7cb19bb
 
 ---
 
-## 第 3 步｜部署前端（约 100 字）
+## 第 3 步｜部署前端（自动，约 100 字）
 
-紧接着后端执行（**与第 2 步在同一个低峰窗口内完成，中间不要停**）：
+本项目的前端由 **Vercel × GitHub 集成自动部署**：只要代码推到 `cloud-cottage/xiai` 的 `main`，Vercel 项目 `xiai` 就会自动构建上线（本次推送后约 1 分钟生效，已在生产验证：产物含 `platformAccessToken`/`getVerification`，`729341` 零命中）。
 
-```bash
-cd /Users/kevin/bistro/xiai
-npm run build && vercel --prod
-```
+**不要用本机的 `vercel --prod`**：本机 CLI 登录的账号是 `coldrinx-7076`，看不到 `xiai` 这个 team 项目，会报 "Could not retrieve Project Settings"。手工部署请用 Kevin 本人的 Vercel 账号，或直接在 Vercel 控制台点 Redeploy。
 
-Vercel 项目名 `xiai`（已 link 到 team 账户，直接跑即可）。约 1–2 分钟出 Production URL。
-
-**为什么不能只上一边**：新后端只认 `{phone, platformAccessToken}`，旧前端还发 `{phone, code}` ⇒ 登录全断；反之新前端打到旧后端也一样全断。所以两条命令必须连着跑，中断窗口内暂时无法登录是正常现象。
+**为什么不能只上一边**：新后端只认 `{phone, platformAccessToken}`，旧前端还发 `{phone, code}` ⇒ 登录全断；反之亦然。所以「推 GitHub」与「第 2 步」必须在同一窗口内完成，这几十秒内登不上是正常现象。
 
 ---
 
