@@ -129,7 +129,7 @@ function bookLabel(bookId) {
 
 /* ------------------------------ ② 新建表單 ------------------------------ */
 const currentYear = new Date().getFullYear()
-const form = ref({ name: '', author_person_id: '', isbn: '', cip: '', first_publish_year: '' })
+const form = ref({ name: '', author_person_id: '', isbn: '', cip: '', publisher: '', first_publish_year: '' })
 const submitting = ref(false)
 const formError = ref('')
 const createFeedback = ref('')
@@ -172,7 +172,7 @@ function formProblemOf() {
 }
 
 function resetForm() {
-  form.value = { name: '', author_person_id: '', isbn: '', cip: '', first_publish_year: '' }
+  form.value = { name: '', author_person_id: '', isbn: '', cip: '', publisher: '', first_publish_year: '' }
   authorFilter.value = { query: '', count: 0 }
 }
 
@@ -199,6 +199,7 @@ async function submitBook() {
     name: String(form.value.name || '').trim(),
     isbn: String(form.value.isbn || '').trim(),
     cip: String(form.value.cip || '').trim(),
+    publisher: String(form.value.publisher || '').trim(),
     author_person_id: String(form.value.author_person_id || '').trim(),
     first_publish_year: yearText ? Number(yearText) : null
   }
@@ -469,6 +470,7 @@ watch(
                 <th>書名</th>
                 <th>作者</th>
                 <th>首次出版年</th>
+                <th>出版社</th>
                 <th>ISBN</th>
                 <th>CIP</th>
                 <th v-if="bookFieldPresent">關聯影像數</th>
@@ -480,6 +482,7 @@ watch(
                 <td>{{ book.name }}</td>
                 <td>{{ authorNameOf(book) }}</td>
                 <td>{{ book.first_publish_year || '未著錄' }}</td>
+                <td>{{ book.publisher || '未著錄' }}</td>
                 <td>{{ book.isbn || '未著錄' }}</td>
                 <td>{{ book.cip || '未著錄' }}</td>
                 <td v-if="bookFieldPresent">{{ imageCountOf(book) }}</td>
@@ -537,6 +540,8 @@ watch(
             </template>
           </div>
           <div class="field">
+            <label for="book-publisher">出版社（可空）</label>
+            <input id="book-publisher" v-model="form.publisher" type="text" maxlength="200" placeholder="可空；如 上海書畫出版社" />
             <label for="book-isbn">ISBN（可空）</label>
             <input id="book-isbn" v-model="form.isbn" type="text" maxlength="40" placeholder="可空；非空時原樣保留（連字符不剝）" />
           </div>

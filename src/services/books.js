@@ -62,6 +62,8 @@ export const BOOK_ROW_KEYS = Object.freeze([
   'name',
   'isbn',
   'cip',
+  /* **2026-11-15**：【出版社】非必填（服务端同名键，行投影同步加一）。 */
+  'publisher',
   'author_person_id',
   'first_publish_year',
   'created_at',
@@ -124,6 +126,11 @@ export async function createBook(input) {
   }
   const isbn = text(source.isbn)
   const cip = text(source.cip)
+  /* 出版社：非必填；长度上界与书名同级（200），与编号类 64 分开判。 */
+  const publisher = text(source.publisher)
+  if (publisher.length > BOOK_NAME_MAX_LENGTH) {
+    return denial('INVALID_VALUE', `出版社不得超過 ${BOOK_NAME_MAX_LENGTH} 字；本次零寫入。`)
+  }
   for (const [key, value] of [
     ['isbn', isbn],
     ['cip', cip]
@@ -148,11 +155,12 @@ export async function createBook(input) {
     firstPublishYear = parsed
   }
   if (isLocalDevMode()) return localDevDenial('新建印譜')
-  /* **载荷封闭恰 5 键**（逐字取服务端 `BOOK_CREATE_ALLOWED_KEYS`；身份类键一律不递）。 */
+  /* **载荷封闭恰 6 键**（逐字取服务端 `BOOK_CREATE_ALLOWED_KEYS`；身份类键一律不递）。 */
   const payload = {
     name,
     isbn,
     cip,
+    publisher,
     author_person_id: authorPersonId,
     first_publish_year: firstPublishYear
   }

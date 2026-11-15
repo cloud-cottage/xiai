@@ -543,7 +543,7 @@ async function probeList(mod) {
 /* =============================== 静态判据 =============================== */
 const ADMIN_ACTIONS = 12
 const REASON_COUNT = 13
-const BOOK_ROW_KEY_COUNT = 8
+const BOOK_ROW_KEY_COUNT = 9
 
 function judgeSidebar(raw) {
   const clean = stripComments(raw, { line: true })
@@ -737,8 +737,8 @@ check(
 
 const payloadGate = await probePayloadGate(booksModule0())
 
-check('A2', '`createBook` 载荷**封闭恰 5 键**（`name/isbn/cip/author_person_id/first_publish_year`）；`book_id` / `created_by` / 未知键 ⇒ `INVALID_FIELD` 且**零读零写**（判定早于任何读）', {
-  allowedCreateKeys: ['author_person_id', 'cip', 'first_publish_year', 'isbn', 'name'],
+check('A2', '`createBook` 载荷**封闭恰 6 键**（`name/isbn/cip/publisher/author_person_id/first_publish_year`；2026-11-15 增 publisher【出版社】非必填）；`book_id` / `created_by` / 未知键 ⇒ `INVALID_FIELD` 且**零读零写**（判定早于任何读）', {
+  allowedCreateKeys: ['author_person_id', 'cip', 'first_publish_year', 'isbn', 'name', 'publisher'],
   extraKeyReason: REASONS.INVALID_FIELD,
   bookIdKeyReason: REASONS.INVALID_FIELD,
   auditKeyReason: REASONS.INVALID_FIELD,
@@ -831,7 +831,7 @@ check('A4', '作者**引用型**门：未收录 id / 自由文本人名 / `tmp-`
 
 const listProbe = await probeList(booksModule0())
 
-check('A5', '`listBooks`：`books` / `total` 键面；行投影**恰 `BOOK_ROW_KEYS` 8 键**（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
+check('A5', '`listBooks`：`books` / `total` 键面；行投影**恰 `BOOK_ROW_KEYS` 9 键**（2026-11-15 增 publisher）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
   responseKeys: ['books', 'ok', 'total'],
   total: 3,
   count: 3,

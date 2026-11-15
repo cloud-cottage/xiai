@@ -77,6 +77,8 @@ const BOOK_CREATE_ALLOWED_KEYS = Object.freeze([
   'name',
   'isbn',
   'cip',
+  /* **2026-11-15 新增**：【出版社】非必填（空串 / null ⇒ 未著录；非空原样保留）。 */
+  'publisher',
   'author_person_id',
   'first_publish_year'
 ])
@@ -120,6 +122,7 @@ const BOOK_ROW_KEYS = Object.freeze([
   'name',
   'isbn',
   'cip',
+  'publisher',
   'author_person_id',
   'first_publish_year',
   'created_at',
@@ -244,22 +247,24 @@ async function createBook(payload, identity, context) {
       `書名（name）長度不得超過 ${BOOK_NAME_MAX_LENGTH} 字；本次零寫入。`
     )
   }
-  /* ④ 可空串门：`isbn` / `cip`（给出即必须是字符串；空串 / `null` ⇒ 未著录）。 */
-  for (const key of ['isbn', 'cip']) {
+  /* ④ 可空串门：`isbn` / `cip`（编号类，上界 64）＋ `publisher`（出版社名，上界同书名 200）。
+     给出即必须是字符串；空串 / `null` ⇒ 未著录。 */
+  for (const [key, maxLength] of [['isbn', BOOK_CODE_MAX_LENGTH], ['cip', BOOK_CODE_MAX_LENGTH], ['publisher', BOOK_NAME_MAX_LENGTH]]) {
     const value = payload[key]
     if (value === undefined || value === null) continue
     if (typeof value !== 'string') {
       return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串（可留空）；本次零寫入。`)
     }
-    if (text(value).length > BOOK_CODE_MAX_LENGTH) {
+    if (text(value).length > maxLength) {
       return deny(
         REASONS.INVALID_VALUE,
-        `欄位（${key}）長度不得超過 ${BOOK_CODE_MAX_LENGTH} 字；本次零寫入。`
+        `欄位（${key}）長度不得超過 ${maxLength} 字；本次零寫入。`
       )
     }
   }
   const isbn = text(payload.isbn)
   const cip = text(payload.cip)
+  const publisher = text(payload.publisher)
   /* ⑤ 年份门（可空；给出即必须是 1000〜当年的整数；**不静默归一 / 不四舍五入**）。 */
   const seconds = secondsOf(context)
   const currentYear = yearOf(seconds)
@@ -340,6 +345,7 @@ async function createBook(payload, identity, context) {
     name,
     isbn,
     cip,
+    publisher,
     author_person_id: authorPersonId,
     first_publish_year: firstPublishYear,
     created_by: text(identity && identity.uid),
