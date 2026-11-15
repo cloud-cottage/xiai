@@ -65,6 +65,9 @@ export const BOOK_ROW_KEYS = Object.freeze([
   /* **2026-11-15**：【出版社】非必填（服务端同名键，行投影同步加一）。 */
   'publisher',
   'author_person_id',
+  /* **2026-11-15（v1.120）**：`author_name` ＝ 服务端回的作者显示名快照 —— 本机印人快照
+     缺失时（新设备 / 未水合会话）作者列仍能出真名，不误报「未收錄」。 */
+  'author_name',
   'first_publish_year',
   'created_at',
   'updated_at'
