@@ -154,7 +154,32 @@ watch(
    仍可用「載入更多」按鈕（同一執行點）。 */
 const sentinel = ref(null)
 let sentinelObserver = null
+/* 庫存總量（頁頭三計數）：失敗 ⇒ `null` ⇒ **整行不渲染**（不上屏「0 枚」冒充）。 */
+const stats = ref(null)
+/** 三計數上屏文本（千分位；繁體量詞）。`stats` 為 `null` ⇒ 空陣列 ⇒ 整行不渲染。 */
+const statsItems = computed(() => {
+  const s = stats.value
+  if (!s) return []
+  const fmt = (n) => Number(n).toLocaleString('en-US')
+  return [`【璽印 ${fmt(s.seals)} 枚】`, `【印面 ${fmt(s.faces)} 個】`, `【圖像 ${fmt(s.images)} 張】`]
+})
+
+/**
+ * 讀頁頭三計數（公開只讀 `catalogStats`；載荷空）。
+ * **失敗不寫 0**：`sealCards.catalogStats()` 失敗回 `null` ⇒ 保持 `stats = null` ⇒ 整行不渲染，
+ * 絕不把「讀不到」上屏成「庫存為零」。
+ */
+async function loadCatalogStats() {
+  try {
+    stats.value = await sealCards.catalogStats()
+  } catch (error) {
+    stats.value = null
+  }
+}
+watch(dataVersion, () => { void loadCatalogStats() })
+
 onMounted(() => {
+  void loadCatalogStats()
   if (typeof IntersectionObserver !== 'function') return
   sentinelObserver = new IntersectionObserver(
     (entries) => {
@@ -466,6 +491,9 @@ async function confirmClearLocal() {
       <div>
         <h1>璽印匯類</h1>
         <p>歷代印章與印面彙集於此，可按朝代、印面內容、印面風格與大類篩選，亦可查看印面詳情。</p>
+        <p v-if="statsItems.length" class="square__stats" data-catalog-stats>
+          <span v-for="item in statsItems" :key="item">{{ item }}</span>
+        </p>
       </div>
       <button
         v-if="canUploadSeal"
@@ -678,6 +706,16 @@ async function confirmClearLocal() {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--s-4);
+}
+
+/* 頁頭庫存三計數（【璽印 N 枚】【印面 N 個】【圖像 N 張】）：與說明文字同寬、弱化一級。 */
+.square__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin-top: var(--s-2);
+  color: var(--muted-foreground, #666);
+  font-variant-numeric: tabular-nums;
 }
 
 .square__notice-link {

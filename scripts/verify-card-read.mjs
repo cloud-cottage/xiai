@@ -312,13 +312,13 @@ const getPersonCalls = () => fakeCard.state.calls.filter((call) => call.op === '
 /* ===========================================================================
    R0：冻结键面逐字（唯一真源；直接引用被测件导出）
    =========================================================================== */
-section('R0', '冻结键面：PUBLIC_OPS 恰 4 ／ 两 op 载荷与回包 ／ 索引行 10＋2 键')
+section('R0', '冻结键面：PUBLIC_OPS 恰 5 ／ 两 op 载荷与回包 ／ 索引行 10＋2 键')
 {
   const publicKeys = Object.keys(sealCards.PUBLIC_OPS)
-  check('R0', '`PUBLIC_OPS` **恰 4 成员**（listSealCards / suggestAuthors / listPersonCards / getPersonCard，皆函数）', {
-    count: 4,
-    keys: ['getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors'],
-    types: ['function', 'function', 'function', 'function']
+  check('R0', '`PUBLIC_OPS` **恰 5 成员**（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats，皆函数）', {
+    count: 5,
+    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function', 'function']
   }, {
     count: publicKeys.length,
     keys: sorted(publicKeys),

@@ -62,6 +62,48 @@ export const SEAL_CARDS_ACTION = 'public'
 /** 公開只讀 op 名（與雲函數 `PUBLIC_OPS` 註冊面逐字一致）。 */
 export const SEAL_CARDS_OP = 'listSealCards'
 
+/* ---------------------------------------------------------------------------
+ * 0. 庫存總量（頁頭「【璽印 N 枚】【印面 N 個】【圖像 N 張】」的唯一來源）
+ * ------------------------------------------------------------------------- */
+
+/** 公開只讀 op：庫存三計數（雲函數 `PUBLIC_OPS.catalogStats`）。 */
+export const CATALOG_STATS_OP = 'catalogStats'
+
+/** 回包**恰 4 鍵**（順序即契約順序）。 */
+export const CATALOG_STATS_KEYS = Object.freeze(['ok', 'seals', 'faces', 'images'])
+
+/** 三計數的取整門（非數字 / 負數 ⇒ 0，**不偽造**）。 */
+function statCountOf(value) {
+  const num = Number(value)
+  return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0
+}
+
+/**
+ * **讀庫存總量**（`{action:'public', op:'catalogStats'}`，載荷空）。
+ *
+ * 語義：這是**庫存**（集合總行數），與列表頁「共 N 枚」（`listSealCards.total`，只算有面章）
+ * **不是同一把尺** —— 兩處數字允許不同，頁頭已明示「庫存」。
+ *
+ * 失敗一律回 `null`（**不拋、不編造 0**）：調用方據此**不渲染**這一行，而不是上屏「0 枚」。
+ * @returns {Promise<{seals:number, faces:number, images:number}|null>}
+ */
+export async function catalogStats() {
+  if (!cloudBaseConfigured()) return null
+  const reply = await callCloudFunction(SEAL_CARDS_FUNCTION_NAME, {
+    action: SEAL_CARDS_ACTION,
+    op: CATALOG_STATS_OP,
+    payload: {}
+  })
+  if (!reply || reply.ok === false) return null
+  const result = reply.result
+  if (!result || typeof result !== 'object' || result.ok === false) return null
+  return {
+    seals: statCountOf(result.seals),
+    faces: statCountOf(result.faces),
+    images: statCountOf(result.images)
+  }
+}
+
 /** `rows` 元素**恰 14 鍵**（順序即契約順序；取證可逐字比對）。 */
 export const SEAL_CARD_ROW_KEYS = Object.freeze([
   'stamp_id',

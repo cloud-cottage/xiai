@@ -156,6 +156,11 @@ function createStore(seedRows) {
               const rows = hit(match)
               return { data: limit > 0 ? rows.slice(0, limit) : rows }
             },
+            async count() {
+              /* 真 SDK 形态：`where(match).count() ⇒ {total}`（`catalogStats` 三计数走这条） */
+              stats.reads += 1
+              return { total: hit(match).length }
+            },
             async update(doc) {
               const rows = hit(match)
               rows.forEach((row) => {
@@ -319,17 +324,17 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5
 })
 
 /* ===========================================================================
-   P1：`PUBLIC_OPS` 恰 4 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零读
+   P1：`PUBLIC_OPS` 恰 5 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
    =========================================================================== */
-section('P1', 'PUBLIC_OPS 恰 4（listSealCards / suggestAuthors / listPersonCards / getPersonCard）；表外 op ⇒ FORBIDDEN')
+section('P1', 'PUBLIC_OPS 恰 5（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats）；表外 op ⇒ FORBIDDEN')
 {
   const keys = Object.keys(sealCards.PUBLIC_OPS)
   const readsBefore = store.stats.reads
   const denied = await publicCall('repairPrimaryFace', {})
-  check('P1', '`PUBLIC_OPS` **恰 4 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`，皆函数）', {
-    count: 4,
-    keys: ['getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors'],
-    types: ['function', 'function', 'function', 'function']
+  check('P1', '`PUBLIC_OPS` **恰 5 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats`，皆函数）', {
+    count: 5,
+    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function', 'function']
   }, {
     count: keys.length,
     keys: sorted(keys),
@@ -345,6 +350,43 @@ section('P1', 'PUBLIC_OPS 恰 4（listSealCards / suggestAuthors / listPersonCar
     reason: denied.reason,
     keys: shapeOf(denied),
     reads: store.stats.reads - readsBefore
+  })
+
+  /* P1c：新 op `catalogStats` 的**回包键面**与**计数口径**（匿名可调、恒零写）。
+     seed 行数：`xiai_seals` 2 ／ `xiai_faces` 2 ／ `xiai_images` 0（本套件未种影像）——
+     计数＝**集合总行数**（零面章也算，与列表页「共 N 枚」不同尺）。 */
+  const writesBefore = store.stats.writes.length
+  const statsReply = await publicCall('catalogStats', {})
+  check('P1c', '`catalogStats` 匿名可调：回包**恰 4 鍵** `{ok,seals,faces,images}` ＋ 计数＝集合行数（2 / 2 / 0，含零面章）＋ **零写**', {
+    ok: true,
+    keys: 'faces,images,ok,seals',
+    seals: 2,
+    faces: 2,
+    images: 0,
+    writes: 0
+  }, {
+    ok: statsReply.ok,
+    reason: statsReply.reason,
+    keys: shapeOf(statsReply),
+    seals: statsReply.seals,
+    faces: statsReply.faces,
+    images: statsReply.images,
+    writes: store.stats.writes.length - writesBefore
+  })
+
+  /* P1d：载荷封闭 —— 任何参数（含空数组以外的形态）一律 `INVALID_VALUE` ＋ 零读。 */
+  const readsBeforePayload = store.stats.reads
+  const statsDenied = await publicCall('catalogStats', { limit: 1 })
+  check('P1d', '`catalogStats` 載荷**封閉**：帶任何參數（`{limit:1}`）⇒ `INVALID_VALUE` ＋ **零讀**', {
+    ok: false,
+    reason: 'INVALID_VALUE',
+    keys: 'message,ok,reason',
+    reads: 0
+  }, {
+    ok: statsDenied.ok,
+    reason: statsDenied.reason,
+    keys: shapeOf(statsDenied),
+    reads: store.stats.reads - readsBeforePayload
   })
 }
 

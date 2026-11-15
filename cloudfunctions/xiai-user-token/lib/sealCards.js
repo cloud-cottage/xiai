@@ -2657,23 +2657,53 @@ function personMatchRowOfIndex(row) {
 }
 
 /**
+ * **库存总量读面**（首页「璽印匯類」页头三计数用）。
+ *
+ * 契约（逐条）：
+ *   · 载荷**封闭**：不接受任何参数；非空对象 ⇒ `INVALID_VALUE` ＋ **零读**；
+ *   · 回包**恰 4 键** `{ok, seals, faces, images}`，三值均为非负整数（读失败不可得时**不伪造**，
+ *     由信封层回 `STORAGE_UNAVAILABLE`）；
+ *   · **只读**：只发 `count()`，恒零写；三个 `count()` 彼此无因果依赖 ⇒ 并行取。
+ *   · 口径＝**库存储量**（集合总行数），与列表页「共 N 枚」（`listSealCards.total`，只算有面章）
+ *     **不是同一把尺**，故两处数字允许不同 —— 页头这一行明示「庫存」语义。
+ */
+async function catalogStats(payload) {
+  if (payload !== undefined && payload !== null) {
+    if (typeof payload !== 'object' || Object.keys(payload).length > 0) {
+      return deny(REASONS.INVALID_VALUE, '此操作不接受任何參數；本次零讀取。')
+    }
+  }
+  const db = dbOf()
+  const ops = opsOf()
+  const [seals, faces, images] = await Promise.all([
+    countRows(db, ops.COLLECTIONS.seals),
+    countRows(db, ops.COLLECTIONS.faces),
+    countRows(db, ops.COLLECTIONS.images)
+  ])
+  const num = (value) => (Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.floor(Number(value)) : 0)
+  return { ok: true, seals: num(seals), faces: num(faces), images: num(images) }
+}
+
+/**
  * **匿名可调的公开 op 表**（`index.js` 在令牌校验**之前**按这张表分流；
  * 表外的一切 op 仍必须验 token）。**只读**：这里的 op 一律零写。
- * **恰 4 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
- * ＋ `listPersonCards` / `getPersonCard`（人物读面改吃 CARD 主库；本单 `2 → 4`）。
+ * **恰 5 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
+ * ＋ `listPersonCards` / `getPersonCard`（人物读面改吃 CARD 主库；`2 → 4`）
+ * ＋ `catalogStats`（首页页头三计数；`4 → 5`）。
  */
 const PUBLIC_OPS = Object.freeze({
   listSealCards,
   suggestAuthors,
   listPersonCards,
-  getPersonCard
+  getPersonCard,
+  catalogStats
 })
 
 /**
  * **匿名可调的公开写 op 表**（`index.js` 在令牌 / 会话 / 配置判定**之前**按 `action:'public-write'`
  * 分流；与上面 `PUBLIC_OPS` **两张表分开可判负**）。**恰 1 成员**：`bumpSealView`
  * （印章浏览量 +1；裁定 §6）。表外 op ⇒ `FORBIDDEN` ＋ 零读零写。
- * `PUBLIC_OPS` **仍恰 4 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
+ * `PUBLIC_OPS` **现恰 5 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
  */
 const PUBLIC_WRITE_OPS = Object.freeze({
   bumpSealView

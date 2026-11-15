@@ -66,7 +66,7 @@ const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSession
 const {
   PUBLIC_OPS,
   /* **公开写面（本单新增｜`action:'public-write'`）**：`PUBLIC_WRITE_OPS` 是**另一张表**
-     （现恰 1 成员 `bumpSealView`），与 `PUBLIC_OPS`（仍恰 4 成员、恒零写）**分开可判负**。 */
+     （现恰 1 成员 `bumpSealView`），与 `PUBLIC_OPS`（现恰 5 成员、恒零写）**分开可判负**。 */
   PUBLIC_WRITE_OPS,
   REPAIR_PRIMARY_FACE_READOUT_KEYS,
   REPAIR_SEAL_FACE_COUNT_READOUT_KEYS,
@@ -983,8 +983,8 @@ return response
  * **匿名只读动作（`action:'public'`）**：**不验令牌、不读身份、零写入**。
  *
  * 硬口径（逐条）：
- *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；现恰 4 成员
- *     `listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`；
+ *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；现恰 5 成员
+ *     `listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats`；
  *     表外 op ⇒ `FORBIDDEN` ＋ 零读）；
  *     `repairPrimaryFace` 等管理员 op **不在这张表上** ⇒ 匿名调不到，仍必须走 `action:'verify'`
  *     验令牌 ＋ 白名单身份；
@@ -1046,7 +1046,7 @@ async function handlePublic(event) {
  *   · 与 `action:'public'` **同级**：位置在**令牌 / 会话 / 配置判定之前** ⇒ 匿名可调，
  *     且**不因令牌配置缺失而连坐**（浏览计数不该被写面配置故障拖死）；
  *   · 表外 op（含一切 `PUBLIC_OPS` 读 op 与管理员 op）⇒ `FORBIDDEN` ＋ **零读零写**；
- *     `PUBLIC_OPS` 仍恰 4 成员且**恒零写** —— 两张表分开可判负；
+ *     `PUBLIC_OPS` 现恰 5 成员且**恒零写** —— 两张表分开可判负；
  *   · 载荷 / 回包键面由各 op 自己封闭（本函数**零改写、零补键** ⇒ 成功恰 1 键
  *     `{ok:true}`、失败恰 3 键 `{ok:false, reason, message}`）；
  *   · op 内部的存储故障已由 op 自己转成结构化失败（不得 5xx）；这里兜底**未预期异常**
