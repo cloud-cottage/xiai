@@ -2497,8 +2497,13 @@ export function personDisplayName(row) {
   /* ① CARD（主存储）：索引行按本地编号 `id` → `card_id` 映射，命中则用其姓 / 名 / 字 / 號。 */
   const attrs = personAttributesOf(row)
   if (attrs) {
-    const cardFull = `${hasText(attrs.family_name) ? String(attrs.family_name) : ''}${
-      hasText(attrs.given_name) ? String(attrs.given_name) : ''
+    /* **2026-11-15｜繁体优先**：`family_name_cht` / `given_name_cht` 是 xiai 专用繁体面，
+       旧 `family_name` / `given_name` 属「简体标识面」（jiapu 等其它项目用，可能被写成简体）
+       ⇒ 显示名一律先吃 `*_cht`，**仅在尚未回填时**回落旧字段。 */
+    const chtFamily = hasText(attrs.family_name_cht) ? String(attrs.family_name_cht) : ''
+    const chtGiven = hasText(attrs.given_name_cht) ? String(attrs.given_name_cht) : ''
+    const cardFull = `${chtFamily || (hasText(attrs.family_name) ? String(attrs.family_name) : '')}${
+      chtGiven || (hasText(attrs.given_name) ? String(attrs.given_name) : '')
     }`
     if (cardFull) return cardFull
     if (hasText(attrs.name)) return String(attrs.name)

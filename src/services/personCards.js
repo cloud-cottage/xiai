@@ -63,6 +63,9 @@ const ATTRIBUTE_KEYS = Object.freeze([
   'name',
   'family_name',
   'given_name',
+  /* **繁体面（2026-11-15）**：xiai 专用辨识/展示字段；旧两键属简体标识面。 */
+  'family_name_cht',
+  'given_name_cht',
   'courtesy_name',
   'art_name',
   'zhaihao',
@@ -143,6 +146,9 @@ function normalizeIndexRow(row) {
     name: textOf(row.name),
     family_name: textOf(row.family_name),
     given_name: textOf(row.given_name),
+    /* 繁体面（xiai 专用）：显示名与作者检索优先使用（见 db.js::personDisplayName）。 */
+    family_name_cht: textOf(row.family_name_cht),
+    given_name_cht: textOf(row.given_name_cht),
     courtesy_name: textOf(row.courtesy_name),
     art_name: textOf(row.art_name),
     zhaihao: textOf(row.zhaihao),
