@@ -8,10 +8,13 @@
  *   手机号**双向一致**才签 xiai 令牌。⇒ 客户端无法冒充任意手机号（含管理员白名单号）。
  *
  * 判定链（逐条，与裁定逐字对应）：
- *   ① `POST https://<envId>.<region>.tcb-api.tencentcloudapi.com/auth/v1/user/me?client_id=<envId>`
+ *   ① `GET https://<envId>.<region>.tcb-api.tencentcloudapi.com/auth/v1/user/me?client_id=<envId>`
  *      （`envId` 由 `lib/config.js::readEnvId` 读；`region` 由 **R-L9** 区域参数化给出
  *      —— `lib/config.js::readAuthRegion` 读 `XIAI_AUTH_REGION` / 回退 `TCB_REGION` / 默认
  *      `ap-shanghai`；**两者都不写死**）；
+ *      ⇒ **必须是 GET**：该端点只实现 GET；2026-11-15 实测「以 POST 并显式声明零长度请求体」
+ *      会回 HTTP 501 `{"code":"UNIMPLEMENTED"}`（被误判成内部不可用）。故一律 GET，
+ *      且**不再发送任何长度头**；
  *   ② 请求头 `Authorization: Bearer <platformAccessToken>`（**只进请求头，绝不进日志 / 回包**）；
  *   ③ 从回体取 `phone_number`（形态可能带 `+86 ` 前缀与空格）⇒ 归一为 11 位大陆手机号；
  *   ④ 由调用方（`index.js::handleIssue`）与服务端 `normalizePhone(event.phone)` **严格相等**才继续。
@@ -274,11 +277,10 @@ async function verifyPlatformSession(params) {
     const url = `https://${authHostOf(envId, region)}${ME_PATH}?client_id=${envId}`
     const response = await transport({
       url,
-      method: 'POST',
+      method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-        'Content-Length': 0
+        Accept: 'application/json'
       },
       timeoutMs
     })
