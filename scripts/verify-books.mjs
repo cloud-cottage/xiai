@@ -424,8 +424,9 @@ async function probePayloadGate(mod) {
   }
   const hList = makeHarness()
   installOps(hList.ops)
-  const listExtra = await mod.listBooks({ q: 'x' }, {}, ADMIN_CTX)
+  const listExtra = await mod.listBooks({ evil: 1 }, {}, ADMIN_CTX)
   const listExtraReads = hList.log.reads
+  const listAllowed = await mod.listBooks({ q: 'x', offset: 0, limit: 10 }, {}, ADMIN_CTX)
   installOps(hList.ops)
   const listMissing = await mod.listBooks(undefined, {}, ADMIN_CTX)
   const hSet = makeHarness()
@@ -446,6 +447,36 @@ async function probePayloadGate(mod) {
 }
 
 /** `setImageBook` 形态门矩阵（含 `book_id` 正则放宽的判负点）。 */
+/** 分頁 ＋ 篩選探針（2026-11-15）：服務端切片 / 命中總數 / 三類篩選 / 形態門。 */
+async function probeListPagingAndFilters(mod) {
+  const h = makeHarness()
+  h.seedBook('00001', { name: '求是齋印稿', author_name: '黃鵷', first_publish_year: 1838 })
+  h.seedBook('00002', { name: '試篆印存', author_name: '黃家積', first_publish_year: null })
+  h.seedBook('00003', { name: '二金蜨堂印存', author_name: '吳隱', first_publish_year: 1908 })
+  const run = async (payload) => {
+    installOps(h.ops)
+    const out = await mod.listBooks(payload, {}, ADMIN_CTX)
+    return {
+      ok: out.ok === true,
+      reason: out.ok === true ? null : out.reason,
+      ids: (Array.isArray(out.books) ? out.books : []).map((row) => textOf(row.id)),
+      total: out.total,
+      hasMore: out.has_more === true,
+      offset: out.offset,
+      limit: out.limit
+    }
+  }
+  return {
+    page1: await run({ limit: 2 }),
+    page2: await run({ limit: 2, offset: 2 }),
+    byName: await run({ q: '篆' }),
+    byAuthor: await run({ author: '黃' }),
+    byYear: await run({ year_from: 1900 }),
+    badLimit: await run({ limit: 0 }),
+    badYearRange: await run({ year_from: 2000, year_to: 1900 })
+  }
+}
+
 async function probeSetImageGuards(mod) {
   const run = async (payload) => {
     const h = makeHarness()
@@ -755,8 +786,8 @@ check('A2', '`createBook` 载荷**封闭恰 6 键**（`name/isbn/cip/publisher/a
   extraKeyIssue: payloadGate.extraKey.issue
 })
 
-check('A2b', '`listBooks` 载荷**封闭 0 键**（给出任何键 ⇒ `INVALID_FIELD`）；`setImageBook` 载荷**封闭 2 键**（`image_id` / `book_id`）', {
-  allowedListKeys: [],
+check('A2b', '`listBooks` 载荷**封闭 6 键**（offset/limit/q/author/year_from/year_to；给出未知键 ⇒ `INVALID_FIELD` ＋ 零读）；`setImageBook` 载荷**封闭 2 键**（`image_id` / `book_id`）', {
+  allowedListKeys: ['author', 'limit', 'offset', 'q', 'year_from', 'year_to'],
   allowedSetKeys: ['book_id', 'image_id'],
   listExtraReason: REASONS.INVALID_FIELD,
   listExtraReads: 0,
@@ -831,8 +862,8 @@ check('A4', '作者**引用型**门：未收录 id / 自由文本人名 / `tmp-`
 
 const listProbe = await probeList(booksModule0())
 
-check('A5', '`listBooks`：`books` / `total` 键面；行投影**恰 `BOOK_ROW_KEYS` 11 键**（2026-11-15 增 publisher ＋ author_name ＋ creators）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
-  responseKeys: ['books', 'ok', 'total'],
+check('A5', '`listBooks`：`books` / `total` / `offset` / `limit` / `has_more` 键面；行投影**恰 `BOOK_ROW_KEYS` 11 键**（2026-11-15 增 publisher ＋ author_name ＋ creators）（零 `created_by` / 零 `_id`）；按 `id` 升序（乱序入库仍升序）；`total` ＝ 行数', {
+  responseKeys: ['books', 'has_more', 'limit', 'offset', 'ok', 'total'],
   total: 3,
   count: 3,
   ids: ['00001', '00002', '00003'],
@@ -849,6 +880,31 @@ check('A5', '`listBooks`：`books` / `total` 键面；行投影**恰 `BOOK_ROW_K
   rowKeysDistinct: new Set(listProbe.rowKeys.map((keys) => keys.join('|'))).size,
   rowHasAudit: listProbe.rowHasAudit,
   ascending: listProbe.ascending
+})
+
+
+const pagingProbe = await probeListPagingAndFilters(booksModule0())
+
+check('A5b', '`listBooks` 分頁：`limit=2` ⇒ 首頁 2 行 / `has_more:true`；`offset=2` ⇒ 次頁 1 行 / `has_more:false`；`total` 恒為命中總數（3）', {
+  page1: { ids: ['00001', '00002'], total: 3, hasMore: true, offset: 0, limit: 2 },
+  page2: { ids: ['00003'], total: 3, hasMore: false, offset: 2, limit: 2 }
+}, {
+  page1: { ids: pagingProbe.page1.ids, total: pagingProbe.page1.total, hasMore: pagingProbe.page1.hasMore, offset: pagingProbe.page1.offset, limit: pagingProbe.page1.limit },
+  page2: { ids: pagingProbe.page2.ids, total: pagingProbe.page2.total, hasMore: pagingProbe.page2.hasMore, offset: pagingProbe.page2.offset, limit: pagingProbe.page2.limit }
+})
+
+check('A5c', '`listBooks` 篩選：`q`（書名包含）、`author`（作者名包含）、`year_from`（年份下界，無年份行不命中）各自縮小命中集；`limit=0` / `year_from>year_to` ⇒ `INVALID_VALUE`', {
+  byName: ['00002'],
+  byAuthor: ['00001', '00002'],
+  byYear: ['00003'],
+  badLimit: REASONS.INVALID_VALUE,
+  badYearRange: REASONS.INVALID_VALUE
+}, {
+  byName: pagingProbe.byName.ids,
+  byAuthor: pagingProbe.byAuthor.ids,
+  byYear: pagingProbe.byYear.ids,
+  badLimit: pagingProbe.badLimit.reason,
+  badYearRange: pagingProbe.badYearRange.reason
 })
 
 const setGuards = await probeSetImageGuards(booksModule0())

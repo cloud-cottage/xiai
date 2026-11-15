@@ -61,6 +61,74 @@ const booksState = ref('idle') // idle / loading / ready / failed / unavailable
 const booksMessage = ref('')
 const version = ref(0)
 
+/* ---------------------- 分頁 ＋ 篩選（2026-11-15） ---------------------- */
+/* 口徑：篩選與分頁**一律在服務端**（`listBooks` 封閉 6 鍵）；本頁只持「已生效」條件，
+   輸入框改動不算數，按【查詢】才生效（避免每次輸入都打雲端）。 */
+const pageSize = ref(bookService.BOOK_LIST_PAGE_SIZE || 50)
+const pageOffset = ref(0)
+const pageTotal = ref(0)
+const pageHasMore = ref(false)
+const filterForm = ref({ q: '', author: '', yearFrom: '', yearTo: '' })
+const appliedFilters = ref({ q: '', author: '', yearFrom: '', yearTo: '' })
+
+/** 當前頁範圍文案（`第 1–50 筆 / 共 1,745 筆`；零命中 ⇒ `共 0 筆`）。 */
+const pageRangeText = computed(() => {
+  const total = pageTotal.value
+  if (total === 0) return '共 0 筆'
+  const start = pageOffset.value + 1
+  const end = Math.min(pageOffset.value + pageSize.value, total)
+  return `第 ${start.toLocaleString('en-US')}–${end.toLocaleString('en-US')} 筆 / 共 ${total.toLocaleString('en-US')} 筆`
+})
+const canPrevPage = computed(() => pageOffset.value > 0)
+/** 是否有生效中的篩選（決定空清單文案：真沒資料 vs 條件沒命中）。 */
+const filterActive = computed(() => {
+  const applied = appliedFilters.value || {}
+  return [applied.q, applied.author, applied.yearFrom, applied.yearTo]
+    .some((value) => String(value === undefined || value === null ? '' : value).trim() !== '')
+})
+const canNextPage = computed(() => pageHasMore.value)
+
+/** 篩選值收口（去空白；年份留空 ⇒ 不設界）。 */
+function filterInputOf(applied) {
+  const source = applied || {}
+  const input = { offset: pageOffset.value, limit: pageSize.value }
+  const q = String(source.q || '').trim()
+  const author = String(source.author || '').trim()
+  if (q !== '') input.q = q
+  if (author !== '') input.author = author
+  const yearFrom = Number(source.yearFrom)
+  const yearTo = Number(source.yearTo)
+  if (Number.isInteger(yearFrom)) input.year_from = yearFrom
+  if (Number.isInteger(yearTo)) input.year_to = yearTo
+  return input
+}
+
+/** 按當前輸入執行查詢（重置回第一頁）。 */
+function applyFilters() {
+  appliedFilters.value = { ...filterForm.value }
+  pageOffset.value = 0
+  void refreshBooks()
+}
+
+/** 重置篩選（清空輸入 ＋ 已生效條件）。 */
+function resetFilters() {
+  filterForm.value = { q: '', author: '', yearFrom: '', yearTo: '' }
+  appliedFilters.value = { q: '', author: '', yearFrom: '', yearTo: '' }
+  pageOffset.value = 0
+  void refreshBooks()
+}
+
+/** 上/下一頁（步進＝一整頁；越界由服務端 `has_more` / `offset` 兜住）。 */
+function gotoPrevPage() {
+  pageOffset.value = Math.max(0, pageOffset.value - pageSize.value)
+  void refreshBooks()
+}
+function gotoNextPage() {
+  if (!pageHasMore.value) return
+  pageOffset.value += pageSize.value
+  void refreshBooks()
+}
+
 /**
  * 作者人名：**服务端快照优先**（`book.author_name`，`listBooks` 行上带回），
  * 服务端没带再退本机印人快照（`persons.personNameOfId`），两者皆无 ⇒ 明示「未收錄」。
@@ -437,7 +505,7 @@ async function refreshBooks() {
   }
   let out = null
   try {
-    out = await api.listBooks()
+    out = await api.listBooks(filterInputOf(appliedFilters.value))
   } catch (err) {
     out = { ok: false, message: (err && err.message) || '調用異常' }
   }
@@ -447,6 +515,10 @@ async function refreshBooks() {
     return
   }
   books.value = Array.isArray(out.books) ? out.books : []
+  pageTotal.value = Number.isInteger(out.total) ? out.total : books.value.length
+  pageHasMore.value = out.hasMore === true
+  if (Number.isInteger(out.offset)) pageOffset.value = out.offset
+  if (Number.isInteger(out.limit) && out.limit > 0) pageSize.value = out.limit
   booksState.value = 'ready'
 }
 
@@ -498,10 +570,33 @@ watch(
         <div class="panel__head">
           <h2>印譜清單</h2>
           <span class="detail__hint">
-            {{ booksState === 'loading' ? '正在讀取…' : `共 ${books.length} 本` }}
+            {{ booksState === 'loading' ? '正在讀取…' : pageRangeText }}
           </span>
         </div>
         <div class="panel__body">
+          <!-- 篩選（服務端過濾；輸入改動不即時生效，按【查詢】才落請求） -->
+          <form class="books-filter" data-books-filter @submit.prevent="applyFilters">
+            <label class="books-filter__field">
+              <span>書名／關鍵詞</span>
+              <input v-model="filterForm.q" type="search" maxlength="60" placeholder="書名、作者、出版社、ISBN、CIP" />
+            </label>
+            <label class="books-filter__field">
+              <span>作者</span>
+              <input v-model="filterForm.author" type="search" maxlength="60" placeholder="作者或創作者人名" />
+            </label>
+            <label class="books-filter__field books-filter__field--year">
+              <span>出版年起</span>
+              <input v-model="filterForm.yearFrom" type="number" min="1000" max="2100" inputmode="numeric" placeholder="如 1900" />
+            </label>
+            <label class="books-filter__field books-filter__field--year">
+              <span>出版年止</span>
+              <input v-model="filterForm.yearTo" type="number" min="1000" max="2100" inputmode="numeric" placeholder="如 1949" />
+            </label>
+            <div class="books-filter__actions">
+              <button class="btn btn--primary" type="submit" data-action="filter-books">查詢</button>
+              <button class="btn btn--ghost" type="button" data-action="reset-books-filter" @click="resetFilters">重置</button>
+            </div>
+          </form>
           <table v-if="books.length" class="books-table">
             <thead>
               <tr>
@@ -534,9 +629,27 @@ watch(
             </tbody>
           </table>
           <p v-else-if="booksState === 'ready'" class="books__empty" data-books-empty="list">
-            尚無印譜資料，先在下方的「新增印譜」建立第一本。
+            {{ pageTotal === 0 && !filterActive ? '尚無印譜資料，先在下方的「新增印譜」建立第一本。' : '目前篩選條件沒有符合的印譜；可調整條件或按【重置】。' }}
           </p>
           <p v-else class="books__empty">印譜清單尚未就緒。</p>
+          <!-- 分頁（服務端 offset/limit；上一頁/下一頁以整頁步進） -->
+          <div v-if="booksState === 'ready' && pageTotal > 0" class="books-pager" data-books-pager>
+            <button
+              class="btn btn--ghost"
+              type="button"
+              data-action="books-prev-page"
+              :disabled="!canPrevPage"
+              @click="gotoPrevPage"
+            >上一頁</button>
+            <span class="books-pager__range">{{ pageRangeText }}</span>
+            <button
+              class="btn btn--ghost"
+              type="button"
+              data-action="books-next-page"
+              :disabled="!canNextPage"
+              @click="gotoNextPage"
+            >下一頁</button>
+          </div>
           <p v-if="books.length && !bookFieldPresent" class="books__hint" data-books-hint="no-book-field">
             影像行尚未回傳 `book_id` 欄位（數據層未落地）⇒ 關聯影像數暫不能統計，本列暫不顯示。
           </p>
@@ -624,7 +737,10 @@ watch(
       <section class="panel" data-book-batch>
         <div class="panel__head">
           <h2>批量掛圖</h2>
-          <span class="detail__hint">選定一本印譜 → 勾選影像 → 逐張提交；已歸屬其它印譜的影像改掛前須確認。</span>
+          <span class="detail__hint">
+              選定一本印譜 → 勾選影像 → 逐張提交；已歸屬其它印譜的影像改掛前須確認。
+              目標印譜下拉只列**當前頁**（每頁 {{ pageSize }} 本）—— 先用上方篩選縮小範圍，再在此選定。
+            </span>
         </div>
         <div class="panel__body">
           <div class="field">
@@ -780,6 +896,55 @@ watch(
   color: var(--c-text-muted);
   font-weight: normal;
   font-size: var(--t-xs);
+}
+
+/* 篩選列（服務端過濾；窄屏自動換行） */
+.books-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.books-filter__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+  font-size: 0.9em;
+}
+
+.books-filter__field--year {
+  min-width: 110px;
+}
+
+.books-filter__field input {
+  padding: 6px 8px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.books-filter__actions {
+  display: flex;
+  gap: var(--s-2);
+}
+
+/* 分頁條 */
+.books-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.books-pager__range {
+  color: var(--muted-foreground, #666);
+  font-variant-numeric: tabular-nums;
 }
 
 .books-table__id {

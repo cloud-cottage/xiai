@@ -83,8 +83,22 @@ const BOOK_CREATE_ALLOWED_KEYS = Object.freeze([
   'first_publish_year'
 ])
 
-/** `listBooks` 载荷**封闭恰 0 键**（管理员读；无分页 / 无筛选面）。 */
-const BOOK_LIST_ALLOWED_KEYS = Object.freeze([])
+/**
+ * `listBooks` 载荷**封闭恰 6 键**（2026-11-15 分页＋筛选；缺键即默认值，多键/未知键 ⇒ `INVALID_FIELD`）：
+ *   · `offset` —— 起始偏移（整数 ≥0，默认 0）
+ *   · `limit`  —— 每页行数（整数 1〜200，默认 50）
+ *   · `q`      —— 关键词（书名 / 作者名 / 出版社 / ISBN / CIP / 创作者名的包含匹配；≤60 字）
+ *   · `author` —— 作者名包含匹配（主作者名 ＋ 创作者链人名；≤60 字）
+ *   · `year_from` / `year_to` —— 首次出版年份区间（整数 1000〜当年，闭区间；给了区间 ⇒ 无年份的行**不命中**）
+ */
+const BOOK_LIST_ALLOWED_KEYS = Object.freeze(['offset', 'limit', 'q', 'author', 'year_from', 'year_to'])
+
+/** `listBooks` 分页默认 / 上限（防御：误传大值不把一页拖成全表）。 */
+const BOOK_LIST_DEFAULT_LIMIT = 50
+const BOOK_LIST_MAX_LIMIT = 200
+
+/** `listBooks` 关键词长度上界（与 `listSealCards.q` 同级）。 */
+const BOOK_LIST_MAX_QUERY_LENGTH = 60
 
 /** `setImageBook` 载荷**封闭恰 2 键**（`book_id` 必须显式出现；`null` ＝ 取消归属）。 */
 const BOOK_SET_IMAGE_ALLOWED_KEYS = Object.freeze(['image_id', 'book_id'])
@@ -135,7 +149,7 @@ const BOOK_ROW_KEYS = Object.freeze([
 const CREATE_BOOK_READOUT_KEYS = Object.freeze(['book_id', 'skipped'])
 
 /** `listBooks` 回包读数键面（`truncated` 为 **additive 提示键**：仅在「取不全」那一轮出现）。 */
-const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total', 'truncated'])
+const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total', 'has_more', 'offset', 'limit', 'truncated'])
 
 /** `setImageBook` 回包读数键面（`book_id` 是**读回值**，非请求回显）。 */
 const SET_IMAGE_BOOK_READOUT_KEYS = Object.freeze(['image_id', 'book_id'])
@@ -225,6 +239,105 @@ function bookRowProjectionOf(row) {
     out[key] = text(source[key])
   }
   return out
+}
+
+/* --------------------------------------------------------------------------
+ * `listBooks` 分页 ＋ 筛选（2026-11-15）
+ * ------------------------------------------------------------------------- */
+
+/** 简繁逐字表（**复用 `authorMatch` 的同一张表**，不建第二套）；惰性建一次。 */
+let booksS2tMap = null
+function s2tOfBooks(value) {
+  const source = String(value === undefined || value === null ? '' : value)
+  if (source === '') return ''
+  if (booksS2tMap === null) {
+    const authorMatch = require('./authorMatch.js')
+    const from = Array.from(String(authorMatch.S2T_GLYPH_SOURCE || '').replace(/\s+/g, ''))
+    const to = Array.from(String(authorMatch.S2T_GLYPH_TARGET || '').replace(/\s+/g, ''))
+    booksS2tMap = new Map()
+    for (let i = 0; i < from.length && i < to.length; i += 1) booksS2tMap.set(from[i], to[i])
+  }
+  return Array.from(source).map((ch) => booksS2tMap.get(ch) || ch).join('')
+}
+
+/** 正整数门（`null` ⇒ 默认值；非法 ⇒ `null` 表示拒绝）。 */
+function positiveIntOf(value, fallback, min, max) {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback
+  const num = Number(value)
+  if (!Number.isInteger(num) || num < min || num > max) return null
+  return num
+}
+
+/**
+ * `listBooks` 载荷解析（**封闭 6 键**）：缺键取默认，非法 ⇒ `INVALID_VALUE`（零读）。
+ * @returns {{ok:true, value:{offset:number, limit:number, q:string, author:string, yearFrom:number|null, yearTo:number|null}}
+ *          |{ok:false, reason:string, message:string}}
+ */
+function parseListBooksPayload(payload) {
+  const source = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
+  const offset = positiveIntOf(source.offset, 0, 0, Number.MAX_SAFE_INTEGER)
+  if (offset === null) return deny(REASONS.INVALID_VALUE, '分頁起點（offset）必須是整數且不小於 0；本次零讀取。')
+  const limit = positiveIntOf(source.limit, BOOK_LIST_DEFAULT_LIMIT, 1, BOOK_LIST_MAX_LIMIT)
+  if (limit === null) {
+    return deny(REASONS.INVALID_VALUE, `每頁行數（limit）必須是 1〜${BOOK_LIST_MAX_LIMIT} 的整數；本次零讀取。`)
+  }
+  const textOf = (value) => String(value === undefined || value === null ? '' : value).trim()
+  const q = textOf(source.q)
+  const author = textOf(source.author)
+  for (const [key, value] of [['q', q], ['author', author]]) {
+    if (value.length > BOOK_LIST_MAX_QUERY_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `關鍵詞（${key}）不得超過 ${BOOK_LIST_MAX_QUERY_LENGTH} 字；本次零讀取。`)
+    }
+  }
+  const currentYear = new Date().getFullYear()
+  const yearFrom = positiveIntOf(source.year_from, null, BOOK_FIRST_YEAR_MIN, currentYear)
+  if (yearFrom === null && textOf(source.year_from) !== '') {
+    return deny(REASONS.INVALID_VALUE, `起始年份（year_from）必須是 ${BOOK_FIRST_YEAR_MIN}〜${currentYear} 的整數；本次零讀取。`)
+  }
+  const yearTo = positiveIntOf(source.year_to, null, BOOK_FIRST_YEAR_MIN, currentYear)
+  if (yearTo === null && textOf(source.year_to) !== '') {
+    return deny(REASONS.INVALID_VALUE, `結束年份（year_to）必須是 ${BOOK_FIRST_YEAR_MIN}〜${currentYear} 的整數；本次零讀取。`)
+  }
+  if (yearFrom !== null && yearTo !== null && yearFrom > yearTo) {
+    return deny(REASONS.INVALID_VALUE, '起始年份不得大於結束年份；本次零讀取。')
+  }
+  return { ok: true, value: { offset, limit, q, author, yearFrom, yearTo } }
+}
+
+/** 行 ⇒ 检索面（书名 / 作者名 / 出版社 / ISBN / CIP / 创作者人名；简繁双形态）。 */
+function bookSearchHaystackOf(book) {
+  const row = book && typeof book === 'object' ? book : {}
+  const creators = Array.isArray(row.creators) ? row.creators : []
+  const base = [row.name, row.author_name, row.publisher, row.isbn, row.cip]
+    .concat(creators.map((item) => (item && typeof item === 'object' ? item.name : '')))
+    .map((value) => String(value === undefined || value === null ? '' : value))
+    .join('\n')
+  return `${base}\n${s2tOfBooks(base)}`
+}
+
+/** 行是否命中筛选（关键词 ＋ 作者名 ＋ 年份区间；空筛选恒真）。 */
+function bookMatchesFiltersOf(book, filters) {
+  const row = book && typeof book === 'object' ? book : {}
+  if (filters.q !== '') {
+    const hay = bookSearchHaystackOf(row).toLowerCase()
+    const needle = filters.q.toLowerCase()
+    if (hay.indexOf(needle) === -1 && hay.indexOf(s2tOfBooks(needle).toLowerCase()) === -1) return false
+  }
+  if (filters.author !== '') {
+    const creators = Array.isArray(row.creators) ? row.creators : []
+    const names = [row.author_name].concat(creators.map((item) => (item && typeof item === 'object' ? item.name : '')))
+      .map((value) => String(value === undefined || value === null ? '' : value).toLowerCase())
+      .join('\n')
+    const needle = filters.author.toLowerCase()
+    if (names.indexOf(needle) === -1 && names.indexOf(s2tOfBooks(needle).toLowerCase()) === -1) return false
+  }
+  if (filters.yearFrom !== null || filters.yearTo !== null) {
+    const year = Number.isInteger(row.first_publish_year) ? row.first_publish_year : null
+    if (year === null) return false
+    if (filters.yearFrom !== null && year < filters.yearFrom) return false
+    if (filters.yearTo !== null && year > filters.yearTo) return false
+  }
+  return true
 }
 
 /**
@@ -420,9 +533,12 @@ async function listBooks(payload, identity, context) {
   /* ① 管理员门（**第一行即判**；非管理员 ⇒ 结构化拒 ＋ 零读）。 */
   const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
   if (identityDenial) return identityDenial
-  /* ② 载荷封闭恰 0 键（空载荷 `{}`；给出任何键 ⇒ `INVALID_FIELD`）。 */
+  /* ② 载荷封闭恰 6 键（未知键 / 身份类键 ⇒ `INVALID_FIELD`），再做形态门。 */
   const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_LIST_ALLOWED_KEYS)
   if (payloadDenial) return payloadDenial
+  const parsed = parseListBooksPayload(payload)
+  if (!parsed.ok) return parsed
+  const filters = parsed.value
   /* ③ 读全表（**显式截断**：翻页取全，到顶回 `truncated`）＋ 按 `id` 数值升序（形态不符的行排尾、保序返回）。 */
   const scan = await readBookRowsGuarded(ops)
   const rows = scan.rows
@@ -435,10 +551,23 @@ async function listBooks(payload, identity, context) {
       return left.index - right.index
     })
     .map((item) => bookRowProjectionOf(item.row))
-  /* ④ 回包（`index.js` 按 `LIST_BOOKS_READOUT_KEYS` 收窄透传）。
-     **展示类**：允许截断，但**不得静默** ⇒ 到顶时多一个 additive 提示键 `truncated: true`
-     （正常轮**不出现**该键 ⇒ 既有键面 `{ok, books, total}` 逐字不变）。 */
-  const reply = { ok: true, books, total: books.length }
+  /* ④ 回包（`index.js` 按 `LIST_BOOKS_READOUT_KEYS` 收窄透传）：`books` 为**本页**，
+     `total` 为**命中总数**（分页前）；`has_more` 驱动「下一頁」。
+     **展示类**：允许截断，但**不得静默** ⇒ 到顶时多一个 additive 提示键 `truncated: true`。
+     ⑤ 筛选（在**服务端**做：全表已在手，1,745 行内存过滤远小于一次网络往返）⇒ 分页切片。 */
+  const matched = books.filter((book) => bookMatchesFiltersOf(book, filters))
+  const total = matched.length
+  const offset = filters.offset
+  const limit = filters.limit
+  const page = matched.slice(offset, offset + limit)
+  const reply = {
+    ok: true,
+    books: page,
+    total,
+    offset,
+    limit,
+    has_more: offset + page.length < total
+  }
   if (scan.truncated) reply.truncated = true
   return reply
 }

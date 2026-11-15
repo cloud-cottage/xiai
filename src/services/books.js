@@ -53,7 +53,7 @@ export const BOOK_CODE_MAX_LENGTH = 64
 
 /** 回包读数键面（**与云函数 `lib/books.js::*_READOUT_KEYS` 逐字同集**）。 */
 const CREATE_BOOK_READOUT_KEYS = Object.freeze(['book_id', 'skipped'])
-const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total'])
+const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total', 'has_more', 'offset', 'limit'])
 const SET_IMAGE_BOOK_READOUT_KEYS = Object.freeze(['image_id', 'book_id'])
 
 /** `listBooks` 单行投影键面（服务端 `BOOK_ROW_KEYS` 的客户端副本，供视图按同一键面取值）。 */
@@ -182,15 +182,42 @@ export async function createBook(input) {
   return { ok: true, book_id: bookId, skipped: gate.skipped === true, mode: gate.mode }
 }
 
+/** `listBooks` 默认每页行数（与服务端 `BOOK_LIST_DEFAULT_LIMIT` 同值）。 */
+export const BOOK_LIST_PAGE_SIZE = 50
+
+/** `listBooks` 每页上限（与服务端 `BOOK_LIST_MAX_LIMIT` 同值）。 */
+export const BOOK_LIST_MAX_PAGE_SIZE = 200
+
 /**
- * **印譜清單（管理员读）**：按 `id` 升序回全部 book 行。
- * @returns {Promise<{ok:true, books:Array<object>, total:number, mode:string}
- *                  |{ok:false, reason:string, message:string}>}
+ * **印譜清單（管理员读；分頁 ＋ 篩選）**。
+ *
+ * 载荷封闭 6 键（缺键由服务端取默认；客户端**只递非空键**，不递 `undefined`）：
+ * `offset` / `limit` / `q` / `author` / `year_from` / `year_to`。
+ * @param {{offset?:number, limit?:number, q?:string, author?:string,
+ *          year_from?:number|null, year_to?:number|null}} [input]
+ * @returns {Promise<{ok:true, books:Array<object>, total:number, hasMore:boolean,
+ *            offset:number, limit:number, truncated:boolean, mode:string}
+ *          |{ok:false, reason:string, message:string}>}
  */
-export async function listBooks() {
+export async function listBooks(input = {}) {
   if (isLocalDevMode()) return localDevDenial('讀取印譜清單')
-  /* **载荷封闭恰 0 键**（空载荷）。 */
-  const gate = await userWriteGate(BOOK_OP_LIST, {}, { readoutKeys: LIST_BOOKS_READOUT_KEYS })
+  const source = input && typeof input === 'object' ? input : {}
+  const payload = {}
+  const offset = Number(source.offset)
+  payload.offset = Number.isInteger(offset) && offset >= 0 ? offset : 0
+  const limit = Number(source.limit)
+  payload.limit = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, BOOK_LIST_MAX_PAGE_SIZE)
+    : BOOK_LIST_PAGE_SIZE
+  for (const key of ['q', 'author']) {
+    const value = text(source[key])
+    if (value !== '') payload[key] = value
+  }
+  for (const key of ['year_from', 'year_to']) {
+    const value = Number(source[key])
+    if (Number.isInteger(value)) payload[key] = value
+  }
+  const gate = await userWriteGate(BOOK_OP_LIST, payload, { readoutKeys: LIST_BOOKS_READOUT_KEYS })
   if (!gate.ok) return denial(gate.reason, gate.message)
   if (!Array.isArray(gate.books)) {
     /* 服务端未回行面 ⇒ **如实失败**（不默认成 `[]` 冒充「一本書都沒有」）。 */
@@ -200,28 +227,39 @@ export async function listBooks() {
     )
   }
   const books = gate.books.map((row) => {
-    const source = row && typeof row === 'object' ? row : {}
+    const src = row && typeof row === 'object' ? row : {}
     const out = {}
     for (const key of BOOK_ROW_KEYS) {
       if (key === 'first_publish_year') {
-        out[key] = Number.isInteger(source.first_publish_year) ? source.first_publish_year : null
+        out[key] = Number.isInteger(src.first_publish_year) ? src.first_publish_year : null
         continue
       }
       if (key === 'creators') {
         /* 创作者链：只取四鍵、字串化；非陣列 ⇒ `[]`（视图据空集不渲染链行）。 */
-        out[key] = (Array.isArray(source.creators) ? source.creators : [])
+        out[key] = (Array.isArray(src.creators) ? src.creators : [])
           .map((item) => (item && typeof item === 'object'
             ? { person_id: text(item.person_id), card_id: text(item.card_id), role: text(item.role), name: text(item.name) }
             : null))
           .filter((item) => item !== null)
         continue
       }
-      out[key] = text(source[key])
+      out[key] = text(src[key])
     }
     return out
   })
   const total = Number.isInteger(gate.total) ? gate.total : books.length
-  return { ok: true, books, total, mode: gate.mode }
+  const appliedOffset = Number.isInteger(gate.offset) ? gate.offset : payload.offset
+  const appliedLimit = Number.isInteger(gate.limit) ? gate.limit : payload.limit
+  return {
+    ok: true,
+    books,
+    total,
+    hasMore: gate.has_more === true,
+    offset: appliedOffset,
+    limit: appliedLimit,
+    truncated: gate.truncated === true,
+    mode: gate.mode
+  }
 }
 
 /**
