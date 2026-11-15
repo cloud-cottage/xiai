@@ -22,14 +22,19 @@
 | **P3 令牌持久化** | ✅ 代码+离线验证完成（未部署） | `tests/p3-token-persistence.mjs` **69/69 绿**；localStorage 单点（信封恰 4 键）；`verify` 按服务端 `expiresAt` 滑动续期回写；`TOKEN_INVALID`/版本不符清持久化且不重试；内部故障**不清**令牌；登出清两通道；R-L9 区域参数化（`XIAI_AUTH_REGION`→`TCB_REGION`→`ap-shanghai`） |
 | **上线** | ⏸ 待人类 | 见 §11 |
 
-## 11. 上线清单（只能由人类执行）
+## 11. 上线（操作说明书另开一册）
 
-1. **同批部署**（R-L4）：`xiai-user-token` + `xiai-admin-token` 与前端 `dist` 同一时间窗上；只上一边 = 登录全断。低峰执行。
-2. **真机收码联调**（唯一能坐实平台回传字段名的步骤）：取码 → 输码 → 登录 → 一次写操作；再验「换号登录 / 过期 token」均拒。全程 token 与号码不落日志。
-3. **控制台**：确认 `XIAI_USER_TOKEN_SECRET` / `XIAI_ADMIN_TOKEN_SECRET` / `XIAI_ADMIN_PHONE` 在位；`XIAI_USER_SMS_CODE` / `XIAI_ADMIN_SMS_CODE` 已不参与判定，可下线。
-4. **发布门替代**：`run-verify-suite.sh` 在 R-L3 迁移完成前不可作门（102 条新红属预期）；期间用「P1 探针 + build + Neng 负向」替代。
-5. **已知既存红**（与本轮无关，单独排期）：基线 `failed_ids=36`，含 6 个两轮均崩的脚本（`admin-review-op` / `ai-enhance-wire` / `correction-display` / `person-model` / `phrase-data` / `writeface-p1`）。
-6. **规范遗留**：§3.94 号段由 v1.117 宣告行占用但正文本体缺位（`grep -c '^### 3\.94'` = 0），本轮自 §3.95 续号未占用 —— 待 Jing 另单收口。
+**逐步操作见 `docs/xiai-login-sms-go-live-sop-2026-11-15.md`**（六步、每步一操作约 100 字、带可粘贴命令与故障对照表）。本节只留三条发布纪律：
+
+1. **同批上线**（R-L4）：`xiai-user-token` + `xiai-admin-token` 代码与前端 `dist` 同一时间窗；只上一边 = 登录全断。
+2. **代码通道**：只用 `tcb fn code update <name> -e <envId>`（不碰环境变量）；禁用 `tcb fn deploy` / `tcb fn config update`（会把含密钥配置写盘并可能用空值覆盖线上变量）；禁用 `tcb fn detail`（原文回显密钥）。
+3. **回滚**：两个函数各自回滚上一版本 + Vercel Promote 上一个 production 部署，两样同批回。
+
+**附：发布门与遗留**
+
+- `run-verify-suite.sh` 暂不可作发布门（18 个脚本已迁移、缺密钥 SKIP；残余红为既存非登录类）；期间门 = `npm run build` + `tests/p2-auth-password.mjs` + `tests/p3-token-persistence.mjs` + 真机联调。
+- **已知既存红**（与本轮无关，单独排期）：基线 `failed_ids=36`，含 6 个两轮均崩的脚本（`admin-review-op` / `ai-enhance-wire` / `correction-display` / `person-model` / `phrase-data` / `writeface-p1`）+ `W-93`〜`W-96`。
+- **规范遗留**：§3.94 号段由 v1.117 宣告行占用但正文本体缺位（`grep -c '^### 3\.94'` = 0），本轮自 §3.95 续号未占用 —— 待 Jing 另单收口。
 
 ---
 
