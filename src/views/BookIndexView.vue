@@ -33,6 +33,7 @@ import PersonPicker from '../components/PersonPicker.vue'
 import PersonProposalDialog from '../components/PersonProposalDialog.vue'
 import { admin, corrections, persons, seals } from '../services/index.js'
 import { isLoggedIn } from '../data/session.js'
+import { toTraditionalText } from '../utils/traditional.js'
 /* 印譜（book）服务：静态命名空间导入（本页用 `createBook` / `listBooks` / `setImageBook`）。 */
 import * as bookService from '../services/books.js'
 
@@ -68,6 +69,31 @@ const version = ref(0)
  * 那时整表都会误显示「未收錄於印人庫」（实测 1,745 行全中招）。行上 `author_name`
  * 由服务端单点落盘 ⇒ 与本机快照是否就绪无关。
  */
+/**
+ * **創作者鏈**（`book.creators`，服務端權威）⇒ 上屏文本片段。
+ *
+ * 口徑：
+ *   · **主作者已在上一行顯示** ⇒ 鏈裡**排除主作者本人**，避免重複；
+ *   · 角色**簡轉繁**（源站 `role` 混用「辑／輯／刻印／刻」；上屏一律繁體），空角色 ⇒ `編者`；
+ *   · 人名優先本機印人快照，退行上快照（`c.name`）；皆無 ⇒ 不造名、該條**整條略過**；
+ *   · 結果為空 ⇒ 模板不渲染這一鏈行（**不編造**「佚名」）。
+ */
+function creatorChainOf(book) {
+  const list = book && Array.isArray(book.creators) ? book.creators : []
+  const primaryId = book && book.author_person_id ? String(book.author_person_id) : ''
+  const parts = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const personId = item.person_id ? String(item.person_id) : ''
+    if (personId !== '' && personId === primaryId) continue
+    const name = persons.personNameOfId(personId) || String(item.name || '').trim()
+    if (!name) continue
+    const role = toTraditionalText(String(item.role || '').trim()) || '編者'
+    parts.push(`${role} ${name}`)
+  }
+  return parts.join(' · ')
+}
+
 function authorNameOf(book) {
   const id = book && book.author_person_id ? String(book.author_person_id) : ''
   const snapshot = book && book.author_name ? String(book.author_name).trim() : ''
@@ -493,7 +519,12 @@ watch(
               <tr v-for="book in books" :key="book.id" :data-book-row="book.id">
                 <td class="books-table__id">{{ book.id }}</td>
                 <td>{{ book.name }}</td>
-                <td>{{ authorNameOf(book) }}</td>
+                <td class="books-table__author">
+                  <span class="books-table__author-name">{{ authorNameOf(book) }}</span>
+                  <span v-if="creatorChainOf(book)" class="books-table__creator-chain" data-creator-chain>
+                    {{ creatorChainOf(book) }}
+                  </span>
+                </td>
                 <td>{{ book.first_publish_year || '未著錄' }}</td>
                 <td>{{ book.publisher || '未著錄' }}</td>
                 <td>{{ book.isbn || '未著錄' }}</td>
@@ -754,6 +785,19 @@ watch(
 .books-table__id {
   font-family: var(--font-mono, monospace);
   letter-spacing: 0.06em;
+}
+
+/* 作者列：主作者一行 ＋ 创作者链一行（弱化一級；链行存在性由 `v-if` 控制）。 */
+.books-table__author-name {
+  display: block;
+}
+
+.books-table__creator-chain {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted-foreground, #666);
+  font-size: 0.86em;
+  line-height: 1.35;
 }
 
 .books-images {

@@ -125,6 +125,7 @@ const BOOK_ROW_KEYS = Object.freeze([
   'publisher',
   'author_person_id',
   'author_name',
+  'creators',
   'first_publish_year',
   'created_at',
   'updated_at'
@@ -202,13 +203,23 @@ async function readBookRowsGuarded(ops) {
   return { rows: list, truncated: list.length >= BOOK_SCAN_HARD_CAP }
 }
 
-/** 行投影（**只出 `BOOK_ROW_KEYS` 10 键**；审计键 `created_by` / `_id` / `legacy_*` 不外传）。 */
+/** 行投影（**只出 `BOOK_ROW_KEYS` 11 鍵**；审计键 `created_by` / `_id` / `legacy_*` 不外传）。 */
 function bookRowProjectionOf(row) {
   const source = row && typeof row === 'object' ? row : {}
   const out = {}
   for (const key of BOOK_ROW_KEYS) {
     if (key === 'first_publish_year') {
       out[key] = Number.isInteger(source.first_publish_year) ? source.first_publish_year : null
+      continue
+    }
+    if (key === 'creators') {
+      /* **创作者链**（服務端權威）：只出四鍵，字串化；順序即源站 `seq` 序 ⇒ 原樣保留。
+         非陣列 / 空 ⇒ `[]`（前端據此不渲染鏈行，**不編造**「佚名」）。 */
+      out[key] = (Array.isArray(source.creators) ? source.creators : [])
+        .map((item) => (item && typeof item === 'object'
+          ? { person_id: text(item.person_id), card_id: text(item.card_id), role: text(item.role), name: text(item.name) }
+          : null))
+        .filter((item) => item !== null)
       continue
     }
     out[key] = text(source[key])

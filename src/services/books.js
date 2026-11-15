@@ -68,6 +68,8 @@ export const BOOK_ROW_KEYS = Object.freeze([
   /* **2026-11-15（v1.120）**：`author_name` ＝ 服务端回的作者显示名快照 —— 本机印人快照
      缺失时（新设备 / 未水合会话）作者列仍能出真名，不误报「未收錄」。 */
   'author_name',
+  /* **2026-11-15（v1.121）**：`creators` ＝ 创作者链（服務端權威；`[{person_id,card_id,role,name}]`） */
+  'creators',
   'first_publish_year',
   'created_at',
   'updated_at'
@@ -203,6 +205,15 @@ export async function listBooks() {
     for (const key of BOOK_ROW_KEYS) {
       if (key === 'first_publish_year') {
         out[key] = Number.isInteger(source.first_publish_year) ? source.first_publish_year : null
+        continue
+      }
+      if (key === 'creators') {
+        /* 创作者链：只取四鍵、字串化；非陣列 ⇒ `[]`（视图据空集不渲染链行）。 */
+        out[key] = (Array.isArray(source.creators) ? source.creators : [])
+          .map((item) => (item && typeof item === 'object'
+            ? { person_id: text(item.person_id), card_id: text(item.card_id), role: text(item.role), name: text(item.name) }
+            : null))
+          .filter((item) => item !== null)
         continue
       }
       out[key] = text(source[key])
