@@ -95,7 +95,8 @@ tcb fn code update xiai-admin-token -e liwu-cny1313-d1gb2fukyb7cb19bb
 | 收到短信了，但填码后提示「手機號或驗證碼不正確」 | 平台 `/auth/v1/user/me` 回体里手机号字段名与代码预期（`phone_number`）不一致，验签拿不到号 ⇒ fail-closed | 在 `cloudfunctions/*/lib/platformAuth.js::pickPhoneNumber` 的兼容键里按实测字段名加一行（两份文件必须同改、保持逐字节相同），重跑第 2 步 |
 | 登录提示「用戶令牌服務內部錯誤」 | 缺令牌密钥、`envId` 解析不到、或区域写错 | 回第 0/1 步核对；确认环境变量里 `TCB_ENV`/`SCF_NAMESPACE`/`CLOUDBASE_ENV_ID` 至少一项能解析出 envId |
 | 点「獲取驗證碼」提示「当前调用的 getVerification() 所需的登录方式尚未在云开发控制台启用」 | 身份源被关 | 控制台 → 登录授权 → 开启「短信验证码登录」 |
-| 取码提示频率受限 / 收不到短信 | 每号每分钟 1 条、环境日上限 30 条 | 等 60 秒再试；额度用尽等次日重置 |
+| 取码失败 | 每号每分钟 1 条、环境日上限 30 条 | 等 60 秒再试；额度用尽等次日重置 |
+| 取码报「账号不存在」/ 显示「短訊驗證服務暫時不可用」 | **旧版缺陷（已于 `39baea5` 修复）**：取码带了 `target:'USER'`，平台只给已注册用户发码，而新号占绝大多数 | 确认前端是新版（产物里 `target:"USER"` 应为 0、`isUsernameRegistered` 应存在）；若仍出现，说明前端未更新，重新触发 Vercel 构建 |
 | 刷新页面就掉登录 | `XIAI_*_TOKEN_TTL_SECONDS` 没配（仍是 900 秒） | 回第 1 步配置后重新登录一次 |
 | 管理员审核全部被拒 | `XIAI_ADMIN_PHONE` 缺或与登录手机号不一致 | 回第 0 步核对，注意管理面只认白名单里那一个号 |
 
