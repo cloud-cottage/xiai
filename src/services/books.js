@@ -79,6 +79,9 @@ export const BOOK_ROW_KEYS = Object.freeze([
   'updated_at'
 ])
 
+/** `searchBookImages` 行投影键面（服务端 `BOOK_IMAGE_ROW_KEYS` 的客户端副本，恰 5 键）。 */
+export const BOOK_IMAGE_ROW_KEYS = Object.freeze(['image_id', 'stamp_id', 'seal_name', 'kind', 'book_id'])
+
 function text(value) {
   return String(value === undefined || value === null ? '' : value).trim()
 }
