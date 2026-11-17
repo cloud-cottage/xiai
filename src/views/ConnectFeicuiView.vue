@@ -19,8 +19,9 @@
  *   · 金鑰是**憑證**：頁面明確提示「勿入版本庫、勿貼群」；
  *   · 斐萃令牌區（管理員簽發）**逐字沿用**改前三態（未登錄 / 非管理員 / 管理員簽發）。
  */
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { isAdmin, isLoggedIn } from '../data/session.js'
+import { otpSessionAccessToken } from '../data/cloudbaseAuth.js'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import {
   FEICUI_DEVICE_TTL,
@@ -37,6 +38,15 @@ import {
 /* **「我的 AI」唯一業務入口（本單新增）**：7 個 op 鍵面逐字在 `aiAccess.js`；
    本視圖只調它的**動詞函數**（`issueKey` / `listKeys` / …），不接觸任何 `op` 名字面值。 */
 import * as aiAccess from '../services/aiAccess.js'
+/* **內嵌登錄复用既有登錄服務**（本單新增）：取碼 / 登錄都走 `services/auth.js` 的**同一份**實現 ——
+   視圖內不自造驗證碼路徑、不持有任何碼常量。`login` 別名為 `loginWithCode` 以免與本地 ref 同名。 */
+import {
+  CODE_RESEND_SECONDS,
+  isPhoneLike,
+  login as loginWithCode,
+  loginCodeHint,
+  requestCode
+} from '../services/auth.js'
 import { formatDateTime } from '../utils/format.js'
 
 const logged = isLoggedIn
@@ -459,6 +469,9 @@ async function onIssueDeviceToken() {
 async function onIssueSessionToken() {
   if (!admin.value) return
   if (deviceBusy.value) return
+  /* **幂等门（本单新增）**：本页加载内已经签过（已交付 / 令牌在手）⇒ 不再签第二枚。
+     自动（挂载 / 登录成功）与手动按钮**共用这一道门** ⇒ 两者不会各签一枚。 */
+  if (deviceDelivered.value || deviceToken.value !== null) return
   deviceBusy.value = true
   deviceError.value = ''
   deviceCopied.value = false
@@ -505,6 +518,159 @@ function clearDeviceToken() {
 
 /* 離開頁面亦清（記憶體釋放；不影響任何持久層）。 */
 onUnmounted(clearDeviceToken)
+
+/* ===========================================================================
+   ⑤ 登錄即授權 —— **內嵌登錄 ＋ 掛載即自動簽發**（本單新增：零第二下點擊）
+   ---------------------------------------------------------------------------
+   触发条件（恰好两处，且**互相幂等**）：
+     · **挂载**：`bootstrapDesktopAuthorization()` 取 `otpSessionAccessToken()`
+         - 非空（本页内存里确有有效 OTP 会话）⇒ 立即 `autoIssueOnce()` ⇒ 签发
+           `ttl_seconds = 28800`，有宿主桥即**当场交付**并清掉 DOM 明文；
+         - 空 ⇒ `loginRequired = true` ⇒ 渲染内嵌登录表单（**不签发、零请求**）。
+     · **内嵌登录成功**：`onInlineLogin()` 在**同一次页面加载内**直接 `autoIssueOnce()`
+       —— 不跳转、不需第二下点击。
+   幂等：`onIssueSessionToken()` 的「已交付 / 令牌在手 ⇒ 早退」门 ＋ `autoIssueAttempted`
+   旗标 ⇒ 自动与手动**不会各签一枚**；手动按钮保留作回退（会话取不到 / 签发失败时重试）。
+
+   硬约束（与 ④ 同一套，逐条）：
+     · 手机号 / 验证码 / 令牌**只在内存**：不写本地存儲 / 會話存儲 / 浏览器数据库 / cookie，
+       不进网址，不打日志；登录成功后**立刻清空表单明文**（验证码是一次性凭据）；
+     · 失败**不静默**：取码 / 登录 / 签发三条路径各自把可见文案落到 `loginError` /
+       `deviceError`（服务端 `message` 原样并列上屏）；
+     · 本视图**不自造验证码路径**：取码 / 登录一律走 `services/auth.js` 的同一份实现。
+   =========================================================================== */
+const autoIssueAttempted = ref(false)
+const sessionProbing = ref(true)
+const otpSessionPresent = ref(false)
+const loginRequired = ref(false)
+const loginPhone = ref('')
+const loginCode = ref('')
+const loginBusy = ref(false)
+const loginError = ref('')
+const loginNotice = ref('')
+const codeBusy = ref(false)
+const codeCooldown = ref(0)
+let codeTimer = null
+const loginCodeHintText = loginCodeHint()
+
+/** 取码冷却的唯一启停点（前端体验层；**不是**服务端频控判据）。 */
+function stopCooldown() {
+  if (codeTimer !== null) {
+    clearInterval(codeTimer)
+    codeTimer = null
+  }
+}
+
+function startCooldown(seconds) {
+  stopCooldown()
+  const total = Math.floor(Number(seconds) || 0)
+  codeCooldown.value = total > 0 ? total : 0
+  if (codeCooldown.value <= 0) return
+  codeTimer = setInterval(() => {
+    codeCooldown.value -= 1
+    if (codeCooldown.value <= 0) {
+      codeCooldown.value = 0
+      stopCooldown()
+    }
+  }, 1000)
+}
+
+const codeButtonLabel = computed(() => {
+  if (codeBusy.value) return '發送中…'
+  if (codeCooldown.value > 0) return `${codeCooldown.value} 秒後可重發`
+  return '獲取驗證碼'
+})
+
+/** 取短訊驗證碼（复用 `auth.requestCode`；失败原文上屏，频控带 `retryAfter` 起冷却）。 */
+async function onRequestLoginCode() {
+  if (codeBusy.value || codeCooldown.value > 0) return
+  loginError.value = ''
+  loginNotice.value = ''
+  if (!isPhoneLike(loginPhone.value)) {
+    loginError.value = '請輸入 11 位手機號。'
+    return
+  }
+  codeBusy.value = true
+  const reply = await requestCode(loginPhone.value)
+  codeBusy.value = false
+  if (!reply.ok) {
+    loginError.value = reply.message || '驗證碼發送失敗，請稍後再試。'
+    if (reply.retryAfter) startCooldown(reply.retryAfter)
+    return
+  }
+  loginNotice.value = reply.message || '驗證碼已發送至你填寫的手機號，請查收短訊。'
+  startCooldown(reply.cooldownSeconds || CODE_RESEND_SECONDS)
+}
+
+/**
+ * **自动签发**的唯一调用点（幂等：本页加载内只跑一次）。
+ * 供两条触发路径共用：挂载探测命中 / 内嵌登录成功。
+ */
+async function autoIssueOnce() {
+  if (autoIssueAttempted.value) return
+  autoIssueAttempted.value = true
+  await onIssueSessionToken()
+}
+
+/**
+ * 内嵌登录（`/connect` 页内完成，**不跳转**）。
+ *
+ * 顺序固定：① 形态校验（就地拒、零请求）② 复用 `auth.login`（平台判）
+ * ③ 成功 ⇒ **清空表单明文** ＋ 收起表单（`loginRequired = false`）
+ * ④ `autoIssueOnce()` ⇒ 同一页面加载内自动签发并交付（无需第二下点击）。
+ */
+async function onInlineLogin() {
+  if (loginBusy.value) return
+  loginError.value = ''
+  if (!isPhoneLike(loginPhone.value)) {
+    loginError.value = '請輸入 11 位手機號。'
+    return
+  }
+  if (String(loginCode.value).trim() === '') {
+    loginError.value = '請輸入短訊驗證碼。'
+    return
+  }
+  loginBusy.value = true
+  const reply = await loginWithCode(loginPhone.value, loginCode.value)
+  loginBusy.value = false
+  if (!reply.ok) {
+    loginError.value = reply.message || '登錄失敗，請重新獲取驗證碼後再試。'
+    return
+  }
+  /* 登录成功：表单明文立刻清空（验证码一次性；手机号同样不留在 DOM）。 */
+  loginCode.value = ''
+  loginPhone.value = ''
+  loginNotice.value = ''
+  stopCooldown()
+  otpSessionPresent.value = true
+  loginRequired.value = false
+  await autoIssueOnce()
+}
+
+/**
+ * **挂载即判**（自动签发的唯一挂载触发点；本页只绑在 `onMounted` 恰 1 处）。
+ *
+ * 读取的是**当前页面内存里的 OTP 会话**（`persistence:'none'`）：取不到 ⇒ 只显示内嵌登录表单，
+ * **零签发请求**；取到 ⇒ 立即自动签发（`ttl_seconds = 28800`）。
+ *
+ * **两个条件取「与」（实测踩过）**：`otpSessionAccessToken()` 非空 **且** 本页确实是登录态
+ * （`logged`）。只判非空会把**匿名平台会话**当成已登录 —— SDK 的匿名会话同样给出一枚
+ * `access_token`（读面登录匿名后浏览器里就有），症状是「登录表单不出现、也没签发」的空白页。
+ * @returns {Promise<{session:boolean, issued:boolean}>} 结构化读数（自检用；不上屏、不含令牌）
+ */
+async function bootstrapDesktopAuthorization() {
+  sessionProbing.value = true
+  const present = (await otpSessionAccessToken()) !== '' && logged.value
+  sessionProbing.value = false
+  otpSessionPresent.value = present
+  loginRequired.value = !present
+  if (!present) return { session: false, issued: false }
+  await autoIssueOnce()
+  return { session: true, issued: true }
+}
+
+onMounted(bootstrapDesktopAuthorization)
+onUnmounted(stopCooldown)
 </script>
 
 <template>
@@ -516,6 +682,45 @@ onUnmounted(clearDeviceToken)
         本頁同時提供「我的 API」：自助管理 AI 金鑰、金餘額與用量（管理員另可配置上游）。
       </p>
     </div>
+
+    <!-- ================= 登錄即授權：無 OTP 會話時顯示**內嵌登錄**（登錄成功即在同一頁面自動簽發） ================= -->
+    <section v-if="loginRequired || sessionProbing" class="panel" data-feicui-login-gate>
+      <div class="panel__head">
+        <h2>登錄即授權（斐翠桌面）</h2>
+      </div>
+      <div class="panel__body">
+        <p class="hint">
+          在本頁登錄後，系統會<b>自動為斐翠桌面簽發一枚 8 小時會話並直接交付</b>，不需要再按任何按鈕。
+          <b>登錄後將自動簽發並交付桌面版；刷新本頁需重新登錄</b>
+          （本頁的登錄會話只存在頁面記憶體，不落任何本地存儲）。
+        </p>
+        <p v-if="sessionProbing" class="hint" data-feicui-login-probing>正在檢查本頁的登錄會話…</p>
+        <form v-else class="form" data-feicui-login-form @submit.prevent="onInlineLogin">
+          <label class="field">
+            <span class="field__label">手機號（11 位）</span>
+            <input v-model.trim="loginPhone" class="field__input" type="tel" inputmode="numeric"
+              autocomplete="off" spellcheck="false" placeholder="13800000000" data-feicui-login-phone />
+          </label>
+          <label class="field">
+            <span class="field__label">短訊驗證碼（6 位數字）</span>
+            <input v-model.trim="loginCode" class="field__input" type="text" inputmode="numeric"
+              autocomplete="one-time-code" spellcheck="false" placeholder="6 位數字" data-feicui-login-code />
+          </label>
+          <p class="hint">{{ loginCodeHintText }}</p>
+          <div class="ai-head-actions">
+            <button class="btn btn--ghost" type="button" data-action="feicui-login-code"
+              :disabled="codeBusy || codeCooldown > 0" @click="onRequestLoginCode">
+              {{ codeButtonLabel }}
+            </button>
+            <button class="btn" type="submit" data-action="feicui-login-submit" :disabled="loginBusy">
+              {{ loginBusy ? '登錄中…' : '登錄並自動簽發' }}
+            </button>
+          </div>
+        </form>
+        <p v-if="loginNotice" class="hint" data-feicui-login-notice>{{ loginNotice }}</p>
+        <p v-if="loginError" class="error" role="alert">{{ loginError }}</p>
+      </div>
+    </section>
 
     <!-- ================= 未登錄：AI 區塊只顯示說明 ＋ 登錄引導（**零請求**） ================= -->
     <section v-if="!logged" class="panel" data-ai-anon-panel>
@@ -706,7 +911,7 @@ onUnmounted(clearDeviceToken)
         <div class="panel__head">
           <h2>斐萃桌面授權</h2>
           <div class="ai-head-actions">
-            <button class="btn btn--ghost" type="button" data-action="feicui-device-issue-session" :disabled="deviceBusy" @click="onIssueSessionToken">
+            <button class="btn btn--ghost" type="button" data-action="feicui-device-issue-session" :disabled="deviceBusy || deviceDelivered" @click="onIssueSessionToken">
               {{ deviceBusy ? '簽發中…' : '為斐翠桌面簽發 8 小時會話' }}
             </button>
             <button class="btn" type="button" data-action="feicui-device-issue" :disabled="deviceBusy" @click="onIssueDeviceToken">
@@ -726,6 +931,9 @@ onUnmounted(clearDeviceToken)
             <code>wails</code> → 通用）就<b>當場交付給斐萃桌面版</b>（<code>receive_feicui_token</code>），
             交付後<b>頁面不再保留令牌明文</b>；沒有宿主橋（例如用普通瀏覽器打開本頁）則自動回退為
             「一次性顯示 ＋ 一鍵複製」。
+            <b>自動簽發：本頁掛載時若偵測到有效的登錄會話，就會自動簽發並交付，不需要再點按鈕</b>
+            （上方「登錄即授權」表單登錄成功亦同，同一頁面內完成）；右上角按鈕僅作<b>回退</b>
+            （會話取不到或簽發失敗時重試）。
             <b>注意：本頁的登錄會話只存在頁面記憶體 —— 若刷新本頁需重新登錄後再簽。</b>
           </p>
 

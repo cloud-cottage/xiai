@@ -685,6 +685,410 @@ section('E', '/connect 页面契约：第二按钮（8 小時）/ 并存 / admin
   })
 }
 
+/* ===========================================================================
+   F 段：登录即自动签发（**可执行**：把视图里的真函数体逐字抽出来，注入假 refs / 假服务）
+   ---------------------------------------------------------------------------
+   为什么不另起一个 `verify-*.mjs`：仓内 `verify-ai-relay` 的 F4 是**套件计数哨兵**，
+   新增一个脚本必然顶红 ⇒ 本段并入既有套件（同批 +15 条，总数 52 → 67）。
+   =========================================================================== */
+section('F', '登录即自动签发：挂载探测 ⇒ 自动签发 ttl=28800 / 无会话 ⇒ 内嵌登录表单 / 登录成功即签 / 幂等 / 失败不静默')
+
+const VIEW_SCRIPT_SRC = viewSrc.slice(viewSrc.indexOf('<script setup>'), viewSrc.indexOf('</script>'))
+
+/** 取视图里某个顶层函数的**完整源码**（含签名与形参，逐字；取不到即抛 ⇒ 判据不静默跳过）。 */
+function sourceOf(name) {
+  const re = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`)
+  const match = re.exec(VIEW_SCRIPT_SRC)
+  if (!match) throw new Error(`MISSING_FUNCTION_SOURCE:${name}`)
+  const open = VIEW_SCRIPT_SRC.indexOf('{', match.index)
+  let depth = 0
+  let i = open
+  for (; i < VIEW_SCRIPT_SRC.length; i += 1) {
+    if (VIEW_SCRIPT_SRC[i] === '{') depth += 1
+    else if (VIEW_SCRIPT_SRC[i] === '}') {
+      depth -= 1
+      if (depth === 0) break
+    }
+  }
+  return VIEW_SCRIPT_SRC.slice(match.index, i + 1)
+}
+
+/** 仅取函数体（静态判据用：数钩子 / 判顺序）。 */
+function bodyOf(name) {
+  const source = sourceOf(name)
+  return source.slice(source.indexOf('{'))
+}
+
+function makeRef(initial) {
+  return { value: initial }
+}
+
+/**
+ * 把真函数**源码**编成可调用体：自由变量（refs / 服务）由参数名注入，
+ * 函数自身的形参（如 `ready` / `reply`）留在源码里 ⇒ 不需要复制任何实现。
+ */
+function compileFn(name, names) {
+  const source = sourceOf(name)
+  return new Function(...names, `return function (...args) { return (${source}).apply(undefined, args) }`)
+}
+
+/**
+ * 最小运行时（**只注入假 refs / 假服务**；四个被测函数体逐字取自 SFC，不复制实现）。
+ * @param {{admin?:boolean, signedIn?:boolean, otpToken?:string, issueReply?:object,
+ *          delivery?:object, loginReply?:object, phone?:string, code?:string}} [options]
+ */
+function buildViewRuntime(options) {
+  const opts = options || {}
+  const refs = {
+    admin: makeRef(opts.admin === undefined ? true : opts.admin),
+    deviceBusy: makeRef(false),
+    deviceError: makeRef(''),
+    deviceCopied: makeRef(false),
+    deviceDelivered: makeRef(false),
+    deviceToken: makeRef(null),
+    signedIn: makeRef(opts.signedIn === undefined ? true : opts.signedIn),
+    autoIssueAttempted: makeRef(false),
+    sessionProbing: makeRef(true),
+    otpSessionPresent: makeRef(false),
+    loginRequired: makeRef(false),
+    loginPhone: makeRef(opts.phone === undefined ? '' : opts.phone),
+    loginCode: makeRef(opts.code === undefined ? '123456' : opts.code),
+    loginBusy: makeRef(false),
+    loginError: makeRef(''),
+    loginNotice: makeRef(''),
+    codeCooldown: makeRef(0)
+  }
+  const calls = { issue: [], deliver: [], otpSession: 0, login: [], cooldownStops: 0 }
+  const TTL = 28800
+
+  const issueDeviceToken = async (input) => {
+    calls.issue.push(input === undefined ? { absent: true } : { ttlSeconds: input.ttlSeconds })
+    if (opts.issueReply) return opts.issueReply
+    return { ok: true, token: TOKEN, expires_at: EXPIRES_AT }
+  }
+  const deliverTokenToHost = async (token, meta) => {
+    calls.deliver.push({ token, meta })
+    if (opts.delivery) return opts.delivery
+    return { delivered: true, reason: 'DELIVERED' }
+  }
+  const otpSessionAccessToken = async () => {
+    calls.otpSession += 1
+    return opts.otpToken === undefined ? TOKEN : opts.otpToken
+  }
+  const loginWithCode = async (phone, code) => {
+    calls.login.push({ phone, code })
+    if (opts.loginReply) return opts.loginReply
+    return { ok: true, user: { id: 'u-' + '0'.repeat(16), role: 'admin' } }
+  }
+  const isPhoneLike = (value) => /^1[3-9]\d{9}$/.test(String(value === undefined || value === null ? '' : value).trim())
+  const stopCooldown = () => {
+    calls.cooldownStops += 1
+  }
+
+  /**
+   * 两次调用：`compileFn(名字, 自由变量名)(自由变量…值)` ⇒ 得到「零参可调体」（真函数原样执行）。
+   * 「已绑定值的零参可调体」＝ `bound`；带形参的真函数（`deviceErrorText`）绑定后仍需传实参。
+   */
+  const bind = (name, names, values) => compileFn(name, names)(...values)
+
+  const clearDeviceToken = bind('clearDeviceToken', ['deviceToken', 'deviceCopied'], [
+    refs.deviceToken,
+    refs.deviceCopied
+  ])
+  /* 提示表注入空对象 ⇒ 走真函数里的「服务端 message 原样上屏」分支（不复制任何提示文案）。 */
+  const deviceErrorText = bind('deviceErrorText', ['DEVICE_REASON_HINTS'], [{}])
+
+  const manualSessionIssue = bind('onIssueSessionToken', [
+    'admin',
+    'deviceBusy',
+    'deviceDelivered',
+    'deviceToken',
+    'deviceError',
+    'deviceCopied',
+    'clearDeviceToken',
+    'issueDeviceToken',
+    'deliverTokenToHost',
+    'deviceErrorText',
+    'DEVICE_SESSION_TTL_SECONDS'
+  ], [
+    refs.admin,
+    refs.deviceBusy,
+    refs.deviceDelivered,
+    refs.deviceToken,
+    refs.deviceError,
+    refs.deviceCopied,
+    clearDeviceToken,
+    issueDeviceToken,
+    deliverTokenToHost,
+    deviceErrorText,
+    TTL
+  ])
+  /* 自动签发 ＝ `autoIssueOnce`（幂等旗标 ＋ 同一个签发体）。 */
+  const auto = bind('autoIssueOnce', ['autoIssueAttempted', 'onIssueSessionToken'], [
+    refs.autoIssueAttempted,
+    manualSessionIssue
+  ])
+  const login = bind('onInlineLogin', [
+    'loginBusy',
+    'loginError',
+    'loginPhone',
+    'loginCode',
+    'loginNotice',
+    'isPhoneLike',
+    'loginWithCode',
+    'stopCooldown',
+    'otpSessionPresent',
+    'loginRequired',
+    'autoIssueOnce'
+  ], [
+    refs.loginBusy,
+    refs.loginError,
+    refs.loginPhone,
+    refs.loginCode,
+    refs.loginNotice,
+    isPhoneLike,
+    loginWithCode,
+    stopCooldown,
+    refs.otpSessionPresent,
+    refs.loginRequired,
+    auto
+  ])
+  const bootstrap = bind('bootstrapDesktopAuthorization', [
+    'sessionProbing',
+    'otpSessionAccessToken',
+    'otpSessionPresent',
+    'loginRequired',
+    'logged',
+    'autoIssueOnce'
+  ], [
+    refs.sessionProbing,
+    otpSessionAccessToken,
+    refs.otpSessionPresent,
+    refs.loginRequired,
+    refs.signedIn,
+    auto
+  ])
+
+  return { refs, calls, manualSessionIssue, login, bootstrap }
+}
+
+{
+  /* F1｜有会话 ⇒ 挂载即自动签发，参数 ttl=28800 */
+  const rt1 = buildViewRuntime()
+  const mounted1 = await rt1.bootstrap()
+  check('F1', '有有效 OTP 會話 ⇒ **掛載即自動簽發**恰 1 次（零點擊），參數逐字 `ttlSeconds = 28800`', {
+    session: true,
+    issued: true,
+    issueCalls: 1,
+    ttl: 28800,
+    otpProbe: 1
+  }, {
+    session: mounted1.session,
+    issued: mounted1.issued,
+    issueCalls: rt1.calls.issue.length,
+    ttl: (rt1.calls.issue[0] || {}).ttlSeconds === undefined ? 0 : rt1.calls.issue[0].ttlSeconds,
+    otpProbe: rt1.calls.otpSession
+  })
+
+  /* F2｜交付成功 ⇒ 已交付 ＋ 令牌从内存 / DOM 清掉 */
+  const rt2 = buildViewRuntime()
+  await rt2.bootstrap()
+  check('F2', '自動簽發 ＋ 宿主橋交付成功 ⇒ `deviceDelivered=true` 且令牌**已從記憶體 / DOM 清掉**（`deviceToken=null`）；橋收到同一枚令牌與 `ttl_seconds=28800`', {
+    delivered: true,
+    tokenHeld: null,
+    deliverCalls: 1,
+    sameToken: true,
+    metaTtl: 28800
+  }, {
+    delivered: rt2.refs.deviceDelivered.value,
+    tokenHeld: rt2.refs.deviceToken.value,
+    deliverCalls: rt2.calls.deliver.length,
+    sameToken: fingerprint((rt2.calls.deliver[0] || {}).token || '') === fingerprint(TOKEN),
+    metaTtl: ((rt2.calls.deliver[0] || {}).meta || {}).ttl_seconds
+  })
+
+  /* F3｜无会话 ⇒ 不自动签、显示登录表单 */
+  const rt3 = buildViewRuntime({ otpToken: '' })
+  const mounted3 = await rt3.bootstrap()
+  check('F3', '取不到 OTP 會話（空串）⇒ **不自動簽發**（零往返、零交付）且 `loginRequired=true`（渲染內嵌登錄表單）', {
+    session: false,
+    issued: false,
+    issueCalls: 0,
+    deliverCalls: 0,
+    loginRequired: true,
+    formPhonePrefilled: false
+  }, {
+    session: mounted3.session,
+    issued: mounted3.issued,
+    issueCalls: rt3.calls.issue.length,
+    deliverCalls: rt3.calls.deliver.length,
+    loginRequired: rt3.refs.loginRequired.value,
+    formPhonePrefilled: rt3.refs.loginPhone.value !== ''
+  })
+
+  /* F4｜无宿主桥 ⇒ 回退一次性显示（令牌不丢，不算失败） */
+  const rt4 = buildViewRuntime({ delivery: { delivered: false, reason: 'BRIDGE_ABSENT' } })
+  await rt4.bootstrap()
+  check('F4', '無宿主橋 ⇒ `delivered=false`、令牌**留在 `deviceToken`**（回退「一次性顯示 ＋ 一鍵複製」，令牌不丢），且**不算失敗**（`deviceError` 空串）', {
+    delivered: false,
+    tokenHeldLen: TOKEN.length,
+    error: ''
+  }, {
+    delivered: rt4.refs.deviceDelivered.value,
+    tokenHeldLen: String((rt4.refs.deviceToken.value || {}).token || '').length,
+    error: rt4.refs.deviceError.value
+  })
+
+  /* F5｜签发失败 ⇒ 文案可见、不静默 */
+  const DENIAL_MESSAGE = '僅管理員可以簽發斐萃桌面授權。'
+  const rt5 = buildViewRuntime({ issueReply: { ok: false, reason: 'FORBIDDEN', message: DENIAL_MESSAGE } })
+  await rt5.bootstrap()
+  check('F5', '簽發失敗 ⇒ 文案**可見且不靜默**（`deviceError` ＝ 服務端 message 原樣）、令牌仍為 null、零交付、不誤報已交付', {
+    error: DENIAL_MESSAGE,
+    tokenHeld: null,
+    delivered: false,
+    deliverCalls: 0
+  }, {
+    error: rt5.refs.deviceError.value,
+    tokenHeld: rt5.refs.deviceToken.value,
+    delivered: rt5.refs.deviceDelivered.value,
+    deliverCalls: rt5.calls.deliver.length
+  })
+
+  /* F6｜幂等：自动 ＋ 手动 ＋ 再挂载 ⇒ 仍只签 1 枚 */
+  const rt6 = buildViewRuntime()
+  await rt6.bootstrap()
+  await rt6.manualSessionIssue()
+  await rt6.bootstrap()
+  check('F6', '幂等：自動簽發後再點**手動按鈕**、再跑一次掛載探測 ⇒ 全程只簽發 1 枚、只交付 1 次（自動與手動不重複）', {
+    issueCalls: 1,
+    deliverCalls: 1
+  }, {
+    issueCalls: rt6.calls.issue.length,
+    deliverCalls: rt6.calls.deliver.length
+  })
+
+  /* F7｜登录成功 ⇒ 同一页面加载内自动签发 ＋ 表单明文清零 */
+  const rt7 = buildViewRuntime({ otpToken: '', phone: '13800000000' })
+  await rt7.bootstrap()
+  const formShownBeforeLogin = rt7.refs.loginRequired.value
+  await rt7.login()
+  check('F7', '內嵌登錄成功 ⇒ **同一頁面加載內自動簽發**（不需再點）、`ttl=28800`、表單明文清零（`loginCode` / `loginPhone`）且表單收起', {
+    formShownBeforeLogin: true,
+    loginCalls: 1,
+    issueCalls: 1,
+    ttl: 28800,
+    code: '',
+    phone: '',
+    loginRequired: false
+  }, {
+    formShownBeforeLogin,
+    loginCalls: rt7.calls.login.length,
+    issueCalls: rt7.calls.issue.length,
+    ttl: (rt7.calls.issue[0] || {}).ttlSeconds,
+    code: rt7.refs.loginCode.value,
+    phone: rt7.refs.loginPhone.value,
+    loginRequired: rt7.refs.loginRequired.value
+  })
+
+  /* F8｜登录失败 ⇒ 不签发、文案可见、表单保留 */
+  const LOGIN_DENIAL = '驗證碼不正確或已過期，請重新獲取驗證碼。'
+  const rt8 = buildViewRuntime({ otpToken: '', phone: '13800000000', loginReply: { ok: false, message: LOGIN_DENIAL } })
+  await rt8.bootstrap()
+  await rt8.login()
+  check('F8', '內嵌登錄失敗 ⇒ **零簽發**、`loginError` 可見（服務端 message 原樣）、表單保持渲染、驗證碼不靜默清掉（留給用戶核對）', {
+    issueCalls: 0,
+    error: LOGIN_DENIAL,
+    loginRequired: true,
+    codeKept: true
+  }, {
+    issueCalls: rt8.calls.issue.length,
+    error: rt8.refs.loginError.value,
+    loginRequired: rt8.refs.loginRequired.value,
+    codeKept: rt8.refs.loginCode.value !== ''
+  })
+
+  /* F15｜匿名平台会话（凭据非空但本页未登录）⇒ 不能当成「有效会话」 */
+  const rt9 = buildViewRuntime({ signedIn: false })
+  const mounted9 = await rt9.bootstrap()
+  check('F15', '匿名平台會話（`otpSessionAccessToken()` 非空**但本頁未登錄**）⇒ **不視為有效會話**：零簽發、內嵌表單照出（實測踩過：SDK 匿名會話同樣回 `access_token`，只判非空會讓人看到「表單不出現、也沒簽發」的空白頁）', {
+    session: false,
+    issued: false,
+    issueCalls: 0,
+    loginRequired: true
+  }, {
+    session: mounted9.session,
+    issued: mounted9.issued,
+    issueCalls: rt9.calls.issue.length,
+    loginRequired: rt9.refs.loginRequired.value
+  })
+
+  /* F9｜表单形态（静态） */
+  check('F9', '內嵌登錄表單鉤子：`data-feicui-login-form` 恰 1 處、提交走 `@submit.prevent="onInlineLogin"`（不隱式導航）、手機號 / 驗證碼輸入各 1 處', {
+    form: 1,
+    submit: 1,
+    phone: 1,
+    code: 1
+  }, {
+    form: countIn(viewSrc, 'data-feicui-login-form'),
+    submit: countIn(viewSrc, '@submit.prevent="onInlineLogin"'),
+    phone: countIn(viewSrc, 'data-feicui-login-phone'),
+    code: countIn(viewSrc, 'data-feicui-login-code')
+  })
+
+  /* F10｜硬文案（逐字） */
+  const GATE_COPY = '登錄後將自動簽發並交付桌面版；刷新本頁需重新登錄'
+  check('F10', '硬文案逐字在碼面恰 1 處：「登錄後將自動簽發並交付桌面版；刷新本頁需重新登錄」', 1, countIn(viewSrc, GATE_COPY))
+
+  /* F11｜复用既有登录服务、零自造码路径 */
+  check('F11', '取碼 / 登錄**复用 `services/auth.js`**（`requestCode` ＋ `login` 别名为 `loginWithCode`），視圖內零自造驗證碼路徑（無 `verify(` 調用、無固定碼常量）', {
+    authImport: 1,
+    requestCodeCalls: 1,
+    loginCalls: 1,
+    verifyCalls: 0,
+    fixedCode: 0
+  }, {
+    authImport: countIn(VIEW_SCRIPT_SRC, "from '../services/auth.js'"),
+    requestCodeCalls: countIn(VIEW_SCRIPT_SRC, 'await requestCode('),
+    loginCalls: countIn(VIEW_SCRIPT_SRC, 'await loginWithCode('),
+    verifyCalls: countIn(VIEW_SCRIPT_SRC, 'auth.verify(') + countIn(VIEW_SCRIPT_SRC, '.verify({'),
+    fixedCode: countIn(VIEW_SCRIPT_SRC, 'DEMO_SMS_CODE')
+  })
+
+  /* F12｜自动触发点唯一 */
+  check('F12', '自動觸發點唯一：`onMounted(` 恰 1 處且綁 `bootstrapDesktopAuthorization`；OTP 會話探測 `otpSessionAccessToken()` 恰 1 處（不散落）', {
+    mounted: 1,
+    mountedBinding: 1,
+    otpProbe: 1
+  }, {
+    mounted: countIn(VIEW_SCRIPT_SRC, 'onMounted('),
+    mountedBinding: countIn(VIEW_SCRIPT_SRC, 'onMounted(bootstrapDesktopAuthorization)'),
+    otpProbe: countIn(VIEW_SCRIPT_SRC, 'otpSessionAccessToken()')
+  })
+
+  /* F13｜幂等门位置（静态） */
+  check('F13', '冪等門在簽發體首位區：`if (deviceDelivered.value || deviceToken.value !== null) return` 出現在 `await issueDeviceToken(` **之前**（自動與手動共用）', {
+    guard: 1,
+    beforeIssue: true
+  }, (() => {
+    const body = bodyOf('onIssueSessionToken')
+    const guardAt = body.indexOf('if (deviceDelivered.value || deviceToken.value !== null) return')
+    const issueAt = body.indexOf('await issueDeviceToken(')
+    return { guard: countIn(body, 'if (deviceDelivered.value || deviceToken.value !== null) return'), beforeIssue: guardAt >= 0 && issueAt > guardAt }
+  })())
+
+  /* F14｜表单开关只由「挂载探测 / 登录成功」两处写 */
+  check('F14', '表單開關（`loginRequired.value =`）**恰 2 處**：掛載探測（無會話 ⇒ true）＋ 登錄成功（⇒ false），無第三條路徑能把它關掉', {
+    assignments: 2,
+    inBootstrap: 1,
+    inLogin: 1
+  }, {
+    assignments: countIn(VIEW_SCRIPT_SRC, 'loginRequired.value ='),
+    inBootstrap: countIn(bodyOf('bootstrapDesktopAuthorization'), 'loginRequired.value = !present'),
+    inLogin: countIn(bodyOf('onInlineLogin'), 'loginRequired.value = false')
+  })
+}
+
 /* ---------------------------------------------------------------------------
    末行 summary
    ------------------------------------------------------------------------- */
