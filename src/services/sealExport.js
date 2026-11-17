@@ -30,6 +30,7 @@
  * 返回结构化 `{ok:false, reason, message}`，**绝不产出半成品文件**（下载动作只在全部成功之后）。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { FIXED_ATTR_LABELS, SEAL_FIXED_ATTR_LABELS, isAdminSession } from './admin.js'
 import { faceLabelOf, fixedAttributesOf, getSealById, imageDisplaySourceOf, imageSourceOf, listFacesOf } from './seals.js'
 import { listPhotosByStamp, loadPhotoDataUrl } from './photos.js'
@@ -493,7 +494,7 @@ export function exportFilenameOf(seal) {
  */
 export async function exportSealData(stampId, actor) {
   if (!canExportSealData(actor)) {
-    return denial('FORBIDDEN', `僅管理員可以導出印章數據；${NO_FILE_SUFFIX}`)
+    return denial('FORBIDDEN', `僅${ADMIN_LABEL}可以導出印章數據；${NO_FILE_SUFFIX}`)
   }
   const id = String(stampId || '').trim()
   const seal = id ? getSealById(id) : null

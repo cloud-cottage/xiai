@@ -29,6 +29,7 @@
  * 钩子：本页按钮一律 `data-action`（**不得**用 `data-admin-action` —— 该族取值集合冻结为 12）。
  * 上屏文案一律繁體（`s2t(x) === x`）。
  */
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { computed, ref, watch } from 'vue'
 import BookCard from '../components/BookCard.vue'
 import BookDetailDialog from '../components/BookDetailDialog.vue'
@@ -52,8 +53,8 @@ function loadBookApi() {
 const canManage = computed(() => admin.isAdminSession())
 /** 無權限時的上屏提示：未登錄與「登錄了但不是管理員」分开说（都不發任何請求）。 */
 const denialMessage = computed(() => {
-  if (!isLoggedIn.value) return '此頁僅管理員可用，請先登錄管理員帳號。'
-  return '此頁僅管理員可用：當前帳號沒有「印譜匯觀」權限。'
+  if (!isLoggedIn.value) return `此頁僅${ADMIN_LABEL}可用，請先登錄${ADMIN_LABEL}帳號。`
+  return `此頁僅${ADMIN_LABEL}可用：當前帳號沒有「印譜匯觀」權限。`
 })
 
 /* ------------------------------ ① 列表 ------------------------------ */
@@ -568,11 +569,11 @@ watch(
       <div>
         <h1>印譜匯觀</h1>
         <p>
-          印譜（book）資料與影像歸屬關係目前僅管理員可見：一本印譜含書名、作者（印人庫引用）、
+          印譜（book）資料與影像歸屬關係目前僅{{ ADMIN_LABEL }}可見：一本印譜含書名、作者（印人庫引用）、
           ISBN、CIP 與首次出版年；一張影像至多歸一本印譜。點卡片開啟詳情，即場改資料、掛圖、選封面。
         </p>
       </div>
-      <span class="books__gate" data-books-gate="admin">僅管理員</span>
+      <span class="books__gate" data-books-gate="admin">僅{{ ADMIN_LABEL }}</span>
     </div>
 
     <!-- 權限門：非管理員 / 未登錄 ⇒ 只此一段提示，**零 book 請求**（見 `refreshBooks` 前置判）。 -->

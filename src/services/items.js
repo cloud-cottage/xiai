@@ -26,6 +26,7 @@
  * ============================================================================
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { currentUser } from '../data/session.js'
 import {
   listItemRows,
@@ -304,7 +305,7 @@ export async function submitItemImport({
       review_note: ''
     }
     saveItemImportRows([...listItemImportRows(), row])
-    return { ok: true, row, authority: 'LOCAL_DEV', message: '已提交印谱外部導入行，待管理員審覈（dev / 離線形態，非正式寫入路徑）' }
+    return { ok: true, row, authority: 'LOCAL_DEV', message: `已提交印谱外部導入行，待${ADMIN_LABEL}審覈（dev / 離線形態，非正式寫入路徑）` }
   }
 
   const serverRow = gate.row
@@ -312,7 +313,7 @@ export async function submitItemImport({
     return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。' }
   }
   saveItemImportRows([...listItemImportRows(), serverRow])
-  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, message: '已提交印谱外部導入行，待管理員審覈' }
+  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, message: `已提交印谱外部導入行，待${ADMIN_LABEL}審覈` }
 }
 
 /* ------------------------------ 導入：读面（管理员） ------------------------------ */
@@ -361,7 +362,7 @@ export function itemPendingReadVerdict(rows, configured, status) {
 export function listPendingItemImportsForAdmin(actor) {
   const who = actor || currentUser()
   if (!canReviewItemImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的印谱外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的印谱外部導入批次` }
   }
   const rows = listItemImportRows()
     .filter((row) => normalizeItemImportStatus(row && row.status) === ITEM_IMPORT_STATUS.PENDING)
@@ -426,7 +427,7 @@ function pullItemImportRowsDenial(gate) {
 export async function pullItemImportRows(actor, options = {}) {
   const who = actor || currentUser()
   if (!canReviewItemImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以取回全部用戶的印谱外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以取回全部用戶的印谱外部導入批次` }
   }
   const batch = String((options && options.batchId) || '').trim()
   const statusText = String((options && options.status) || '').trim()
@@ -692,7 +693,7 @@ function applyItemImportDecision(who, { batchId = '', importId = '', decision = 
 export async function reviewItemImport(actor, options = {}) {
   const who = actor || currentUser()
   if (!canReviewItemImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈印谱外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以審覈印谱外部導入批次` }
   }
   const gate = await userWriteGate('reviewItemImport', {
     batch_id: String((options && options.batchId) || ''),

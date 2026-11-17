@@ -16,6 +16,7 @@
  *     该键（新建行不写、既有行由 `migrateTraditionalData()` 一次性幂等清除）。
  */
 
+import { ADMIN_LABEL } from './roleLabels.js'
 import {
   readKey,
   writeKey,
@@ -2351,7 +2352,7 @@ export function personDirectWriteDenial(collectionKey) {
       reason: 'FORBIDDEN',
       message:
         `集合（${key}）為單寫者：只經採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
-        '（含管理員直寫）⇒ 已拒絕；本次零寫入。'
+        `（含${ADMIN_LABEL}直寫）⇒ 已拒絕；本次零寫入。`
     }
   }
   return null
@@ -2414,8 +2415,8 @@ export function sealImportDirectWriteDenial(collectionKey) {
       ok: false,
       reason: 'FORBIDDEN',
       message:
-        `集合（${key}）為單寫者：只經管理員採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
-        '（含管理員直寫）⇒ 已拒絕；本次零寫入。'
+        `集合（${key}）為單寫者：只經${ADMIN_LABEL}採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
+        `（含${ADMIN_LABEL}直寫）⇒ 已拒絕；本次零寫入。`
     }
   }
   return null
@@ -2508,7 +2509,7 @@ export function itemDirectWriteDenial(collectionKey) {
       reason: 'FORBIDDEN',
       message:
         `集合（${key}）為單寫者：只經採納路徑 / 外部導入通道寫，不開放任何直寫入口` +
-        '（含管理員直寫）⇒ 已拒絕；本次零寫入。'
+        `（含${ADMIN_LABEL}直寫）⇒ 已拒絕；本次零寫入。`
     }
   }
   return null
@@ -2663,7 +2664,7 @@ export function personReferenceDenial(personId) {
     reason: 'NOT_FOUND',
     message:
       `作者所引用的印人（${id}）在庫中不存在 ⇒ 已拒絕寫入；` +
-      '請改選既有印人，或先提交印人提案、經管理員審覈通過後再選。'
+      `請改選既有印人，或先提交印人提案、經${ADMIN_LABEL}審覈通過後再選。`
   }
 }
 
@@ -2960,7 +2961,7 @@ function normalizeEdgeIds(value) {
 }
 
 export function writeFaceFixedAttributes(actor, faceId, patch) {
-  const denied = forbiddenFor(actor, '僅管理員可以修改印面的固定屬性')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以修改印面的固定屬性`)
   if (denied) return denied
   /* 字段白名单不通过 ⇒ **结构化拒绝**（`INVALID_FIELD`），零写入、不抛错。 */
   const invalid = assertKnownFields(patch)
@@ -2989,7 +2990,7 @@ export function writeFaceFixedAttributes(actor, faceId, patch) {
  * @returns 更新后的主印面行（带 `stamp_id` 兼容别名）。
  */
 export function writeFixedAttributes(actor, stampId, patch) {
-  const denied = forbiddenFor(actor, '僅管理員可以修改印面的固定屬性')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以修改印面的固定屬性`)
   if (denied) return denied
   /* 先做整份 patch 的白名单校验：不通过 ⇒ **结构化拒绝**（`INVALID_FIELD`），零写入、不抛错。 */
   const invalid = assertKnownFields(patch)
@@ -3042,7 +3043,7 @@ export function writeFixedAttributes(actor, stampId, patch) {
  *   成功时 `seal` 为**落盘后的印章行**（`shape` / `material` 为写入后的现值）。
  */
 export function writeSealFixedAttributes(actor, stampId, patch) {
-  const denied = forbiddenFor(actor, '僅管理員可以修改印章的固定屬性（形制 / 材質）')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以修改印章的固定屬性（形制 / 材質）`)
   if (denied) return denied
   /* 印章级白名单：不通过 ⇒ 结构化拒绝（`INVALID_FIELD`），零写入、不抛错。 */
   const invalid = assertKnownFields(patch, SEAL_FIXED_ATTR_FIELDS)
@@ -3798,7 +3799,7 @@ function findEquivalentSeal(clean, sha) {
  * @returns {{ok:boolean, row?:object, stampId?:string, reason?:string, missing?:string[], message:string}}
  */
 export function insertSealRow(actor, payload = {}) {
-  const denied = forbiddenFor(actor, '僅管理員可以上傳印章（新增進藏品庫）')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以上傳印章（新增進藏品庫）`)
   if (denied) return denied
   /* **R-49 第 1 条（键白名单门）**：在任何写入之前判定 ⇒ 拒绝即零写入。 */
   const invalidField = assertKnownKeys(payload, SEAL_INSERT_INPUT_FIELDS, '印章實體')
@@ -3887,7 +3888,7 @@ export function insertSealRow(actor, payload = {}) {
  * ② 值域门 —— `kind` 不在 `FACE_KIND` 之内 ⇒ `INVALID_VALUE` ＋ 零写入（改前是**静默归一**成 `FACE`）。
  */
 export async function insertImageRow(actor, payload = {}) {
-  const denied = forbiddenFor(actor, '僅管理員可以上傳印面圖')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以上傳印面圖`)
   if (denied) return denied
   /* **R-49 第 1 条**：键白名单门。 */
   const invalidField = assertKnownKeys(payload, IMAGE_INSERT_INPUT_FIELDS, '影像實體')
@@ -4003,7 +4004,7 @@ export async function insertImageRow(actor, payload = {}) {
 }
 
 export async function insertFaceRow(actor, payload = {}) {
-  const denied = forbiddenFor(actor, '僅管理員可以在印章下新增印面')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以在印章下新增印面`)
   if (denied) return denied
   /* **R-49 第 1 条（键白名单门）**：先判 `material`（R-32 移级，有**更具体的指路文案**），
      再判通用键白名单 —— 两者都是 `INVALID_FIELD` ＋ 零写入。
@@ -4211,7 +4212,7 @@ export async function insertFaceRow(actor, payload = {}) {
  */
 export async function replaceFaceImage(actor, faceId, imageInput) {
   /* ① 权限（数据层硬拦截）：非管理员 ⇒ **结构化拒绝**（`reason:'FORBIDDEN'`），**不产生任何写入**。 */
-  const deniedByRole = forbiddenFor(actor, '僅管理員可以重新上傳印面圖')
+  const deniedByRole = forbiddenFor(actor, `僅${ADMIN_LABEL}可以重新上傳印面圖`)
   if (deniedByRole) {
     return { ...deniedByRole, previousFaceImageId: null }
   }
@@ -4341,7 +4342,7 @@ export async function replaceFaceImage(actor, faceId, imageInput) {
  *          |{ok:false, reason:string, message:string, missing?:string[]}}
  */
 export function planSealWithFaceInput(actor, payload = {}) {
-  const denied = forbiddenFor(actor, '僅管理員可以上傳印章（新增進藏品庫）')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以上傳印章（新增進藏品庫）`)
   if (denied) return denied
   /* **R-49 第 1 条（键白名单门）**：在任何副作用（影像解析 / 落盘）之前拒绝（零写入）。 */
   const invalidField = assertKnownKeys(payload, SEAL_COMPOSITE_INPUT_FIELDS, '新增印章入口')
@@ -4528,7 +4529,7 @@ export async function createSealWithFaceRows(actor, payload = {}) {
  */
 export function listPendingCorrectionRowsForAdmin(actor) {
   if (!actor || actor.role !== 'admin') {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的待審勘誤` }
   }
   const rows = listCorrectionRows()
     .filter((row) => normalizeCorrectionStatus(row.status) === 'PENDING')
@@ -4548,7 +4549,7 @@ export function listPendingCorrectionRowsForAdmin(actor) {
  * @returns {{ok:boolean, row?:object, status?:string, accepted?:boolean, reason?:string, message:string}}
  */
 export function writeCorrectionDecision(actor, correctionId, decision, note = '') {
-  const denied = forbiddenFor(actor, '僅管理員可以審覈勘誤')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以審覈勘誤`)
   if (denied) return denied
   /* 理由值域门（**写之前**）：非文字 / 超 200 字 ⇒ 结构化拒绝 ＋ 零写入。
      与「单条驳回不写理由」不冲突：默认空串放行，且空串不落 `review_note` 键。 */
@@ -4631,7 +4632,7 @@ export function writeCorrectionDecision(actor, correctionId, decision, note = ''
 
 /** 给已采纳的勘误打「奖励已发」标记（同一勘误只发一次，见 §7.4）。 */
 export function markCorrectionRewarded(actor, correctionId, at = nowIso()) {
-  const denied = forbiddenFor(actor, '僅管理員可以審覈勘誤')
+  const denied = forbiddenFor(actor, `僅${ADMIN_LABEL}可以審覈勘誤`)
   if (denied) return denied
   const rows = listCorrectionRows()
   if (!rows.some((row) => row.id === correctionId)) {

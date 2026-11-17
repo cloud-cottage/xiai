@@ -19,6 +19,7 @@
  *   · 金鑰是**憑證**：頁面明確提示「勿入版本庫、勿貼群」；
  *   · 斐萃令牌區（管理員簽發）**逐字沿用**改前三態（未登錄 / 非管理員 / 管理員簽發）。
  */
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 import { otpAuth, otpSessionAccessToken } from '../data/cloudbaseAuth.js'
@@ -418,8 +419,8 @@ const deviceDelivered = ref(false)
 
 /** 服務端 reason → 可讀繁體提示（**只作前綴；服務端 message 恆原樣並列上屏**）。 */
 const DEVICE_REASON_HINTS = Object.freeze({
-  FORBIDDEN: '權限不足：僅管理員可以簽發斐萃桌面授權。',
-  NOT_ADMIN: '僅管理員可以簽發斐萃桌面授權。',
+  FORBIDDEN: `權限不足：僅${ADMIN_LABEL}可以簽發斐萃桌面授權。`,
+  NOT_ADMIN: `僅${ADMIN_LABEL}可以簽發斐萃桌面授權。`,
   LOGIN_REQUIRED: '請先登錄後再申請桌面授權。',
   STORAGE_UNAVAILABLE: '雲端暫時不可用，請稍後再試。',
   INVALID_VALUE: '有效期（ttl_seconds）不合法（需 300〜43200 的整數秒）。',
@@ -814,7 +815,7 @@ onUnmounted(stopCooldown)
       <h1>斐萃令牌</h1>
       <p>
         為斐萃桌面版簽發一枚令牌；斐萃拿它調本機轉發接口，<b>上游密鑰始終不離開璽愛</b>。
-        本頁同時提供「我的 API」：自助管理 AI 金鑰、金餘額與用量（管理員另可配置上游）。
+        本頁同時提供「我的 API」：自助管理 AI 金鑰、金餘額與用量（{{ ADMIN_LABEL }}另可配置上游）。
       </p>
     </div>
 
@@ -865,7 +866,7 @@ onUnmounted(stopCooldown)
       <div class="panel__body">
         <p class="hint">
           「我的 API」讓你自助簽發 <b>AI 金鑰</b>（<code>sk-xiai-…</code>）、查看金餘額與用量窗口；
-          金鑰是<b>憑證</b>，簽發明文只顯示一次。斐萃令牌另由管理員簽發。
+          金鑰是<b>憑證</b>，簽發明文只顯示一次。斐萃令牌另由{{ ADMIN_LABEL }}簽發。
         </p>
         <p class="hint">請先登錄；本頁在未登錄狀態<b>不會發出任何請求</b>。</p>
         <router-link class="btn" :to="{ name: 'login', query: { redirect: '/connect' } }">前往登錄</router-link>
@@ -993,7 +994,7 @@ onUnmounted(stopCooldown)
       <!-- ================= 管理員區：【上游配置】卡片（條件渲染，非 CSS 隱藏） ================= -->
       <section v-if="admin" class="panel" data-admin-action="edit-ai-upstream" data-ai-upstream-panel>
         <div class="panel__head">
-          <h2>上游配置（管理員）</h2>
+          <h2>上游配置（{{ ADMIN_LABEL }}）</h2>
           <button class="btn btn--ghost" type="button" data-action="ai-upstream-reload" :disabled="upstreamBusy" @click="loadUpstream">
             {{ upstreamBusy ? '處理中…' : '重新讀取' }}
           </button>
@@ -1092,7 +1093,7 @@ onUnmounted(stopCooldown)
               <button class="btn btn--ghost" type="button" data-action="feicui-device-clear" @click="clearDeviceToken">關閉並清除</button>
             </div>
           </div>
-          <p v-else-if="!deviceBusy && !deviceError && !deviceDelivered" class="hint">按右上角【簽發設備令牌】取得令牌；僅管理員可簽發。</p>
+          <p v-else-if="!deviceBusy && !deviceError && !deviceDelivered" class="hint">按右上角【簽發設備令牌】取得令牌；僅{{ ADMIN_LABEL }}可簽發。</p>
 
           <!-- 已交付宿主（**令牌明文已清**：此區塊不綁任何令牌值，DOM 內零明文） -->
           <div v-if="deviceDelivered" class="token-box" data-feicui-device-delivered>
@@ -1113,12 +1114,12 @@ onUnmounted(stopCooldown)
       <!-- ================= 斐萃令牌區（既有；逐字沿用改前三態） ================= -->
       <section v-if="!admin" class="panel">
         <div class="panel__head">
-          <h2>僅管理員可簽發</h2>
+          <h2>僅{{ ADMIN_LABEL }}可簽發</h2>
         </div>
         <div class="panel__body">
           <p class="hint">
             斐萃令牌是<b>憑證</b>：持有它就能以你的身份讀取印譜讀面（朝代 / 印人 / 印譜）。
-            因此本頁只對管理員開放；需要令牌請聯繫管理員。
+            因此本頁只對{{ ADMIN_LABEL }}開放；需要令牌請聯繫{{ ADMIN_LABEL }}。
           </p>
           <p class="hint">你現在登錄的是普通用戶賬號，本頁不會發出任何簽發請求。</p>
         </div>

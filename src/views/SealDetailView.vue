@@ -1,5 +1,6 @@
 
 <script setup>
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AddSealFaceDialog from '../components/AddSealFaceDialog.vue'
@@ -687,7 +688,7 @@ const imageCorrectionLede = computed(() => {
   if (!target) return ''
   return (
     `勘誤對象：${target.label}（影像編號 ${target.imageId}）。` +
-    '提交後為「待審覈」，管理員審覈通過後才會生效；審核前影像與印面指向都不變。'
+    `提交後為「待審覈」，${ADMIN_LABEL}審覈通過後才會生效；審核前影像與印面指向都不變。`
   )
 })
 
@@ -3113,8 +3114,8 @@ async function onImageBookChange(imageId, event) {
           class="btn btn--ghost btn--admin"
           type="button"
           data-admin-action="export-seal-data"
-          title="一鍵導出印章數據（僅管理員可見）"
-          aria-label="一鍵導出印章數據（僅管理員可見）"
+          :title="`一鍵導出印章數據（僅${ADMIN_LABEL}可見）`"
+          :aria-label="`一鍵導出印章數據（僅${ADMIN_LABEL}可見）`"
           @click="runSealExport"
         >
           <AdminBadge />
@@ -3129,8 +3130,8 @@ async function onImageBookChange(imageId, event) {
           type="button"
           data-action="seal-delete"
           :disabled="sealDeleteBusy"
-          title="刪除印章（僅管理員可見）"
-          aria-label="刪除印章（僅管理員可見）"
+          :title="`刪除印章（僅${ADMIN_LABEL}可見）`"
+          :aria-label="`刪除印章（僅${ADMIN_LABEL}可見）`"
           @click="openSealDelete"
         >
           <AdminBadge />
@@ -3206,8 +3207,8 @@ async function onImageBookChange(imageId, event) {
           class="btn btn--ghost btn--admin"
           type="button"
           data-admin-action="edit-seal-attributes"
-          title="編輯印章屬性（僅管理員可見）"
-          aria-label="編輯印章屬性（僅管理員可見）"
+          :title="`編輯印章屬性（僅${ADMIN_LABEL}可見）`"
+          :aria-label="`編輯印章屬性（僅${ADMIN_LABEL}可見）`"
           @click="openSealAttributes"
         >
           <AdminBadge />
@@ -3254,8 +3255,8 @@ async function onImageBookChange(imageId, event) {
         class="btn btn--ghost btn--admin"
         type="button"
         data-action="add-seal-face"
-        title="新增印面（僅管理員可見）"
-        aria-label="新增印面（僅管理員可見）"
+        :title="`新增印面（僅${ADMIN_LABEL}可見）`"
+        :aria-label="`新增印面（僅${ADMIN_LABEL}可見）`"
         @click="openAddSealFace"
       >
         <AdminBadge />
@@ -3292,8 +3293,8 @@ async function onImageBookChange(imageId, event) {
             class="btn btn--ghost btn--admin"
             type="button"
             data-admin-action="edit-fixed-attributes"
-            title="編輯固定屬性（僅管理員可見）"
-            aria-label="編輯固定屬性（僅管理員可見）"
+            :title="`編輯固定屬性（僅${ADMIN_LABEL}可見）`"
+            :aria-label="`編輯固定屬性（僅${ADMIN_LABEL}可見）`"
             @click="openFixedEditor(face)"
           >
             <AdminBadge />
@@ -3307,8 +3308,8 @@ async function onImageBookChange(imageId, event) {
             type="button"
             data-admin-action="replace-face-image"
             :data-face-id="face.id"
-            title="重新上傳印面圖（僅管理員可見）"
-            aria-label="重新上傳印面圖（僅管理員可見）"
+            :title="`重新上傳印面圖（僅${ADMIN_LABEL}可見）`"
+            :aria-label="`重新上傳印面圖（僅${ADMIN_LABEL}可見）`"
             @click="openFaceImageReplace(face)"
           >
             <AdminBadge />
@@ -3323,8 +3324,8 @@ async function onImageBookChange(imageId, event) {
             type="button"
             data-admin-action="ai-enhance-face"
             :data-face-id="face.id"
-            title="人工智能修復（僅管理員可見）"
-            aria-label="人工智能修復（僅管理員可見）"
+            :title="`人工智能修復（僅${ADMIN_LABEL}可見）`"
+            :aria-label="`人工智能修復（僅${ADMIN_LABEL}可見）`"
             @click="openAiEnhance(face)"
           >
             <AdminBadge />
@@ -3340,8 +3341,8 @@ async function onImageBookChange(imageId, event) {
             data-action="set-base-face"
             :data-face-id="face.id"
             :disabled="setBaseFaceBusy"
-            title="設為 base face（僅管理員可見）"
-            aria-label="設為 base face（僅管理員可見）"
+            :title="`設為 base face（僅${ADMIN_LABEL}可見）`"
+            :aria-label="`設為 base face（僅${ADMIN_LABEL}可見）`"
             @click="openSetBaseFace(face)"
           >
             <AdminBadge />
@@ -3395,8 +3396,8 @@ async function onImageBookChange(imageId, event) {
               :data-face-id="face.id"
               :data-image-id="face.face_image_id"
               :disabled="faceImageDeleteBusy"
-              title="刪除本印面影像（僅管理員可見）"
-              aria-label="刪除本印面影像（僅管理員可見）"
+              :title="`刪除本印面影像（僅${ADMIN_LABEL}可見）`"
+              :aria-label="`刪除本印面影像（僅${ADMIN_LABEL}可見）`"
               @click="openFaceImageDelete(face)"
             >
               <AdminBadge />
@@ -3631,7 +3632,7 @@ async function onImageBookChange(imageId, event) {
                   重新提交
                 </button>
                 <span class="detail__hint endorse__resubmit-hint" data-endorse-resubmit-hint>
-                  已駁回的行不再阻塞重新提交，管理員會重新審覈。
+                  已駁回的行不再阻塞重新提交，{{ ADMIN_LABEL }}會重新審覈。
                 </span>
               </template>
               <span v-if="endorseFeedbackOf(face, entry)" class="detail__hint endorse__feedback" data-endorse-feedback>
@@ -3730,8 +3731,8 @@ async function onImageBookChange(imageId, event) {
                 data-action="delete-whole-seal-image"
                 :data-image-id="image.id"
                 :disabled="wholeSealDeleteBusy"
-                title="刪除整枚印章圖（僅管理員可見）"
-                aria-label="刪除整枚印章圖（僅管理員可見）"
+                :title="`刪除整枚印章圖（僅${ADMIN_LABEL}可見）`"
+                :aria-label="`刪除整枚印章圖（僅${ADMIN_LABEL}可見）`"
                 @click="openWholeSealImageDelete(image)"
               >
                 <AdminBadge />
@@ -4441,7 +4442,7 @@ async function onImageBookChange(imageId, event) {
                   提交印人提案
                 </button>
                 <span class="field__hint">
-                  庫中無此人 ⇒ 可先提交印人提案（提案框開在本彈窗之上，本彈窗保持現狀、已填內容不丟），經管理員審覈通過後即可在此選中。
+                  庫中無此人 ⇒ 可先提交印人提案（提案框開在本彈窗之上，本彈窗保持現狀、已填內容不丟），經{{ ADMIN_LABEL }}審覈通過後即可在此選中。
                 </span>
               </template>
             </template>

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppHeader from './components/AppHeader.vue'
 import AppSidebar from './components/AppSidebar.vue'
+import AppToast from './components/AppToast.vue'
 import PlaceholderPanel from './components/PlaceholderPanel.vue'
 
 const route = useRoute()
@@ -115,6 +116,10 @@ function reloadPage() {
       </main>
     </div>
   </div>
+
+  <!-- 全站提示条（退出登錄等结果反馈的唯一渲染点）：bare 与非 bare 两种壳都要在，
+       否则登錄頁（bare）上的「已退出登錄」就没有落点。 -->
+  <AppToast />
 
   <!-- 路由級延遲載入失敗面：分頁模組取不到時，**不得**讓使用者只看到「點了沒反應」，
        也不得用假內容頂替 —— 就地顯示可重試的失敗態，兩個動作各自可用。

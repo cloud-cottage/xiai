@@ -20,6 +20,7 @@
  * `id` / `name` / `category` 作别名。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import {
   listSealRows,
   listFaceRows,
@@ -791,7 +792,7 @@ export async function deleteSeal(actor, sealId, reason) {
     return {
       ok: false,
       reason: 'NOT_ADMIN',
-      message: '僅管理員可以刪除印章（前端前置；未發出任何請求、零寫入）。'
+      message: `僅${ADMIN_LABEL}可以刪除印章（前端前置；未發出任何請求、零寫入）。`
     }
   }
   const id = String(sealId === undefined || sealId === null ? '' : sealId).trim()
@@ -893,7 +894,7 @@ export async function deleteFaceImage(faceId, imageId) {
     return {
       ok: false,
       reason: 'NOT_ADMIN',
-      message: '僅管理員可以刪除印面影像（前端前置；未發出任何請求、零寫入）。'
+      message: `僅${ADMIN_LABEL}可以刪除印面影像（前端前置；未發出任何請求、零寫入）。`
     }
   }
   const face = String(faceId === undefined || faceId === null ? '' : faceId).trim()
@@ -991,7 +992,7 @@ export async function deleteWholeSealImage(payload = {}) {
     return {
       ok: false,
       reason: 'NOT_ADMIN',
-      message: '僅管理員可以刪除整枚印章圖（前端前置；未發出任何請求、零寫入）。'
+      message: `僅${ADMIN_LABEL}可以刪除整枚印章圖（前端前置；未發出任何請求、零寫入）。`
     }
   }
   const stampId = String(source.stamp_id ?? source.stampId ?? '').trim()
@@ -1092,7 +1093,7 @@ export async function setBaseFace(payload = {}) {
     return {
       ok: false,
       reason: 'NOT_ADMIN',
-      message: '僅管理員可以切換主印面（前端前置；未發出任何請求、零寫入）。'
+      message: `僅${ADMIN_LABEL}可以切換主印面（前端前置；未發出任何請求、零寫入）。`
     }
   }
   const stampId = String(source.stamp_id ?? source.stampId ?? '').trim()
@@ -2525,7 +2526,7 @@ export async function replaceFaceImage(faceId, payload = {}) {
       ok: false,
       reason: 'UNAUTHENTICATED',
       previousFaceImageId,
-      message: '請先登錄管理員賬號後再重新上傳印面圖'
+      message: `請先登錄${ADMIN_LABEL}賬號後再重新上傳印面圖`
     }
   }
   if (!canReplaceFaceImage(user)) {
@@ -2533,7 +2534,7 @@ export async function replaceFaceImage(faceId, payload = {}) {
       ok: false,
       reason: 'FORBIDDEN',
       previousFaceImageId,
-      message: '僅管理員可以重新上傳印面圖'
+      message: `僅${ADMIN_LABEL}可以重新上傳印面圖`
     }
   }
   if (!id) {
@@ -2802,10 +2803,10 @@ export async function addSealFace(payload = {}) {
   /* ① 形參門 —— 全部判在任何請求 / 任何寫入之前。 */
   const user = currentUser()
   if (!user) {
-    return { ok: false, reason: 'UNAUTHENTICATED', message: '請先登錄管理員賬號後再新增印面（本次未提交任何內容）。' }
+    return { ok: false, reason: 'UNAUTHENTICATED', message: `請先登錄${ADMIN_LABEL}賬號後再新增印面（本次未提交任何內容）。` }
   }
   if (!canAddSealFace(user)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以新增印面（本次未提交任何內容）。' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以新增印面（本次未提交任何內容）。` }
   }
   if (!stampId) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '未指定要新增印面的印章（缺少 stamp_id）；本次未提交任何內容。' }
@@ -3076,10 +3077,10 @@ export async function registerWholeSealImage(payload = {}) {
   /* ① 形參門 —— 全部判在任何請求 / 任何寫入之前（與 `addSealFace` 同門、同 reason 集合）。 */
   const user = currentUser()
   if (!user) {
-    return { ok: false, reason: 'UNAUTHENTICATED', message: '請先登錄管理員賬號後再加入整枚印章圖（本次未提交任何內容）。' }
+    return { ok: false, reason: 'UNAUTHENTICATED', message: `請先登錄${ADMIN_LABEL}賬號後再加入整枚印章圖（本次未提交任何內容）。` }
   }
   if (!canAddSealFace(user)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以加入整枚印章圖（本次未提交任何內容）。' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以加入整枚印章圖（本次未提交任何內容）。` }
   }
   if (!stampId) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '未指定要加入整枚印章圖的印章（缺少 stamp_id）；本次未提交任何內容。' }
@@ -3773,7 +3774,7 @@ export async function submitSealImport({
       row,
       authority: 'LOCAL_DEV',
       ...suspect,
-      message: '已提交印章外部導入行，待管理員審覈（dev / 離線形態，非正式寫入路徑）'
+      message: `已提交印章外部導入行，待${ADMIN_LABEL}審覈（dev / 離線形態，非正式寫入路徑）`
     }
   }
 
@@ -3782,7 +3783,7 @@ export async function submitSealImport({
     return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。' }
   }
   saveSealImportRows([...listSealImportRows(), serverRow])
-  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, ...suspect, message: '已提交印章外部導入行，待管理員審覈' }
+  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, ...suspect, message: `已提交印章外部導入行，待${ADMIN_LABEL}審覈` }
 }
 
 /* --------------------------- 導入：讀面（管理員） --------------------------- */
@@ -3799,7 +3800,7 @@ export async function submitSealImport({
 export function listPendingSealImportsForAdmin(actor) {
   const who = actor || currentUser()
   if (!canReviewSealImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的印章外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的印章外部導入批次` }
   }
   const rows = listSealImportRows()
     .filter((row) => normalizeSealImportStatus(row && row.status) === SEAL_IMPORT_STATUS.PENDING)
@@ -3879,7 +3880,7 @@ function pullSealImportRowsDenial(gate) {
 export async function pullSealImportRows(actor, options = {}) {
   const who = actor || currentUser()
   if (!canReviewSealImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以取回全部用戶的印章外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以取回全部用戶的印章外部導入批次` }
   }
   const batch = String((options && options.batchId) || '').trim()
   const statusText = String((options && options.status) || '').trim()
@@ -4353,7 +4354,7 @@ function applySealImportDecision(who, { batchId = '', importId = '', decision = 
 export async function reviewSealImport(actor, options = {}) {
   const who = actor || currentUser()
   if (!canReviewSealImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈印章外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以審覈印章外部導入批次` }
   }
   const gate = await userWriteGate('reviewSealImport', {
     batch_id: String((options && options.batchId) || ''),

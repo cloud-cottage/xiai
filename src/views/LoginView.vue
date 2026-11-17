@@ -1,9 +1,12 @@
 
 <script setup>
-import { computed, onUnmounted, ref } from 'vue'
+import { ADMIN_LABEL } from '../data/roleLabels.js'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { auth } from '../services/index.js'
 import { currentUser } from '../data/session.js'
+/* **退出登錄三態**：與頁頭共用同一份壳与同一份文案（進行中 / 已退出登錄 / 退出失敗）。 */
+import { useLogout } from '../utils/useLogout.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -35,6 +38,20 @@ const resetting = ref(false)
 const passwordHint = auth.passwordRuleHint()
 
 const user = computed(() => currentUser())
+
+/* 退出三態（單点壳）：`logoutView.label` = `退出登錄` / `正在退出…`；
+   `notice` = 成功頁內提示（`已退出登錄`，重新登入後清掉）；`logoutError` = `退出失敗：…`。 */
+const {
+  error: logoutError,
+  notice: logoutNotice,
+  view: logoutView,
+  signOut: runLogout
+} = useLogout()
+
+/* 重新登入成功后不留「已退出登錄」的旧提示（否则与「歡迎回來」自相矛盾）。 */
+watch(user, (next) => {
+  if (next) logoutNotice.value = ''
+})
 
 /* 驗證碼提示由服務層給出（真短訊 / 有頻控 / 有每日上限 ⇒ 如實說明，不自稱任何取值）。 */
 const codeHint = auth.loginCodeHint()
@@ -186,18 +203,24 @@ async function submitReset() {
 }
 
 function signOut() {
-  auth.logout()
-  phone.value = ''
-  code.value = ''
-  codeSent.value = false
-  cooldown.value = 0
-  password.value = ''
-  resetCode.value = ''
-  newPassword.value = ''
-  confirmPassword.value = ''
-  passwordStage.value = 'login'
-  stopCooldown()
-  feedback.value = '已退出登錄'
+  /* **三態退出**（與頁頭同一份壳 `utils/useLogout.js`）：進行中按鈕換字禁用；
+     成功 ⇒ 上屏「已退出登錄」（頁內提示條 ＋ 全站 toast）並清掉頁面上的敏感輸入；
+     失敗 ⇒ 原因就地顯示、原會話保留、按鈕恢復可重試。 */
+  return runLogout({
+    onSignedOut: () => {
+      phone.value = ''
+      code.value = ''
+      codeSent.value = false
+      cooldown.value = 0
+      password.value = ''
+      resetCode.value = ''
+      newPassword.value = ''
+      confirmPassword.value = ''
+      passwordStage.value = 'login'
+      stopCooldown()
+      feedback.value = ''
+    }
+  })
 }
 </script>
 
@@ -210,13 +233,25 @@ function signOut() {
       </div>
       <p class="login__lede">登錄後可提交勘誤、上傳實物照片，並以金兌換高清印面資料。</p>
 
+      <!-- 退出成功的**頁內**留痕（toast 會自動消失；頁面本身也要能讀到結論） -->
+      <p v-if="logoutNotice" class="login__notice" role="status" data-logout-done>{{ logoutNotice }}</p>
+
       <div v-if="user" class="login__signed">
         <p class="login__signed-who">{{ user.nickname }} · {{ user.phone }}</p>
-        <p class="login__signed-role">{{ user.role === 'admin' ? '管理員賬號' : '普通用戶賬號' }}</p>
+        <p class="login__signed-role">{{ user.role === 'admin' ? ADMIN_LABEL + '賬號' : '普通用戶賬號' }}</p>
         <div class="login__signed-foot">
-          <button class="btn btn--ghost" type="button" @click="signOut">退出登錄</button>
+          <button
+            class="btn btn--ghost"
+            type="button"
+            data-logout
+            :disabled="logoutView.disabled"
+            :aria-busy="logoutView.tone === 'running' ? 'true' : 'false'"
+            @click="signOut"
+          >{{ logoutView.label }}</button>
           <router-link class="btn btn--primary" :to="{ name: 'square' }">返回璽印匯類</router-link>
         </div>
+        <!-- 失敗不得靜默：原因就地上屏；原會話保留（按鈕已恢復可點 ⇒ 可直接重試） -->
+        <p v-if="logoutError" class="login__logout-error" role="alert" data-logout-error>{{ logoutError }}</p>
       </div>
 
       <template v-else>
@@ -440,6 +475,29 @@ function signOut() {
   background: var(--c-surface-sunken);
   border-radius: var(--r-md);
   color: var(--c-text);
+  font-size: var(--t-sm);
+  white-space: pre-line;
+}
+
+/* 退出成功的頁內提示條（`已退出登錄`）：與 toast 同文案，綠線標示「這是結果，不是錯誤」。 */
+.login__notice {
+  margin-bottom: var(--s-4);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-sunken);
+  border-left: 3px solid var(--c-ok);
+  border-radius: var(--r-md);
+  color: var(--c-text);
+  font-size: var(--t-sm);
+}
+
+/* 退出失敗的頁內提示（`退出失敗：…`）：紅線 ＋ 紅字，與成功條明顯不同。 */
+.login__logout-error {
+  margin-top: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-sunken);
+  border-left: 3px solid var(--c-danger);
+  border-radius: var(--r-md);
+  color: var(--c-danger);
   font-size: var(--t-sm);
   white-space: pre-line;
 }

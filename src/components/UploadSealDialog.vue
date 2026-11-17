@@ -1,5 +1,6 @@
 
 <script setup>
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextTransformButtons from './TextTransformButtons.vue'
 /* 【作者】单一点选入口（搜索＋按姓氏分组＋右侧 A–Z 索引）；替换旧「检索输入框 ＋ select」两件套。 */
@@ -689,7 +690,7 @@ onBeforeUnmount(() => {
             提交印人提案
           </button>
           <span class="field__hint">
-            庫中無此人 ⇒ 可先提交印人提案，經管理員審覈通過後即可在此選中（本框保持打開）。
+            庫中無此人 ⇒ 可先提交印人提案，經{{ ADMIN_LABEL }}審覈通過後即可在此選中（本框保持打開）。
           </span>
         </template>
       </div>

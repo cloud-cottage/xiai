@@ -26,6 +26,7 @@
  *  ④ 組件 / 視圖**只經本文件**；`op` 名字面值**全倉只在此處**（含腳本自檢的判據面）。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 import { userWriteGate } from './userWrite.js'
 
@@ -78,8 +79,8 @@ export const AI_REASON_HINTS = Object.freeze({
   LIMIT_DAY: '日限滿：本日用量已達上限，請明日再試或調高日限。',
   LIMIT_MINUTE: '分鐘限滿：本分鐘用量已達上限，請稍後再試。',
   KEY_INVALID: '金鑰失效：金鑰不存在、已註銷或校驗不通過。',
-  CONFIG_MISSING: '配置缺失：AI 上游尚未配置（管理員需先完成【上游配置】）。',
-  FORBIDDEN: '權限不足：該操作需要本人（管理員操作需管理員身份）。',
+  CONFIG_MISSING: `配置缺失：AI 上游尚未配置（${ADMIN_LABEL}需先完成【上游配置】）。`,
+  FORBIDDEN: `權限不足：該操作需要本人（${ADMIN_LABEL}操作需${ADMIN_LABEL}身份）。`,
   INVALID_VALUE: '數值不合法：請檢查限額 / 地址 / 超時是否在允許範圍內。',
   INVALID_FIELD: '欄位不合法：載荷含服務端不接受的欄位。',
   MISSING_REQUIRED: '缺少必填欄位：請補齊後重試。',
@@ -242,7 +243,7 @@ export async function readUsage() {
  */
 export async function readUpstream() {
   if (!isLoggedIn.value || !isAdmin.value) {
-    return denial(NOT_ADMIN, '僅管理員可以讀取 AI 上游配置（前端前置；未發出任何請求）。')
+    return denial(NOT_ADMIN, `僅${ADMIN_LABEL}可以讀取 AI 上游配置（前端前置；未發出任何請求）。`)
   }
   return call(AI_OPS.getAiUpstream, {})
 }
@@ -256,7 +257,7 @@ export async function readUpstream() {
  */
 export async function writeUpstream(input) {
   if (!isLoggedIn.value || !isAdmin.value) {
-    return denial(NOT_ADMIN, '僅管理員可以配置 AI 上游（前端前置；未發出任何請求）。')
+    return denial(NOT_ADMIN, `僅${ADMIN_LABEL}可以配置 AI 上游（前端前置；未發出任何請求）。`)
   }
   const options = input || {}
   const baseUrl = String(options.base_url === undefined || options.base_url === null ? '' : options.base_url).trim()

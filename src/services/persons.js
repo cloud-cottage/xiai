@@ -30,6 +30,7 @@
  *     故云端形态的端到端验证**当前不可验**（依赖未建集合 / 未部署）。本机（dev / 離線）形态可验。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { currentUser } from '../data/session.js'
 import {
   listPersonRows,
@@ -470,7 +471,7 @@ export async function submitPersonProposal({
       ok: true,
       row,
       authority: 'LOCAL_DEV',
-      message: '已提交印人提案，待管理員審覈（dev / 離線形態，非正式寫入路徑）'
+      message: `已提交印人提案，待${ADMIN_LABEL}審覈（dev / 離線形態，非正式寫入路徑）`
     }
   }
 
@@ -489,7 +490,7 @@ export async function submitPersonProposal({
     row: serverRow,
     authority: 'SERVER',
     docId: gate.docId,
-    message: '已提交印人提案，待管理員審覈'
+    message: `已提交印人提案，待${ADMIN_LABEL}審覈`
   }
 }
 
@@ -512,7 +513,7 @@ export function listMyPersonProposals() {
 export function listPendingPersonProposalsForAdmin(actor) {
   const who = actor || currentUser()
   if (!canReviewPersonProposals(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審印人提案' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的待審印人提案` }
   }
   const rows = listPersonProposalRows()
     .filter((row) => normalizeProposalStatus(row && row.status) === PERSON_PROPOSAL_STATUS.PENDING)
@@ -597,7 +598,7 @@ function acceptPersonProposal(proposal, actor, at) {
 export async function reviewPersonProposal(actor, proposalId, decision, note = '') {
   const who = actor || currentUser()
   if (!canReviewPersonProposals(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈印人提案' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以審覈印人提案` }
   }
   /* **写面接线（本单）**：与 `corrections.review` **同一通道** —— 登录令牌写面门 `userWriteGate`
      （含令牌自愈）。载荷键面**逐字**取服务端封闭面
@@ -896,7 +897,7 @@ export async function submitPersonImport({
       review_note: ''
     }
     savePersonImportRows([...listPersonImportRows(), row])
-    return { ok: true, row, authority: 'LOCAL_DEV', message: '已提交外部導入行，待管理員審覈（dev / 離線形態，非正式寫入路徑）' }
+    return { ok: true, row, authority: 'LOCAL_DEV', message: `已提交外部導入行，待${ADMIN_LABEL}審覈（dev / 離線形態，非正式寫入路徑）` }
   }
 
   const serverRow = gate.row
@@ -904,7 +905,7 @@ export async function submitPersonImport({
     return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回傳缺少權威行，無法確認寫入內容；本機未鏡像（雲端是否已寫入未知）。' }
   }
   savePersonImportRows([...listPersonImportRows(), serverRow])
-  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, message: '已提交外部導入行，待管理員審覈' }
+  return { ok: true, row: serverRow, authority: 'SERVER', docId: gate.docId, message: `已提交外部導入行，待${ADMIN_LABEL}審覈` }
 }
 
 /* ------------------------------ 导入：读面（管理员） ------------------------------ */
@@ -924,7 +925,7 @@ export async function submitPersonImport({
 export function listPendingPersonImportsForAdmin(actor) {
   const who = actor || currentUser()
   if (!canReviewPersonImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的外部導入批次` }
   }
   const rows = listPersonImportRows()
     .filter((row) => String((row && row.status) || '') === PERSON_IMPORT_STATUS.PENDING || !(row && row.status))
@@ -1009,7 +1010,7 @@ function pullPersonImportRowsDenial(gate) {
 export async function pullPersonImportRows(actor, options = {}) {
   const who = actor || currentUser()
   if (!canReviewPersonImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以取回全部用戶的外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以取回全部用戶的外部導入批次` }
   }
   const batch = String((options && options.batchId) || '').trim()
   const statusText = String((options && options.status) || '').trim()
@@ -1271,7 +1272,7 @@ function applyPersonImportDecision(who, { batchId = '', importId = '', decision 
 export async function reviewPersonImport(actor, options = {}) {
   const who = actor || currentUser()
   if (!canReviewPersonImports(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈外部導入批次' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以審覈外部導入批次` }
   }
   const gate = await userWriteGate('reviewPersonImport', {
     batch_id: String((options && options.batchId) || ''),

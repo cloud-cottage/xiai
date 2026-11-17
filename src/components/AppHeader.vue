@@ -3,7 +3,8 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { currentUser, goldBalance, isLoggedIn } from '../data/session.js'
-import { auth } from '../services/index.js'
+/* **退出登錄三態**（進行中 / 成功 / 失敗）與提示條：與登錄頁共用同一份壳与同一份文案。 */
+import { useLogout } from '../utils/useLogout.js'
 /* **頁頭單框雙態搜索**（交互重構單）：普通關鍵詞框 ＋ 識別編碼 OTP（首字符判型），
    全站唯一搜索入口；`SquareView` 不再另設獨立 OTP 控件。 */
 import HeaderSearch from '../components/HeaderSearch.vue'
@@ -24,6 +25,13 @@ const logoUrl = `${import.meta.env.BASE_URL}assets/xiai-logo.svg`
 const user = computed(() => currentUser())
 const logged = isLoggedIn
 const gold = goldBalance
+/* 退出的三态：`logoutView.label`（`退出登錄` / `正在退出…`）、`logoutView.disabled`、
+   `logoutError`（`退出失敗：…`，就地显示在菜单里）。 */
+const {
+  error: logoutError,
+  view: logoutView,
+  signOut: runLogout
+} = useLogout()
 const avatarGlyph = computed(() => {
   const u = user.value
   if (!u) return '客'
@@ -65,9 +73,15 @@ function go(name) {
 }
 
 function signOut() {
-  auth.logout()
-  closeMenu()
-  router.push({ name: 'square' })
+  /* **三态退出**（`utils/useLogout.js` 单点）：进行中换字禁用 → 成功上屏「已退出登錄」
+     ＋ 关菜单 ＋ 回广场（未登錄态：头像/菜单/管理员入口全部随 `session.js` 回到游客）→
+     失败保留会话、就地上屏原因并可重试。 */
+  return runLogout({
+    onSignedOut: () => {
+      closeMenu()
+      return router.push({ name: 'square' })
+    }
+  })
 }
 
 function onDocClick(event) {
@@ -132,7 +146,15 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
             <button type="button" @click="go('points')">積分中心</button>
             <!-- **本单改造**：斐萃令牌（管理员签发；入口对已登录用户可见，页内与**服务端**双重判管理员）。 -->
             <button type="button" data-entry="connect-feicui" @click="go('connect-feicui')">斐萃令牌</button>
-            <button type="button" @click="signOut">退出登錄</button>
+            <button
+              type="button"
+              data-logout
+              :disabled="logoutView.disabled"
+              :aria-busy="logoutView.tone === 'running' ? 'true' : 'false'"
+              @click="signOut"
+            >{{ logoutView.label }}</button>
+            <!-- 失敗就地可見（菜單保持打開；原會話未被動過 ⇒ 可原地重試） -->
+            <p v-if="logoutError" class="app-header__menu-error" role="alert" data-logout-error>{{ logoutError }}</p>
           </template>
         </div>
       </div>
@@ -159,5 +181,26 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
 .app-header__icon-btn {
   color: var(--slot-header-text);
+}
+
+/* 退出進行中：按鈕禁用但不「消失」（仍可讀「正在退出…」），指針不給可用暗示。 */
+.app-header__menu button:disabled {
+  opacity: 0.62;
+  cursor: default;
+}
+
+.app-header__menu button:disabled:hover {
+  background: none;
+  color: var(--slot-panel-head-text);
+}
+
+/* 退出失敗就地上屏（菜單內）：與菜單同欄、左側紅線；文案由服務層給（`退出失敗：…`）。 */
+.app-header__menu-error {
+  margin: var(--s-1) 0 0;
+  padding: var(--s-2) var(--s-3);
+  border-left: 2px solid var(--c-danger);
+  color: var(--c-danger);
+  font-size: var(--t-xs);
+  line-height: 1.45;
 }
 </style>

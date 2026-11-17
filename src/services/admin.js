@@ -17,6 +17,7 @@
  * `FORBIDDEN` 逐字为越权**唯一**字面值（服务层与数据层**同字面值**）；`message` 文案逐字保留。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import {
   listSealRows,
   writeFaceFixedAttributes,
@@ -59,7 +60,7 @@ export function isAdminSession() {
  * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:'FORBIDDEN', message:string}}
  */
 export function listSealsForAdmin() {
-  if (!isAdminSession()) return forbidden('僅管理員可以查看全部印章')
+  if (!isAdminSession()) return forbidden(`僅${ADMIN_LABEL}可以查看全部印章`)
   return { ok: true, rows: listSealRows() }
 }
 
@@ -83,13 +84,13 @@ export const SEAL_FIXED_ATTR_LABELS = {
  * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:'FORBIDDEN', message:string}}
  */
 export function listFacesForAdmin(sealId) {
-  if (!isAdminSession()) return forbidden('僅管理員可以查看印面的固定屬性')
+  if (!isAdminSession()) return forbidden(`僅${ADMIN_LABEL}可以查看印面的固定屬性`)
   return { ok: true, rows: listFacesOf(sealId) }
 }
 
 /** 写入**印面**固定属性（canonical 入口，按印面归属）。 */
 export function updateFaceFixedAttributes(faceId, patch) {
-  if (!isAdminSession()) return forbidden('僅管理員可以修改印面的固定屬性')
+  if (!isAdminSession()) return forbidden(`僅${ADMIN_LABEL}可以修改印面的固定屬性`)
   return writeFaceFixedAttributes(currentUser(), faceId, patch)
 }
 
@@ -98,7 +99,7 @@ export function updateFaceFixedAttributes(faceId, patch) {
  * 数据层会按印面归属拆分落库（见 data/db.js 同名函数）。
  */
 export function updateFixedAttributes(stampId, patch) {
-  if (!isAdminSession()) return forbidden('僅管理員可以修改印面的固定屬性')
+  if (!isAdminSession()) return forbidden(`僅${ADMIN_LABEL}可以修改印面的固定屬性`)
   return writeFixedAttributes(currentUser(), stampId, patch)
 }
 
@@ -143,7 +144,7 @@ export async function setInviteReward(actor, value) {
   if (!gate.ok) return { ok: false, reason: gate.reason, message: gate.message }
   /* ② dev / 离线形态：沿用改前的本地角色门（**不得**当作正式写入路径）。 */
   if (gate.mode === 'local-dev' && (!user || user.role !== 'admin')) {
-    return forbidden('僅管理員可以修改邀請獎勵數值；本次零寫入。')
+    return forbidden(`僅${ADMIN_LABEL}可以修改邀請獎勵數值；本次零寫入。`)
   }
   /* ③ 值域门（本地兜底，判定在**任何写入之前**）。 */
   if (!Number.isInteger(value) || value < 0) {

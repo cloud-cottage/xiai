@@ -17,7 +17,7 @@
  *   A 样式单点：`.btn--admin` 有 `position: relative` ＋ `border-style: dashed`；`:hover` 回 `solid`；
  *     角标组件绝对定位 ＋ `pointer-events: none` ＋ `aria-hidden` ＋ `currentColor`；两处均无
  *     `visibility` 声明、样式段无颜色字面量（只用令牌）。
- *   B 应用面：`btn--admin` 开标签数 ＝ `<AdminBadge` 数；每个都含「僅管理員可見」；
+ *   B 应用面：`btn--admin` 开标签数 ＝ `<AdminBadge` 数；每个都含「僅${ADMIN_LABEL}可見」；
  *     10 个管理员门控 `v-if` 后的 class 全带该类；`canClearLocal` / `canUpload`（普通权限）后不带；
  *     普通按钮（存入雲盤 / 下載高清原圖 / 勘誤）零误加；`[data-admin-action]` 全仓仍恰 12 值。
  *   C 作者选择器：`item.key === 'author'` 分支渲染 `PersonPicker` 且分支内零 `<input>`；
@@ -259,7 +259,7 @@ function judgeView(viewText) {
   return {
     adminTagCount: adminTags.length,
     badgeCount: countOf(clean, '<AdminBadge'),
-    adminTagsWithoutLabel: adminTags.filter((t) => !t.raw.includes('僅管理員可見')).length,
+    adminTagsWithoutLabel: adminTags.filter((t) => !t.raw.includes('僅${ADMIN_LABEL}可見')).length,
     normalSampleCount: normalSamples.length,
     normalSampleAdminCount: normalSamples.filter((t) => /\bbtn--admin\b/.test(t.raw)).length,
     gateMap,
@@ -330,13 +330,13 @@ check('A7', 'AdminBadge 着色：用 `currentColor`（跟随按钮文字色）�
 check('A8', 'AdminBadge 零 `visibility` 声明（角标靠定位出界，不靠隐藏）', { hasVisibility: false }, { hasVisibility: badgeJudge.hasVisibility })
 
 /* --------------------------------- B 应用面 ------------------------------ */
-section('B', '应用面：管理员门控按钮成对带样式＋角标＋「僅管理員可見」，普通按钮零误加，钩子面不变')
+section('B', '应用面：管理员门控按钮成对带样式＋角标＋「僅${ADMIN_LABEL}可見」，普通按钮零误加，钩子面不变')
 check('B1', '`btn--admin` 开标签数 ＝ `<AdminBadge` 数（每个管理入口都配一枚锁标；不成对即红）且 ≥ 10', {
   badgeCount: viewJudge.adminTagCount
 }, {
   badgeCount: viewJudge.badgeCount
 })
-check('B2', '每个带 `btn--admin` 的开标签都含「僅管理員可見」（title / aria-label 至少一处：悬停与读屏都有落点）', {
+check('B2', '每个带 `btn--admin` 的开标签都含「僅${ADMIN_LABEL}可見」（title / aria-label 至少一处：悬停与读屏都有落点）', {
   adminTagsWithoutLabel: 0
 }, { adminTagsWithoutLabel: viewJudge.adminTagsWithoutLabel })
 check('B3', '10 个管理员门控 `v-if` 后紧跟的 class 均含 `btn--admin`（逐个门点名，缺一即红）', {

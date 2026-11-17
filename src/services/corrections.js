@@ -9,6 +9,7 @@
  * 提交、汇总、审核与奖励发放的闭环追加在文件末尾的「闭环补全」段。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import {
   listCorrectionRows,
   saveCorrectionRows,
@@ -547,7 +548,7 @@ const FIELD_VALUE_DOMAINS = {
     accepts: (text) => personExistsById(text),
     denyMessage: (label, text) =>
       `${label}「${text}」在庫中沒有對應的印人 ⇒ 已拒絕提交；` +
-      '請改選既有印人，或先提交印人提案、經管理員審覈通過後再選（不報錯即放行的自由文本已不再接受）。'
+      `請改選既有印人，或先提交印人提案、經${ADMIN_LABEL}審覈通過後再選（不報錯即放行的自由文本已不再接受）。`
   }
 }
 
@@ -1095,7 +1096,7 @@ async function listPendingForAdminInner(actor, status = CORRECTION_STATUS.PENDIN
   /* 与写入口 `review` 同判定：非管理员**结构化拒绝**（不是空集）。
      —— 三态共用**同一道管理员门**（不新增第二套判定）。 */
   if (!canReviewCorrections(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的待審勘誤` }
   }
   /* ① 本机镜像（与改前同一段逻辑；数据层拒绝 ⇒ **原样透传、不再发起云读**）。
         `PENDING` ⇒ **逐字走既有数据层入口**；`ACCEPTED` / `REJECTED` ⇒ 同门判权后按状态过滤本机行。 */
@@ -1105,7 +1106,7 @@ async function listPendingForAdminInner(actor, status = CORRECTION_STATUS.PENDIN
   } catch (err) {
     /* 数据层已改为结构化拒绝；此兜底只为保证展示面不崩（如实回报，绝不外抛）。 */
     if (isPermissionError(err)) {
-      return { ok: false, reason: 'FORBIDDEN', message: err.message || '僅管理員可以查看全部用戶的待審勘誤' }
+      return { ok: false, reason: 'FORBIDDEN', message: err.message || `僅${ADMIN_LABEL}可以查看全部用戶的待審勘誤` }
     }
     return { ok: false, reason: 'INTERNAL_ERROR', message: `讀取待審勘誤失敗：${(err && err.message) || '未知錯誤'}` }
   }
@@ -1119,7 +1120,7 @@ async function listPendingForAdminInner(actor, status = CORRECTION_STATUS.PENDIN
     return {
       ok: false,
       reason: (res && res.reason) || 'FORBIDDEN',
-      message: (res && res.message) || '僅管理員可以查看全部用戶的待審勘誤'
+      message: (res && res.message) || `僅${ADMIN_LABEL}可以查看全部用戶的待審勘誤`
     }
   }
   /* ② 云端只读（管理员白名单门在**服务端**判；缺 `XIAI_ADMIN_PHONE` ⇒ 结构化拒绝 ＋ 零读取）。
@@ -1404,7 +1405,7 @@ function reconcileLocalMirrorFromAuthority(correctionId, authorityRow, projectio
 export async function review(actor, correctionId, decision, note = '', options = {}) {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以審覈勘誤' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以審覈勘誤` }
   }
   /* ① **登录令牌写面门**（V3：唯一授权判据；dev / 離線形態返回放行標記）。
      经 `userWriteGate` ⇒ 无令牌且有会话时**先静默补签**（刷新后令牌即丢的自愈），再过云端门。
@@ -1526,7 +1527,7 @@ export async function review(actor, correctionId, decision, note = '', options =
  */
 export async function reviewCorrection(id, decision) {
   const user = currentUser()
-  if (!user || user.role !== 'admin') return { ok: false, message: '僅管理員可以審覈勘誤' }
+  if (!user || user.role !== 'admin') return { ok: false, message: `僅${ADMIN_LABEL}可以審覈勘誤` }
   const rows = listCorrectionRows()
   const target = rows.find((row) => row.id === id)
   if (!target) return { ok: false, message: '未找到該勘誤' }
@@ -1603,7 +1604,7 @@ export async function revokeAcceptance(actor, correctionId, note = '') {
   const who = actor || currentUser()
   /* ① 客户端先判管理员（与 `review` 同口径 ⇒ 非管理员**零发请求、零写入**）。 */
   if (!canReviewCorrections(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以撤銷採納' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以撤銷採納` }
   }
   const id = String(correctionId === null || correctionId === undefined ? '' : correctionId).trim()
   const rawNote = note === undefined || note === null ? '' : note
@@ -1828,7 +1829,7 @@ function buildPendingBatches(rows) {
 export async function listPendingBatchesForAdmin(actor, pending) {
   const who = actor || currentUser()
   if (!canReviewCorrections(who)) {
-    return { ok: false, reason: 'FORBIDDEN', message: '僅管理員可以查看全部用戶的待審勘誤' }
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以查看全部用戶的待審勘誤` }
   }
   const source = pending !== undefined && pending !== null ? pending : await listPendingForAdmin(who)
   if (!source.ok) return source
@@ -1879,7 +1880,7 @@ export async function reviewBatch(actor, ids, decision, note = '') {
       reason: 'FORBIDDEN',
       decided: { accepted: 0, rejected: 0 },
       failed: [],
-      message: '僅管理員可以審覈勘誤'
+      message: `僅${ADMIN_LABEL}可以審覈勘誤`
     }
   }
   const noteCheck = normalizeReviewNote(note)

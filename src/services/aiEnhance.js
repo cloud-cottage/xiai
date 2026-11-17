@@ -58,6 +58,7 @@
  * ============================================================================
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 import { listImageRows, saveImageRows, upsertImageRowCache } from '../data/db.js'
 import { userWriteGate } from './userWrite.js'
@@ -308,7 +309,7 @@ export async function discardFaceImage(imageId) {
     return { ok: false, reason: LOGIN_REQUIRED, message: '請先登錄後再棄置候選圖（前端前置；未發出任何請求、未退款）。' }
   }
   if (!isAdmin.value) {
-    return { ok: false, reason: NOT_ADMIN, message: '僅管理員可以棄置候選圖（前端前置；未發出任何請求、未退款）。' }
+    return { ok: false, reason: NOT_ADMIN, message: `僅${ADMIN_LABEL}可以棄置候選圖（前端前置；未發出任何請求、未退款）。` }
   }
   if (!id) {
     return { ok: false, reason: INVALID_INPUT, message: '棄置候選圖需要候選影像編號（image_id），本次未發出任何請求。' }
@@ -583,7 +584,7 @@ export async function enhanceFaceImage(input, runtime) {
     return denial(LOGIN_REQUIRED, '請先登錄後再使用人工智能修復（前端前置；未發出任何請求、未扣金）。')
   }
   if (!isAdmin.value) {
-    return denial(NOT_ADMIN, '僅管理員可以使用人工智能修復（前端前置；未發出任何請求、未扣金）。')
+    return denial(NOT_ADMIN, `僅${ADMIN_LABEL}可以使用人工智能修復（前端前置；未發出任何請求、未扣金）。`)
   }
   if (!imageId || !sealId || !faceId) {
     return denial(

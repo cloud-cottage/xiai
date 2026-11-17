@@ -25,6 +25,7 @@
  *     该旧组件仍被 `UploadSealDialog` / `AddSealFaceDialog` / `SealFolderPicker` 使用，**本单不动**。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { reactive, ref } from 'vue'
 import TextTransformToggle from './TextTransformToggle.vue'
 import { persons } from '../services/index.js'
@@ -121,7 +122,7 @@ useEscToClose({ onCancel: close, isBusy: () => busy.value })
     <div class="proposal-box">
       <h3 class="proposal-box__title">提交印人提案</h3>
       <p class="proposal-box__lede">
-        庫中無此人時提交本提案；提交後為待審狀態，經管理員審覈通過即入印人名錄。
+        庫中無此人時提交本提案；提交後為待審狀態，經{{ ADMIN_LABEL }}審覈通過即入印人名錄。
       </p>
 
       <!-- 繁体录入口径：软提示（不强制、不拒收、不自动改写）；逐欄旁的开关图标由用户自行点按。 -->

@@ -169,3 +169,43 @@ export async function otpSessionAccessToken() {
   }
   return ''
 }
+
+/**
+ * **撤銷本會話的平台登錄態**（退出登錄的唯一平台側動作）。
+ *
+ * 為什麼要有這個出口：「退出登錄」若只清本地，平台側仍留著本次會話的憑證
+ * （`persistence:'none'` 只在內存，但同一頁面內仍可換票）—— 先撤平台、再清本地，
+ * 順序不能反（撤銷後無法再換票，故令牌必須在此之前或同時清；清點仍在
+ * `services/auth.js::logout`，本函數**不碰任何本地狀態**）。
+ *
+ * 硬口徑：
+ *   · **只走 OTP 實例**（`otpAuth()`）；讀面 / 寫面的匿名會話一字不動；
+ *   · 未配置 / 無 SDK / 本會話本來就沒有平台憑證 ⇒ `{ ok:true, revoked:false }`
+ *     （＝「無需撤銷」，**不是失敗**；離線與刷新後恢復的登錄態都走這條）；
+ *   · 真有憑證且撤銷拋錯 ⇒ `{ ok:false, reason:<簡短原因> }`，**不拋錯**，
+ *     由調用方**保留原會話**並給可見的失敗文案 ＋ 允許重試；
+ *   · 不打印、不落盤任何憑證原文（`reason` 只取錯誤文本，不回傳 token）。
+ * @returns {Promise<{ok:boolean, revoked:boolean, reason:string}>}
+ */
+export async function signOutOtpSession() {
+  const auth = await otpAuth()
+  if (!auth || typeof auth.signOut !== 'function') {
+    return { ok: true, revoked: false, reason: '本次會話沒有平台憑證（無需撤銷）' }
+  }
+  let token = ''
+  try {
+    token = await otpSessionAccessToken()
+  } catch {
+    token = ''
+  }
+  if (!token) {
+    return { ok: true, revoked: false, reason: '本次會話沒有平台憑證（無需撤銷）' }
+  }
+  try {
+    await auth.signOut()
+  } catch (error) {
+    const reason = String((error && (error.message || error.errMsg)) || error || '').split('\n')[0].trim()
+    return { ok: false, revoked: false, reason: reason || '平台未確認撤銷' }
+  }
+  return { ok: true, revoked: true, reason: '' }
+}

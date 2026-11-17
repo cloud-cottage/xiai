@@ -39,6 +39,7 @@
  *   不作判据）；令牌是否过期**一律以云函数回传为准**（过期 ⇒ 服务端 `FORBIDDEN` + 明确文案）。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { callCloudFunction, setCloudFunctionTransport } from '../data/cloudbaseFn.js'
 /* **R-L10 / P3**：令牌持久化的**唯一**存储通道（`src/data/storage.js` 是全工程唯一底座
    ⇒ 本文件不直接触碰 `window.localStorage`）。`readKey` 对坏 JSON 恒回 `null`（内部 try/catch）。 */
@@ -601,7 +602,7 @@ export function createTokenChannel(profile) {
  */
 export const adminTokenChannel = createTokenChannel({
   functionName: ADMIN_TOKEN_FUNCTION,
-  subject: '管理員',
+  subject: ADMIN_LABEL,
   resolvePlatformSession: otpSessionAccessToken,
   issueBody: (credentials) => ({
     phone: trimmed(credentials.phone),

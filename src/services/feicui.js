@@ -15,6 +15,7 @@
  * 纪律：页面 / 组件**只经本门面**；令牌的消费方是斐萃（本仓不存、不回放）。
  */
 
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 /* **凭据携带（真机复现的根因修复）**：`xiai-user-token` 的 `action:'verify'` 只认两种凭据 ——
    ① 网关注入的平台会话（`callContext`）② **`event.token`**（xiai 用户令牌）。
@@ -46,7 +47,7 @@ export const FEICUI_RESOURCES = Object.freeze(['dynasties', 'authors', 'inscript
 /** 角色面（与服务端 `feicuiToken.ROLES` 逐字同值）。 */
 export const FEICUI_ROLES = Object.freeze([
   { value: 'user', label: '普通用戶' },
-  { value: 'admin', label: '管理員' }
+  { value: 'admin', label: ADMIN_LABEL }
 ])
 
 /** TTL 选项（天）；默认 30 天（与服务端 `DEFAULT_TTL_SECONDS` 同值）。 */
@@ -194,10 +195,10 @@ export function ttlSecondsOf(days) {
 export async function issueToken(input) {
   const options = input || {}
   if (!isLoggedIn.value) {
-    return { ok: false, reason: LOGIN_REQUIRED, message: '請先以管理員賬號登錄（未找到登錄會話）。' }
+    return { ok: false, reason: LOGIN_REQUIRED, message: `請先以${ADMIN_LABEL}賬號登錄（未找到登錄會話）。` }
   }
   if (!isAdmin.value) {
-    return { ok: false, reason: NOT_ADMIN, message: '僅管理員可以簽發斐萃令牌。' }
+    return { ok: false, reason: NOT_ADMIN, message: `僅${ADMIN_LABEL}可以簽發斐萃令牌。` }
   }
   const target = String(options.target === undefined || options.target === null ? '' : options.target).trim()
   if (!target) {
@@ -205,7 +206,7 @@ export async function issueToken(input) {
   }
   const role = String(options.role || 'user').trim()
   if (!FEICUI_ROLES.some((item) => item.value === role)) {
-    return { ok: false, reason: INVALID_INPUT, message: '角色不在允許面之內（普通用戶 / 管理員）。' }
+    return { ok: false, reason: INVALID_INPUT, message: `角色不在允許面之內（普通用戶 / ${ADMIN_LABEL}）。` }
   }
   const ttlSeconds = ttlSecondsOf(options.ttlDays === undefined ? FEICUI_TTL.defaultDays : options.ttlDays)
   if (ttlSeconds === null) {
@@ -356,10 +357,10 @@ export async function deliverTokenToHost(token, meta, host) {
 export async function issueDeviceToken(input) {
   const options = input || {}
   if (!isLoggedIn.value) {
-    return { ok: false, reason: LOGIN_REQUIRED, message: '請先以管理員賬號登錄（未找到登錄會話）。' }
+    return { ok: false, reason: LOGIN_REQUIRED, message: `請先以${ADMIN_LABEL}賬號登錄（未找到登錄會話）。` }
   }
   if (!isAdmin.value) {
-    return { ok: false, reason: NOT_ADMIN, message: '僅管理員可以簽發斐萃桌面授權。' }
+    return { ok: false, reason: NOT_ADMIN, message: `僅${ADMIN_LABEL}可以簽發斐萃桌面授權。` }
   }
   /* **可选有效期**：未给 ⇒ 载荷逐字 `{}`（服务端 30 天缺省）；给了 ⇒ 整数 `[300, 43200]`。 */
   const ttlGiven = options.ttlSeconds !== undefined && options.ttlSeconds !== null

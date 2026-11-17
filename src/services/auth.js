@@ -33,7 +33,7 @@
  */
 
 import { listUserRows, saveUserRows } from '../data/db.js'
-import { setUser, restoreSession } from '../data/session.js'
+import { setUser, restoreSession, currentUser } from '../data/session.js'
 import { ADMIN_PHONE, ADMIN_NICKNAME } from '../data/seed.js'
 /* **身份标识（uid）单点**：`u-` ＋ sha256(手机号) 前 16 位（不可反推手机号 ⇒ 可公开）。
    与云函数 `xiai-user-token` / `xiai-admin-token` 的 `uidOf` **同一算法 ⇒ 同值**。 */
@@ -45,7 +45,9 @@ import { ensureUserLoginToken } from './userToken.js'
 /* **R-L10（P3）**：登出清持久化令牌（同一份 `token.js` 的 `clear()`；不新建第二套清点）。 */
 import { clearUserToken, clearAdminToken } from './token.js'
 /* **短訊驗證碼 / 密碼登錄的 SDK 裝配單點**（獨立 app 實例 ＋ 內存持久化 ⇒ 不覆蓋讀面匿名會話）。 */
-import { otpAuth, resetOtpAuth } from '../data/cloudbaseAuth.js'
+import { otpAuth, resetOtpAuth, signOutOtpSession } from '../data/cloudbaseAuth.js'
+/* **退出登錄三態文案單點**（`已退出登錄` / `退出失敗：…` 全仓唯一真源；純函數、零依賴）。 */
+import { LOGOUT_DONE_TEXT, logoutFailureText } from './logoutText.js'
 import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
 
 export const GOLD_INITIAL = 50
@@ -821,7 +823,41 @@ export async function resetPasswordByOtp(phone, code, newPassword, options = {})
   }
 }
 
-export function logout() {
+/**
+ * **退出登錄（登出）—— 三態、全或全無、可重試**。
+ *
+ * 順序是硬口徑（**不得反**）：
+ *   ① **先**等平台側撤銷完成（`signOutOtpSession()`；本函數唯一可能失敗的一步）；
+ *   ② 撤銷**成功之後**才清本地（登錄態 ＋ 兩條令牌 ＋ 平台 SDK 實例）；
+ *   ③ 收尾自檢：本地登錄態沒清乾淨 ⇒ **如實回失敗**，不假裝成功。
+ *
+ * 為什麼不能「先清後發請求」：清了本地就沒有憑證可撤，平台會話成了**孤兒**
+ * （同一頁面內仍可換票）；而且請求失敗時本地已毀 ⇒ 使用者既沒退出成功、也回不去原狀態。
+ *
+ * 失敗分支（平台撤銷拋錯 / 本地清不乾淨）：**原會話原樣保留**（不清一半），
+ * 回 `{ ok:false, message:'退出失敗：<簡短原因>' }`，由頁面給可見文案並允許重試。
+ *
+ * 冪等：未登錄時點退出 ⇒ 零網絡、零報錯，直接回「已在未登錄態」。
+ * @returns {Promise<{ok:boolean, already?:boolean, message:string}>}
+ */
+export async function logout() {
+  /* **冪等（未登錄 ⇒ 已經是登出態）**：不發請求、不報錯、不改寫任何東西。 */
+  if (!currentUser()) {
+    return { ok: true, already: true, message: LOGOUT_DONE_TEXT }
+  }
+
+  /* ① 平台側撤銷：**先 await 完成**（失敗即回頭，本地一字不動）。 */
+  let ended = null
+  try {
+    ended = await signOutOtpSession()
+  } catch (error) {
+    ended = { ok: false, reason: error }
+  }
+  if (!ended || ended.ok === false) {
+    return { ok: false, message: logoutFailureText((ended && ended.reason) || '平台會話未能撤銷') }
+  }
+
+  /* ② 平台會話已撤銷 ⇒ 才清本地 */
   setUser(null)
   /* **R-L10（P3）**：登出必須**清持久化令牌**（兩條通道各一個键；`clear()` 是唯一清点）。
      顺序：先丢令牌、再丢平台会话 —— 后者作废后无法再换票，故令牌必须此前清掉。 */
@@ -830,7 +866,12 @@ export function logout() {
   /* 同時丟掉**平台會話**（`persistence:'none'` ⇒ 只存在內存裡；作廢實例即等於清掉它）。
      不影響讀面 / 寫面那兩個 app 實例的匿名會話。 */
   resetOtpAuth()
-  return { ok: true }
+
+  /* ③ 收尾自檢：清不乾淨 ⇒ 如實報失敗（不退化成「看起來退了」） */
+  if (currentUser()) {
+    return { ok: false, message: logoutFailureText('本地登錄態未能清空，請重試') }
+  }
+  return { ok: true, already: false, message: LOGOUT_DONE_TEXT }
 }
 
 export function bootstrapSession() {
