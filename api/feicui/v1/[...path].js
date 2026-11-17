@@ -2,6 +2,10 @@
  * 玺爱 · **斐萃（feicui）转发路由**（Vercel Serverless Function）
  * ============================================================================
  * 路由：`GET /api/feicui/v1/<path>?limit=&offset=`
+ *      ＋ **换签两路（本单新增，POST）**：`POST /api/feicui/v1/session/refresh` /
+ *        `POST /api/feicui/v1/session/device-token`（实现见 `api/_lib/feicuiSession.js`：
+ *        凭据走 **body**、不验 Feicui 令牌、不收 query；网关侧同路径为
+ *        `/api/xiai/feicui/v1/session/*`）
  *
  * 链路（**斐萃侧永不持有上游 key**）：
  *
@@ -40,12 +44,22 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import feicuiTokenModule from '../../../cloudfunctions/xiai-user-token/lib/feicuiToken.js'
+import * as feicuiSessionModule from '../../_lib/feicuiSession.js'
 
 /* CJS 互操作：Node ESM 的 default 即 `module.exports`；再兜一层 `.default`（打包器差异）。 */
 const tokenLib =
   feicuiTokenModule && typeof feicuiTokenModule.sign === 'function'
     ? feicuiTokenModule
     : feicuiTokenModule && feicuiTokenModule.default
+
+/* **换签端点（本单新增）**：`session/**` 与读面转发**完全分离** —— 不验 Feicui 令牌、不读上游 key、
+   既不查缓存也不进限流；实现全在 `api/_lib/feicuiSession.js`（两份副本逐字节相同）。 */
+const sessionLib =
+  feicuiSessionModule && typeof feicuiSessionModule.createSessionHandler === 'function' ? feicuiSessionModule : null
+
+/** 换签路由段（`/session/<route>`；唯一一处定义点，取自 `_lib/feicuiSession.js`）。 */
+export const SESSION_SEGMENT = sessionLib ? sessionLib.SESSION_SEGMENT : 'session'
+export const SESSION_ROUTES = sessionLib ? sessionLib.SESSION_ROUTES : Object.freeze([])
 
 /** 上游真源（可用 `YINYUAN_API_BASE` 覆盖；**不含 key**）。 */
 export const DEFAULT_UPSTREAM_BASE = 'https://yinyuan2026.vercel.app/api/v1'
@@ -322,6 +336,13 @@ export function createForwardHandler(options = {}) {
         ? Math.floor(Number(env.FEICUI_FORWARD_TIMEOUT_MS))
         : UPSTREAM_TIMEOUT_MS
   const logger = options.logger || console
+  /* 换签端点处理器（生产 = 默认实例；离线自检可整支注入假平台 / 假 env）。 */
+  const sessionHandler =
+    typeof options.sessionHandler === 'function'
+      ? options.sessionHandler
+      : sessionLib
+        ? sessionLib.createSessionHandler({ env, now, logger })
+        : null
 
   function audit(record) {
     try {
@@ -335,6 +356,18 @@ export function createForwardHandler(options = {}) {
 
   return async function handler(req, res) {
     const request = req || {}
+    const segments = segmentsOf(request)
+    /* ⓪ **换签端点（本单新增）**：`POST /session/{refresh,device-token}`。
+       分流位置在方法门之前，且**早于**上游凭据 / 令牌 / path 白名单 / 限流 / 缓存判定
+       —— 换签不需要 Feicui 令牌（凭据走 body），也不该被读面那套 uid 限流牵连。 */
+    if (
+      segments.length === 2 &&
+      segments[0] === SESSION_SEGMENT &&
+      SESSION_ROUTES.indexOf(segments[1]) !== -1
+    ) {
+      if (!sessionHandler) return send(res, 503, { ok: false, reason: REASONS.CONFIG_MISSING })
+      return sessionHandler(request, res, segments[1])
+    }
     /* ① 方法面：只收 GET（`Allow: GET`）。 */
     if (text(request.method).toUpperCase() !== 'GET') {
       return send(res, 405, { ok: false, reason: REASONS.METHOD_NOT_ALLOWED }, { Allow: 'GET' })
@@ -363,7 +396,6 @@ export function createForwardHandler(options = {}) {
       return unauth(res)
     }
     /* ④ path 白名单（**不得透传任意 path**）。 */
-    const segments = segmentsOf(request)
     if (segments.length !== 1 || ALLOWED_PATHS.indexOf(segments[0]) === -1) {
       audit({ outcome: REASONS.PATH_NOT_ALLOWED, uid: verified.uid, segments: segments.length })
       return send(res, 404, { ok: false, reason: REASONS.PATH_NOT_ALLOWED })
