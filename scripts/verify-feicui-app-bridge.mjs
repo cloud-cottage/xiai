@@ -839,7 +839,8 @@ function buildViewRuntime(options) {
     'stopCooldown',
     'otpSessionPresent',
     'loginRequired',
-    'autoIssueOnce'
+    'autoIssueOnce',
+    'autoIssueAttempted'
   ], [
     refs.loginBusy,
     refs.loginError,
@@ -851,7 +852,8 @@ function buildViewRuntime(options) {
     stopCooldown,
     refs.otpSessionPresent,
     refs.loginRequired,
-    auto
+    auto,
+    refs.autoIssueAttempted
   ])
   const bootstrap = bind('bootstrapDesktopAuthorization', [
     'sessionProbing',
@@ -1078,14 +1080,19 @@ function buildViewRuntime(options) {
   })())
 
   /* F14｜表单开关只由「挂载探测 / 登录成功」两处写 */
-  check('F14', '表單開關（`loginRequired.value =`）**恰 2 處**：掛載探測（無會話 ⇒ true）＋ 登錄成功（⇒ false），無第三條路徑能把它關掉', {
-    assignments: 2,
+  check('F14', '表單開關（`loginRequired.value =`）**恰 3 處**：掛載探測（無會話 ⇒ true）＋ 登錄成功（⇒ false）＋ **簽發失敗自愈（⇒ true）**；仍是封闭集合、无第四路', {
+    assignments: 3,
     inBootstrap: 1,
-    inLogin: 1
+    inLogin: 1,
+    inSelfHeal: 1
   }, {
     assignments: countIn(VIEW_SCRIPT_SRC, 'loginRequired.value ='),
     inBootstrap: countIn(bodyOf('bootstrapDesktopAuthorization'), 'loginRequired.value = !present'),
-    inLogin: countIn(bodyOf('onInlineLogin'), 'loginRequired.value = false')
+    inLogin: countIn(bodyOf('onInlineLogin'), 'loginRequired.value = false'),
+    /* **失败即自愈**：签发失败必须把登录表单放出来 —— 判据「会话非空 且 logged」会被
+       「匿名平台会话 ＋ 持久化 App 登录态」同时满足，导致跳过表单直接签发并失败（真机复现）。 */
+    /* 用**全源计数**而非函数体切片：`bodyOf` 的提取边界对新增块不稳定，会把这条判成假绿/假红。 */
+    inSelfHeal: countIn(VIEW_SCRIPT_SRC, 'loginRequired.value = true')
   })
 }
 

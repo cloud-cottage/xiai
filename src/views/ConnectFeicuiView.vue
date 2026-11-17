@@ -449,6 +449,13 @@ async function onIssueDeviceToken() {
   deviceBusy.value = false
   if (!reply.ok) {
     deviceError.value = deviceErrorText(reply)
+    /* **失败即自愈**（真机复现后加）：把内嵌登录表单放出来，并允许登录后再签一次。
+       原因：判据「otpSessionAccessToken() 非空 且 logged」会被「匿名平台会话 ＋ 持久化的
+       App 登录态」同时满足 ⇒ 跳过表单直接签发 ⇒ 服务端必然回「未攜帶有效令牌」；
+       而失败后原先不再给表单，用户就卡死在这条路上（点了也只会重复报错）。 */
+    otpSessionPresent.value = false
+    loginRequired.value = true
+    autoIssueAttempted.value = false
     return
   }
   deviceToken.value = { token: reply.token, expires_at: reply.expires_at }
@@ -689,6 +696,8 @@ async function onInlineLogin() {
   stopCooldown()
   otpSessionPresent.value = true
   loginRequired.value = false
+  /* 登录成功后必须**允许再签一次**：挂载那次尝试可能已经把 autoIssueAttempted 置 true（并失败）。 */
+  autoIssueAttempted.value = false
   await autoIssueOnce()
 }
 
