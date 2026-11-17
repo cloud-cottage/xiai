@@ -86,9 +86,10 @@
  *     处理「一页 ＋ 一个缓冲窗口」；
  *   · 单次请求的集合查询面固定且小：无面筛选 ⇒ 2 次（印章页 ＋ 该页印面）；有面筛选 ⇒ 3 次
  *     （印面候选 ＋ 印章页 ＋ 该页印面）；另有 **1 次 `count()`**（`total`，服务端计数、不传行）
- *     与 **1 次按主印面 `image_id` 的小批量影像读**（≤ `limit` 枚；只为取摘要 / 容器 / 像素尺寸，
- *     **不读字节、不读全库**）。影像读在「每枚卡片都自带 `image_sha256` **与**
- *     `image_storage_key`」时不发生（两样都齐 ⇒ 封面键可由面行直接派生，不必读影像行）。
+ *     与 **1 次按主印面 `image_id` 的小批量影像读**（≤ `limit` 枚；只为取摘要 / 容器 / 像素尺寸
+ *     **与 `visibility`**，**不读字节、不读全库**）。该影像读**恒发**（同批 `in` 查询、零 N+1）：
+ *     `visibility` 只活在影像行上 ⇒ 少读一次就等于把「`hidden` 不外泄」这道读面闸门判空
+ *     （2026-11-17 读面闸门；见 `CARD_IMAGE_PROJECTION_KEYS` 末位 `visibility`）。
  *   · **关键词 `q` 不新增任何读点**：它只是 `xiai_seals` 的 `where` 片段（`$or` 子句），
  *     与四维筛选同沉一次窗口读 ＋ 一次 `count()`；**绝不在服务端拉全表回内存过滤**。
  *   · **查询次数不变、往返变短（P1-4）**：`count()` 只依赖已定型的 `sealMatch`，与
@@ -354,7 +355,11 @@ const CARD_IMAGE_PROJECTION_KEYS = Object.freeze([
   'width',
   'height',
   'storage',
-  'storage_key'
+  'storage_key',
+  /* **读面闸门（2026-11-17）**：`visibility` 是「本行是否可对普通用户露出」的**唯一**行级
+     判据（`lib/ops.js::imageRowVisibilityOf`），卡片组装必须看得见它 —— 投影漏掉这个键
+     ＝ 闸门永远读不到 `hidden`（静默失效）。 */
+  'visibility'
 ])
 
 /** 展示件 / 缩略图对象键的**唯一**派生处（形如 `xiai/images/<sha 前兩位>/<sha>.png`）。 */
@@ -1054,15 +1059,17 @@ async function cardDetailsOfSealRows(db, sealRows) {
     if (!facesBySeal.has(sealId)) facesBySeal.set(sealId, [])
     facesBySeal.get(sealId).push(doc)
   }
-  /* ② 主印面影像行（**只按 `image_id` 小批量读；不读字节**）。面行已自带
-     `image_sha256` ＋ `image_storage_key`（封面键可由面行直接派生）时才不读。 */
+  /* ② 主印面影像行（**只按 `image_id` 小批量读；不读字节**）。
+     **无条件读（读面闸门，2026-11-17）**：`visibility` 只活在影像行上，面行没有这个键 ⇒
+     任何「面行已自带 `image_sha256` ＋ `image_storage_key` ⇒ 不读影像行」的短路都会把
+     `hidden` 判成一个**看不见的空洞**（AI 候選图本不该对普通用户露出）。故本读恒发，
+     仍是**同批 `in` 查询**（`idIn` 一次、`limit` ＝ 批内条数）⇒ 逐卡 N+1 依然零。 */
   const pending = []
   for (const sealRow of rows) {
     const faces = facesBySeal.get(sealKeyOf(sealRow)) || []
     const primary = primaryFaceOf(faces)
     const imageId = text(primary && primary.face_image_id)
     if (imageId === '') continue
-    if (text(primary && primary.image_sha256) !== '' && text(primary && primary.image_storage_key) !== '') continue
     pending.push(imageId)
   }
   const imageById = new Map()
@@ -1093,9 +1100,19 @@ async function cardDetailsOfSealRows(db, sealRows) {
     const primary = primaryFaceOf(faces)
     const imageId = text(primary && primary.face_image_id)
     const image = imageId !== '' ? imageById.get(imageId) || null : null
-    const sha256 = text(image && image.sha256) || text(primary && primary.image_sha256)
-    /* 封面两键：**按影像行真实 `storage_key` 派生**（唯一派生处 `coverKeysOf`）。 */
-    const cover = coverKeysOf(image, primary, sha256)
+    /* **读面闸门（2026-11-17｜`hidden` 影像一律不外泄）**：主印面影像行逐字 `hidden` ⇒
+       卡片的五个影像键（`image_id` / `image_sha256` / `image_mime` / `thumb_key` /
+       `display_key`）**全给空串**（**键面仍恰 14 键** —— 不删键、不落 `null`）。
+       判据单点 ＝ `lib/ops.js::imageRowVisibilityOf`（缺键 / 表外值一律当 `visible`）。
+       `width` / `height` 不在冻结的置空清单内 ⇒ 维持原样（不擅自扩面）。 */
+    const imageHidden =
+      image !== null && ops.imageRowVisibilityOf(image) === ops.IMAGE_VISIBILITY_HIDDEN
+    const sha256 = imageHidden
+      ? ''
+      : text(image && image.sha256) || text(primary && primary.image_sha256)
+    /* 封面两键：**按影像行真实 `storage_key` 派生**（唯一派生处 `coverKeysOf`）；
+       `hidden` ⇒ 两键皆空（与上面五个置空键同批，不派生任何对象键）。 */
+    const cover = imageHidden ? { displayKey: '', thumbKey: '' } : coverKeysOf(image, primary, sha256)
     detailed.push({
       faces,
       card: {
@@ -1106,9 +1123,9 @@ async function cardDetailsOfSealRows(db, sealRows) {
         primary_face_id: text(primary && (primary.id || primary._id)),
         face_count: faceCount,
         edge_count: faces.filter((doc) => isEdgeFace(doc)).length,
-        image_id: imageId,
+        image_id: imageHidden ? '' : imageId,
         image_sha256: sha256,
-        image_mime: text(image && image.mime) || text(primary && primary.image_mime),
+        image_mime: imageHidden ? '' : text(image && image.mime) || text(primary && primary.image_mime),
         width: dimensionOf(image && image.width),
         height: dimensionOf(image && image.height),
         thumb_key: cover.thumbKey,
@@ -2793,6 +2810,9 @@ module.exports = {
   /* 纯函数（供离线自检直接断言） */
   parseListSealCardsPayload,
   primaryFaceOf,
+  /* 封面两键派生单点（`display_key` / `thumb_key`）—— `lib/books.js::listSealCovers` 同源复用，
+     **不建第二套拼法**。 */
+  coverKeysOf,
   objectKeyOfDigest,
   sealKeyOf,
   faceSealKeyOf,

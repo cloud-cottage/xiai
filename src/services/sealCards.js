@@ -10,7 +10,9 @@
  *     · 封面圖直接取行上的 `thumb_key` / `display_key`（**按影像行真實 `storage_key` 派生**：
  *       `.tiff` 源件 ⇒ 派生 `.png`；`.png` / `.jpg` / `.webp` ⇒ 原樣；bundled 占位行與無引用行
  *       ⇒ 兩鍵皆空串）⇒ **不再依賴全量水合的 seals/faces 映射**；取不到對象時由本層＋
- *       `SealCard` 做**三級回落** thumb → display → 本地占位圖；
+ *       `SealCard` 做**四級回落** thumb → display → **original（原始件）** → 本地占位圖；
+ *       第四級（本單新增）只對**帶 `original_storage_key` / `original_sha256` 的行**存在
+ *       （轉碼行必有），其餘行三級語義與改前逐字一致；
  *
  * 【凍結契約（本文件只消費，不自造字段）】
  *   請求 payload：`{ limit, cursor, dynasty, seal_type, face_style, category, q }`（**恰 7 鍵**；
@@ -34,11 +36,13 @@
  */
 
 import { callCloudFunction, cloudBaseApp } from '../data/cloudbaseFn.js'
-import { cloudBaseConfigured, cloudBaseFileIdDenial, cloudBaseFileIdOf, IMAGE_OBJECT_KEY_PATTERN } from '../data/cloudbase.js'
+import { cloudBaseConfigured, cloudBaseFileIdDenial, cloudBaseFileIdOf, cloudObjectBytesOfObjectKey, IMAGE_OBJECT_KEY_PATTERN } from '../data/cloudbase.js'
+/* 字節 ⇒ dataURL：**與 `seals.js` 同一支**（詳情頁的畫布切塊只吃 dataURL，不吃跨域 URL —— 畫布會 taint）。 */
+import { bytesToDataUrl } from '../data/assetmeta.js'
 /* **公開寫面（`action:'public-write'`）的收窄信封**：只取信封、不新增 op 名字面值以外的任何判据
    （`bumpSealView` 这个名字面值**只**在本文件出现一次，见 §6）。 */
 import { publicWrite as publicWriteEnvelope } from './token.js'
-/* **本地占位圖（三級回落的第三級）**：字節真源在 `sealPlaceholderAsset.js`（只認登記鍵），
+/* **本地占位圖（四級回落的第四級）**：字節真源在 `sealPlaceholderAsset.js`（只認登記鍵），
    這裡只取**同一真源**的 base 感知資產 URL（`SITE_BASE_URL` 拼接；**不是**站根絕對路徑）。 */
 import { SEAL_PLACEHOLDER_IMAGE } from '../data/seed.js'
 import { listSeals } from './seals.js'
@@ -148,12 +152,12 @@ const LOCAL_CURSOR_PREFIX = 'off:'
  * ／ `'local'`（本機示範資料經 `cardRowOfLocalSeal` 組裝）。
  * 用符號而非字串鍵：**不進 `Object.keys`** ⇒ 14 鍵面一字不變；標成 `enumerable`
  * ⇒ `{...row}` 展開複製也不丟。為什麼需要它：雲端行在 bundled 占位行 / 無影像行上
- * **兩鍵皆空串**（與本機行同形），`SealCard` 必須仍認得出「這是雲端分頁行」才走封面三級回落，
+ * **兩鍵皆空串**（與本機行同形），`SealCard` 必須仍認得出「這是雲端分頁行」才走封面四級回落，
  * 而不是誤入本機解碼路徑（那條路上雲端行多半查無影像 ⇒ 只剩字形，占位圖出不來）。
  */
 const CARD_ROW_SOURCE = Symbol('xiai.sealCard.source')
 
-/** 該行是否為雲端分頁卡片行（封面三級回落的判據；與 `coverKeyOf` 互補、不替代）。 */
+/** 該行是否為雲端分頁卡片行（封面四級回落的判據；與 `coverKeyOf` 互補、不替代）。 */
 export function isCloudCardRow(row) {
   return Boolean(row && typeof row === 'object' && row[CARD_ROW_SOURCE] === 'cloud')
 }
@@ -237,7 +241,7 @@ export function normalizeSealCardRow(raw) {
   }
   /* 契約明文「0 面印章不會出現」——照收但不讓它上屏（防禦性過濾，零猜值）。 */
   if (!row.stamp_id || row.face_count <= 0) return null
-  /* 來源標記（符號鍵，不佔 14 鍵面）：雲端分頁行 ⇒ 封面走三級回落。 */
+  /* 來源標記（符號鍵，不佔 14 鍵面）：雲端分頁行 ⇒ 封面走四級回落。 */
   row[CARD_ROW_SOURCE] = 'cloud'
   return row
 }
@@ -415,7 +419,7 @@ function demoFallbackOf(input, reason, message) {
 }
 
 /* ---------------------------------------------------------------------------
- * 5. 封面圖（`thumb_key` / `display_key` ⇒ 對象臨時鏈接；**三級回落**）
+ * 5. 封面圖（`thumb_key` / `display_key` / `original_*` ⇒ 對象臨時鏈接；**四級回落**）
  * ------------------------------------------------------------------------- */
 
 /** 臨時鏈接快取（同一對象在滾動中不重複取簽名；鏈接有 TTL ⇒ 只在本次頁面生命週期內用）。 */
@@ -435,7 +439,7 @@ function cachePut(key, value) {
  */
 export const THUMB_OBJECT_KEY_PATTERN = /^xiai\/thumb\/([0-9a-f]{2})\/([0-9a-f]{64})\.webp$/
 
-/** 封面鍵形態門（展示件 ／ 縮略件二族）：畸形鍵一律不出網（但**不**擋三級回落）。 */
+/** 封面鍵形態門（展示件 ／ 縮略件 ／ 原始件三族）：畸形鍵一律不出網（但**不**擋四級回落）。 */
 function coverKeyShapeOk(key) {
   return IMAGE_OBJECT_KEY_PATTERN.test(key) || THUMB_OBJECT_KEY_PATTERN.test(key)
 }
@@ -448,18 +452,51 @@ export function coverKeyOf(card) {
   return textOf(card.display_key).trim()
 }
 
-/** 卡片行的**展示件鍵**（三級回落的第二級；空串＝沒有第二級）。 */
+/** 卡片行的**展示件鍵**（四級回落的第二級；空串＝沒有第二級）。 */
 export function coverDisplayKeyOf(card) {
   return textOf(card && card.display_key).trim()
 }
 
-/** 卡片行的**縮略件鍵**（三級回落的第一級）。 */
+/** 卡片行的**縮略件鍵**（四級回落的第一級）。 */
 export function coverThumbKeyOf(card) {
   return textOf(card && card.thumb_key).trim()
 }
 
+/** 原圖摘要形態門（`original_sha256` 只在 64 位小寫十六進制時才可派生展示鍵；不猜、不補零）。 */
+const ORIGINAL_SHA_PATTERN = /^[0-9a-f]{64}$/
+
 /**
- * **本地占位圖 URL（三級回落的第三級）** —— 取**與 `sealPlaceholderAsset.js` 同一真源**
+ * **原始件展示鍵（四級回落的第三級｜本單新增）**
+ * ----------------------------------------------------------------------------
+ * 【為什麼有這一級】實測事故：一批影像被**轉碼成 TIFF** 後，行上 `sha256` / `storage_key`
+ * 改指 `.tiff`，而按**當前** sha 派生的展示件（`thumb/…webp`、`images/…png`）當時並不存在
+ * ⇒ 前三級全落空 ⇒ 整站這批缺圖。這類**轉碼行**仍帶著原圖的兩個字段（轉碼時寫入、不被覆蓋）：
+ *   · `original_storage_key` —— 原圖對象鍵。**直用**（只做形態門）：必須落在展示件族
+ *     `xiai/images/<sha 前兩位>/<sha>.(png|webp|jpg|jpeg)`。桶按擴展名回 `Content-Type`、
+ *     `<img src>` 由桶解碼 ⇒ 前綴不在展示件族（含 `.tiff` / 原圖私有前綴）**一律不猜、不出網**
+ *     （不把不可匿名讀 / 不可解碼的鍵塞進 `<img>`）；
+ *   · `original_sha256` —— 原圖摘要。按**既有**展示件形態派生
+ *     `xiai/images/<前兩位>/<sha>.png`（與 `data/cloudbase.js::cloudBaseObjectKeyOf` 對來源件行的
+ *     派生**逐字同形**，不另立第二套拼法）。
+ * 次序：有 `original_storage_key` 且形態合法 ⇒ 用它；否則才用 `original_sha256` 派生。
+ * **兩字段皆缺 / 皆不合法 ⇒ 空串** —— 這種行第四級**不存在**，行為與改前逐字一致（不跳級、
+ * 不猜鍵、不拿 `.tiff` 冒充展示件）。
+ * @param {object} card 卡片行（或任何帶 `original_*` 的影像行）
+ * @returns {string} 對象鍵；判不過 ⇒ `''`
+ */
+export function originalDisplayKeyOf(card) {
+  if (!card || typeof card !== 'object') return ''
+  /* ① 行上原圖鍵**直用**（形態門：僅展示件族；`.tiff` / 其它前綴不猜）。 */
+  const direct = textOf(card.original_storage_key).trim()
+  if (direct && IMAGE_OBJECT_KEY_PATTERN.test(direct)) return direct
+  /* ② 只有原圖摘要 ⇒ 按展示件形態派生（缺 64 位形態 ⇒ 不出網）。 */
+  const digest = textOf(card.original_sha256).trim().toLowerCase()
+  if (!ORIGINAL_SHA_PATTERN.test(digest)) return ''
+  return `xiai/images/${digest.slice(0, 2)}/${digest}.png`
+}
+
+/**
+ * **本地占位圖 URL（四級回落的第四級）** —— 取**與 `sealPlaceholderAsset.js` 同一真源**
  * （`SEAL_PLACEHOLDER_IMAGE.asset_url`）的 base 感知路徑：瀏覽器側 `SITE_BASE_URL`（＝部署 base，
  * 如 `/xiai/`）⇒ `/xiai/placeholders/seal-no-image.jpg`。**不是站根絕對路徑**
  * （`/placeholders/…` 在子路徑部署下恆 404 —— 已修過的回歸根因，不得回退）。
@@ -470,49 +507,93 @@ export function coverPlaceholderUrl() {
 }
 
 /**
- * 封面鍵鏈（**三級回落的前兩級**，唯一組鏈處）：`thumb_key` → `display_key`。
- * 只收**形態合法**的鍵（畸形鍵不出網），去重、保序；兩鍵皆空 ⇒ `[]`。
+ * 封面鍵鏈（**四級回落的前三級**，唯一組鏈處）：`thumb_key` → `display_key` → `original`。
+ * 只收**形態合法**的鍵（畸形鍵不出網），去重、保序；三鍵皆無 ⇒ `[]`。
+ * 去重規則（與改前同口徑、只多一級）：第二級不與第一級同鍵；第三級不與**任一已入鏈**的鍵同鍵
+ * （同一對象沒必要重簽一次）。
  * @param {object} card 卡片行
- * @param {{via?:'display'}} [options] `via:'display'` ＝ **只取第二級**（`<img @error>` 的
- *   運行時回落用；避免重簽第一級那條已知壞掉的鏈）
- * @returns {Array<{via:'thumb'|'display', key:string}>}
+ * @param {{via?:'display'|'original'}} [options] `via:'display'` ＝ **從第二級起**（`<img @error>`
+ *   的運行時回落用；避免重簽那一級已知壞掉的鏈）；`via:'original'` ＝ **只取第三級**。
+ * @returns {Array<{via:'thumb'|'display'|'original', key:string}>}
  */
 export function coverKeyChainOf(card, options = {}) {
   const prefer = textOf(options && options.via).trim()
   const thumb = coverThumbKeyOf(card)
   const display = coverDisplayKeyOf(card)
+  const original = originalDisplayKeyOf(card)
   const chain = []
-  if (prefer !== 'display' && thumb && coverKeyShapeOk(thumb)) chain.push({ via: 'thumb', key: thumb })
-  if (display && coverKeyShapeOk(display) && (prefer === 'display' || display !== thumb)) {
+  if (prefer !== 'display' && prefer !== 'original' && thumb && coverKeyShapeOk(thumb)) {
+    chain.push({ via: 'thumb', key: thumb })
+  }
+  if (prefer !== 'original' && display && coverKeyShapeOk(display) && (prefer === 'display' || display !== thumb)) {
     chain.push({ via: 'display', key: display })
+  }
+  /* 第三級（原始件）：**只在形態合法且不與已入鏈者同鍵**時入鏈（無 `original_*` ⇒ 恆不加）。 */
+  if (original && coverKeyShapeOk(original) && !chain.some((item) => item.key === original)) {
+    chain.push({ via: 'original', key: original })
   }
   return chain
 }
 
 /**
+ * **封面回落台階（純函數｜本單新增）**：`<img @error>` 每壞一次**只降一級**，判據全部收在這裡
+ * （組件只管照著做 —— 台階順序可離線斷言，不靠 UI）。
+ *
+ * 台階（0 → 3，只前進、可跨過**不存在**的級，但**永不跳過存在的級**）：
+ *   0 `thumb` ⇒ 1 `display`（行上有展示件鍵時）⇒ 2 `original`（行上有原始件鍵時）⇒ 3 `placeholder`
+ *   （本地占位圖）⇒ 占位圖也壞 ⇒ `glyph`（字形空態，**不再重試**，避免循環）。
+ * 「不存在」＝ 該行**沒有**該級的鍵（`coverDisplayKeyOf` / `originalDisplayKeyOf` 回空串）——
+ * 那不是「跳級」，是這一級本來就沒有；因此在 stage 0 而無展示件鍵時**直接**降到原始件。
+ * 無 `original_*` 的行：台階序列與改前逐字一致（`display` → `placeholder` → `glyph`）。
+ * @param {number} stage 當前台階（0 `thumb` ／ 1 `display` ／ 2 `original` ／ 3 `placeholder`）
+ * @param {object} card 卡片行
+ * @returns {{step:'display'|'original'|'placeholder'|'glyph', via:''|'display'|'original', stage:number}}
+ */
+export function coverEscalationOf(stage, card) {
+  const current = Number.isFinite(Number(stage)) ? Math.max(0, Math.floor(Number(stage))) : 0
+  if (current === 0 && coverDisplayKeyOf(card)) {
+    return { step: 'display', via: 'display', stage: 1 }
+  }
+  if (current <= 1 && originalDisplayKeyOf(card)) {
+    return { step: 'original', via: 'original', stage: 2 }
+  }
+  if (current <= 2) {
+    return { step: 'placeholder', via: '', stage: 3 }
+  }
+  return { step: 'glyph', via: '', stage: 3 }
+}
+
+/**
  * 取卡片封面的**對象臨時鏈接**（`getTempFileURL`；桶 ACL 不動、匿名可讀展示件），
  * **按鍵鏈逐級取鏈**：`thumb_key` 取不到（`STORAGE_FILE_NONEXIST` / 形態不過 / 簽名異常）
- * ⇒ 立刻試 `display_key`；兩級都取不到 ⇒ `{ok:false}`（由 `SealCard` 落到本地占位圖）。
+ * ⇒ 立刻試 `display_key` ⇒ 再試**原始件**（`original_storage_key` / `original_sha256` 派生的
+ * 展示鍵；只有轉碼行才有這一級）；三級都取不到 ⇒ `{ok:false}`（由 `SealCard` 落到本地占位圖）。
  *
  * 為什麼不直接用讀面那個 `cloudTempUrlOfObjectKey`：那個函數要 `appRef`，而 `appRef` 只在
  * **全量水合**裡才被賦值 ⇒ 拿它就等於又把首屏綁回水合。本函數改走 `cloudBaseApp()`
  * （同一套 SDK 裝載縫 ＋ 同一條匿名登錄，與影像上傳面共用），**與水合無關**。
  *
- * @param {object} card 卡片行（`thumb_key` / `display_key`）
- * @param {{via?:'display'}} [options] `via:'display'` ＝ **只取第二級**（`<img @error>` 的
- *   運行時回落用；避免重簽第一級那條已知壞掉的鏈）
- * @returns {Promise<{ok:true, url:string, key:string, via:'thumb'|'display', message:''}
+ * @param {object} card 卡片行（`thumb_key` / `display_key` / `original_*`）
+ * @param {{via?:'display'|'original'}} [options] `via:'display'` ＝ **從第二級起**；
+ *   `via:'original'` ＝ **只取第三級**（`<img @error>` 的運行時回落用：已壞的級不再重簽）
+ * @returns {Promise<{ok:true, url:string, key:string, via:'thumb'|'display'|'original', message:''}
  *          |{ok:false, reason:string, message:string}>}
  */
 export async function cardCoverUrl(card, options = {}) {
   const prefer = textOf(options && options.via).trim()
   const thumb = coverThumbKeyOf(card)
   const display = coverDisplayKeyOf(card)
-  if (!thumb && !display) {
+  const original = originalDisplayKeyOf(card)
+  if (!thumb && !display && !original) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '此印章暫無封面影像。' }
   }
-  /* `via:'display'` 但行上沒有展示件鍵 ⇒ 第二級根本不存在（與「兩鍵皆空」同判）。 */
-  if (prefer === 'display' && !display) {
+  /* `via:'display'` 但行上既無展示件鍵、也無原始件鍵 ⇒ 這一級與下一級都不存在（與「三鍵皆空」同判）。
+     無 `original_*` 的行仍然**逐字**得到改前那個 `MISSING_REQUIRED`。 */
+  if (prefer === 'display' && !display && !original) {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '此印章暫無封面影像。' }
+  }
+  /* `via:'original'` 但行上沒有原始件鍵 ⇒ 第三級不存在（不回落成第一/二級：呼叫方要的是這一級）。 */
+  if (prefer === 'original' && !original) {
     return { ok: false, reason: 'MISSING_REQUIRED', message: '此印章暫無封面影像。' }
   }
   const chain = coverKeyChainOf(card, { via: prefer })
@@ -556,6 +637,41 @@ export async function cardCoverUrl(card, options = {}) {
     }
   }
   return { ok: false, reason, message }
+}
+
+/**
+ * **原始件展示件的 dataURL（本單第四級｜詳情頁印面大圖用）**
+ *
+ * 為什麼不給臨時鏈接：詳情頁的印面大圖經 `SliceImage` 走**畫布切塊**（`drawImage` →
+ * `canvas.toDataURL`）。跨域臨時鏈接會 **taint 畫布** ⇒ `toDataURL` 拋錯 ⇒ 大圖仍不出。
+ * 故這一級在服務層就把字節取回（`cloudObjectBytesOfObjectKey`：臨時鏈接 → `fetch`，
+ * **零轉碼**、與卡片同一對象、同鍵內存緩存），再按字節如實判容器交 dataURL。
+ * 鍵的推導與卡片第三級**同一支**（`originalDisplayKeyOf`）⇒ 兩處不會各拼一套。
+ * 無 `original_*` 的行 ⇒ 立即 `MISSING_REQUIRED`（呼叫方照舊報錯，行為與改前逐字一致）。
+ *
+ * @param {object} card 卡片行 / 影像行（帶 `original_storage_key` 或 `original_sha256`）
+ * @returns {Promise<{ok:true, dataUrl:string, key:string, mime:string, via:'original', message:''}
+ *          |{ok:false, reason:string, message:string}>}
+ */
+export async function originalCoverDataUrlOf(card) {
+  const key = originalDisplayKeyOf(card)
+  if (!key) return { ok: false, reason: 'MISSING_REQUIRED', message: '此印章暫無原始件影像。' }
+  const denial = cloudBaseFileIdDenial()
+  if (denial) return denial
+  const bytes = await cloudObjectBytesOfObjectKey(key, {
+    sha256: textOf(card && card.original_sha256).trim().toLowerCase()
+  })
+  if (!bytes.ok) {
+    return { ok: false, reason: textOf(bytes.reason) || 'STORAGE_UNAVAILABLE', message: bytes.message }
+  }
+  return {
+    ok: true,
+    dataUrl: bytesToDataUrl(bytes.bytes, bytes.mime || ''),
+    key,
+    mime: textOf(bytes.mime),
+    via: 'original',
+    message: ''
+  }
 }
 
 /** 本層是否由雲端分頁接管（診斷 / 取證讀數；不改任何既有狀態機）。 */

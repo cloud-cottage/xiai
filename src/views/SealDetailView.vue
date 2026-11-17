@@ -137,6 +137,27 @@ function imageReadyOf(imageId) {
   return Boolean(imageUrls[id]) || imageVias[id] === 'digest'
 }
 
+/**
+ * **原始件回落（本單｜詳情頁印面大圖的同一台階第三級）**
+ *
+ * 事故形態：轉碼行的 `sha256` / `storage_key` 已指 `.tiff`，而按**當前** sha 派生的展示件
+ * 對象缺位 ⇒ `imageDisplaySourceOf` 結構化失敗 ⇒ 印面大圖空白。這類行仍帶著原圖的
+ * `original_storage_key` / `original_sha256`（轉碼時寫入）⇒ 按**與卡片同一台階**再試一級
+ * （鍵的推導與取鏈全在 `services/sealCards.js`，本頁不自拼對象鍵、不新造取圖通道）。
+ * 交回的是 **dataURL**（不是臨時鏈接）：本頁大圖經 `SliceImage` 畫布切塊，跨域鏈接會 taint 畫布
+ * ⇒ `toDataURL` 拋錯 ⇒ 仍不出圖（服務層因此把字節取回再轉 dataURL）。
+ * 無此二字段的行 ⇒ 立即回空串（**行為與改前逐字一致**：該失敗照舊寫 `imageErrors`）。
+ * @param {string} imageId 影像編號
+ * @returns {Promise<string>} 可放進 `imageUrls` 的 dataURL；取不到 ⇒ `''`
+ */
+async function originalCoverUrlOf(imageId) {
+  const row = seals.imageSourceOf(imageId).row
+  if (!row) return ''
+  if (!sealCards.originalDisplayKeyOf(row)) return ''
+  const cover = await sealCards.originalCoverDataUrlOf(row)
+  return cover.ok ? cover.dataUrl : ''
+}
+
 async function loadFaceImages() {
   for (const id of faceImageIds.value) {
     if (imageUrls[id] || imageVias[id] === 'digest' || imageErrors[id]) continue
@@ -150,6 +171,14 @@ async function loadFaceImages() {
         continue
       }
       delete imagePending[id]
+      /* **原始件回落（本單｜同一台階再降一級）**：展示件對象缺位且行上帶 `original_*` ⇒
+         用原圖的展示鍵出圖（逐影像讀數 `imageVias[id] === 'original'`）；仍取不到 ⇒ 照舊報錯。 */
+      const recovered = await originalCoverUrlOf(id)
+      if (recovered) {
+        imageVias[id] = 'original'
+        imageUrls[id] = recovered
+        continue
+      }
       imageErrors[id] = out.message
       continue
     }

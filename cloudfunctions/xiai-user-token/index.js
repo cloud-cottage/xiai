@@ -58,7 +58,7 @@ const {
 } = require('./lib/platformAuth.js')
 /* **P2-8 结构化日志**：打点一律走 `lib/log.js`（单点硬脱敏；本仓别处不再直呼 console）。 */
 const log = require('./lib/log.js')
-const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, writeStepFingerprintMessageOf, REPAIR_IMAGE_STORAGE_READOUT_KEYS } = require('./lib/ops.js')
+const { OPS, ADMIN_OPS, persist, readRoleRow, countRemainingImportPending, writeStepFingerprintMessageOf, REPAIR_IMAGE_STORAGE_READOUT_KEYS, REPAIR_AI_CANDIDATE_VISIBILITY_READOUT_KEYS } = require('./lib/ops.js')
 /* **V6-a**：调用者平台会话身份判权（additive）；`IDENTITY_SOURCES` / `ROLE` 单点自 `sessionAuthority.js`；
    **V6-a 加固（修订）**：只读诊断 op `sessionProbe`（无令牌可调、context 形状诊断：布尔-only ＋ 零值回显）亦单点自同份文件。 */
 const { resolveSessionAuthority, IDENTITY_SOURCES, ROLE, sessionProbe, isSessionProbe } = require('./lib/sessionAuthority.js')
@@ -1023,6 +1023,21 @@ async function handleVerify(event, config, callContext) {
   if (op === 'repairOrphanEnhanceCharges') {
     const REPAIR_ORPHAN_CHARGE_READOUT_KEYS = ['scanned', 'eligible', 'written', 'rows', 'failed']
     for (const key of REPAIR_ORPHAN_CHARGE_READOUT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+    }
+  }
+  /* **AI 候選圖可见性回填读数面（additive 透传｜**按 `op` 收窄**｜本单 `repairAiCandidateVisibility`）**：
+     `scanned` / `eligible` / `samples` / `written` / `skipped` / `failed` **六鍵**（键名真源 ＝
+     `lib/ops.js::REPAIR_AI_CANDIDATE_VISIBILITY_READOUT_KEYS`）；**僅當 `op === 'repairAiCandidateVisibility'`
+     且 `opResult` 确有该键时**才逐字叠进回包，且**存在性驱动** ⇒ `dry_run` 轮回恰 4 键
+     （`ok` ＋ `scanned` / `eligible` / `samples`）、真写轮回恰 4 键（`ok` ＋ `written` / `skipped` /
+     `failed`），恰如该 op 的冻结键面；**其余任何 op 一律不透传这 6 个键**（`scanned` / `eligible` /
+     `written` / `failed` 与各修复 / 导入 op 同字、`samples` 与 `repairPrimaryFace` 同字、
+     `skipped` 与 `addSealFace` / 导入通道同字，但**按 op 隔离**，一个都不外泄）⇒ 既有回包**逐字不变**
+     （序列化后亦不新增键）。失败回包（`ok:false`）走上面的早退分支、恒 3 键、零读数键；
+     **本 op 不产 `plan`**（写步在 op 内逐行走 `persist`）⇒ `plan` 零外传。 */
+  if (op === 'repairAiCandidateVisibility') {
+    for (const key of REPAIR_AI_CANDIDATE_VISIBILITY_READOUT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
     }
   }

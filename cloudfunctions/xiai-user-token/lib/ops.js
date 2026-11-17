@@ -5375,11 +5375,24 @@ const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
 /** `kind` 合法取值（与 `FACE_KIND` / `buildDirectImageRow` 同口径；缺省 `FACE`）。 */
 const FACE_IMAGE_REGISTER_KINDS = Object.freeze(['FACE', 'EDGE'])
 
+/** 可見性字面 `visible`（**唯一取值处**；供本文件与各读面共用，零第二套字面）。 */
+const IMAGE_VISIBILITY_VISIBLE = 'visible'
+
+/**
+ * 可見性字面 `hidden`（**唯一取值处**）。
+ *
+ * **本單（2026-11-17 Kevin 裁定｜AI 修復產物）**：AI 修復得來的影像**如同其它影像一樣入庫**，
+ * 只是**默認顯示屬性為 `hidden`**；直到管理員【取】（把印面指向它）之後才對普通用戶可見。
+ * 故 `lib/aiEnhance.js` 的產物行落 `visibility: <本常量>`（經導出面取，不另立字面），
+ * 【取】寫面 `updateFaceAttributes` 再同批把它抬回 `visible`。
+ */
+const IMAGE_VISIBILITY_HIDDEN = 'hidden'
+
 /** 影像可见性合法取值（**封闭二值**；与前端 `src/data/cloudbase.js::IMAGE_VISIBILITY_VALUES` 逐字同值）。 */
-const IMAGE_VISIBILITY_VALUES = Object.freeze(['visible', 'hidden'])
+const IMAGE_VISIBILITY_VALUES = Object.freeze([IMAGE_VISIBILITY_VISIBLE, IMAGE_VISIBILITY_HIDDEN])
 
 /** 影像可见性**缺省值**（未传 ⇒ 落 `visible`；**不落空串、不落 `null`**）。 */
-const IMAGE_VISIBILITY_DEFAULT = 'visible'
+const IMAGE_VISIBILITY_DEFAULT = IMAGE_VISIBILITY_VISIBLE
 
 /**
  * 影像可见性**值域门**（封闭二值；违反 ⇒ `INVALID_VALUE` ＋ 零写入）。
@@ -5400,6 +5413,62 @@ function imageVisibilityOf(payload) {
     return { ok: false }
   }
   return { ok: true, value: src.visibility }
+}
+
+/* ---------------------------------------------------------------------------
+   **影像可见性 · *行级* 判据与【取】的可见性提升（2026-11-17 Kevin 裁定）**
+   ---------------------------------------------------------------------------
+   上面 `imageVisibilityOf` 判的是**载荷**；下面判的是**已经存在于 `xiai_images` 的行**，
+   以及「管理員【取】」这一个写面该不该同批把候选图抬成 `visible`。
+   --------------------------------------------------------------------------- */
+
+/** AI 修復產物的來源字面值（与 `lib/aiEnhance.js` 落行的 `source` 逐字同值；本文件只读它）。 */
+const AI_CANDIDATE_SOURCE = 'ai_enhance'
+
+/**
+ * **行上的可见性**（`xiai_images.visibility` 的**唯一**行级读取判据）。
+ *
+ * 判据（与前端 `src/data/cloudbase.js::imageVisibilityOf` 逐字同语义）：
+ *   · **只有逐字 `'hidden'` 才算隐藏**；
+ *   · 缺键 / `null` / 空串 / 表外值 / 非字符串 ⇒ 一律当 `visible`（旧行不得凭空消失 ——
+ *     「宁可露出也不能凭空少一张」）。
+ * @param {object|null|undefined} row 影像行（云行 / 本机行）
+ * @returns {'visible'|'hidden'}
+ */
+function imageRowVisibilityOf(row) {
+  const value = row && typeof row === 'object' ? row.visibility : undefined
+  return value === IMAGE_VISIBILITY_HIDDEN ? IMAGE_VISIBILITY_HIDDEN : IMAGE_VISIBILITY_VISIBLE
+}
+
+/**
+ * **【取】的「同批抬可见」写步**（**唯一**判据；`updateFaceAttributes` 换图单点调用）。
+ *
+ * 口径（Kevin 2026-11-17）：AI 修復產物入库即 `hidden`；**被选定为显示（【取】）之后**
+ * 才转 `visible`。判据逐条：
+ *   ① 行缺席 / 非物件 ⇒ `null`（无行可判 ⇒ **零写**，调用方按既有「影像行不存在」拒）；
+ *   ② `source` 非 `ai_enhance`（原图 / 精修件 / 修正图 / 导入图 …）⇒ `null`
+ *      ⇒ **其它来源影像的可见性一律不动**（改它等于改别人的展示裁定）；
+ *   ③ 已是 `visible`（含表外值按 `visible` 判）⇒ `null` ⇒ **幂等零写**（重放不多写一次）；
+ *   ④ 其余（`hidden`）⇒ 回**一条 `update` 写步**（只写 `visibility` 一个键，不写
+ *      `updated_at`、不碰行上其它字段）。
+ * @param {object|null} imageRow 被指向的影像行
+ * @returns {object|null} `persist` 的 `writes[]` 元素；不该写 ⇒ `null`
+ */
+function aiCandidateVisibilityStepOf(imageRow) {
+  if (!imageRow || typeof imageRow !== 'object') return null
+  if (text(imageRow.source) !== AI_CANDIDATE_SOURCE) return null
+  if (imageRowVisibilityOf(imageRow) === IMAGE_VISIBILITY_VISIBLE) return null
+  const docId = text(imageRow._id)
+  const rowId = text(imageRow.id)
+  const match = docId !== '' ? { _id: docId } : rowId !== '' ? { id: rowId } : null
+  if (!match) return null
+  return {
+    kind: 'update',
+    collection: COLLECTIONS.images,
+    match,
+    doc: { visibility: IMAGE_VISIBILITY_VISIBLE },
+    expectAtLeast: 1
+  }
 }
 
 /**
@@ -6283,6 +6352,204 @@ async function readAscendingWindowOf(collectionName, match, after, windowSize) {
     cursor,
     size
   )
+}
+
+/* ---------------------------------------------------------------------------
+   **AI 候選圖可见性一次性回填（`repairAiCandidateVisibility`｜ADMIN_OPS 成员）**
+   ---------------------------------------------------------------------------
+   口径（Kevin 2026-11-17）：AI 修復得來的影像**与其它影像一样入库**，只是**默认 `hidden`**，
+   直到被选定为显示（【取】）才 `visible`。本 op 只补**历史行**（上线前落库的候选行一律没有
+   `visibility` 键 ⇒ 现按 `visible` 语义裸露）。
+
+   判定序（**顺序即契约**）：
+     ① `source !== 'ai_enhance'` ⇒ 不看（本 op 只碰 AI 候選图，其它来源一律不动）；
+     ② 已是 `hidden` ⇒ **已合格 ⇒ 不写**（幂等）；
+     ③ **显式 `visible`** ⇒ 不写 —— 那已经是「被选定为显示」的终态（【取】写面抬过的行），
+        回填**不得倒退**（把它按回 `hidden` 等于把已采纳的图从普通用户眼前抽走）；
+     ④ **被任一印面行引用**（`face_image_id` 命中）⇒ 不写，计入 `skipped` —— 同上：既已挂面
+        就是「已采纳」，写 `hidden` 会让那枚章的公开封面凭空消失；
+     ⑤ 其余（`visibility` **缺键 / 表外值**，且未被任何印面引用）⇒ **eligible**，写 `visibility:'hidden'`。
+
+   记载：`dry_run` 缺省 `true` ⇒ 回 `{ok, scanned, eligible, samples}`；真写 ⇒
+   `{ok, written, skipped, failed}`（`failed` 恒为数组、元素恰 2 键 `{image_id, reason}`、
+   `reason` 只用既有冻结值 `STORAGE_UNAVAILABLE`）。**幂等**：重跑 ⇒ `eligible === 0`、
+   `written === 0`。**零新集合**（读写都在 `xiai_images` / `xiai_faces`）、**零新增 `reason`**、
+   **本 op 不产 `plan`**（写步在 op 内逐行 `persist`）。
+   --------------------------------------------------------------------------- */
+
+/** 回填载荷封闭键面（**恰一键** `dry_run`；缺省 `true`）。 */
+const REPAIR_AI_CANDIDATE_VISIBILITY_ALLOWED_KEYS = Object.freeze(['dry_run'])
+
+/** 回填回包读数键面（`index.js` 按 `op` 收窄透传的键名真源；两态合计恰 6 键）。 */
+const REPAIR_AI_CANDIDATE_VISIBILITY_READOUT_KEYS = Object.freeze([
+  'scanned',
+  'eligible',
+  'samples',
+  'written',
+  'skipped',
+  'failed'
+])
+
+/** 单次扫描上限（AI 候選行数；超出即判「本轮扫不全」并如实拒，**不静默截断**）。 */
+const AI_CANDIDATE_SCAN_CAP = 5000
+
+/** `samples` 条数上限（诊断用；**只回前若干条**，不整批外传）。 */
+const AI_CANDIDATE_SAMPLE_LIMIT = 5
+
+/** 引用判定的并发度（逐 id 精确读 `xiai_faces`；一次性回填、不追求吞吐）。 */
+const AI_CANDIDATE_REF_CONCURRENCY = 8
+
+/** 影像行 id（`id` → `_id`；两形态同用一处取法）。 */
+function imageRowIdOf(row) {
+  const id = text(row && row.id)
+  return id !== '' ? id : text(row && row._id)
+}
+
+/**
+ * 该影像是否**已被任一印面行引用**（`face_image_id` 命中；**逐 id 精确读、无窗口截断**）。
+ *
+ * 为什么不用 `in` 批量：批量查询带 `limit` 时会被服务端截断 ⇒ 漏判一条引用就等于把「已采纳」
+ * 的候选图按成 `hidden`（那枚章的公开封面会凭空消失）。本 op 是一次性回填、候选行数有限，
+ * 故按 8 路并发的单 id 精确读，宁慢不误。
+ * @param {string[]} ids 影像 id 表
+ * @returns {Promise<Set<string>>} 已被引用的 id 集
+ */
+async function referencedImageIdsOf(ids) {
+  const list = (Array.isArray(ids) ? ids : []).map((id) => text(id)).filter((id) => id !== '')
+  const referenced = new Set()
+  if (list.length === 0) return referenced
+  let cursor = 0
+  const worker = async () => {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      if (index >= list.length) return
+      const id = list[index]
+      const rows = await readRows(COLLECTIONS.faces, { face_image_id: id }, { limit: 1 })
+      if (Array.isArray(rows) && rows.length > 0) referenced.add(id)
+    }
+  }
+  const workers = []
+  for (let slot = 0; slot < Math.min(AI_CANDIDATE_REF_CONCURRENCY, list.length); slot += 1) workers.push(worker())
+  await Promise.all(workers)
+  return referenced
+}
+
+/**
+ * **AI 候選圖可见性回填**（管理员 op；`dry_run` 缺省 `true`）。
+ * @param {object} [payload] `{dry_run?:boolean}`（封闭恰一键）
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<object>} 见上方键面
+ */
+async function repairAiCandidateVisibilityImpl(payload, identity, context) {
+  /* ① 管理员门（**第一行**；缺 env / 非白名单 ⇒ 结构化拒 ＋ 零读零写）。 */
+  const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷门（缺省 ⇒ 空载荷；形态 / 未知键一律早于任何读拒掉）。 */
+  const input = payload === undefined || payload === null ? {} : payload
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return deny(REASONS.INVALID_FIELD, '載荷形態不合法（應為物件）；本次零寫入。')
+  }
+  const unknown = Object.keys(input).filter(
+    (key) => REPAIR_AI_CANDIDATE_VISIBILITY_ALLOWED_KEYS.indexOf(key) === -1
+  )
+  if (unknown.length > 0) {
+    return deny(
+      REASONS.INVALID_FIELD,
+      `載荷含未知欄位：${unknown.join('、')}（封閉一鍵：dry_run）；本次零寫入。`
+    )
+  }
+  let dryRun = true
+  if (Object.prototype.hasOwnProperty.call(input, 'dry_run')) {
+    if (typeof input.dry_run !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, '`dry_run` 必須是布林值（true / false）；本次零寫入。')
+    }
+    dryRun = input.dry_run
+  }
+  /* ③ 扫 AI 候選行（`_id` 升序一窗；**扫满上限 ⇒ 如实拒**，不静默只处理前 N 条）。 */
+  const rows = await readAscendingWindowOf(
+    COLLECTIONS.images,
+    { source: AI_CANDIDATE_SOURCE },
+    '',
+    AI_CANDIDATE_SCAN_CAP
+  )
+  if (rows.length >= AI_CANDIDATE_SCAN_CAP) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `AI 候選行數已達單次掃描上限（${AI_CANDIDATE_SCAN_CAP}），本輪為零寫入；請先擴容上限再跑。`
+    )
+  }
+  const scanned = rows.length
+  /* ④ 先按 ①②③ 分流（`hidden` / 显式 `visible` / 非 AI 来源一律不看）。 */
+  const pending = []
+  let skipped = 0
+  for (const row of rows) {
+    if (text(row && row.source) !== AI_CANDIDATE_SOURCE) continue
+    const current = row && typeof row === 'object' ? row.visibility : undefined
+    if (current === IMAGE_VISIBILITY_HIDDEN) {
+      skipped += 1
+      continue
+    }
+    if (current === IMAGE_VISIBILITY_VISIBLE) {
+      skipped += 1
+      continue
+    }
+    const id = imageRowIdOf(row)
+    if (id === '') {
+      skipped += 1
+      continue
+    }
+    pending.push({ id, row })
+  }
+  /* ⑤ 引用判定（已被任一印面采纳 ⇒ 不写）。 */
+  const referenced = await referencedImageIdsOf(pending.map((item) => item.id))
+  const targets = []
+  for (const item of pending) {
+    if (referenced.has(item.id)) {
+      skipped += 1
+      continue
+    }
+    targets.push(item)
+  }
+  const eligible = targets.length
+  const samples = targets.slice(0, AI_CANDIDATE_SAMPLE_LIMIT).map((item) => ({
+    image_id: item.id,
+    stamp_id: text(item.row && (item.row.stamp_id || item.row.sealId)),
+    visibility: typeof item.row.visibility === 'string' ? item.row.visibility : ''
+  }))
+  /* ⑥ 预演 / 无事可做 ⇒ **零写入**（回包键面按轮次区分，不补编）。 */
+  if (dryRun) return { ok: true, scanned, eligible, samples }
+  if (eligible === 0) return { ok: true, written: 0, skipped, failed: [] }
+  /* ⑦ 真写：逐行只写 `visibility` 一个键（`persist` 的 `update` 分支自带读回比对 ⇒ 成功即已落）。
+     失败**不中断**（其余行照旧处理），逐条进 `failed`（`reason` 复用既有冻结值）。 */
+  let written = 0
+  const failed = []
+  for (const item of targets) {
+    const match = text(item.row._id) !== '' ? { _id: text(item.row._id) } : { id: item.id }
+    try {
+      await persist({
+        writes: [
+          {
+            kind: 'update',
+            collection: COLLECTIONS.images,
+            match,
+            doc: { visibility: IMAGE_VISIBILITY_HIDDEN },
+            expectAtLeast: 1
+          }
+        ]
+      })
+      written += 1
+    } catch (error) {
+      failed.push({ image_id: item.id, reason: REASONS.STORAGE_UNAVAILABLE })
+      log.warn('repairAiCandidateVisibility.write.degraded', {
+        message: '候選圖可見性回填失敗（行保留原值，可重跑）',
+        imageId: item.id,
+        errorMessage: (error && error.message) || 'unknown'
+      })
+    }
+  }
+  return { ok: true, written, skipped, failed }
 }
 
 const ADMIN_OPS = Object.freeze({
@@ -9195,6 +9462,31 @@ const ADMIN_OPS = Object.freeze({
   },
 
   /**
+   * **AI 候選圖可见性回填（`repairAiCandidateVisibility`｜管理员面｜本單新增）** ——
+   * 实现单点就是本文件上方的 `repairAiCandidateVisibility`（业务逻辑、载荷 / 回包键面、
+   * 读写接线全在一处；本处只做**注册与绑定**，零第二套逻辑）。
+   *
+   * 硬口径（逐条）：① **第一行即管理员门**（既有 `adminWhitelistDenial`；缺 env / 非白名单 ⇒
+   * 结构化拒 ＋ **零读零写**）；② 载荷**封闭恰一键** `{dry_run?}`（`dry_run` 缺省 `true`；
+   * 非布林 ⇒ `INVALID_VALUE`；未知键 ⇒ `INVALID_FIELD`；判定早于任何读）；③ 只扫
+   * `xiai_images` 中 `source: 'ai_enhance'` 的行；④ 判定序 非 AI 来源不看 → 已 `hidden` 不写 →
+   * 显式 `visible` 不写（**回填不得倒退**）→ 已被任一印面行 `face_image_id` 引用不写
+   * （已采纳 ⇒ 写 `hidden` 会让那枚章的公开封面消失）→ 其余（**缺键 / 表外值**）写 `visibility:'hidden'`；
+   * ⑤ `dry_run` 回包**恰 4 键** `{ok, scanned, eligible, samples}`、真写**恰 4 键**
+   * `{ok, written, skipped, failed}`（`failed` 元素恰 2 键 `{image_id, reason}`；`reason` 只用
+   * 既有冻结值）；`samples` ≤ 5 条、元素恰 3 键 `{image_id, stamp_id, visibility}`；
+   * ⑥ **幂等**：重跑 ⇒ `eligible === 0`、`written === 0`；⑦ `reason` **零新增**、**零新集合**、
+   * **不产 `plan`**（写步在 op 内逐行走 `persist` ⇒ `index.js` 落盘分支不触发）。
+   * @param {object} [payload] `{dry_run?:boolean}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async repairAiCandidateVisibility(payload, identity, context) {
+    /* 显式指向本文件的实现单点（方法名不绑定自身作用域；写明以免误读成递归）。 */
+    return repairAiCandidateVisibilityImpl(payload, identity, context)
+  },
+
+  /**
    * **作者引用回填（本单新增 op｜`repairAuthorPersonId`｜管理员面）** —— 薄委派：业务逻辑单点、
    * 载荷封闭键面与回包读数键面真源都在 `lib/authorMatch.js`、读写接线在
    * `lib/sealCards.js::repairAuthorPersonId`（本处零第二套逻辑；`require` 延迟以打破加载环、
@@ -10604,6 +10896,10 @@ const ADMIN_OPS = Object.freeze({
        域表单点 ＝ `VALUE_DOMAINS`（与 `src/data/db.js` 四道值域门同表同值；其余 3 个自由文本
        字段无域表 ⇒ 只受长度门约束）。**影像指向 2 键**不过域表/长度门，改为引用存在性校验。 */
     const clean = {}
+    /* **本单（AI 修復產物可见性｜Kevin 2026-11-17）**：`face_image_id` 指向的**那一行影像行**
+       （存在性校验时顺手留下 —— 同一把读，零额外查询）。⑧ 据此判「是不是没被选过的 AI 候选图」，
+       并在**同一批写步**里把它抬成 `visible`（判据单点 `aiCandidateVisibilityStepOf`）。 */
+    let targetImageRow = null
     for (const key of patchKeys) {
       const raw = patchRaw[key]
       if (IMAGE_REF_FIELDS.indexOf(key) !== -1) {
@@ -10613,10 +10909,20 @@ const ADMIN_OPS = Object.freeze({
           }
           const one = raw === null || raw === undefined ? '' : raw.trim()
           if (one !== '') {
-            const found = await readRows(COLLECTIONS.images, { id: one }, { limit: 1 })
+            let found = []
+            try {
+              found = await readRows(COLLECTIONS.images, { id: one }, { limit: 1 })
+            } catch (error) {
+              /* 读抛错 ⇒ 与既有「读不到就拒」同口径（不把真故障吞成「无行」）。 */
+              return deny(
+                REASONS.STORAGE_UNAVAILABLE,
+                `影像編號（${one}）校驗讀取失敗；本次零寫入。（診斷：${(error && error.message) || 'unknown'}）`
+              )
+            }
             if (found.length === 0) {
               return deny(REASONS.INVALID_VALUE, `影像編號（${one}）在影像行中不存在；本次零寫入。`)
             }
+            targetImageRow = found[0]
           }
           clean[key] = one
           continue
@@ -10670,14 +10976,40 @@ const ADMIN_OPS = Object.freeze({
     if (faceRow === null) {
       return deny(REASONS.INVALID_VALUE, `未找到該印面（face_id：${faceId}）；本次零寫入。`)
     }
-    /* ⑧ 落盘（`kind:'update'` ＋ `expectAtLeast:1`；只写 patch 键 ＋ `updated_at`）。 */
+    /* ⑧ 落盘（`kind:'update'` ＋ `expectAtLeast:1`；只写 patch 键 ＋ `updated_at`）。
+       **本单（AI 修復產物可见性）**：若本次把 `face_image_id` 指向了一张**没被选过的 AI 候选图**
+       （`source:'ai_enhance'` 且不是 `visible`），就把「抬可见」那一步拼进**同一批写步**。
+       **写序（先后即契约）**：① 面行指向 → ② 影像行 `visibility:'visible'`。
+       为什么是这个次序：反过来的话，一旦第 2 步失败就会出现「候选图已对普通用户可见、却还没有
+       任何印面指向它」＝ **未取先露**（口径级违规）；而本序失败只落成「面行已指、图仍隐藏」
+       ＝ 管理员侧一眼可见的空白，重试同一次【取】即自愈（第 1 步同值、第 2 步补齐），
+       **永不出现半成品泄漏**。已是 `visible` / 非 AI 来源 ⇒ 写步只有 1 条（零额外写）。 */
     const seconds = Number.isFinite(Number(context && context.nowSeconds))
       ? Math.floor(Number(context.nowSeconds))
       : Math.floor(Date.now() / 1000)
     const at = new Date(seconds * 1000).toISOString()
     const doc = Object.assign({}, clean, { updated_at: at })
     const match = text(faceRow._id) ? { _id: text(faceRow._id) } : { [probeField]: faceId }
-    await persist({ writes: [{ kind: 'update', collection: COLLECTIONS.faces, match, doc, expectAtLeast: 1 }] })
+    const writes = [{ kind: 'update', collection: COLLECTIONS.faces, match, doc, expectAtLeast: 1 }]
+    const visibilityStep = aiCandidateVisibilityStepOf(targetImageRow)
+    if (visibilityStep) writes.push(visibilityStep)
+    try {
+      await persist({ writes })
+    } catch (error) {
+      /* **半成品如实登记**：本 op 的写步至多 2 步、按确定序执行，`persist` 在抛出的错误上挂
+         `completedSteps` / `totalSteps`。第 1 步就没成 ⇒ 一个字没写；第 1 步成了第 2 步没成 ⇒
+         面行已指、候选图仍隐藏（**不谎报「本次零寫入」**，也不谎报成功）。 */
+      const completed = Number(error && error.completedSteps)
+      const changed = Number.isFinite(completed) && completed > 0
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        changed
+          ? `印面指向已更新，但候選圖可見性未更新（重試同一次操作即可補齊；本次未回包成功）。（診斷：${
+              (error && error.message) || 'unknown'
+            }）`
+          : `印面屬性落盤失敗；本次零寫入、影像行可見性未改動。（診斷：${(error && error.message) || 'unknown'}）`
+      )
+    }
     /* ⑨ 回读更新后服务端行（回读空 ⇒ 退路为本地合并行）。 */
     const after = await readRows(COLLECTIONS.faces, match, { limit: 1 })
     const row = after.length > 0 ? after[0] : Object.assign({}, faceRow, doc)
@@ -11453,6 +11785,20 @@ module.exports = {
   readRegisteredImageByDigest,
   FACE_IMAGE_REGISTER_KINDS,
   EXISTING_FACE_SCAN_LIMIT,
+  /* **影像可见性（AI 修復產物｜Kevin 2026-11-17 裁定）**：两个字面常量 ＋ **行级**判据
+     ＋【取】的「同批抬可见」写步单点 ＋ 回填 op 的载荷 / 回包键面 —— 供
+     `lib/aiEnhance.js`（落行恒 `hidden`）、`lib/sealCards.js` / `lib/books.js`（公开读面闸门）、
+     `index.js`（按 op 收窄透传）与离线自检共用**同一份**真源（零第二套字面 / 零第二套判据）。 */
+  IMAGE_VISIBILITY_VISIBLE,
+  IMAGE_VISIBILITY_HIDDEN,
+  IMAGE_VISIBILITY_VALUES,
+  IMAGE_VISIBILITY_DEFAULT,
+  imageRowVisibilityOf,
+  imageVisibilityOf,
+  aiCandidateVisibilityStepOf,
+  AI_CANDIDATE_SOURCE,
+  REPAIR_AI_CANDIDATE_VISIBILITY_ALLOWED_KEYS,
+  REPAIR_AI_CANDIDATE_VISIBILITY_READOUT_KEYS,
   readCorrectionRow,
   buildProjection,
   /* **審計載體 preflight（本單新增）**：唯一建集点（`db.createCollection`）＋「已存在」判据 ——

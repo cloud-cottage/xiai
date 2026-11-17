@@ -36,7 +36,8 @@
  *  ⑧ **入册**：内容寻址键 `xiai/images/<新摘要前两位>/<新摘要>.<ext>` ＋ **新影像行**（8 位影像
  *     编号 `img-` ＋ 8 位十六进制 ＝ `sha256(idem_key)` 前 8 位 —— **确定性 ⇒ 重放不建第二行**；
  *     `sha256` / `bytes` / `bytesLength` / `mime` / `storage: 'server'` / `source: 'ai_enhance'` /
- *     `displayOnly: true` / `created_at`）；**不挂印面**（不写任何 `face_image_id`、不写面行）。
+ *     `displayOnly: true` / **`visibility: hidden`**（默认隐藏 —— 直到管理員【取】把它抬成 `visible`，
+ *     见本文件 ⑨ 行体的字段注） / `created_at`）；**不挂印面**（不写任何 `face_image_id`、不写面行）。
  *  ⑨ **成功回包恰 9 键**：`ok, image_id, source_image_id, preview{mime,sha256},
  *     charge{amount,balance}, upstream_status, elapsed_ms, idempotent, row` —— `row` ＝ **已落库的
  *     那一行本身**（与入册对象逐字段一致：`_id`/`id`、`stamp_id`、`sealId`、`kind`、`storage`、
@@ -1107,6 +1108,12 @@ async function enhanceFace(payload, identity, context) {
     height: null,
     source: 'ai_enhance',
     displayOnly: true,
+    /* **可见性（2026-11-17 Kevin 裁定｜本單）**：AI 修復產物**如同其它影像一樣入库**，只是
+       **默认显示属性为 `hidden`**（普通用户读面不交出它）；直到管理員【取】——把印面
+       `face_image_id` 指向本行（`ops.ADMIN_OPS.updateFaceAttributes`）——**同批**才抬成
+       `visible`。此处**恒落该键**（不落空串 / 不落 `null`）：取值经 `lib/ops.js` 的字面单点
+       `IMAGE_VISIBILITY_HIDDEN` 取，不另立第二个字面。 */
+    visibility: ops.IMAGE_VISIBILITY_HIDDEN,
     /* 回放重建回包用的服务端记载（不下发、不参与读面判定）。 */
     source_image_id: imageId,
     charge_balance_after: charged.balance,

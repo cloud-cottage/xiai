@@ -141,16 +141,21 @@ function enqueueJob(job) {
 
 const pendingCovers = new Set()
 
-/** 取一格封面（幂等：已成功 / 已在队列 ⇒ 直接返回）。 */
+/** 取一格封面（幂等：已成功 / 已在队列 ⇒ 直接返回）。
+ *  **本單（四級回落）**：這一行**原樣**交給 `cardCoverUrl`（不再只抽 `thumb_key`）——
+ *  台階 thumb → display → **原始件** → 佔位 全在服務層；今日 `listSealCovers` 的回包只帶
+ *  `{stamp_id, thumb_key}` ⇒ 行為與改前逐字一致，雲端回包日後補 `display_key` / `original_*`
+ *  鍵即自動獲得兜底（本頁零再改）。 */
 function ensureCover(sealId) {
   if (!sealId) return
   if (coverUrls.value[sealId]) return
   if (pendingCovers.has(sealId)) return
-  const thumbKey = coverKeys.value[sealId] || ''
-  if (!thumbKey) return
+  const row = coverKeys.value[sealId] || null
+  if (!row) return
+  if (!sealCards.coverKeyOf(row) && !sealCards.originalDisplayKeyOf(row)) return
   pendingCovers.add(sealId)
   enqueueJob(async () => {
-    const out = await sealCards.cardCoverUrl({ thumb_key: thumbKey })
+    const out = await sealCards.cardCoverUrl(row)
     pendingCovers.delete(sealId)
     const nextUrls = { ...coverUrls.value }
     nextUrls[sealId] = out.ok ? out.url : ''
@@ -187,7 +192,9 @@ watch(
     }
     const next = {}
     result.rows.forEach((row) => {
-      next[row.stamp_id] = row.thumb_key
+      /* **整行留存**（本單）：多帶的鍵（`display_key` / `original_*`，雲端日後補）原樣進台階，
+         今日只帶 `{stamp_id, thumb_key}` ⇒ 與改前逐字一致。 */
+      next[row.stamp_id] = row
     })
     coverKeys.value = next
     visibleFolders.forEach((key) => loadCoversFor(key))

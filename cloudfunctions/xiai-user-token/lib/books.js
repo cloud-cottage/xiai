@@ -823,7 +823,9 @@ async function setImageBook(payload, identity, context) {
  *                     （`image_id` 空串 ＝ 清除封面；写到 `xiai_books.cover_image_id`）；
  *   · `listBookCovers`（管理員）`{book_ids:[≤200]}` → `{ok:true, rows:[{book_id, cover_image_id, thumb_key}]}`；
  *   · `listSealCovers`（**公開讀**｜`lib/sealCards.js::PUBLIC_OPS` 成员，`action:'public'`）`{stamp_ids:[≤200]}`
- *                     → `{ok:true, rows:[{stamp_id, thumb_key}]}`（**零寫入**）。
+ *                     → `{ok:true, rows:[{stamp_id, thumb_key, display_key, original_storage_key,
+ *                     original_sha256}]}`（**零寫入**；后三鍵為 2026-11-17 前端四級回落凍結的
+ *                     **additive 鍵**，取不到給空串；`hidden` 影像行 ⇒ 四個影像派生鍵全空）。
  *
  * 硬口径（逐条）：
  *  ① 三个管理員 op 的**第一行**即 `adminWhitelistDenial`（缺 env / 非白名单 ⇒ 结构化拒 ＋ **零读零写**）；
@@ -1324,7 +1326,19 @@ async function listBookCovers(payload, identity, context) {
  *
  * 每个印章取**主印面**（`is_primary:true`；无则 `kind='FACE'` 中 `face_no` 最小 —— 与
  * `lib/sealCards.js::primaryFaceOf` **同一判据**）的 `face_image_id` → 影像行 → 同源派生
- * `thumb_key`；取不到给空串。
+ * 封面键；取不到给空串。
+ *
+ * 回包每行**恰 5 键**（2026-11-17 前端四级回落冻结键面；**只加键，不改已有键名与语义**）：
+ *   · `stamp_id` —— 请求里的印章键原样；
+ *   · `thumb_key` —— 缩略件对象键（第一级）；
+ *   · `display_key` —— 展示件对象键（第二级；派生单点 ＝ `sealCards.coverKeysOf`，与首页卡片同源）；
+ *   · `original_storage_key` / `original_sha256` —— **转码行**才有的原图两字段（第三级）；
+ *     行上没有 ⇒ 空串（**不编造**）。
+ *
+ * **读面闸门（2026-11-17）**：主印面影像行逐字 `hidden` ⇒ 该行**四个影像派生键全给空串**
+ * （`thumb_key` / `display_key` / `original_storage_key` / `original_sha256`），前端据此落本地
+ * 占位图；`stamp_id` 照回（行仍在表里，只是没有可出的图）。判据单点 ＝
+ * `lib/ops.js::imageRowVisibilityOf`（缺键 / 表外值一律当 `visible`，旧行不得凭空少一张）。
  * @param {object} payload `{stamp_ids: string[]}`（≤200）
  * @returns {Promise<{ok:true, rows:object[]}|{ok:false, reason:string, message:string}>}
  */
@@ -1352,12 +1366,16 @@ async function listSealCovers(payload) {
   if (missing.length > 0) take(await rowsByFieldIn(ops, ops.COLLECTIONS.faces, 'stamp_id', missing))
   missing = stampIds.filter((stampId) => !facesByStamp.has(stampId))
   if (missing.length > 0) take(await rowsByFieldIn(ops, ops.COLLECTIONS.faces, 'seal_id', missing))
-  /* ③ 主印面（**唯一判据点** ＝ `lib/sealCards.js::primaryFaceOf`；本文件零第二套）。 */
-  const { primaryFaceOf } = require('./sealCards.js')
+  /* ③ 主印面（**唯一判据点** ＝ `lib/sealCards.js::primaryFaceOf`；本文件零第二套）。
+     面行本身留着 —— `display_key` 的派生要与首页卡片**同一处**（`coverKeysOf` 在影像行
+     缺席 `storage_key` 时会回落到面行自带引用）。 */
+  const { primaryFaceOf, coverKeysOf } = require('./sealCards.js')
   const primaryImageIdOfStamp = new Map()
+  const primaryFaceOfStamp = new Map()
   for (const stampId of stampIds) {
     const faces = facesByStamp.get(stampId) || []
     const face = faces.length > 0 ? primaryFaceOf(faces) : null
+    primaryFaceOfStamp.set(stampId, face || null)
     primaryImageIdOfStamp.set(stampId, text(face && face.face_image_id))
   }
   /* ④ 影像行一次批量取（`id` → `_id` 两轮）⇒ 循环内零读库。 */
@@ -1369,9 +1387,23 @@ async function listSealCovers(payload) {
   const rows = stampIds.map((stampId) => {
     const imageId = primaryImageIdOfStamp.get(stampId) || ''
     const imageRow = imageId === '' ? null : imageRows.get(imageId) || null
+    /* **读面闸门**：影像行 `visibility === 'hidden'` ⇒ 四个影像派生键全空（`stamp_id` 照回）。 */
+    if (imageRow !== null && ops.imageRowVisibilityOf(imageRow) === ops.IMAGE_VISIBILITY_HIDDEN) {
+      return {
+        stamp_id: stampId,
+        thumb_key: BOOK_COVER_EMPTY,
+        display_key: BOOK_COVER_EMPTY,
+        original_storage_key: BOOK_COVER_EMPTY,
+        original_sha256: BOOK_COVER_EMPTY
+      }
+    }
+    const cover = imageRow ? coverKeysOf(imageRow, primaryFaceOfStamp.get(stampId), text(imageRow.sha256)) : null
     return {
       stamp_id: stampId,
-      thumb_key: imageRow ? thumbKeyOfImageRow(imageRow) : BOOK_COVER_EMPTY
+      thumb_key: imageRow ? thumbKeyOfImageRow(imageRow) : BOOK_COVER_EMPTY,
+      display_key: cover ? text(cover.displayKey) : BOOK_COVER_EMPTY,
+      original_storage_key: imageRow ? text(imageRow.original_storage_key) : BOOK_COVER_EMPTY,
+      original_sha256: imageRow ? text(imageRow.original_sha256) : BOOK_COVER_EMPTY
     }
   })
   return { ok: true, rows }
