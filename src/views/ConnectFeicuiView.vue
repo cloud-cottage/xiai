@@ -23,11 +23,13 @@ import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import {
+  FEICUI_DEVICE_TTL,
   FEICUI_FORWARD_PREFIX,
   FEICUI_RESOURCES,
   FEICUI_ROLES,
   FEICUI_TTL,
   FEICUI_TTL_OPTIONS,
+  deliverTokenToHost,
   issueDeviceToken,
   issueToken,
   remainingSeconds
@@ -377,21 +379,32 @@ async function onSaveUpstream() {
 /* ===========================================================================
    ④ 管理員區 —— 【斐萃桌面授權】卡片（跨倉契約 §13.2；條件渲染，非 CSS 隱藏）
    ---------------------------------------------------------------------------
-   點【簽發設備令牌】⇒ 經服務層 `issueDeviceToken()`（`{action:'verify', op, payload:{}}`）
-   取得一枚 30 天設備令牌，斐萃桌面版憑它在本地寫入授權文件。
+   兩條簽發路（**並存**；本單新增第二條）：
+     · 【簽發設備令牌】＝ 30 天（服務端缺省），令牌一次性顯示，由人複製後在**本機**寫入授權文件；
+     · 【為斐翠桌面簽發 8 小時會話】＝ `ttl_seconds ＝ 28800`（**登錄即授權**）：
+       簽發成功 ⇒ 先探宿主橋（pywebview → wails → 通用），有橋就**當場交付**給 App
+       （`receive_feicui_token(token, {expires_at, ttl_seconds})`）並**立刻清掉 DOM 裡的明文**；
+       無橋 / 橋拋錯 ⇒ 回退到與 30 天路同一套「一次性顯示 ＋ 一鍵複製」（**令牌不丟**）。
 
    安全硬約束（逐條）：
      · 令牌**只保存在本組件的一個 ref**（`deviceToken`）—— 不落任何前端持久層
        （本地存儲 / 會話存儲 / 瀏覽器資料庫 / cookie）、不進網址（query / hash）、
        不打日誌；頁面重新整理即重新申請（服務端零落盤，舊令牌只能被新令牌覆寫）；
      · 每次請求**先清舊值**再發 ⇒ 失敗路徑**零令牌上屏**（不會殘留上一枚）；
-     · 非管理員：入口本身不渲染（`v-if="admin"`），並在動作首行前置短路、零請求。
+     · 非管理員：入口本身不渲染（`v-if="admin"`），並在動作首行前置短路、零請求；
+     · **為何必須與登錄同一頁面加載**：`/connect` 的 OTP 登錄用 `persistence:'none'`
+       （第三個 app 實例）⇒ 手機號會話**只在頁面記憶體**、刷新即丟；故簽發必須在
+       登錄後的同一次頁面加載內完成 —— 頁面文案已寫明「若刷新本頁需重新登錄後再簽」。
    =========================================================================== */
 const deviceBusy = ref(false)
 const deviceError = ref('')
 const deviceCopied = ref(false)
 /** **令牌唯一持有處**：`{token, expires_at}`（成功回包恰 3 鍵，`ok` 不外存）。 */
 const deviceToken = ref(null)
+/** 8 小時會話的 TTL（服务端 clamp 上界的同值镜像：`FEICUI_DEVICE_TTL.sessionSeconds`）。 */
+const DEVICE_SESSION_TTL_SECONDS = FEICUI_DEVICE_TTL.sessionSeconds
+/** 宿主橋已交付（令牌明文**已從 DOM 清掉**；此後頁面只顯示「已交付」）。 */
+const deviceDelivered = ref(false)
 
 /** 服務端 reason → 可讀繁體提示（**只作前綴；服務端 message 恆原樣並列上屏**）。 */
 const DEVICE_REASON_HINTS = Object.freeze({
@@ -399,6 +412,7 @@ const DEVICE_REASON_HINTS = Object.freeze({
   NOT_ADMIN: '僅管理員可以簽發斐萃桌面授權。',
   LOGIN_REQUIRED: '請先登錄後再申請桌面授權。',
   STORAGE_UNAVAILABLE: '雲端暫時不可用，請稍後再試。',
+  INVALID_VALUE: '有效期（ttl_seconds）不合法（需 300〜43200 的整數秒）。',
   TIMEOUT: '請求逾時，請稍後再試。'
 })
 
@@ -419,6 +433,7 @@ async function onIssueDeviceToken() {
   deviceBusy.value = true
   deviceError.value = ''
   deviceCopied.value = false
+  deviceDelivered.value = false /* 交付態只屬於 8 小時會話路；30 天路簽發時一併收起 */
   deviceToken.value = null /* **先清** ⇒ 任何失敗路徑都不殘留舊令牌 */
   const reply = await issueDeviceToken()
   deviceBusy.value = false
@@ -427,6 +442,45 @@ async function onIssueDeviceToken() {
     return
   }
   deviceToken.value = { token: reply.token, expires_at: reply.expires_at }
+}
+
+/**
+ * **8 小時會話（登錄即授權｜本單新增）**：簽發 → 交付宿主橋 → **清掉頁面明文**。
+ *
+ * 順序（每步都可被判據釘住）：
+ *   ① 首行 admin 守衛 ＋ 在途去重（非管理員零請求）；
+ *   ② **先清**上一次的令牌 / 交付態 / 錯誤（失敗路徑零殘留）；
+ *   ③ 簽發 `ttl_seconds ＝ 28800`（服務端 clamp `[300, 43200]`）；
+ *   ④ 成功 ⇒ 令牌進唯一持有處 `deviceToken`（與 30 天路同一文本域，仍是**唯一上屏處**）；
+ *   ⑤ `deliverTokenToHost()`：pywebview → wails → 通用，有橋就交付
+ *      `(token, {expires_at, ttl_seconds})`；**無橋 / 橋拋錯 ⇒ 不動令牌**，回退一鍵複製；
+ *   ⑥ 交付成功 ⇒ `deviceDelivered = true` 並 `clearDeviceToken()` —— **DOM 不再含令牌明文**。
+ */
+async function onIssueSessionToken() {
+  if (!admin.value) return
+  if (deviceBusy.value) return
+  deviceBusy.value = true
+  deviceError.value = ''
+  deviceCopied.value = false
+  deviceDelivered.value = false
+  clearDeviceToken()
+  const reply = await issueDeviceToken({ ttlSeconds: DEVICE_SESSION_TTL_SECONDS })
+  deviceBusy.value = false
+  if (!reply.ok) {
+    deviceError.value = deviceErrorText(reply)
+    return
+  }
+  /* 与 30 天路同一持有形状 `{token, expires_at}`（複用同一張只讀文本域 ⇒ 上屏處仍恰 1 處）。 */
+  deviceToken.value = { token: String(reply.token), expires_at: String(reply.expires_at) }
+  const delivery = await deliverTokenToHost(reply.token, {
+    expires_at: reply.expires_at,
+    ttl_seconds: DEVICE_SESSION_TTL_SECONDS
+  })
+  /* 無橋 / 橋拋錯 ⇒ **不改令牌**，落回「一次性顯示 ＋ 一鍵複製」（令牌不丟）。 */
+  if (!delivery.delivered) return
+  deviceDelivered.value = true
+  /* **交付即清**：令牌已交宿主，頁面不留明文（DOM 由 `v-if="deviceToken"` 整塊收掉）。 */
+  clearDeviceToken()
 }
 
 async function onCopyDeviceToken() {
@@ -651,15 +705,28 @@ onUnmounted(clearDeviceToken)
       <section v-if="admin" class="panel" data-feicui-device-panel>
         <div class="panel__head">
           <h2>斐萃桌面授權</h2>
-          <button class="btn" type="button" data-action="feicui-device-issue" :disabled="deviceBusy" @click="onIssueDeviceToken">
-            {{ deviceBusy ? '簽發中…' : deviceToken ? '重新簽發' : '簽發設備令牌' }}
-          </button>
+          <div class="ai-head-actions">
+            <button class="btn btn--ghost" type="button" data-action="feicui-device-issue-session" :disabled="deviceBusy" @click="onIssueSessionToken">
+              {{ deviceBusy ? '簽發中…' : '為斐翠桌面簽發 8 小時會話' }}
+            </button>
+            <button class="btn" type="button" data-action="feicui-device-issue" :disabled="deviceBusy" @click="onIssueDeviceToken">
+              {{ deviceBusy ? '簽發中…' : deviceToken ? '重新簽發' : '簽發設備令牌' }}
+            </button>
+          </div>
         </div>
         <div class="panel__body">
           <p class="hint">
             簽發一枚 <b>30 天</b>的斐萃桌面設備令牌：斐萃桌面版拿它在<b>本機</b>寫入授權文件，
             之後即以你的身份讀寫。令牌<b>只出現在本次頁面的記憶體</b>裡，重新整理即消失（需再簽一次）；
             本頁不寫任何本地存儲、不把令牌放進網址、也不打日誌。
+          </p>
+          <p class="hint">
+            <b>登錄即授權（桌面版）</b>：按右上角【為斐翠桌面簽發 8 小時會話】＝ 簽發一枚 8 小時
+            （<code>ttl_seconds = 28800</code>）的會話令牌，若偵測到宿主橋（<code>pywebview</code> →
+            <code>wails</code> → 通用）就<b>當場交付給斐萃桌面版</b>（<code>receive_feicui_token</code>），
+            交付後<b>頁面不再保留令牌明文</b>；沒有宿主橋（例如用普通瀏覽器打開本頁）則自動回退為
+            「一次性顯示 ＋ 一鍵複製」。
+            <b>注意：本頁的登錄會話只存在頁面記憶體 —— 若刷新本頁需重新登錄後再簽。</b>
           </p>
 
           <!-- 令牌區塊（**唯一上屏處**；`deviceToken` 為 null ⇒ 整塊不渲染） -->
@@ -682,7 +749,19 @@ onUnmounted(clearDeviceToken)
               <button class="btn btn--ghost" type="button" data-action="feicui-device-clear" @click="clearDeviceToken">關閉並清除</button>
             </div>
           </div>
-          <p v-else-if="!deviceBusy && !deviceError" class="hint">按右上角【簽發設備令牌】取得令牌；僅管理員可簽發。</p>
+          <p v-else-if="!deviceBusy && !deviceError && !deviceDelivered" class="hint">按右上角【簽發設備令牌】取得令牌；僅管理員可簽發。</p>
+
+          <!-- 已交付宿主（**令牌明文已清**：此區塊不綁任何令牌值，DOM 內零明文） -->
+          <div v-if="deviceDelivered" class="token-box" data-feicui-device-delivered>
+            <div class="token-box__head">
+              <span class="token-box__title">已交付桌面版</span>
+            </div>
+            <p class="hint">
+              這枚 <b>8 小時</b>會話令牌已直接交給斐萃桌面版（宿主橋 <code>receive_feicui_token</code>），
+              <b>頁面內不再顯示、也不再保留令牌明文</b>，且未寫入任何本地存儲 / 網址 / 日誌。
+              授權由桌面版自己保存；<b>若刷新本頁需重新登錄後再簽</b>。
+            </p>
+          </div>
 
           <p v-if="deviceError" class="error" role="alert">{{ deviceError }}</p>
         </div>

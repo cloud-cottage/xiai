@@ -270,10 +270,11 @@ async function callOp(payload, identity, context) {
 /* ===========================================================================
   A 段：常量 / 注册面
   =========================================================================== */
-section('A', '常量与注册面：TTL 30 天 / 载荷封闭恰一键 / op 已在册 / 回包白名单在册')
+section('A', '常量与注册面：TTL 30 天 / 载荷封闭两键（device_label ＋ 可选 ttl_seconds）/ op 已在册 / 回包白名单在册')
 
 check('A1', 'TTL 常量 ＝ 2,592,000 s（30 天，§13.1 冻结）', 2592000, ops.FEICUI_DEVICE_TOKEN_TTL_SECONDS)
-check('A2', '载荷封闭键面恰 [device_label]（身份类键一律不在面内）', ['device_label'], ops.FEICUI_DEVICE_TOKEN_ALLOWED_KEYS.slice())
+check('A2', '载荷封闭键面恰 [device_label, ttl_seconds]（身份类键一律不在面内；`ttl_seconds` 为 2026-11-17 新增的可选有效期）', ['device_label', 'ttl_seconds'], ops.FEICUI_DEVICE_TOKEN_ALLOWED_KEYS.slice())
+check('A2b', '`ttl_seconds` 允许区间常量 ＝ [300, 43200]（5 分钟〜12 小时；缺省仍走 30 天 A1）', [300, 43200], [ops.FEICUI_DEVICE_TOKEN_MIN_TTL_SECONDS, ops.FEICUI_DEVICE_TOKEN_MAX_TTL_SECONDS])
 check('A3', '`issueFeicuiDeviceToken` 在 `OPS` 注册面且在册为函数', 'function', typeof ops.OPS[OP])
 check('A4', '兼底 env 名逐字 ＝ SHADOW_TOKEN_SECRET（与 feicui-shadow 同名）', 'SHADOW_TOKEN_SECRET', ops.FEICUI_DEVICE_TOKEN_SECRET_ENV)
 check('A5', '`index.js` 回包白名单常量恰 [token, expires_at]（只对这一个 op）', ['token', 'expires_at'], fn.FEICUI_DEVICE_TOKEN_READOUT_KEYS.slice())

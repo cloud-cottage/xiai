@@ -148,25 +148,113 @@ export function remainingSeconds(expiresAt, nowMs) {
    通道与 `issueToken` **同一条**（`xiai-user-token` 的 `action:'verify'` 信封），
    入口契约逐字 `{action:'verify', op, payload}` —— **不是**把 op 名当 `action`。
    硬口径（逐条）：
-     ① 载荷**封闭空对象** `{}`：本入口不收集任何字段（`device_label` 服务端可选，
-        UI 不传 ⇒ 服务端零歧义）；
+     ① 载荷**封闭键面**：缺省 `{}`（不收集任何字段）；**本单新增**可选 `ttl_seconds`
+        （整数秒 ∈ `[300, 43200]`；页面「為斐翠桌面簽發 8 小時會話」传 28800）。
+        未给 ⇒ 载荷逐字仍是 `{}`（服务端走 30 天缺省，既有行为不变）；
      ② 回包**恰 3 键** `{ok, token, expires_at}` —— 本层只挑这三键，**不多不少**；
      ③ 失败原样透传服务端的 `{ok:false, reason, message}`（`FORBIDDEN` 就是
-        `FORBIDDEN`，不伪装成传输故障、不造兜底文案覆盖判定）；
+        `FORBIDDEN`，不伪装成传输故障、不造兜底文案覆盖判定）；`ttl_seconds` 形态不合
+        ⇒ 本层前置 `INVALID_VALUE` ＋ **零往返**（与服务端同一 reason 字面值）；
      ④ **本层零持久化**：不写本地存儲 / 會話存儲 / 瀏覽器資料庫 / cookie，
         不進網址，不打日誌 —— 令牌只沿返回值上抛给调用方（组件内存持有）。
 */
-export async function issueDeviceToken() {
+
+/** 設備令牌有效期面（服务端 `FEICUI_DEVICE_TOKEN_*` 的同值镜像；缺省 30 天）。 */
+export const FEICUI_DEVICE_TTL = Object.freeze({
+  defaultSeconds: 30 * 24 * 60 * 60,
+  /** 斐萃桌面版「登錄即授權」通道：8 小時。 */
+  sessionSeconds: 8 * 60 * 60,
+  minSeconds: 5 * 60,
+  maxSeconds: 12 * 60 * 60
+})
+
+/** 前置拦截的取值 reason（与服务端 `REASONS.INVALID_VALUE` 同一字面值）。 */
+export const INVALID_VALUE = 'INVALID_VALUE'
+
+/**
+ * 前置换算 `ttlSeconds`（**越界 / 非整数 ⇒ `null`**，由调用方报错，不静默夹取）。
+ * 缺省（未给 / `null`）⇒ 30 天。
+ * @param {*} value
+ * @returns {number|null}
+ */
+export function deviceTtlSecondsOf(value) {
+  if (value === undefined || value === null) return FEICUI_DEVICE_TTL.defaultSeconds
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null
+  if (value < FEICUI_DEVICE_TTL.minSeconds || value > FEICUI_DEVICE_TTL.maxSeconds) return null
+  return value
+}
+
+/**
+ * 宿主橋探测（**桌面版必需**；只读、无副作用）：pywebview → wails → 通用全局函数。
+ * 返回 `(token, meta) => Promise|void` 的薄包；无桥 ⇒ `null`（调用方回退一键複製）。
+ * @param {object} [host] 宿主对象（缺省取 `window`；自检可注入假体）
+ * @returns {((token:string, meta:{expires_at:string, ttl_seconds:number}) => *)|null}
+ */
+export function feicuiHostBridgeOf(host) {
+  const scope = host === undefined ? (typeof window === 'undefined' ? null : window) : host
+  if (!scope) return null
+  const pywebviewApi = scope.pywebview && scope.pywebview.api
+  if (pywebviewApi && typeof pywebviewApi.receive_feicui_token === 'function') {
+    return (token, meta) => pywebviewApi.receive_feicui_token(token, meta)
+  }
+  const wails = scope.wails
+  if (wails && typeof wails.receive_feicui_token === 'function') {
+    return (token, meta) => wails.receive_feicui_token(token, meta)
+  }
+  if (typeof scope.receive_feicui_token === 'function') {
+    return (token, meta) => scope.receive_feicui_token(token, meta)
+  }
+  return null
+}
+
+/**
+ * 把令牌交给宿主（**令牌只经函数参数过一遍**，本层不落盘、不打日志、不进网址）。
+ * 桥抛错 ⇒ 结构化 `{delivered:false, reason:'BRIDGE_FAILED'}`，**令牌原样留在调用方**
+ * （回退一键複製，不丢令牌）。
+ * @param {string} token 令牌明文
+ * @param {{expires_at?:string, ttl_seconds?:number}} [meta] 交付元数据
+ * @param {object} [host] 宿主对象（缺省 `window`；自检注入假体）
+ * @returns {Promise<{delivered:boolean, reason:string}>}
+ */
+export async function deliverTokenToHost(token, meta, host) {
+  const plaintext = String(token === undefined || token === null ? '' : token).trim()
+  if (plaintext === '') return { delivered: false, reason: 'NO_TOKEN' }
+  const bridge = feicuiHostBridgeOf(host)
+  if (!bridge) return { delivered: false, reason: 'BRIDGE_ABSENT' }
+  const options = meta || {}
+  try {
+    await bridge(plaintext, {
+      expires_at: String(options.expires_at === undefined || options.expires_at === null ? '' : options.expires_at),
+      ttl_seconds: Number(options.ttl_seconds) || 0
+    })
+    return { delivered: true, reason: 'DELIVERED' }
+  } catch {
+    return { delivered: false, reason: 'BRIDGE_FAILED' }
+  }
+}
+
+export async function issueDeviceToken(input) {
+  const options = input || {}
   if (!isLoggedIn.value) {
     return { ok: false, reason: LOGIN_REQUIRED, message: '請先以管理員賬號登錄（未找到登錄會話）。' }
   }
   if (!isAdmin.value) {
     return { ok: false, reason: NOT_ADMIN, message: '僅管理員可以簽發斐萃桌面授權。' }
   }
+  /* **可选有效期**：未给 ⇒ 载荷逐字 `{}`（服务端 30 天缺省）；给了 ⇒ 整数 `[300, 43200]`。 */
+  const ttlGiven = options.ttlSeconds !== undefined && options.ttlSeconds !== null
+  const ttlSeconds = deviceTtlSecondsOf(options.ttlSeconds)
+  if (ttlSeconds === null) {
+    return {
+      ok: false,
+      reason: INVALID_VALUE,
+      message: `有效期（ttl_seconds）必須是 ${FEICUI_DEVICE_TTL.minSeconds}〜${FEICUI_DEVICE_TTL.maxSeconds} 的整數秒。`
+    }
+  }
   const reply = await callCloudFunction(FEICUI_FUNCTION_NAME, {
     action: 'verify',
     op: FEICUI_DEVICE_OP,
-    payload: {}
+    payload: ttlGiven ? { ttl_seconds: ttlSeconds } : {}
   })
   /* 传输层失败（超时 / SDK / 网络）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装成 FORBIDDEN**。 */
   if (!reply.ok) {
