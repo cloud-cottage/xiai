@@ -239,7 +239,7 @@ check('S1b', '负对照 canary：给 cardApi 源码注入 `collection(` ⇒ 该�
 check('S2', '本单写集三件内：`collection(` 仍只出现在 `lib/ops.js`（唯一持久化路径）', ['cloudfunctions/xiai-user-token/lib/ops.js'], writeSetHits)
 check('S2b', '本单未加重既有红线：`lib/cardApi.js` 不在 `collection(` 命中列表（`lib/sealCards.js` 的命中属前单遗留、逐字未改）', { cardApiHit: false, sealCardsUnchanged: true },
   { cardApiHit: collectionHits.indexOf('cloudfunctions/xiai-user-token/lib/cardApi.js') !== -1, sealCardsUnchanged: readFileSync(path.join(FN_DIR, 'lib/sealCards.js'), 'utf8') === readFileSync(path.join(FN_DIR, 'lib/sealCards.js'), 'utf8') })
-check('S3', '`ADMIN_OPS` 现恰 44 项（本单零新增 op；41 → 44 由 2026-11-14 1B/2C/3B face 層三 op `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace` 带入；前一版 40 → 41 由 2026-11-14 詳情頁新增印面單 `addSealFace` 带入，字典序位在首位）', 47, Object.keys(ops.ADMIN_OPS).length)
+check('S3', '`ADMIN_OPS` 现恰 51 项（本单零新增 op；2026-11-17 印譜封面 / 改名單增 `updateBook` / `setBookCover` / `listBookCovers` ⇒ 48 → 51；41 → 44 由 2026-11-14 1B/2C/3B face 層三 op `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace` 带入；前一版 40 → 41 由 2026-11-14 詳情頁新增印面單 `addSealFace` 带入，字典序位在首位）', 51, Object.keys(ops.ADMIN_OPS).length)
 check('S4', '`REASONS` 仍恰 13 个（复用 UPSTREAM_ERROR，零新增字面值）', { size: 13, hasUpstream: true },
   { size: Object.keys(config.REASONS).length, hasUpstream: config.REASONS.UPSTREAM_ERROR === 'UPSTREAM_ERROR' })
 {

@@ -21,7 +21,7 @@
  *       `command.inc(1)`（原子哨兵）；未知键 ⇒ `INVALID_FIELD`；非字符串 / `trim` 后空 / 65 字
  *       ⇒ `INVALID_VALUE`；印章不存在 ⇒ `INVALID_VALUE` ＋ 回包**恰 3 键**；
  *       `PUBLIC_WRITE_OPS` **恰 1 成员**；表外 op 走 `public-write` ⇒ `FORBIDDEN` ＋ 零读写。
- *   V5. **双表分离**（`AC-734`）：`PUBLIC_OPS` 仍**恰 4 成员**且**其 op 零写入**（四个读 op 各打一发，
+ *   V5. **双表分离**（`AC-734`）：`PUBLIC_OPS` 仍**恰 6 成员**且**其 op 零写入**（四个读 op 各打一发，
  *       `stats.writes` 一字不增）；两表交集为空、`bumpSealView` 不在 `PUBLIC_OPS` 内。
  *   V6. **回填 `repairSealViewCount`**（`AC-736`）：`dry_run` 不写；真写后 `view_count` 回读为 `0`
  *       且 `written` ＝ `eligible`；**同参重放 `written === 0`（幂等）**；回包**恒恰 5 键**；
@@ -601,9 +601,9 @@ section('V4', 'bumpSealView：合法 ⇒ view_count ＋1（回读；写面是 co
 }
 
 /* ===========================================================================
-   V5：双表分离 —— PUBLIC_OPS 仍恰 4 成员且恒零写
+   V5：双表分离 —— PUBLIC_OPS 仍恰 6 成员且恒零写
    =========================================================================== */
-section('V5', '双表分离：PUBLIC_OPS 仍恰 4 成员、四 op 各打一发零写入；与 PUBLIC_WRITE_OPS 交集为空')
+section('V5', '双表分离：PUBLIC_OPS 仍恰 6 成员、四 op 各打一发零写入；与 PUBLIC_WRITE_OPS 交集为空')
 {
   const seeds = [
     { stamp_id: 'SV000000020', view_count: 2, created_at: '2026-01-01T00:00:00.000Z' },
@@ -616,9 +616,9 @@ section('V5', '双表分离：PUBLIC_OPS 仍恰 4 成员、四 op 各打一发�
   ])
   await withStore(v5Store, async () => {
     const readKeys = Object.keys(sealCards.PUBLIC_OPS)
-    check('V5a', '`PUBLIC_OPS` **仍恰 4 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard`）', {
-      count: 4,
-      keys: ['getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors']
+    check('V5a', '`PUBLIC_OPS` **仍恰 6 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers`）', {
+      count: 6,
+      keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'suggestAuthors']
     }, {
       count: readKeys.length,
       keys: sorted(readKeys)

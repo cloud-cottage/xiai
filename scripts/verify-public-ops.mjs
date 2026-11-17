@@ -14,8 +14,8 @@
  *       `SUGGEST_AUTHORS_ALLOWED_KEYS`(3：face_id,name,limit) /
  *       `SUGGEST_AUTHORS_SUCCESS_KEYS`(4：ok,query,normalized,candidates) /
  *       `AUTHOR_CANDIDATE_KEYS`(7) / `MATCHED_FIELDS`(5：name,alias,courtesy,art,contains)。
- *   P1. `PUBLIC_OPS` **恰 4 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
- *       `getPersonCard`，皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
+ *   P1. `PUBLIC_OPS` **恰 6 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
+ *       `getPersonCard` / `catalogStats` / `listSealCovers`，皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
  *   P2. **两 op 载荷封闭**：未知键 / **身份类键**（`user_id` / `phone`）⇒ `INVALID_FIELD`
  *       ＋ 恰 3 键拒绝 ＋ 零读（判定早于任何读）。
  *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 14 键**。
@@ -324,17 +324,17 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5
 })
 
 /* ===========================================================================
-   P1：`PUBLIC_OPS` 恰 5 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
+   P1：`PUBLIC_OPS` 恰 6 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
    =========================================================================== */
-section('P1', 'PUBLIC_OPS 恰 5（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats）；表外 op ⇒ FORBIDDEN')
+section('P1', 'PUBLIC_OPS 恰 6（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers）；表外 op ⇒ FORBIDDEN')
 {
   const keys = Object.keys(sealCards.PUBLIC_OPS)
   const readsBefore = store.stats.reads
   const denied = await publicCall('repairPrimaryFace', {})
-  check('P1', '`PUBLIC_OPS` **恰 5 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats`，皆函数）', {
-    count: 5,
-    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'suggestAuthors'],
-    types: ['function', 'function', 'function', 'function', 'function']
+  check('P1', '`PUBLIC_OPS` **恰 6 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers`，皆函数）', {
+    count: 6,
+    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function', 'function', 'function']
   }, {
     count: keys.length,
     keys: sorted(keys),
