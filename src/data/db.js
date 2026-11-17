@@ -60,7 +60,7 @@ import { uidOf } from './uid.js'
    全部由 `cloudbase.js` 自己判；本文件**不碰** SDK、**不發**請求、**不自立**第二處判據。
    另經 `cloudBaseSnapshot()` 拿**同一份快照對象**做「上傳成功後併入」（`mergeCloudSnapshotRows`）：
    仍是**同一個單點的讀口**，不新增判據、不發請求；併入只替換集合數組身份以失效讀緩存。 */
-import { cloudBaseReadOf, cloudBaseSnapshot, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS, filterImageRowsForViewer, isHiddenImageRow } from './cloudbase.js'
+import { cloudBaseReadOf, cloudBaseSnapshot, ensureCloudBaseHydration, CLOUD_COLLECTION_KEYS, filterImageRowsForViewer, isHiddenImageRow, isMarkedImageRow } from './cloudbase.js'
 /* **影像可见性（2026-11-15 E1 裁定）的**身份来源**：`session.js` 的 `isAdmin` 是登录态唯一真源
    （角色 `role === 'admin'`）。本文件**只读该标志**，不另立第二套判据、不碰写入面。
    单向依赖（`session.js` 不 import 本文件）⇒ 无加载环。 */
@@ -1669,36 +1669,59 @@ export function saveImageRows(rows) {
 }
 
 /**
- * **投影侧判据：某影像行是否被可见性藏起**（`resolveShare` 专用；**不吃读面过滤**）。
+ * **投影侧真源查询（`isImageRowHidden` / `imageRowMarkedStateOf` 共用）**：不经读面过滤地把
+ * 某影像行**原样**取回来（`{found, row}`）。
  *
- * 为什么单列一支：分享投影要判「面行指向的那张图是不是 `hidden`」。若去问**已过滤**的
- * `listImageRows()`，非管理员根本看不到 hidden 行 ⇒ 判不出来（「查不到」与「被藏」不可分辨）。
- * 故这里直接查**两处未过滤真源**：
- *   ① 内存补位行 `imageRowMemory`（雲端候選行剛補進來的）；
- *   ② 云端快照的 `images` 集合（`cloudBaseReadOf('images')` —— **原始行**，
- *      `readCollection` 的过滤只作用于**交出的副本**，快照本体一字未改）。
- * 本机镜像行（localStorage）不带 `visibility`（抽样 300 行零命中）⇒ 不必扫。
+ * 为什么不能用 `listImageRows()`：那两个判据要判「面行指向的那张图**是不是**被藏 / 未标记」，
+ * 而读面过滤已经把藏起 / 未标记的行摘掉了 ⇒ 「查不到」与「被藏」不可分辨。
+ * 故直接查三处**未过滤**真源：① 内存补位行；② 云端快照原始行；③ 本机镜像行（离线 / 本机形态）。
  * @param {string} imageRowId 影像行 id
- * @returns {boolean} `true` ＝ 该行存在且 `visibility === 'hidden'`；不存在 / 缺键 ⇒ `false`
+ * @returns {{found:boolean, row:object|null}}
  */
-export function isImageRowHidden(imageRowId) {
+function imageRowFactsOf(imageRowId) {
   const id = imageRowId === null || imageRowId === undefined ? '' : String(imageRowId)
-  if (id === '') return false
+  if (id === '') return { found: false, row: null }
   /* ① 內存補位行（雲端候選行剛補進來的那一批）。 */
   const memoryRow = imageRowMemory.get(id)
-  if (memoryRow && isHiddenImageRow(memoryRow)) return true
+  if (memoryRow) return { found: true, row: memoryRow }
   /* ② 云端快照的原始行（`readCollection` 的过滤只作用于交出的副本，快照本体未改）。 */
   const cloud = cloudBaseReadOf('images')
   const cloudRows = cloud && Array.isArray(cloud.rows) ? cloud.rows : []
   const cloudHit = cloudRows.find((row) => String((row && (row.id || row._id)) || '') === id)
-  if (cloudHit) return isHiddenImageRow(cloudHit)
+  if (cloudHit) return { found: true, row: cloudHit }
+  if (cloud && cloud.state === 'ready') return { found: false, row: null }
   /* ③ 雲端未接管（`off` / `pending` / `failed`）⇒ 本機鏡像行（離線驗收 / 本機調試用；
      生產雲模式下本機鏡像停寫，本支恆走不到）。 */
-  if (cloud && cloud.state === 'ready') return false
   ensureSeed()
   const local = readKey(STORAGE_KEYS.images)
   const localHit = Array.isArray(local) ? local.find((row) => String((row && (row.id || row._id)) || '') === id) : null
-  return localHit ? isHiddenImageRow(localHit) : false
+  return localHit ? { found: true, row: localHit } : { found: false, row: null }
+}
+
+/**
+ * **投影侧判据：某影像行是否被可见性藏起**（`resolveShare` 专用；**不吃读面过滤**）。
+ * @param {string} imageRowId 影像行 id
+ * @returns {boolean} `true` ＝ 该行存在且 `visibility === 'hidden'`；不存在 / 缺键 ⇒ `false`
+ */
+export function isImageRowHidden(imageRowId) {
+  const facts = imageRowFactsOf(imageRowId)
+  return facts.found ? isHiddenImageRow(facts.row) : false
+}
+
+/**
+ * **投影侧判据：某影像行的准入状态**（`resolveShare` 专用；**不吃读面过滤**）。
+ *
+ * 三态分明（`resolveShare` 必须能区分「未标记」与「读不到」）：
+ *   · `{found:true, marked:true}`  ⇒ 已标记（**含哨兵行 `storage === 'bundled'`**，恒真）；
+ *   · `{found:true, marked:false}` ⇒ 未标记（缺键旧行亦落此档）⇒ 投影**不得交出该 id**；
+ *   · `{found:false, marked:false}` ⇒ 该 id 在三处真源都查不到（如快照未就绪）⇒
+ *     **不得据此判「未标记」**（「查不到 ≠ 未标记」，同 `isImageRowHidden` 的既有口径）。
+ * @param {string} imageRowId 影像行 id
+ * @returns {{found:boolean, marked:boolean}}
+ */
+export function imageRowMarkedStateOf(imageRowId) {
+  const facts = imageRowFactsOf(imageRowId)
+  return { found: facts.found, marked: facts.found ? isMarkedImageRow(facts.row) : false }
 }
 
 /* ============================================================================

@@ -15,6 +15,9 @@
  *   - **投影**：`resolveShare(code)` 在**投影层**就把被遮内容摘掉（未登錄 ⇒ 名 ＋ 印數 ＋
  *     夹内倒序前 3 枚；第 4 枚起的任何印文 / 縮略圖欄位**不在返回物件裏**）；
  *     登錄後（含非擁有者）返回完整清单（**只读**）。
+ *   - **影像两层闸门（投影侧，非管理员）**：① `visibility === 'hidden'` 的影像行**不交出 id**；
+ *     ② **`marked !== true` 的影像行同样不交出 id**（2026-11-17 准入裁定 —— **游客投影零未标记影像**）；
+ *     哨兵行（`storage === 'bundled'`）恒视为已标记；管理员与读面同口径（全取）。
  *
  * 权限（§6.3）：写操作（新建 / 存入 / 移出 / 生成分享 / 重新生成）**仅拥有者** ⇒
  * 非拥有者一律 `{ok:false, reason:'FORBIDDEN'}` ＋ **零写入**；读分享面**不得**以「非擁有者」拒
@@ -23,7 +26,7 @@
  * 上屏文案一律**繁体**（`s2t(x) === x`），且**零「切分」措辞**。
  */
 
-import { listSealRows, listFaceRows, primaryFaceIn, isImageRowHidden } from '../data/db.js'
+import { listSealRows, listFaceRows, primaryFaceIn, isImageRowHidden, imageRowMarkedStateOf } from '../data/db.js'
 import { currentUser, isAdmin as isAdminSessionRef } from '../data/session.js'
 /* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
    雙端同段代碼 ⇒ 前端只能**副作用導入**、API 掛 `globalThis.__XIAI_CODE_ID__`。 */
@@ -141,7 +144,18 @@ function sealBriefOf(sealId) {
      判据用 `isImageRowHidden`（**不吃读面过滤** —— 若问已过滤的 `listImageRows()`，
      非管理员根本看不到 hidden 行，「查不到」与「被藏」不可分辨）。 */
   const referencedImageId = primary && primary.face_image_id ? String(primary.face_image_id) : ''
-  const withheld = referencedImageId !== '' && !isAdminSessionRef.value && isImageRowHidden(referencedImageId)
+  /* **影像准入（2026-11-17 `marked` 裁定）**：投影同样只允许 `marked === true` 的行 ——
+     **游客投影零未标记影像**。三态分明：`found && !marked` ⇒ 摘 id；`found === false`
+     （快照未就绪 / 该 id 三处真源都查不到）⇒ **不据此摘**（「查不到 ≠ 未标记」）；
+     哨兵行（`storage === 'bundled'`）由 `imageRowMarkedStateOf` 侧恒判已标记 ⇒ 不受影响。
+     管理员与 `visibility` 同口径：照旧拿到真 id（管理员全取）。 */
+  const markedStateOfReferenced =
+    referencedImageId === '' ? { found: false, marked: false } : imageRowMarkedStateOf(referencedImageId)
+  const unmarked = markedStateOfReferenced.found && !markedStateOfReferenced.marked
+  const withheld =
+    referencedImageId !== '' &&
+    !isAdminSessionRef.value &&
+    (isImageRowHidden(referencedImageId) || unmarked)
   return {
     seal_id: id,
     seal_name: seal.seal_name || seal.name || '',

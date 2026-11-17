@@ -26,12 +26,19 @@
  *   A 纯函数（7）：`hidden` / `visible` / **缺键** / `null` 四态 ＋ 表外值（`'HIDDEN'` 大写、
  *     `'secret'`、非字符串）＋ 空行。**判定口径写死**：读面**只有逐字 `'hidden'` 才藏**；
  *     缺键、`null`、表外值一律**当 `visible`**（不是拒绝、不是抛错）——「宁可露出也不能凭空少一张」。
- *   B 读面（5）：非管理员不返回 `hidden`；管理员全返回；缺键旧行不消失；组内「无 visible 但有
+ *   B 读面（7）：非管理员不返回 `hidden`；管理员全返回；缺键旧行不消失；组内「无 visible 但有
  *     hidden」⇒ 自动提升序号最小的一张为 `visible` 且**原行不就地改写**；`isImageRowHidden`
- *     四态（不吃读面过滤）。
+ *     四态（不吃读面过滤）；**准入门两条（2026-11-17 `marked` 口径）：未标记行对非管理员
+ *     不可见 / 标记后即可见**。
  *   C 写面（4）：未传 `visibility` 默认 `visible`；非法值 ⇒ `INVALID_VALUE` 零写入；`hidden`
- *     能写进；白名单**只**多这一个键（静态 8 键 ＋ 未登记键仍 `INVALID_FIELD`）。
+ *     能写进；白名单**只**多这一个键（静态 9 键〔含 `marked`，2026-11-17 准入裁定 8 → 9〕＋
+ *     未登记键仍 `INVALID_FIELD`）。
  *   D 分享投影（2）：投影里零 `hidden` 行；游客与登录非管理员集合一致、管理员不同。
+ *
+ * **本套的适配（2026-11-17，**不改被测逻辑**）**：读面自准入裁定起会**先按 `marked` 裁掉未标记
+ * 行**再按 `visibility` 过滤 ⇒ B 段基线不能再取 `listImageRows()`（非管理员视图恒 0 行），
+ * 改由 `readKey(STORAGE_KEYS.images)` 取**未过滤集合**，并在造数时给种子行补 `marked: true`
+ * （＝既有种子影像「已回填」口径）。断言强度只增不减：另补 B6 / B7 两条准入断言。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -198,7 +205,19 @@ const db = await importSrc('src/data/db.js')
 const { writeKey, readKey, STORAGE_KEYS } = storage
 
 /* 首读触发种子（全新安装 ⇒ 整套种子一次写入）。 */
-const SEED_ROWS = db.listImageRows()
+db.listImageRows()
+
+/* **基线改由未过滤集合取**（2026-11-17 准入裁定后）：`listImageRows()` 对非管理员**先按
+   `marked` 裁掉未标记行**，而种子影像行都没有 `marked` 键 ⇒ 用它当基线会读成 0 行（B1/B2/B3
+   恒红的真因）。种子有几行只由**落盘集合**决定 ⇒ 直读 `readKey`。 */
+const SEED_ROWS = readKey(STORAGE_KEYS.images) || []
+/* 造数：种子行补 `marked: true`（＝既有种子影像「已回填」口径；生产同口径见
+   `scripts/backfill-image-marked.mjs`）。**只补这一键**，`visibility` 一律不碰 —— B 段判的
+   仍然是 `visibility`，准入由 B6 / B7 单独判。 */
+writeKey(
+  STORAGE_KEYS.images,
+  SEED_ROWS.map((row) => ({ ...row, marked: true }))
+)
 const SEED_COUNT = SEED_ROWS.length
 
 /** 把指定 id 的行改成 `hidden`（其余行一字不动）。 */
@@ -282,6 +301,60 @@ check(
     id: groupHits.length === 1 ? textOf(groupHits[0].id) : groupHits.map((row) => row.id).join(','),
     visibility: groupHits.length === 1 ? textOf(groupHits[0].visibility) : '',
     storageUnchanged: storageBefore === promotedStorage
+  }
+)
+
+/* B6 / B7：**准入门本身的两条断言**（2026-11-17 `marked` 口径）——
+   ① 未标记行对非管理员不可见；② 标记后即可见（同一行、只翻 `marked` 一个键）。 */
+const patchImages = (ids, patch) => {
+  const rows = readKey(STORAGE_KEYS.images)
+  const wanted = new Set(ids)
+  writeKey(
+    STORAGE_KEYS.images,
+    rows.map((row) => (wanted.has(row.id) ? { ...row, ...patch } : row))
+  )
+}
+
+/* 造数：同组两张都 `visible`、都**未标记**（B4 把两张都藏了 ⇒ 先复位展示形态）。 */
+patchImages(['img-0001f', 'img-0001g'], { visibility: 'visible', marked: false })
+session.setUser({ id: 'u-plain-1', role: 'user' })
+const unmarkedPlain = db.listImageRows()
+session.setUser({ id: 'u-admin-1', role: 'admin' })
+const unmarkedAdmin = db.listImageRows()
+
+check(
+  'B6',
+  '**未标记行对非管理员不可见**：同组两张都 `visible` 且都 `marked:false` ⇒ 非管理员 0 张（不是「提升成可显示」）；管理员照旧 2 张',
+  { plainGroupSize: 0, adminGroupSize: 2, plainTotal: SEED_COUNT - 2, adminTotal: SEED_COUNT },
+  {
+    plainGroupSize: unmarkedPlain.filter((row) => textOf(row.stamp_id) === 'XAI-0001' && textOf(row.kind) !== 'EDGE').length,
+    adminGroupSize: unmarkedAdmin.filter((row) => textOf(row.stamp_id) === 'XAI-0001' && textOf(row.kind) !== 'EDGE').length,
+    plainTotal: unmarkedPlain.length,
+    adminTotal: unmarkedAdmin.length
+  }
+)
+
+/* 只把 `img-0001f` 标上（`img-0001g` 仍未标记），其他一字不动。 */
+patchImages(['img-0001f'], { marked: true })
+session.setUser({ id: 'u-plain-1', role: 'user' })
+const markedPlain = db.listImageRows()
+const markedIds = idsOf(markedPlain)
+const storedMarked = textOf((rowById(readKey(STORAGE_KEYS.images), 'img-0001f') || {}).marked)
+
+check(
+  'B7',
+  '**标记后即可见**：只把 `img-0001f` 的 `marked` 改 `true` ⇒ 非管理员立刻看到那张；同组未标记的 `img-0001g` 仍不可见（准入按行判、不按组）',
+  {
+    newRowVisible: true,
+    siblingStillHidden: false,
+    plainTotal: SEED_COUNT - 1,
+    storedMarked: 'true'
+  },
+  {
+    newRowVisible: markedIds.includes('img-0001f'),
+    siblingStillHidden: markedIds.includes('img-0001g'),
+    plainTotal: markedPlain.length,
+    storedMarked
   }
 )
 
@@ -394,7 +467,8 @@ check(
   }
 )
 
-/* C4：白名单**只**多这一个键 —— 静态（源码字面恰 8 键、含 `visibility`）＋ 行为（未登记键仍拒）。 */
+/* C4：白名单**只**多这一键 —— 静态（源码字面恰 9 键、含 `visibility` **与** `marked`
+   〔2026-11-17 准入裁定 8 → 9〕）＋ 行为（未登记键仍拒）。 */
 const opsSource = fs.readFileSync(path.join(ROOT, OPS_REL), 'utf8')
 const allowBlock = /const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(opsSource)
 const staticKeys = allowBlock ? Array.from(allowBlock[1].matchAll(/'([^']+)'/g)).map((m) => m[1]).sort() : []
@@ -402,9 +476,9 @@ const extraKeyReply = await register({ ...BASE_PAYLOAD, book_id: '00001' })
 
 check(
   'C4',
-  '服务端白名单**只**多 `visibility` 一键：静态恰 8 键（其余 7 键一字未动）＋ 未登记键（`book_id`）仍 `INVALID_FIELD` 零写入',
+  '服务端白名单**只**多 `visibility` ＋ `marked` 两键：静态恰 9 键（其余 7 键一字未动；`marked_by`/`marked_at` 不在内）＋ 未登记键（`book_id`）仍 `INVALID_FIELD` 零写入',
   {
-    staticKeys: ['bytes', 'face_id', 'kind', 'mime', 'seal_id', 'sha256', 'storage_key', 'visibility'],
+    staticKeys: ['bytes', 'face_id', 'kind', 'marked', 'mime', 'seal_id', 'sha256', 'storage_key', 'visibility'],
     extraDenied: true,
     extraReason: 'INVALID_FIELD',
     extraHasPlan: false
@@ -426,9 +500,10 @@ check(
 section('D', '分享投影：resolveShare 零 hidden 行 ＋ 游客／非管理员／管理员三态')
 
 const HIDDEN_IMAGE_ID = 'img-0001f'
-/* 复位：只藏 `img-0001f`（`img-0001g` 保持缺键 ⇒ 该组恒有 visible，不触发提升）。 */
+/* 复位：只藏 `img-0001f`（`img-0001g` 保持缺键 ⇒ 该组恒有 visible，不触发提升）。
+   准入一并复位为 `true`（B6 / B7 动过 `marked`）—— **D 段只判 `visibility`**。 */
 const seedImages = readKey(STORAGE_KEYS.images).map((row) => {
-  const next = { ...row }
+  const next = { ...row, marked: true }
   delete next.visibility
   if (next.id === HIDDEN_IMAGE_ID) next.visibility = 'hidden'
   return next

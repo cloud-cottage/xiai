@@ -700,6 +700,12 @@ export function normalizeImageRow(doc, options = {}) {
     /* **影像可见性（2026-11-15 E1 裁定）**：只认逐字 `'hidden'`，缺键 / 空值 / 表外取值一律
        归一为 `'visible'`（旧行不得因本单消失）。判据单点 ＝ `imageVisibilityOf`。 */
     visibility: imageVisibilityOf(row),
+    /* **影像准入（2026-11-17 `marked`）**：归一为**布尔**（缺键 ⇒ `false`；哨兵行
+       `storage === 'bundled'` ⇒ `true`）。判据单点 ＝ `imageMarkedOf`。
+       `marked_by` / `marked_at` 只做空值归一（**不猜、不补**；未标记时为空串）。 */
+    marked: imageMarkedOf(row),
+    marked_by: text(row.marked_by),
+    marked_at: text(row.marked_at),
     created_at: text(row.created_at)
   }
 }
@@ -751,6 +757,53 @@ export function isHiddenImageRow(row) {
   return imageVisibilityOf(row) === IMAGE_VISIBILITY.HIDDEN
 }
 
+/**
+ * **影像准入（`xiai_images.marked`｜Kevin 2026-11-17 裁定）**
+ * ============================================================================
+ * 口径：`visibility` ＝ **展示形态**（主图 `hidden`、精修件 `visible`）；
+ * `marked` ＝ **准入**（**xiai 只读取已标记的影像**）。两者**语义不同、必须分开**，
+ * 读面要**同时**满足（见 `filterImageRowsForViewer`）：
+ *   · 非管理员只拿 `marked === true` 的行 —— **未标记对 xiai 等同「暂无影像」**；
+ *   · **缺 `marked` 键的旧行一律当 `false`**（唯一例外见下：哨兵行）；
+ *   · **哨兵豁免**：`storage === 'bundled'`（随包占位图 `img-placeholder-seal-no-image`）
+ *     **恒视为已标记** —— 它是 UI 兜底，不得因未标记而消失；
+ *   · 管理员**全取**（与 `visibility` 同一口径）。
+ * 字段契约（三个扁平键，冻结）：`marked`（boolean）／`marked_by`（不透明 uid）／
+ * `marked_at`（ISO）。**服务端唯一写点**＝云函数 `registerFaceImage`（客户端不得递）。
+ * ============================================================================
+ */
+
+/** 准入缺省语义：**缺键一律当 `false`**（不是拒绝、不是抛错；只是「对 xiai 等同暂无影像」）。 */
+export const IMAGE_MARKED_DEFAULT = false
+
+/** 哨兵行的存储取值（随包资产，字节来自前端随包文件 ⇒ 恒可展示）。 */
+export const IMAGE_STORAGE_BUNDLED = 'bundled'
+
+/**
+ * 是否哨兵行（`storage === 'bundled'`）—— **恒视为已标记**（UI 兜底，不得消失）。
+ * @param {object} row 影像行
+ * @returns {boolean}
+ */
+export function isBundledImageRow(row) {
+  return text(row && row.storage) === IMAGE_STORAGE_BUNDLED
+}
+
+/**
+ * 行上的准入（**只认布尔 `true`**；缺键 / `false` / 非布尔（`'true'` / `1` / `{}`）⇒ `false`）。
+ * 哨兵行（`storage === 'bundled'`）**恒 `true`**。
+ * @param {object} row 影像行（云行或本机行）
+ * @returns {boolean}
+ */
+export function imageMarkedOf(row) {
+  if (isBundledImageRow(row)) return true
+  return Boolean(row && row.marked === true)
+}
+
+/** 是否已标记（＝ `imageMarkedOf` 的布尔形态；哨兵行恒真）。 */
+export function isMarkedImageRow(row) {
+  return imageMarkedOf(row) === true
+}
+
 /** 组键（`(stamp_id, kind)`；**未归属 / 占位 `stamp_id` 不成组** ⇒ 不参与提升）。 */
 function imageGroupKeyOf(row) {
   const stamp = text(row && row.stamp_id)
@@ -770,15 +823,22 @@ function promotedOrderOf(a, b) {
 }
 
 /**
- * **按角色过滤影像行**（读面 / 水合结果的**唯一**可见性过滤点）。
+ * **按角色过滤影像行**（读面 / 水合结果的**唯一**可见性 ＋ 准入过滤点）。
  *
  * 判据（顺序即判定序）：
  *   ① `options.isAdmin === true` ⇒ **原数组原样返回**（零分配、零改写；管理员全取）；
- *   ② 非管理员 ⇒ 去掉 `hidden` 行；
- *   ③ **不变量**：某 `(stamp_id, kind)` 组**一张 `visible` 都没有** ⇒ 把该组**序号最小的那张**
+ *   ② **准入门（2026-11-17 `marked`）**：非管理员只留 `marked === true` 的行
+ *      （缺键旧行按 `false` 处理 ⇒ 不交出）；**哨兵行 `storage === 'bundled'` 恒放行**
+ *      （UI 兜底不得消失）；
+ *   ③ 非管理员 ⇒ 再去掉 `hidden` 行（`visibility` 语义不变）；
+ *   ④ **不变量**：某 `(stamp_id, kind)` 组**一张 `visible` 都没有** ⇒ 把该组**序号最小的那张**
  *      `hidden` 行**当 `visible` 交出**（交出的是**副本**，`visibility` 改写为 `'visible'` ——
  *      投影 / 界面拿到的行与其语义一致；原行对象不就地改写）；
- *   ④ 其余行身份不变（`visible` 行、缺键旧行**逐字原样**透传）。
+ *   ⑤ 其余行身份不变（`visible` 行、缺键旧行**逐字原样**透传）。
+ *
+ * ⚠️ ② 与 ④ 的先后是契约的一部分：**先按准入裁掉未标记行**，再在**留下的行**里做
+ * 「组内无 visible ⇒ 提升」—— 否则一张未标记的 `hidden` 行会被提升成「面有图可显示」，
+ * 等于绕过准入门。
  * @param {Array<object>} rows 影像行
  * @param {{isAdmin?:boolean}} [options] 身份（缺省按非管理员）
  * @returns {Array<object>} 可交给界面 / 水合结果的行
@@ -786,8 +846,10 @@ function promotedOrderOf(a, b) {
 export function filterImageRowsForViewer(rows, options = {}) {
   const list = Array.isArray(rows) ? rows : []
   if (options.isAdmin === true) return list
+  /* ② 准入门：未标记 ＝ 对 xiai「暂无影像」；哨兵行（bundled）豁免。 */
+  const admitted = list.filter((row) => isMarkedImageRow(row))
   const groups = new Map()
-  list.forEach((row, index) => {
+  admitted.forEach((row, index) => {
     const key = imageGroupKeyOf(row)
     if (key === '') return
     if (!groups.has(key)) groups.set(key, { hasVisible: false, hidden: [] })
@@ -798,12 +860,12 @@ export function filterImageRowsForViewer(rows, options = {}) {
   const promoted = new Set()
   groups.forEach((bucket) => {
     if (bucket.hasVisible || bucket.hidden.length === 0) return
-    const candidates = bucket.hidden.map((index) => list[index])
+    const candidates = bucket.hidden.map((index) => admitted[index])
     const ordered = candidates.slice().sort(promotedOrderOf)
-    promoted.add(list.indexOf(ordered[0]))
+    promoted.add(admitted.indexOf(ordered[0]))
   })
   const out = []
-  list.forEach((row, index) => {
+  admitted.forEach((row, index) => {
     if (!isHiddenImageRow(row)) {
       out.push(row)
       return

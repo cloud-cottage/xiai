@@ -3287,7 +3287,11 @@ const OPS = Object.freeze({
    *   ⑤ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用、不耗号；否则经 `imageSeqsOf` /
    *      `nextImageSeqOf`，**本 op 不自算号**）；
    *   ⑥ 行体 ＝ `buildDirectImageRow` 字段面（`id` ＝ `img-<sha16>` **内容寻址**；`stamp_id` 回填
-   *      `seal_id`，缺省空串）＋ `kind:'set'` 覆写计划 ⇒ **同 `id` 重放不建第二行、不耗号**；
+   *      `seal_id`，缺省空串）＋ **准入三键（2026-11-17 `marked` 裁定）**：用户提交件**必须经
+   *      审核** ⇒ `marked:false` ＋ `marked_by:''` / `marked_at:''`（**不得自动准入**；三键
+   *      **都不在白名单**，客户端递 ⇒ `INVALID_FIELD`）；同 `id` 既有行**已准入** ⇒ 覆写不降级
+   *      （闸门单向：撤销只走 `registerFaceImage`）＋ `kind:'set'` 覆写计划 ⇒ **同 `id` 重放不建
+   *      第二行、不耗号**；
    *   ⑦ 成功回包**恰 2 键** `{ok:true, image_id}`（＋ `plan` 内部面，`index.js` 绝不外传）；
    *      失败恒**恰 3 键** `{ok, reason, message}`，`reason` 只用既有冻结值（**零新增**）。
    * **安全边界**：本 op **只登记 `xiai_images` 影像行** —— 不改任何印面 / 印章行、不删任何东西、
@@ -3368,14 +3372,24 @@ const OPS = Object.freeze({
     const seq = sameSealExisting
       ? Number(existing.seq)
       : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
-    /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`。 */
+    /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`
+       ＋ **准入三键（2026-11-17 `marked` 裁定）**：用户提交件**必须经审核** ⇒ `marked:false`
+       ＋ `marked_by:''` / `marked_at:''`（**不自动准入**、不给「谁标记的」留假归属）。
+       **闸门单向**：同 `id`（`img-<sha16>` 内容寻址）已有行若**已被管理员标记**，本次覆写
+       **不得把它降级** —— 同一张图可能已被别的印面引用，降级会连带把那些面「藏掉」；
+       撤销准入只走 `registerFaceImage`（`marked:false`），不走用户提交路径。 */
+    const existingAdmission = markedStateOfImageRow(existing)
+    const admission = existingAdmission.marked ? existingAdmission : { marked: false, by: '', at: '' }
     const row = {
       ...buildDirectImageRow(
         { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
         at,
         seq
       ),
-      stamp_id: sealId
+      stamp_id: sealId,
+      marked: admission.marked,
+      marked_by: admission.by,
+      marked_at: admission.at
     }
     /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
     return {
@@ -5306,6 +5320,11 @@ async function directWriteRowOfExistingSeal(sealRow, idempotent) {
  * **本單（2026-11-15 E1 裁定｜影像可见性）**：封闭键面 **7 → 8**，**只加 `visibility` 一个键**
  * （其余键一字未动、不得顺手放宽）。口径：同一印面两张图 —— **原图（裁切 TIFF）标 `hidden`
  * （仅管理员可见）**、**精修件标 `visible`**；没有精修件时原图必须 `visible`（缺省即 `visible`）。
+ *
+ * **本單（2026-11-17 `marked` 裁定｜影像准入）**：封闭键面 **8 → 9**，**只加 `marked` 一个键**
+ * （其余键一字未动）。口径：`marked` ＝ **准入**（xiai 只读取已标记的影像），与 `visibility`
+ * （展示形态）**分开**；**只收布尔**、缺省 `false`；`marked_by` / `marked_at` **由服务端从身份
+ * 与时钟取**（客户端不得递 ⇒ 递了就是未登记键 ⇒ `INVALID_FIELD`）。
  */
 const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
   'seal_id',
@@ -5315,7 +5334,8 @@ const FACE_IMAGE_REGISTER_ALLOWED_KEYS = Object.freeze([
   'mime',
   'storage_key',
   'kind',
-  'visibility'
+  'visibility',
+  'marked'
 ])
 
 /** `kind` 合法取值（与 `FACE_KIND` / `buildDirectImageRow` 同口径；缺省 `FACE`）。 */
@@ -5346,6 +5366,79 @@ function imageVisibilityOf(payload) {
     return { ok: false }
   }
   return { ok: true, value: src.visibility }
+}
+
+/**
+ * **影像准入（`marked`｜Kevin 2026-11-17 裁定）值域门**：**只收布尔**，缺省 `false`。
+ *
+ * 判据（顺序即判定序）：
+ *   ① 载荷**没有** `marked` 键（或值 `undefined`）⇒ `{ok:true, value:false}`（缺省即未标记）；
+ *   ② 有该键且值是**布尔** ⇒ 原样采信；
+ *   ③ 其余（字符串 `'true'` / 数字 `1` / `null` / 对象 / 空串）⇒ `{ok:false}`
+ *      ⇒ 调用方一律 `INVALID_VALUE` ＋ **零写入**（**不静默归一**：准入门不接受猜测）；
+ *   ④ **`marked_by` / `marked_at` 不由客户端递** —— 它们不在白名单里（递了 ⇒ `INVALID_FIELD`），
+ *      本 op 落行时**从身份与时钟取**（`identity.uid` / 本次落盘时刻）。
+ * @param {object} payload 载荷
+ * @returns {{ok:true, value:boolean}|{ok:false}}
+ */
+function imageMarkedOf(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {}
+  if (!Object.prototype.hasOwnProperty.call(src, 'marked') || src.marked === undefined) {
+    return { ok: true, value: false }
+  }
+  if (typeof src.marked !== 'boolean') return { ok: false }
+  return { ok: true, value: src.marked }
+}
+
+/* ---------------------------------------------------------------------------
+   **影像准入 · *行级* 判据（服务端单点｜2026-11-17 `marked` 裁定）**
+   ---------------------------------------------------------------------------
+   上面 `imageMarkedOf` 判的是**载荷**；下面判的是**已经存在于 `xiai_images` 的行**。
+   两个写面（① 管理员换图 `replaceFaceImage` ② 登录用户提交修正图
+   `registerCorrectionImage`）此前**都不写准入三键** ⇒ 落出来的行缺 `marked` ⇒ 读面按
+   「缺键一律 `false`」口径**全站不可见**（换完图 / 提交完修正图什么都没变）。本段补齐。
+   --------------------------------------------------------------------------- */
+
+/** 哨兵行的存储取值（随包占位图 `img-placeholder-seal-no-image`；与前端
+ *  `cloudbase.js::IMAGE_STORAGE_BUNDLED` **同一字面**，两端各一处、不互 import）。 */
+const IMAGE_STORAGE_BUNDLED = 'bundled'
+
+/**
+ * 读**单张**影像行（`id` → `_id` 两形态依次；未命中 ⇒ `null`）。
+ *
+ * **读抛错 ⇒ 原样上抛**（由调用方按自己的降级口径处理 —— 本函数不吞真故障，
+ * 也不把「读不到」伪装成「无行」）。
+ * @param {string} imageId 影像行 id
+ * @returns {Promise<object|null>}
+ */
+async function readImageRowOf(imageId) {
+  const id = text(imageId)
+  if (id === '') return null
+  for (const probe of ['id', '_id']) {
+    const rows = await readRows(COLLECTIONS.images, { [probe]: id }, { limit: 1 })
+    if (Array.isArray(rows) && rows.length > 0) return rows[0]
+  }
+  return null
+}
+
+/**
+ * **行级准入三键**（`marked` / `marked_by` / `marked_at` 的**唯一**读取判据）。
+ *
+ * 判据（顺序即判定序）：
+ *   ① 无行（`null` / `undefined`）⇒ `{marked:false, by:'', at:''}`；
+ *   ② **哨兵行**（`storage === 'bundled'`）⇒ **恒已标记**（随包兜底图，与前端读面同口径；
+ *      它没有也不需要 `marked_by` / `marked_at`）；
+ *   ③ 只认**布尔** `true`（`'true'` / `1` / `{}` 一律 `false`；缺键亦 `false`）；
+ *   ④ 已标记 ⇒ `by` / `at` **照抄行上的原值**（`text()` 归一、**不补编**：谁标记的就写谁，
+ *      没有就是空串 —— 不给「谁标记的」留假归属）；未标记 ⇒ 两键恒空串。
+ * @param {object|null} row 影像行（云行 / 本机行）
+ * @returns {{marked:boolean, by:string, at:string}}
+ */
+function markedStateOfImageRow(row) {
+  if (!row) return { marked: false, by: '', at: '' }
+  const marked = text(row.storage) === IMAGE_STORAGE_BUNDLED || row.marked === true
+  if (!marked) return { marked: false, by: '', at: '' }
+  return { marked: true, by: text(row.marked_by), at: text(row.marked_at) }
 }
 
 /* ---------------------------------------------------------------------------
@@ -9266,7 +9359,8 @@ const ADMIN_OPS = Object.freeze({
    *   ③ 必填六键：缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`（`bytes` 另判整数）；
    *   ④ 值域门：`sha256` 64 位小写十六进制；`storage_key` 匹配 `ARTIFACT_OBJECT_KEY_PATTERN`
    *      **且键内摘要 ≡ sha256**；`bytes` ∈ 1〜`ARTIFACT_MAX_BYTES`；`kind` ∈ {FACE, EDGE}
-   *      （缺省 `FACE`）；`visibility` ∈ {visible, hidden}（**缺省 `visible`**）
+   *      （缺省 `FACE`）；`visibility` ∈ {visible, hidden}（**缺省 `visible`**）；
+   *      `marked` **只收布尔**（**缺省 `false`** ＝ 未标记）
    *      ⇒ 任一不符 `INVALID_VALUE` ＋ 零写入、零读取之外的任何副作用；
    *   ⑤ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用、不消耗号；否则经
    *      `imageSeqsOf` / `nextImageSeqOf`，**本 op 不自算号**）；
@@ -9274,7 +9368,7 @@ const ADMIN_OPS = Object.freeze({
    *      覆写计划 ⇒ **同 `id` 重放不建第二行、不消耗号**；
    *   ⑦ 成功回包**恰 2 键** `{ok:true, image_id}`（＋ `plan` 内部面，`index.js` 不外传）；
    *      失败恒**恰 3 键**，`reason` 只用既有冻结值（**零新增**）。
-   * @param {object} payload 载荷（封闭八键，见 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`；`visibility` 缺省 `visible`）
+   * @param {object} payload 载荷（封闭九键，见 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`；`visibility` 缺省 `visible`、`marked` 缺省 `false`）
    * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
    * @param {{adminPhone?:string, nowSeconds?:number}} [context]
    * @returns {Promise<{ok:true, image_id:string, plan:object}|{ok:false, reason:string, message:string}>}
@@ -9338,6 +9432,12 @@ const ADMIN_OPS = Object.freeze({
     if (!visibility.ok) {
       return deny(REASONS.INVALID_VALUE, '影像可見性（visibility）只能是 visible 或 hidden；本次零寫入。')
     }
+    /* ④e 准入门（**2026-11-17 `marked` 裁定**；只收布尔、缺省 `false`，判在**任何读之前**
+       ⇒ 非布尔结构性拒绝 ＋ **零读取、零写入**）。 */
+    const marked = imageMarkedOf(payload)
+    if (!marked.ok) {
+      return deny(REASONS.INVALID_VALUE, '影像准入標記（marked）只能是布林值 true 或 false；本次零寫入。')
+    }
     const sealId = text(payload.seal_id)
     const at = new Date().toISOString()
     /* 内容寻址 id 的**唯一规则点** ＝ `buildDirectImageRow`（此处只取 id，不自拼）。 */
@@ -9360,7 +9460,11 @@ const ADMIN_OPS = Object.freeze({
       ? Number(existing.seq)
       : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
     /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`
-       ＋ **`visibility`（本單；缺省即 `visible`，恒落该键 —— 不落空串、不落 `null`）**。 */
+       ＋ **`visibility`（缺省即 `visible`，恒落该键 —— 不落空串、不落 `null`）**
+       ＋ **`marked` / `marked_by` / `marked_at`（2026-11-17 准入裁定，三键恒落）**：
+         `marked` 恒为布尔（缺省 `false`）；`marked_by` / `marked_at` **只从服务端取**
+         （`identity.uid` / 本次落盘时刻），**未标记时为空串** —— 不给「谁标记的」留假归属。 */
+    const markedBy = marked.value ? text(identity && identity.uid) : ''
     const row = {
       ...buildDirectImageRow(
         { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
@@ -9368,7 +9472,10 @@ const ADMIN_OPS = Object.freeze({
         seq
       ),
       stamp_id: sealId,
-      visibility: visibility.value
+      visibility: visibility.value,
+      marked: marked.value,
+      marked_by: markedBy,
+      marked_at: marked.value ? at : ''
     }
     /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
     return {
@@ -9514,8 +9621,14 @@ const ADMIN_OPS = Object.freeze({
    *   ⑥ **幂等**：面行已指向该内容寻址 `image_id` ⇒ **零写**、回包 `previous_image_id === image_id`；
    *   ⑦ `seq` **单点取号**（同 `id` 已有行且属同印 ⇒ 沿用其 `seq`、不消耗号；否则经
    *      `imageSeqsOf` ＋ `nextImageSeqOf`，**本 op 不自算号**；读抛错 ⇒ 按无既有行继续）；
+   *   ⑦″ **准入继承（2026-11-17 `marked` 裁定）**：新行 `marked` ＝ **被替换行**的准入态
+   *      （true→true / false→false / **无该键或行不存在 ⇒ false**）；已标记时 `marked_by` /
+   *      `marked_at` **照抄被替换行原值**（不补编），未继承时两键空串；`marked` 与 by/at
+   *      **都不可由客户端递**（递 ⇒ `INVALID_FIELD`）；读被替换行抛错 ⇒ 按「不存在」⇒ `false`
+   *      ＋ 如实 `log.warn`；⑦‴ **共用行不得降级**（内容寻址行可能被别的印面引用且已准入 ⇒
+   *      准入取「继承 ∨ 既有行」，本 op 只增不减）；
    *   ⑧ `persist` `kind:'set'` 落影像行（**幂等，不建第二行**；行体 ＝ `buildDirectImageRow`
-   *      字段面 ＋ `stamp_id` 回填 `seal_id`）；
+   *      字段面 ＋ `stamp_id` 回填 `seal_id` ＋ 准入三键）；
    *   ⑨ 更新面行指向（`kind:'FACE'` ⇒ `face_image_id`；`kind:'EDGE'` ⇒ `edge_image_ids` 首位换新；
    *      `expectAtLeast:1`）；**失败 ⇒ 回滚 ⑧ 那一行**：本轮新建的槽位 ⇒ `deleteRow`；
    *      槽位本轮之前已在 ⇒ `kind:'set'` 回退其原行内容 —— **对象字节一律不删**，回
@@ -9637,14 +9750,48 @@ const ADMIN_OPS = Object.freeze({
     const seq = sameSealExisting
       ? Number(existing.seq)
       : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
-    /* ⑧ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`。 */
+    /* ⑦″ **准入继承（2026-11-17 `marked` 裁定）**：新行 `marked` ＝ **被替换行**的准入态
+       —— 换图不改变「该印面这张图是否已过审」的裁定（管理员换图不是审核动作）。
+         · 被替换行**不存在** / **无 `marked` 键**（旧行 6444 条那一态）/ 值非布尔 `true` ⇒ `false`；
+         · 已标记 ⇒ `marked_by` / `marked_at` **照抄被替换行原值**（不补编：谁标记的写谁，
+           原本没有就是空串）；未继承 ⇒ 两键空串（服务端取，**客户端零参与** ——
+           `marked` / `marked_by` / `marked_at` 都**不在本 op 白名单**里，递了即 `INVALID_FIELD`）；
+         · 哨兵行（`storage === 'bundled'`）由 `markedStateOfImageRow` 侧恒判已标记 ⇒ 替换
+           随包占位图后新图保持可见（兜底图不得因换图而消失）；
+         · 读抛错 ⇒ 按「被替换行不存在」继续 ⇒ `false` ＋ 如实 `log.warn`（**不谎报已标记**）。 */
+    let inherited = { marked: false, by: '', at: '' }
+    if (previousImageId !== null) {
+      try {
+        inherited = markedStateOfImageRow(await readImageRowOf(previousImageId))
+      } catch (error) {
+        log.warn('replaceFaceImage.replacedRowRead.degraded', {
+          message: '讀被替換影像行失敗 ⇒ 按「不存在」繼續（新行 `marked` 落 `false`，需管理員再標記）',
+          errorMessage: error && error.message ? error.message : error
+        })
+      }
+    }
+    /* ⑦‴ **共用行不得降级**：`img-<sha16>` 是内容寻址 ⇒ 同一张图可能已被**别的印面**引用且
+       已准入；⑧ 的 `kind:'set'` 覆写若把它改回未标记，会连带把那些面「藏掉」。故准入取
+       **继承 ∨ 既有行**（只增不减）：本 op 只能准入、不能撤销既定准入（撤销仍只走
+       `registerFaceImage`）。 */
+    const existingAdmission = markedStateOfImageRow(existing)
+    const admission = inherited.marked
+      ? inherited
+      : existingAdmission.marked
+        ? existingAdmission
+        : { marked: false, by: '', at: '' }
+    /* ⑧ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`
+       ＋ 准入三键（见 ⑦″ / ⑦‴）。 */
     const row = {
       ...buildDirectImageRow(
         { image_sha256: digest, image_bytes: claimedBytes, image_storage_key: storageKey, kind },
         at,
         seq
       ),
-      stamp_id: sealId
+      stamp_id: sealId,
+      marked: admission.marked,
+      marked_by: admission.by,
+      marked_at: admission.at
     }
     try {
       await persist({ writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }] })
