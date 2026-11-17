@@ -43,7 +43,7 @@
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import feicuiTokenModule from '../../../cloudfunctions/xiai-user-token/lib/feicuiToken.js'
+import feicuiTokenModule from '../../_lib/feicuiToken.cjs'
 import * as feicuiSessionModule from '../../_lib/feicuiSession.js'
 
 /* CJS 互操作：Node ESM 的 default 即 `module.exports`；再兜一层 `.default`（打包器差异）。 */
