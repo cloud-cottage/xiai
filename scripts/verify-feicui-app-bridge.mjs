@@ -18,7 +18,7 @@
  *   只读假体）、零浏览器、零部署、零写被测仓库任何文件。**不打印令牌原文**（只给长度与指纹）。
  *   断言失败 ⇒ 退出码 1。
  *
- * 覆盖面（A〜E 五段）：
+ * 覆盖面（A〜G 七段）：
  *   A 常量面（可执行）：缺省 30 天 / 会话 8 小时 / 区间 [300, 43200]；越界与非整数一律 `null`。
  *   B 服务层（可执行）：缺省载荷逐字 `{}`；28800 ⇒ `{ttl_seconds:28800}`；299 / 43201 / 1.5 /
  *     '28800' ⇒ `INVALID_VALUE` ＋ **零往返**；非管理員 ⇒ `NOT_ADMIN` ＋ 零往返。
@@ -28,6 +28,14 @@
  *     参数形状 `(token, {expires_at, ttl_seconds})`；桥抛错 ⇒ **不丢令牌**；全程零存储 / 零 URL / 零日志。
  *   E 页面契约（静态）：第二按钮 / 并存 / 首行 admin 守卫 / TTL 28800 / 交付后清 DOM /
  *     已交付块零令牌绑定 / 刷新提示文案 / 零持久层 / 刷新无残留。
+ *   F 登录即自动签发（可执行）：挂载探测 / 自动签发 28800 / 无会话出内嵌表单 / 登录成功即签 / 幂等 /
+ *     失败不静默 / 匿名平台会话不算登录态。
+ *   **G 凭据携带（本单根因修复｜可执行）**：`action:'verify'` 的请求体必须**顶层带 `token`**
+ *     （xiai 用户令牌）—— 服务端只认「网关注入的平台会话」或 `event.token`；`/connect` 的 OTP 会话
+ *     在 `persistence:'none'` 实例里 ⇒ 网关看不见，缺 `token` 就是「未攜帶有效令牌」
+ *     （真机复现多次）。故：先取票（管道复用 / 用平台会话来换）⇒ 再由管道携带；
+ *     取票失败（未登录 / 无平台会话 / 取票抛错）⇒ `LOGIN_REQUIRED` ＋ **零请求**；
+ *     两处 `action:'verify'`（`issueFeicuiDeviceToken` / `issueFeicuiToken`）同形。
  *
  * 用法：node scripts/verify-feicui-app-bridge.mjs
  */
@@ -129,6 +137,12 @@ function functionBody(source, name) {
    ------------------------------------------------------------------------- */
 
 const { setCloudFunctionTransport } = await import(path.join(ROOT, 'src/data/cloudbaseFn.js'))
+/* **写入口形态覆盖**：本段要观察「请求体到底发了什么」⇒ 必须走云端形态
+   （`local-dev` 下管道会短路、零往返 —— 那是 dev 形态的既有语义，不是本单的被测面）。 */
+const writeFace = await import(path.join(ROOT, 'src/data/writeFaceMode.js'))
+writeFace.setWriteFaceModeOverride('cloud')
+const cloudbaseAuth = await import(path.join(ROOT, 'src/data/cloudbaseAuth.js'))
+const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const feicuiSvc = await import(path.join(ROOT, 'src/services/feicui.js'))
 const session = await import(path.join(ROOT, 'src/data/session.js'))
 
@@ -140,13 +154,68 @@ const viewSrc = stripComments(viewRaw)
 
 /* ---------------------------------------------------------------------------
    2. 假传输（**零联网**）：记录每一次往返的形状
+   ---------------------------------------------------------------------------
+   本单起有**两类**往返（同一函数名 `xiai-user-token`）：
+     · `{action:'issue', phone, platformAccessToken}` —— 令牌管道**取票**；
+     · `{action:'verify', token, op, payload}`        —— **携带令牌**的签发（被测面）。
+   ⇒ 假件按 `action` 分流：取票回一枚**用户令牌**（`USER_TOKEN`），verify 回设备令牌。
    ------------------------------------------------------------------------- */
 
 const TOKEN = 'tok-' + randomBytes(24).toString('hex')
 const EXPIRES_AT = '2026-11-17T18:00:00.000Z'
+/* 用户令牌（**运行期随机构造**；只在断言里比对，不打印原文）。 */
+const USER_TOKEN = 'v1.' + randomBytes(36).toString('base64url') + '.' + randomBytes(32).toString('base64url')
+const PLATFORM_ACCESS_TOKEN = 'plat-' + randomBytes(18).toString('hex')
+const TICKET_DENIED_MESSAGE = '平台憑證不被認可；請重新登錄。'
+
 const transportCalls = []
+/** 取票回包的形态：`ok` / `denied` / `down`。 */
+let ticketMode = 'ok'
+/** 当前「页面里有没有 OTP 平台会话」：`ok` / `none` / `throw`。 */
+let platformSessionMode = 'ok'
+
+cloudbaseAuth.setOtpAuthProvider(async () => ({
+  async getSession() {
+    if (platformSessionMode === 'throw') throw new Error('SESSION_READ_BOOM')
+    if (platformSessionMode === 'none') return { data: { session: null } }
+    return { data: { session: { access_token: PLATFORM_ACCESS_TOKEN } } }
+  }
+}))
+
 setCloudFunctionTransport(async (name, data) => {
   transportCalls.push({ name, data })
+  if (data && data.action === 'issue') {
+    if (ticketMode === 'denied') return { result: { ok: false, reason: 'FORBIDDEN', message: TICKET_DENIED_MESSAGE } }
+    if (ticketMode === 'down') return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '取票不可用（自檢假件）。' }
+    return {
+      result: {
+        ok: true,
+        token: USER_TOKEN,
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        sub: '13800000000',
+        uid: 'u-' + '0'.repeat(16),
+        ver: 'v1'
+      }
+    }
+  }
+  /* 角色令牌（`issueFeicuiToken`）的成功回包是「权威行 `row`」；设备令牌是顶层 `token/expires_at`。 */
+  if (data && data.op === 'issueFeicuiToken') {
+    return {
+      result: {
+        ok: true,
+        row: {
+          token: TOKEN,
+          uid: 'u-' + '0'.repeat(16),
+          role: 'user',
+          kid: 'kid-selfcheck',
+          jti: 'jti-selfcheck',
+          exp: Math.floor(Date.now() / 1000) + 604800,
+          expires_at: EXPIRES_AT,
+          ttl_seconds: 604800
+        }
+      }
+    }
+  }
   return { result: { ok: true, token: TOKEN, expires_at: EXPIRES_AT } }
 })
 
@@ -154,13 +223,24 @@ const ADMIN_USER = { id: 'u-' + '0'.repeat(16), phone: '13800000000', role: 'adm
 const PLAIN_USER = { id: 'u-' + '1'.repeat(16), phone: '13900000000', role: 'user', nickname: '自檢用戶' }
 session.setUser(ADMIN_USER)
 
-/** 一次服务层签发的读数（往返次数 / 事件载荷 / 回包键面）。 */
+/** 往返读数：`verify` 那几次（签发本体）与全部往返分开数。 */
+function verifyCallsOf() {
+  return transportCalls.filter((call) => call.data && call.data.action === 'verify')
+}
+
+/** 一次服务层签发的读数（verify 往返次数 / 事件载荷 / 回包键面）。 */
 async function issueViaService(ttlSeconds) {
   transportCalls.length = 0
   const reply = ttlSeconds === undefined ? await feicuiSvc.issueDeviceToken() : await feicuiSvc.issueDeviceToken({ ttlSeconds })
-  const event = (transportCalls[0] || {}).data || {}
-  return { reply, calls: transportCalls.length, event, payload: event.payload }
+  const verifyCalls = verifyCallsOf()
+  const event = (verifyCalls[verifyCalls.length - 1] || {}).data || {}
+  return { reply, calls: verifyCalls.length, callsTotal: transportCalls.length, event, payload: event.payload }
 }
+
+/* **取票预热**：本单起签发前必须先有一枚可携带的用户令牌（这是修复本身）。
+   先走一次管道取票 ⇒ B 段每一条只观察「verify 往返」，不被取票那一次干扰；
+   「无票 ⇒ 先取票」由 G 段单独钉（那里会清票后重测）。 */
+const warmed = await userTokenSvc.ensureUserWriteSession(PLATFORM_ACCESS_TOKEN)
 
 /* ===========================================================================
    A 段：常量面
@@ -201,10 +281,19 @@ section('B', '服务层：缺省载荷 `{}` / 28800 ⇒ `{ttl_seconds:28800}` / 
 
 {
   const plain = await issueViaService(undefined)
+  check('B0', '取票预热成功（管道里有一枚可携带的用户令牌）⇒ B 段的往返读数只含「携带」那一次', { ok: true, present: true }, {
+    ok: warmed.ok,
+    present: userTokenSvc.hasUserToken()
+  })
   check('B1', '缺省签发：载荷**逐字**仍是 `{}`（服务端 30 天缺省）＋ 往返恰 1 次', { keys: [], json: '{}', calls: 1 }, {
     keys: Object.keys(plain.payload || {}),
     json: JSON.stringify(plain.payload),
     calls: plain.calls
+  })
+  check('B1a', '**请求体顶层携带用户令牌**：键面恰 4 键 `{action, op, payload, token}`，且 `token` 与取票结果**逐字相同**（只报长度与指纹）', { keys: ['action', 'op', 'payload', 'token'], tokenLen: USER_TOKEN.length, tokenFp: fingerprint(USER_TOKEN) }, {
+    keys: Object.keys(plain.event || {}).sort(),
+    tokenLen: String((plain.event || {}).token || '').length,
+    tokenFp: fingerprint((plain.event || {}).token || '')
   })
   check('B1b', '事件形状沿用既有信封：`op` 逐字 ＋ 回包恰 3 键 `{ok, token, expires_at}`', { op: 'issueFeicuiDeviceToken', keys: ['expires_at', 'ok', 'token'] }, {
     op: plain.event.op,
@@ -1093,6 +1182,194 @@ function buildViewRuntime(options) {
        「匿名平台会话 ＋ 持久化 App 登录态」同时满足，导致跳过表单直接签发并失败（真机复现）。 */
     /* 用**全源计数**而非函数体切片：`bodyOf` 的提取边界对新增块不稳定，会把这条判成假绿/假红。 */
     inSelfHeal: countIn(VIEW_SCRIPT_SRC, 'loginRequired.value = true')
+  })
+}
+
+/* ===========================================================================
+   G 段：凭据携带（**本单根因修复**｜可执行）
+   ---------------------------------------------------------------------------
+   真机症状：`/connect` 的 OTP 会话在 `persistence:'none'` 实例里 ⇒ 网关注入的
+   `callContext` 是主 app 实例的**匿名**会话；请求体又没有 `event.token`
+   ⇒ 服务端恒判「未攜帶有效令牌」，用户怎么登录都失败。
+   本段钉住修复后的三条硬口径（两处 `action:'verify'` 同形）：
+     ① 无票 ⇒ **先取票**（`issue`）再携带（`verify`），`verify` 的 `token` 与取票结果逐字相同；
+     ② 有票 ⇒ **复用**（零额外取票）；取票被拒 ⇒ 服务端原话透传、**零 verify**；
+     ③ 无平台会话 / 取票抛错 ⇒ `LOGIN_REQUIRED` ＋ **零请求**（不发必然被拒的空凭据）。
+   =========================================================================== */
+section('G', '凭据携带：无票先取票 / 有票复用 / 无会话即 LOGIN_REQUIRED 零请求 / 两处 verify 同形')
+
+{
+  /** 往返动作序列（`issue` / `verify`）。 */
+  const actionsOf = () => transportCalls.map((call) => (call.data || {}).action)
+
+  /* G1｜无票 ⇒ 先取票再携带（顺序逐字：issue → verify）。 */
+  userTokenSvc.clearUserToken()
+  platformSessionMode = 'ok'
+  ticketMode = 'ok'
+  const fresh = await issueViaService()
+  check('G1', '管道里没有令牌 ⇒ **先取票再携带**：往返恰 2 次（一次 `issue` ＋ 一次 `verify`），顺序逐字', {
+    callsTotal: 2,
+    issues: 1,
+    verifies: 1,
+    order: ['issue', 'verify']
+  }, {
+    callsTotal: fresh.callsTotal,
+    issues: actionsOf().filter((action) => action === 'issue').length,
+    verifies: fresh.calls,
+    order: actionsOf()
+  })
+  check('G1b', '取票那一次的请求体逐字 `{action, phone, platformAccessToken}`（凭据是**平台会话**，不是任何固定码）', {
+    keys: ['action', 'phone', 'platformAccessToken'],
+    platformFp: fingerprint(PLATFORM_ACCESS_TOKEN),
+    hasCode: false
+  }, (() => {
+    const ticket = transportCalls.filter((call) => (call.data || {}).action === 'issue')[0] || {}
+    const body = ticket.data || {}
+    return {
+      keys: Object.keys(body).sort(),
+      platformFp: fingerprint(String(body.platformAccessToken || '')),
+      hasCode: Object.prototype.hasOwnProperty.call(body, 'code')
+    }
+  })())
+  check('G1c', '携带那一次的 `token` 与取票结果**逐字相同**，且 `payload` 仍是 `{}`（30 天缺省）', {
+    tokenLen: USER_TOKEN.length,
+    tokenFp: fingerprint(USER_TOKEN),
+    payloadJson: '{}',
+    tokenNotInReplyText: true
+  }, {
+    tokenLen: String(fresh.event.token || '').length,
+    tokenFp: fingerprint(fresh.event.token || ''),
+    payloadJson: JSON.stringify(fresh.event.payload),
+    tokenNotInReplyText: !JSON.stringify(fresh.reply).includes(USER_TOKEN)
+  })
+
+  /* G2｜有票 ⇒ 复用（零额外取票）。 */
+  const reuse = await issueViaService(28800)
+  check('G2', '管道里已有未过期的用户令牌 ⇒ **复用**：只 1 次 `verify` 往返、零 `issue`', {
+    callsTotal: 1,
+    order: ['verify'],
+    tokenFp: fingerprint(USER_TOKEN),
+    payloadJson: '{"ttl_seconds":28800}'
+  }, {
+    callsTotal: reuse.callsTotal,
+    order: actionsOf(),
+    tokenFp: fingerprint(reuse.event.token || ''),
+    payloadJson: JSON.stringify(reuse.event.payload)
+  })
+
+  /* G3｜无平台会话 ⇒ LOGIN_REQUIRED ＋ 零请求。 */
+  userTokenSvc.clearUserToken()
+  platformSessionMode = 'none'
+  const noSession = await issueViaService()
+  check('G3', '无平台登入会话（页面里取不到 `access_token`）⇒ `LOGIN_REQUIRED` ＋ **零请求** ＋ 回包恰 3 键', {
+    reason: 'LOGIN_REQUIRED',
+    callsTotal: 0,
+    keys: ['message', 'ok', 'reason'],
+    messagePresent: true
+  }, {
+    reason: noSession.reply.reason,
+    callsTotal: noSession.callsTotal,
+    keys: Object.keys(noSession.reply).sort(),
+    messagePresent: String(noSession.reply.message || '').length > 0
+  })
+
+  /* G4｜取票抛错 ⇒ 不阻断（结构化拒绝 ＋ 可读文案）＋ 零请求。 */
+  platformSessionMode = 'throw'
+  transportCalls.length = 0
+  let thrown = null
+  try {
+    thrown = await feicuiSvc.issueDeviceToken()
+  } catch (error) {
+    thrown = { threw: true, message: String(error && error.message) }
+  }
+  check('G4', '取票时平台会话读取抛错 ⇒ **不抛出**、降级为 `LOGIN_REQUIRED` ＋ 可读文案 ＋ **零请求**', {
+    reason: 'LOGIN_REQUIRED',
+    callsTotal: 0,
+    threw: false,
+    keys: ['message', 'ok', 'reason']
+  }, {
+    reason: thrown.reason,
+    callsTotal: transportCalls.length,
+    threw: thrown.threw === true,
+    keys: Object.keys(thrown).sort()
+  })
+  platformSessionMode = 'ok'
+
+  /* G5｜取票被服务端拒 ⇒ 原样透传 ＋ 零 verify。 */
+  userTokenSvc.clearUserToken()
+  ticketMode = 'denied'
+  const denied = await issueViaService()
+  check('G5', '取票被服务端拒（`FORBIDDEN`）⇒ reason / message **逐字透传**、**零 verify 往返**（不拿空票去签发）', {
+    reason: 'FORBIDDEN',
+    message: TICKET_DENIED_MESSAGE,
+    verifies: 0,
+    order: ['issue']
+  }, {
+    reason: denied.reply.reason,
+    message: denied.reply.message,
+    verifies: denied.calls,
+    order: actionsOf()
+  })
+  ticketMode = 'ok'
+
+  /* G6｜角色令牌（`issueFeicuiToken`）同形：同一携带点、带 token、载荷三键。 */
+  userTokenSvc.clearUserToken()
+  transportCalls.length = 0
+  const role = await feicuiSvc.issueToken({ target: '13900000000', role: 'user', ttlDays: 7 })
+  const roleEvent = (verifyCallsOf().slice(-1)[0] || {}).data || {}
+  check('G6', '角色令牌（`issueFeicuiToken`）**同一缺陷同样已修**：往返 2 次（issue → verify）、`token` 逐字相同、签发成功', {
+    order: ['issue', 'verify'],
+    tokenFp: fingerprint(USER_TOKEN),
+    ok: true,
+    tokenLen: TOKEN.length
+  }, {
+    order: actionsOf(),
+    tokenFp: fingerprint(String(roleEvent.token || '')),
+    ok: role.ok,
+    tokenLen: String(role.token || '').length
+  })
+  check('G6b', '角色令牌的载荷仍是封闭三键 `{target, role, ttl_seconds}`（令牌只在**顶层** `token`，不进载荷 —— 服务端会把载荷里的身份类键按 `INVALID_FIELD` 拒）', {
+    payloadKeys: ['role', 'target', 'ttl_seconds'],
+    eventKeys: ['action', 'op', 'payload', 'token'],
+    op: 'issueFeicuiToken'
+  }, {
+    payloadKeys: Object.keys(roleEvent.payload || {}).sort(),
+    eventKeys: Object.keys(roleEvent).sort(),
+    op: roleEvent.op
+  })
+
+  /* G7｜角色令牌：无平台会话 ⇒ 同样 LOGIN_REQUIRED ＋ 零请求。 */
+  userTokenSvc.clearUserToken()
+  platformSessionMode = 'none'
+  transportCalls.length = 0
+  const roleNoSession = await feicuiSvc.issueToken({ target: '13900000000' })
+  check('G7', '角色令牌无平台会话 ⇒ `LOGIN_REQUIRED` ＋ **零请求** ＋ 恰 3 键（与设备令牌同一条前置门）', {
+    reason: 'LOGIN_REQUIRED',
+    callsTotal: 0,
+    keys: ['message', 'ok', 'reason']
+  }, {
+    reason: roleNoSession.reason,
+    callsTotal: transportCalls.length,
+    keys: Object.keys(roleNoSession).sort()
+  })
+  platformSessionMode = 'ok'
+  userTokenSvc.clearUserToken()
+
+  /* G8｜令牌不上屏 / 不进返回值（用户令牌串在任何回包里命中 0）。 */
+  check('G8', '用户令牌串在全部签发回包的序列化文本里命中 0（令牌只在请求体里过一次；回包只有斐萃令牌）', 0, [fresh.reply, reuse.reply, role, noSession.reply, denied.reply]
+    .filter((reply) => String(JSON.stringify(reply)).includes(USER_TOKEN)).length)
+
+  /* G9｜登录成功 ⇒ 管道里已有票（故 `/connect` 的「登录后自动签发」不必再单独取票）。
+     判据取自真源：`services/auth.js` 两条登录路都在成功路径上换票。 */
+  const authSrc = stripComments(readFileSync(path.join(ROOT, 'src/services/auth.js'), 'utf8'))
+  check('G9', '登录成功即已有票：`services/auth.js` 的**短訊登錄**与**密碼登錄**都在成功路径上换票（`ensureUserLoginToken(` ⇒ 管道缓存 ⇒ 内嵌登录后携带点直接复用，零额外取票）', {
+    exchangeCalls: 2,
+    exportedLogin: 1,
+    exportedPasswordLogin: 1
+  }, {
+    exchangeCalls: countIn(authSrc, 'await ensureUserLoginToken('),
+    exportedLogin: countIn(authSrc, 'export async function login('),
+    exportedPasswordLogin: countIn(authSrc, 'export async function loginWithPassword(')
   })
 }
 

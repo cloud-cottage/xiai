@@ -6,15 +6,23 @@
  *   · 身份 / 角色由**服务端**判（会话路看 `xiai_roles` 的 `role==='admin'`）；本层只做**前置**的
  *     未登录 / 非管理员短路（省一次无意义的网络往返），**绝不代替服务端判定**；
  *   · 载荷**封闭三键**：`target`（11 位手机号或既有 uid）/ `role` / `ttl_seconds`；
- *     身份类键（`uid` / `phone` / `token` / `jti` / `kid` …）**一律不传**（服务端会以 `INVALID_FIELD` 拒）；
+ *     身份类键（`uid` / `phone` / `token` / `jti` / `kid` …）**一律不进货载**（服务端会以
+ *     `INVALID_FIELD` 拒）—— **用户令牌只在事件顶层 `token`**，由令牌管道携带（见下面的
+ *     「凭据携带点」）；
  *   · 回包只有令牌与其元数据 —— **没有 plan、零落盘**；
  *   · 本层**不打印令牌原文**，也**不落 localStorage**（令牌只在页面上出现一次，由人复制走）。
  *
  * 纪律：页面 / 组件**只经本门面**；令牌的消费方是斐萃（本仓不存、不回放）。
  */
 
-import { callCloudFunction } from '../data/cloudbaseFn.js'
 import { isAdmin, isLoggedIn } from '../data/session.js'
+/* **凭据携带（真机复现的根因修复）**：`xiai-user-token` 的 `action:'verify'` 只认两种凭据 ——
+   ① 网关注入的平台会话（`callContext`）② **`event.token`**（xiai 用户令牌）。
+   `/connect` 这条通道跑在**主 app 实例的匿名平台会话**上（OTP 会话在另一个 `persistence:'none'`
+   实例里 ⇒ 网关看不到）⇒ 不带 `event.token` 就必然被判「未攜帶有效令牌」。
+   故签发前必须先用**用户令牌管道**取票，并由它把令牌放进请求体顶层 `token`。 */
+import { otpSessionAccessToken } from '../data/cloudbaseAuth.js'
+import { ensureUserWriteSession, hasUserToken, userGate } from './userToken.js'
 
 /** 云函数名 / op 名（与 `cloudfunctions/xiai-user-token/lib/ops.js::ADMIN_OPS` 逐字一致）。 */
 export const FEICUI_FUNCTION_NAME = 'xiai-user-token'
@@ -59,6 +67,114 @@ export const NOT_ADMIN = 'NOT_ADMIN'
 export const LOGIN_REQUIRED = 'LOGIN_REQUIRED'
 export const INVALID_INPUT = 'INVALID_INPUT'
 
+/* ---------------------------------------------------------------------------
+   **凭据携带点（本单根因修复的核心）**
+   ---------------------------------------------------------------------------
+   为什么不能自己拼 `token` 字段：令牌管道（`services/token.js`）**刻意不回吐令牌原文**
+   （`snapshot()` 只给长度 / 指纹）—— 它的唯一携带点是 `gate()`，请求体逐字
+   `{action:'verify', token, op, payload}`。所以本层不持有也不复制令牌，只负责：
+     ① **先取票**（管道里有一枚可携带的用户令牌就复用；没有就用当前平台会话来换）；
+     ② **再携带**（由管道把令牌放进顶层 `token`）。
+   取票失败 ⇒ **零请求**的结构化拒绝（不发一个必然被拒的空凭据请求）。
+
+   为什么必须先取票（真机复现多次的根因）：服务端 `handleVerify` 只认
+   ① 网关注入的平台会话（`callContext`）② `event.token`（xiai 用户令牌）。
+   `/connect` 走的是**主 app 实例的匿名平台会话**，而 OTP 会话在另一个
+   `persistence:'none'` 实例里 ⇒ 网关永远看不到它，请求里又没有 `event.token`
+   ⇒ 无论用户怎么登录都是「未攜帶有效令牌」。
+   ------------------------------------------------------------------------- */
+
+/** 设备令牌回包的两只读数键（`gate()` 的声明式透传键面；服务端成功回包恰 3 键 ⇒ 除 `ok` 外就这两只）。 */
+const DEVICE_REPLY_READOUT_KEYS = Object.freeze(['token', 'expires_at'])
+
+/** 取当前 OTP 会话的平台 `access_token`（**只作取票凭据**；不打印、不落盘、不上屏；取不到 / 抛错 ⇒ 空串）。 */
+async function platformSessionAccessToken() {
+  try {
+    const token = await otpSessionAccessToken()
+    return String(token === undefined || token === null ? '' : token).trim()
+  } catch {
+    return ''
+  }
+}
+
+/** 未登录 / 无平台会话的前置拒绝（零请求、零签发）。 */
+function loginRequiredDenial() {
+  return {
+    ok: false,
+    reason: LOGIN_REQUIRED,
+    message: '請先登錄：本頁未取得登入會話，無法換取用戶令牌，因此不能簽發斐萃令牌；請以手機號＋短訊驗證碼登錄後再試；本次零簽發。'
+  }
+}
+
+/**
+ * 保证「本次签发有一枚**可携带**的用户令牌」。
+ *
+ * 顺序（每一步都可被判据钉住）：
+ *   ① 管道里已有未过期令牌（内存 / R-L10 持久化读回）⇒ **直接复用，零额外往返**；
+ *   ② 没有 ⇒ 取当前 OTP 会话的平台凭据；**取不到 / 取票抛错 ⇒ `LOGIN_REQUIRED` ＋ 零请求**
+ *      （不发空凭据请求，那只会换来一句含糊的拒）；
+ *   ③ 换票失败 ⇒ **原样透传**服务端的 `{reason, message}`（不伪装成传输故障）；
+ *   ④ 换票「成功」却仍无令牌（dev / 离线形态的短路口）⇒ `STORAGE_UNAVAILABLE`（如实说没票）。
+ * @returns {Promise<{ok:true}|{ok:false, reason:string, message:string}>}
+ */
+async function ensureCarryToken() {
+  if (hasUserToken()) return { ok: true }
+  const platformAccessToken = await platformSessionAccessToken()
+  if (platformAccessToken === '') return loginRequiredDenial()
+  let issued = null
+  try {
+    /* 凭据**只经参数过一遍**；管道内部（`token.js`）才决定要不要发请求、要不要落盘。 */
+    issued = await ensureUserWriteSession(platformAccessToken)
+  } catch {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '用戶令牌取票時發生異常；本次零簽發，請稍後再試。'
+    }
+  }
+  if (!issued || issued.ok !== true) {
+    return {
+      ok: false,
+      reason: (issued && issued.reason) || 'STORAGE_UNAVAILABLE',
+      message: (issued && issued.message) || '用戶令牌取票失敗；本次零簽發，請稍後再試。'
+    }
+  }
+  if (!hasUserToken()) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '本機 / 離線形態（或雲端寫入面未配置）取不到可攜帶的用戶令牌；本次零簽發。'
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * 携带用户令牌调用一次 `xiai-user-token`（**唯一携带点**）。
+ *
+ * 请求体逐字 `{action:'verify', token, op, payload}` —— `token` 由管道从它自己那份缓存里取，
+ * 本层既不见它、也不复制它（**不落 localStorage / 不进 URL / 不打日志**，与既有纪律一致）。
+ * @param {string} op op 名（本文件的**两处**调用点：`issueFeicuiToken` / `issueFeicuiDeviceToken`）
+ * @param {object} payload 载荷（封闭键面由 op 侧定）
+ * @param {ReadonlyArray<string>} [readoutKeys] 回包读数键面（缺省不声明 ⇒ 不叠任何键）
+ * @returns {Promise<{ok:true, ...}|{ok:false, reason:string, message:string}>}
+ */
+async function callWithUserToken(op, payload, readoutKeys) {
+  const carried = await ensureCarryToken()
+  if (!carried.ok) return carried
+  const reply = await userGate(op, payload, readoutKeys === undefined ? undefined : { readoutKeys })
+  /* dev / 离线形态的短路回包（`{ok:true, dev:true}`，零往返）：没有服务端 ⇒ 如实说签不出来，
+     绝不把「没发请求」当成功。 */
+  if (reply && reply.ok === true && reply.dev === true) {
+    return {
+      ok: false,
+      reason: 'STORAGE_UNAVAILABLE',
+      message: '本機 / 離線形態未配置雲端寫入面，無法簽發斐萃令牌；本次零簽發。'
+    }
+  }
+  return reply
+}
+
 /** 前置换算：天 → 秒（越界 ⇒ `null`，由调用方报错，不静默夹取）。 */
 export function ttlSecondsOf(days) {
   const value = Number(days)
@@ -95,12 +211,9 @@ export async function issueToken(input) {
   if (ttlSeconds === null) {
     return { ok: false, reason: INVALID_INPUT, message: 'TTL 超出允許區間（最短 5 分鐘、最長 90 天）。' }
   }
-  const reply = await callCloudFunction(FEICUI_FUNCTION_NAME, {
-    action: 'verify',
-    op: FEICUI_ISSUE_OP,
-    payload: { target, role, ttl_seconds: ttlSeconds }
-  })
-  /* 传输层失败（超时 / SDK / 网络）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装成 FORBIDDEN**。 */
+  const reply = await callWithUserToken(FEICUI_ISSUE_OP, { target, role, ttl_seconds: ttlSeconds })
+  /* 传输层失败（超时 / SDK / 网络）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装成 FORBIDDEN**；
+     取票失败（未登录 / 无平台会话）⇒ `LOGIN_REQUIRED` ＋ **零请求**（在携带点前置拦下）。 */
   if (!reply.ok) {
     return {
       ok: false,
@@ -108,15 +221,8 @@ export async function issueToken(input) {
       message: reply.message || '斐萃令牌服務暫時不可用，請稍後再試。'
     }
   }
-  const result = reply.result || {}
-  if (result.ok !== true) {
-    return {
-      ok: false,
-      reason: typeof result.reason === 'string' ? result.reason : 'STORAGE_UNAVAILABLE',
-      message: typeof result.message === 'string' && result.message ? result.message : '斐萃令牌簽發被拒絕。'
-    }
-  }
-  const row = result.row || {}
+  /* 服务端权威行（`gate()` 原样透传 `result.row`；服务端拒绝**不会**走到这里）。 */
+  const row = reply.row || {}
   const token = String(row.token || '').trim()
   if (!token) {
     return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '簽發回包形狀不可辨識（無令牌）；請重試。' }
@@ -146,7 +252,10 @@ export function remainingSeconds(expiresAt, nowMs) {
    **斐萃桌面授權（設備令牌）** —— 跨仓契约 `dispatch-zang.md` §13（管理员入口）
    ---------------------------------------------------------------------------
    通道与 `issueToken` **同一条**（`xiai-user-token` 的 `action:'verify'` 信封），
-   入口契约逐字 `{action:'verify', op, payload}` —— **不是**把 op 名当 `action`。
+   入口契约逐字 `{action:'verify', token, op, payload}` —— **不是**把 op 名当 `action`。
+   `token` 是**用户令牌**（由令牌管道取票并携带；见上面的「凭据携带点」）：不带它，
+   服务端只会判「未攜帶有效令牌」（`/connect` 的平台会话在 `persistence:'none'` 实例里，
+   网关注入的 `callContext` 是主实例的匿名会话 ⇒ 认不出登录用户）。
    硬口径（逐条）：
      ① 载荷**封闭键面**：缺省 `{}`（不收集任何字段）；**本单新增**可选 `ttl_seconds`
         （整数秒 ∈ `[300, 43200]`；页面「為斐翠桌面簽發 8 小時會話」传 28800）。
@@ -251,12 +360,13 @@ export async function issueDeviceToken(input) {
       message: `有效期（ttl_seconds）必須是 ${FEICUI_DEVICE_TTL.minSeconds}〜${FEICUI_DEVICE_TTL.maxSeconds} 的整數秒。`
     }
   }
-  const reply = await callCloudFunction(FEICUI_FUNCTION_NAME, {
-    action: 'verify',
-    op: FEICUI_DEVICE_OP,
-    payload: ttlGiven ? { ttl_seconds: ttlSeconds } : {}
-  })
-  /* 传输层失败（超时 / SDK / 网络）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装成 FORBIDDEN**。 */
+  const reply = await callWithUserToken(
+    FEICUI_DEVICE_OP,
+    ttlGiven ? { ttl_seconds: ttlSeconds } : {},
+    DEVICE_REPLY_READOUT_KEYS
+  )
+  /* 传输层失败（超时 / SDK / 网络）⇒ `STORAGE_UNAVAILABLE`，**绝不伪装成 FORBIDDEN**；
+     取票失败（未登录 / 无平台会话）⇒ `LOGIN_REQUIRED` ＋ **零请求**（在携带点前置拦下）。 */
   if (!reply.ok) {
     return {
       ok: false,
@@ -264,15 +374,8 @@ export async function issueDeviceToken(input) {
       message: reply.message || '斐萃桌面授權服務暫時不可用，請稍後再試。'
     }
   }
-  const result = reply.result || {}
-  if (result.ok !== true) {
-    return {
-      ok: false,
-      reason: typeof result.reason === 'string' && result.reason !== '' ? result.reason : 'STORAGE_UNAVAILABLE',
-      message: typeof result.message === 'string' && result.message !== '' ? result.message : '斐萃桌面授權簽發被拒絕。'
-    }
-  }
-  const token = String(result.token === undefined || result.token === null ? '' : result.token).trim()
+  /* 回包读数（`gate()` 按 `DEVICE_REPLY_READOUT_KEYS` 逐字透传服务端的 `token` / `expires_at`）。 */
+  const token = String(reply.token === undefined || reply.token === null ? '' : reply.token).trim()
   if (token === '') {
     /* 形状不可辨識（无令牌）⇒ 结构化拒绝；**不編造令牌**、调用方零上屏。 */
     return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '簽發回傳形狀不可辨識（無令牌）；請重試。' }
@@ -280,6 +383,6 @@ export async function issueDeviceToken(input) {
   return {
     ok: true,
     token,
-    expires_at: String(result.expires_at === undefined || result.expires_at === null ? '' : result.expires_at)
+    expires_at: String(reply.expires_at === undefined || reply.expires_at === null ? '' : reply.expires_at)
   }
 }

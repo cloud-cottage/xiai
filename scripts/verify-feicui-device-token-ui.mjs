@@ -19,11 +19,12 @@
  *   B 内存-only（静态）：令牌唯一持有 `deviceToken` 一个 ref；上屏恰 1 处且落在面板内；
  *     码面零 `localStorage` / `sessionStorage` / `indexedDB` / `cookie` / `console` /
  *     `location` / `history` / `pushState` / `replaceState`；发前先清 ＋ 失败分支早退；首行 admin 守卫。
- *   C 调用形状（**可执行**）：事件恰 3 键、`action === 'verify'`（**不是**把 op 名当 action）、
- *     `op` 逐字、`payload` 深等于 `{}`；成功回包经服务层仍恰 3 键、令牌与到期逐字透传。
- *   D 四类存储零写入（**可执行**｜令牌窗口内）：localStorage / sessionStorage（set·remove·clear 各 0）
- *     ＋ IndexedDB `open` 0 ＋ `document.cookie` 写入 0；窗口后全表扫存储值 —— 令牌命中 0；
- *     正对照：同一计数器对一次真实写入必 +1。
+ *   C 调用形状（**可执行**）：事件**顶层携带用户令牌**（4 键 `{action, op, payload, token}`）、
+ *     `action === 'verify'`（**不是**把 op 名当 action）、`op` 逐字、`payload` 深等于 `{}`、
+ *     `token` 与管道取票结果逐字相同；成功回包经服务层仍恰 3 键、令牌与到期逐字透传。
+ *   D 存储面（**可执行**｜令牌窗口内）：localStorage **只**回写用户令牌键 `xiai:v1:user-token`
+ *     （管道 R-L10 续期写回）＋ 设备令牌串命中 0；sessionStorage / IndexedDB / cookie 零写入；
+ *     窗口后全表扫存储值 —— 设备令牌命中 0；正对照：同一计数器对一次真实写入必 +1。
  *   E 令牌不入 console / URL（**可执行**）：捕获的 console 条目内令牌命中 0（整轮条目数一并印出）、
  *     `location.search` / `hash` 未变、`history.*` 与 `location.assign` 调用 0；正对照：打一次必被捕获。
  *   F 失败路径零令牌（**可执行**）：非管理員 `NOT_ADMIN` / 未登錄 `LOGIN_REQUIRED` 皆零往返；
@@ -103,6 +104,9 @@ const counters = {
 /** 令牌窗口（发请求 → 拿到令牌）内的四类存储 / 导航读数；只由 D 段填充、汇总行原样印出。 */
 let tokenWindowDelta = null
 
+/** 每一次写入的 `{api, op, key}`（`clear` 记 `key:'*'`）；用于「写的是哪个键」的判据。 */
+const storageWrites = []
+
 function makeStoreApi(prefix, data) {
   return {
     getItem(key) {
@@ -112,14 +116,17 @@ function makeStoreApi(prefix, data) {
     },
     setItem(key, value) {
       counters[`${prefix}Set`] += 1
+      storageWrites.push({ api: prefix, op: 'set', key: String(key) })
       data.set(String(key), String(value))
     },
     removeItem(key) {
       counters[`${prefix}Remove`] += 1
+      storageWrites.push({ api: prefix, op: 'remove', key: String(key) })
       data.delete(String(key))
     },
     clear() {
       counters[`${prefix}Clear`] += 1
+      storageWrites.push({ api: prefix, op: 'clear', key: '*' })
       data.clear()
     },
     key(index) {
@@ -410,16 +417,51 @@ section('B', '② 令牌只在组件内存：唯一持有 ＋ 唯一上屏 ＋ �
    C〜F 段：可执行（真 `src/services/feicui.js` ＋ 假传输）
    =========================================================================== */
 const cloudbaseFn = await import(path.join(ROOT, 'src/data/cloudbaseFn.js'))
+/* **写入口形态覆盖**：被测面是「请求体到底发了什么」⇒ 必须走云端形态
+   （`local-dev` 下管道按既有语义短路、零往返）。 */
+const writeFace = await import(path.join(ROOT, 'src/data/writeFaceMode.js'))
+writeFace.setWriteFaceModeOverride('cloud')
+const cloudbaseAuth = await import(path.join(ROOT, 'src/data/cloudbaseAuth.js'))
+const userTokenSvc = await import(path.join(ROOT, 'src/services/userToken.js'))
 const feicuiSvc = await import(path.join(ROOT, SERVICE_REL))
 const session = await import(path.join(ROOT, 'src/data/session.js'))
 
 const ADMIN_USER = { id: 'u-' + '0'.repeat(16), phone: '13800000000', role: 'admin', nickname: '自檢管理員' }
 const PLAIN_USER = { id: 'u-' + '1'.repeat(16), phone: '13900000000', role: 'user', nickname: '自檢用戶' }
 
+/* **凭据携带（本单根因修复）**：签发前必须有一枚 xiai 用户令牌（管道取票），
+   请求体顶层 `token` 由管道携带。这里注入假 OTP 会话与「取票」假回包。 */
+const USER_TOKEN = `v1.${randomBytes(36).toString('base64url')}.${randomBytes(32).toString('base64url')}`
+const PLATFORM_ACCESS_TOKEN = 'plat-' + randomBytes(18).toString('hex')
+let platformSessionMode = 'ok'
+cloudbaseAuth.setOtpAuthProvider(async () => ({
+  async getSession() {
+    if (platformSessionMode === 'throw') throw new Error('SESSION_READ_BOOM')
+    if (platformSessionMode === 'none') return { data: { session: null } }
+    return { data: { session: { access_token: PLATFORM_ACCESS_TOKEN } } }
+  }
+}))
+
 const transportCalls = []
 let transportMode = 'ok'
 cloudbaseFn.setCloudFunctionTransport(async (name, data) => {
   transportCalls.push({ name, data })
+  /* **取票**（`action:'issue'`）：管道用平台会话凭据换一枚用户令牌。 */
+  if (data && data.action === 'issue') {
+    if (transportMode === 'forbidden') return { result: { ok: false, reason: 'FORBIDDEN', message: SERVER_MESSAGE_FORBIDDEN } }
+    if (transportMode === 'transport-down') return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端暫時不可用（自檢假件）。' }
+    if (transportMode === 'no-token') return { result: { ok: true, expires_at: EXPIRES_AT } }
+    return {
+      result: {
+        ok: true,
+        token: USER_TOKEN,
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        sub: '13800000000',
+        uid: 'u-' + '0'.repeat(16),
+        ver: 'v1'
+      }
+    }
+  }
   if (transportMode === 'forbidden') {
     return { result: { ok: false, reason: 'FORBIDDEN', message: SERVER_MESSAGE_FORBIDDEN } }
   }
@@ -435,15 +477,28 @@ cloudbaseFn.setCloudFunctionTransport(async (name, data) => {
 /* 登录态（会话本身走既有 localStorage 通道，与令牌无关；先置好再开测令牌窗口）。 */
 session.setUser(ADMIN_USER)
 
-section('C', '③ 调用形状：`{action:\'verify\', op:\'issueFeicuiDeviceToken\', payload:{}}` ＋ 回包恰 3 键')
+/* **取票预热**：本单起签发前必须先有一枚可携带的用户令牌（这就是修复本身）。
+   预热在 C 段之前 ⇒ C 段每条只观察「携带」那一次往返。 */
+const warmed = await userTokenSvc.ensureUserWriteSession(PLATFORM_ACCESS_TOKEN)
+
+/** 上一次签发里 `verify`（携带令牌）那一次的请求体。 */
+function lastVerifyEvent() {
+  const verifyCalls = transportCalls.filter((call) => call.data && call.data.action === 'verify')
+  return (verifyCalls[verifyCalls.length - 1] || {}).data || {}
+}
+
+section('C', '③ 调用形状：`{action:\'verify\', token, op:\'issueFeicuiDeviceToken\', payload:{}}` ＋ 回包恰 3 键')
 let successReply = null
 {
   transportCalls.length = 0
   successReply = await feicuiSvc.issueDeviceToken()
-  const call = transportCalls[0] || {}
+  const verifyCalls = transportCalls.filter((call) => call.data && call.data.action === 'verify')
+  const call = verifyCalls[0] || {}
   const event = call.data || {}
-  check('C1', '传输层恰 1 次往返，且函数名逐字 `xiai-user-token`', { calls: 1, name: 'xiai-user-token' }, { calls: transportCalls.length, name: call.name })
-  check('C2', '事件对象恰 3 键 `{action, op, payload}`（无第四键、无身份类键）', ['action', 'op', 'payload'], sorted(Object.keys(event)))
+  check('C0', '取票预热成功（管道里有可携带的用户令牌）⇒ C 段的往返只含「携带」那一次', { ok: true, present: true }, { ok: warmed.ok, present: userTokenSvc.hasUserToken() })
+  check('C1', '传输层恰 1 次往返（取票已预热 ⇒ 只剩携带），且函数名逐字 `xiai-user-token`', { calls: 1, name: 'xiai-user-token' }, { calls: verifyCalls.length, name: call.name })
+  check('C2', '事件对象**顶层携带用户令牌**：键面恰 4 键 `{action, op, payload, token}`（令牌不进载荷、不进 URL）', ['action', 'op', 'payload', 'token'], Object.keys(event).sort())
+  check('C2b', '`token` 与管道取票结果**逐字相同**（只报长度与指纹，不打印原文）', { len: USER_TOKEN.length, fp: fingerprint(USER_TOKEN) }, { len: String(event.token || '').length, fp: fingerprint(String(event.token || '')) })
   check('C3', '入口契约 `action === \'verify\'`（**不是**把 op 名当 action）', 'verify', event.action)
   check('C4', '`op` 逐字 ＝ `issueFeicuiDeviceToken`（与服务端注册面同字）', 'issueFeicuiDeviceToken', event.op)
   check('C5', '`payload` 深等于空对象 `{}`（载荷封闭；本入口不收集任何字段）', { keys: [], json: '{}' }, { keys: Object.keys(event.payload || {}), json: JSON.stringify(event.payload) })
@@ -462,13 +517,31 @@ section('D', '④ 四类存储零写入（令牌窗口内；可执行）')
   /* **令牌窗口**：从「即将请求」到「已拿到令牌」这一段，是唯一可能发生持久化的时刻。
      窗口前的一次 `session.setUser()` 是登录态自身的既有写入（与令牌无关），已在窗口外。 */
   const before = snapshot()
+  const writeIndexBefore = storageWrites.length
   captureConsole()
   const reply = await feicuiSvc.issueDeviceToken()
   releaseConsole()
   const window = deltaSince(before)
+  const windowWrites = storageWrites.slice(writeIndexBefore)
   tokenWindowDelta = window
   check('D0', '窗口内确实拿到了令牌（判据有效：不是「没调用」造成的零写入）', true, reply.ok === true && reply.token === TOKEN)
-  check('D1', 'localStorage 零写入（set 0 / remove 0 / clear 0）', { set: 0, remove: 0, clear: 0 }, { set: window.lsSet, remove: window.lsRemove, clear: window.lsClear })
+  /* **本单更新（凭据携带）**：签发前必须先有用户令牌 ⇒ 令牌管道会在成功回包后**回写它自己那枚用户令牌**
+     （R-L10 续期写回，落点 `xiai:v1:user-token`）—— 这是管道的既有行为、与**设备令牌**无关。
+     故 D1 的判据从「localStorage 零写入」收紧成「**只**写用户令牌键，设备令牌零写入」。 */
+  check('D1', 'localStorage 窗口内**只**回写用户令牌键 `xiai:v1:user-token`（管道 R-L10 续期写回）；零其它键、零删除、零清空 ⇒ **设备令牌零持久化**', {
+    set: 1,
+    keys: ['xiai:v1:user-token'],
+    remove: 0,
+    clear: 0
+  }, {
+    set: window.lsSet,
+    keys: windowWrites.filter((item) => item.api === 'ls' && item.op === 'set').map((item) => item.key),
+    remove: window.lsRemove,
+    clear: window.lsClear
+  })
+  check('D1b', '同一窗口内 localStorage 的写入值里**设备令牌串命中 0**（装置令牌只沿返回值上抛）', 0, [...lsData.entries()]
+    .filter(([key]) => key === 'xiai:v1:user-token')
+    .filter(([, value]) => String(value).includes(TOKEN)).length)
   check('D2', 'sessionStorage 零写入（set 0 / remove 0 / clear 0）', { set: 0, remove: 0, clear: 0 }, { set: window.ssSet, remove: window.ssRemove, clear: window.ssClear })
   check('D3', 'IndexedDB 零打开 / 零删除（`open` 计数 0）', 0, window.idbOpen)
   check('D4', 'cookie 零写入（`document.cookie` setter 计数 0）', 0, window.cookieSet)
