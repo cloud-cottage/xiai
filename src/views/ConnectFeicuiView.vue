@@ -461,37 +461,115 @@ async function onIssueDeviceToken() {
   deviceToken.value = { token: reply.token, expires_at: reply.expires_at }
 }
 
+/** `renewal_source` 的**封闭枚举**（诊断用，不作判据、不上屏）。 */
+const RENEWAL_SOURCES = Object.freeze({
+  session: 'session',
+  loginState: 'loginState',
+  fallback: 'fallback',
+  none: 'none'
+})
+
 /**
- * **续签凭据（本单新增）**：`refresh_token` 取自**当前 OTP 会话**，与 `access_token` **同处**
- * （`auth.getSession().data.session`）—— 不另建会话、不另取凭据。三条硬口径：
- *   · **不上屏**：不进任何 ref / 模板 / 错误文案（本函数只在交付那一刻被调一次，取完即随 `meta` 离开）；
- *   · **不落任何持久层**：不写本地 / 会话存储、IndexedDB、cookie，不进 url，不打日志
- *     —— 存钥匙串是**桌面端**收到 `meta` 之后自己做的事；
- *   · **手动复制回退路径不带它**（`onCopyDeviceToken` 只复制设备令牌）⇒ 不会被贴进剪贴板。
- * 取不到（无会话 / 会话实现不暴露该字段）⇒ 空串：只做 8 小时内存会话，桌面端按 `NO_CREDENTIAL`
- * 降级成「每次登录」并自己说明 —— **不假装已可自动续签**。
- * `phone` 同样是**会话里本来就有**的号（无则空串；只是钥匙串上的标签，不是判据 ——
- * 服务端一律用平台验签后的手机号）。
- * @returns {Promise<{refresh_token:string, phone:string}>}
+ * **续签凭据（三源尝试｜本单修订）**：`refresh_token` / `phone` 本来就在当前 OTP 会话里，
+ * 但不同 SDK 版本 / 不同登录路径把它暴露在不同的读数面上 ⇒ 按优先级逐源尝试，**任一得手即用**：
+ *   ① `otpAuth().getSession()` → `data.session.refresh_token`（初版唯一读法；真机取不到）；
+ *   ② `otpAuth().getLoginState()` → `credentials.refresh_token`；
+ *   ③ **同一 auth 实例**再 `getSession()` 一次，按**备用形状**读（`reply.session` /
+ *      `reply.data` 本体 / `reply.currentSession`）—— 不新建实例、不新建会话。
+ * 三源全空 ⇒ 空串，**不阻断交付**（桌面端按无凭据降级成「每次登录」并自己说明）。
+ *
+ * 硬口径（逐条，与本单前一致）：
+ *   · **不上屏**：不进任何 ref / 模板 / 错误文案（只在交付那一刻随 `meta` 离开）；
+ *   · **不落任何持久层**：不写本地 / 会话存储、IndexedDB、cookie，不进 url，不打日志；
+ *   · 手动复制回退路径不带它（`onCopyDeviceToken` 只复制设备令牌）。
+ * `phone` 同样多源（`session.user.phone_number` → `loginState.user.phone`），只作钥匙串上的标签，
+ * **不是判据**（服务端一律用平台验签后的手机号）。
+ * `renewal_source` 只描述「这次从哪个源命中」：`session` / `loginState` / `fallback` / `none`
+ * —— **诊断枚举而已，不据此放行、不据此拒绝、不上屏**。
+ * @returns {Promise<{refresh_token:string, phone:string, renewal_source:string}>}
  */
 async function sessionRenewalMeta() {
-  const out = { refresh_token: '', phone: '' }
-  let session = null
-  try {
-    const auth = await otpAuth()
-    if (auth && typeof auth.getSession === 'function') {
-      const reply = await auth.getSession()
-      session = (reply && reply.data ? reply.data.session : null) || null
-    }
-  } catch {
-    session = null
+  const out = { refresh_token: '', phone: '', renewal_source: RENEWAL_SOURCES.none }
+  /* 一个读数面 → `{refresh_token, phone}`（形状归一；phone 只认 11 位大陆号）。 */
+  const pairOf = (holder) => {
+    const source = holder && typeof holder === 'object' ? holder : {}
+    const refresh = String(source.refresh_token || source.refreshToken || '').trim()
+    const user = source.user && typeof source.user === 'object' ? source.user : source
+    const rawPhone = (user && (user.phone_number || user.phone || user.phoneNumber)) || ''
+    const phone = String(rawPhone).trim()
+    return { refresh_token: refresh, phone: isPhoneLike(phone) ? phone : '' }
   }
-  if (!session || typeof session !== 'object') return out
-  const refresh = String(session.refresh_token || session.refreshToken || '').trim()
-  if (refresh !== '') out.refresh_token = refresh
-  const rawPhone = (session.user && (session.user.phone_number || session.user.phone)) || session.phone_number || ''
-  const phone = String(rawPhone).trim()
-  if (/^1[3-9]\d{9}$/.test(phone)) out.phone = phone
+
+  let auth = null
+  try {
+    auth = await otpAuth()
+  } catch {
+    auth = null
+  }
+  if (!auth || typeof auth !== 'object') return out
+
+  /* ① 会话面（初版读法）：`reply.data.session` */
+  let sessionReply = null
+  if (typeof auth.getSession === 'function') {
+    try {
+      sessionReply = await auth.getSession()
+    } catch {
+      sessionReply = null
+    }
+  }
+  let loginState = null
+  let loginStateTried = false
+  /* ② 登录状态面（惰性读一次；phone 也复用它）。 */
+  const loginPair = async () => {
+    if (loginStateTried) {
+      return pairOf(loginState && (loginState.credentials || loginState))
+    }
+    loginStateTried = true
+    if (typeof auth.getLoginState !== 'function') return pairOf(null)
+    try {
+      loginState = await auth.getLoginState()
+    } catch {
+      loginState = null
+    }
+    return pairOf(loginState && (loginState.credentials || loginState))
+  }
+
+  const fromSession = pairOf(sessionReply && sessionReply.data ? sessionReply.data.session : null)
+  if (fromSession.refresh_token !== '') {
+    out.refresh_token = fromSession.refresh_token
+    out.phone = fromSession.phone || (await loginPair()).phone
+    out.renewal_source = RENEWAL_SOURCES.session
+    return out
+  }
+
+  const fromLogin = await loginPair()
+  if (fromLogin.refresh_token !== '') {
+    out.refresh_token = fromLogin.refresh_token
+    out.phone = fromLogin.phone || fromSession.phone
+    out.renewal_source = RENEWAL_SOURCES.loginState
+    return out
+  }
+
+  /* ③ 兜底：**同一实例**再取一次会话，按备用形状读（不新建 auth、不重新登录）。 */
+  let retryReply = sessionReply
+  if (typeof auth.getSession === 'function') {
+    try {
+      retryReply = await auth.getSession()
+    } catch {
+      retryReply = sessionReply
+    }
+  }
+  const fallbackHolder =
+    (retryReply && (retryReply.session || retryReply.currentSession)) ||
+    (retryReply && retryReply.data && !retryReply.data.session ? retryReply.data : null) ||
+    (auth.currentSession && typeof auth.currentSession === 'object' ? auth.currentSession : null) ||
+    null
+  const fromFallback = pairOf(fallbackHolder)
+  if (fromFallback.refresh_token !== '') {
+    out.refresh_token = fromFallback.refresh_token
+    out.phone = fromFallback.phone || fromSession.phone || fromLogin.phone
+    out.renewal_source = RENEWAL_SOURCES.fallback
+  }
   return out
 }
 
@@ -504,8 +582,9 @@ async function sessionRenewalMeta() {
  *   ③ 簽發 `ttl_seconds ＝ 28800`（服務端 clamp `[300, 43200]`）；
  *   ④ 成功 ⇒ 令牌進唯一持有處 `deviceToken`（與 30 天路同一文本域，仍是**唯一上屏處**）；
  *   ⑤ `deliverTokenToHost()`：pywebview → wails → 通用，有橋就交付
- *      `(token, {expires_at, ttl_seconds, refresh_token, phone})` —— **後两键是续签凭据**
- *      （取自当前 OTP 会话，见 `sessionRenewalMeta`；取不到即空串 ⇒ 桌面端自行降级）；
+ *      `(token, {expires_at, ttl_seconds, refresh_token, phone, renewal_source})` ——
+ *      **後三键是续签凭据 ＋ 诊断枚举**（取自当前 OTP 会话，见 `sessionRenewalMeta`；
+ *      空串键不下发 ⇒ 桌面端自行降级；`renewal_source` 只作运维诊断，不参与判定）；
  *      **無橋 / 橋拋錯 ⇒ 不動令牌**，回退一鍵複製；
  *   ⑥ 交付成功 ⇒ `deviceDelivered = true` 並 `clearDeviceToken()` —— **DOM 不再含令牌明文**。
  */
@@ -528,18 +607,20 @@ async function onIssueSessionToken() {
   }
   /* 与 30 天路同一持有形状 `{token, expires_at}`（複用同一張只讀文本域 ⇒ 上屏處仍恰 1 處）。 */
   deviceToken.value = { token: String(reply.token), expires_at: String(reply.expires_at) }
-  /* **续签凭据（本单新增）**：只进桥 `meta`；取不到 ⇒ 空串（不阻断交付，降级为纯 8 小时会话）。 */
-  let renewal = { refresh_token: '', phone: '' }
+  /* **续签凭据（本单新增）**：只进桥 `meta`；三源全空 ⇒ 空串（不阻断交付，降级为纯 8 小时会话）。 */
+  let renewal = { refresh_token: '', phone: '', renewal_source: RENEWAL_SOURCES.none }
   try {
     renewal = await sessionRenewalMeta()
   } catch {
-    renewal = { refresh_token: '', phone: '' }
+    renewal = { refresh_token: '', phone: '', renewal_source: RENEWAL_SOURCES.none }
   }
   const delivery = await deliverTokenToHost(reply.token, {
     expires_at: reply.expires_at,
     ttl_seconds: DEVICE_SESSION_TTL_SECONDS,
     refresh_token: renewal.refresh_token,
-    phone: renewal.phone
+    phone: renewal.phone,
+    /* 诊断枚举：**不参与判定**，只让运维知道这次凭据从哪个源命中（桌面端不回显、不上屏）。 */
+    renewal_source: renewal.renewal_source || RENEWAL_SOURCES.none
   })
   /* 無橋 / 橋拋錯 ⇒ **不改令牌**，落回「一次性顯示 ＋ 一鍵複製」（令牌不丟）。 */
   if (!delivery.delivered) return

@@ -36,6 +36,10 @@
  *     （真机复现多次）。故：先取票（管道复用 / 用平台会话来换）⇒ 再由管道携带；
  *     取票失败（未登录 / 无平台会话 / 取票抛错）⇒ `LOGIN_REQUIRED` ＋ **零请求**；
  *     两处 `action:'verify'`（`issueFeicuiDeviceToken` / `issueFeicuiToken`）同形。
+ *   **H 续签凭据三源（本单修订｜可执行）**：`refresh_token` 逐源尝试 —— ① `getSession().data.session`、
+ *     ② `getLoginState().credentials`、③ 同一实例再 `getSession()` 的备用形状；`phone` 同样多源；
+ *     命中源落 `meta.renewal_source`（封闭四值 `session`/`loginState`/`fallback`/`none`，**只作诊断**）；
+ *     三源全空 ⇒ 空串且**不阻断交付**；含凭据时桥 `meta` 带 `refresh_token` 且**不上屏**。
  *
  * 用法：node scripts/verify-feicui-app-bridge.mjs
  */
@@ -151,6 +155,29 @@ const ops = require(path.join(ROOT, 'cloudfunctions/xiai-user-token/lib/ops.js')
 const VIEW_REL = 'src/views/ConnectFeicuiView.vue'
 const viewRaw = readFileSync(path.join(ROOT, VIEW_REL), 'utf8')
 const viewSrc = stripComments(viewRaw)
+
+/**
+ * 取视图里 `Object.freeze({…})` 形态的常量**真值**（逐字求值，不在套件里另抄一份枚举
+ * —— 抄的那份永远会和产品漂移）。
+ * @param {string} name
+ */
+function frozenLiteralOf(name) {
+  const marker = `const ${name} = Object.freeze(`
+  const at = VIEW_SCRIPT_SRC.indexOf(marker)
+  if (at < 0) throw new Error(`MISSING_CONSTANT:${name}`)
+  const open = at + marker.length - 1
+  let depth = 0
+  let i = open
+  for (; i < VIEW_SCRIPT_SRC.length; i += 1) {
+    if (VIEW_SCRIPT_SRC[i] === '(' || VIEW_SCRIPT_SRC[i] === '{' || VIEW_SCRIPT_SRC[i] === '[') depth += 1
+    else if (VIEW_SCRIPT_SRC[i] === ')' || VIEW_SCRIPT_SRC[i] === '}' || VIEW_SCRIPT_SRC[i] === ']') {
+      depth -= 1
+      if (depth === 0) break
+    }
+  }
+  const source = VIEW_SCRIPT_SRC.slice(open + 1, i)     // `Object.freeze(` 之后、配对 `)` 之前
+  return new Function(`return (${source})`)()
+}
 
 /* ---------------------------------------------------------------------------
    2. 假传输（**零联网**）：记录每一次往返的形状
@@ -875,6 +902,13 @@ function buildViewRuntime(options) {
   }
 
   /**
+   * **凭据三源**的注入面（本单新增）：`otpAuth` 由用例提供假 auth（`getSession` /
+   * `getLoginState` 两种读数），`RENEWAL_SOURCES` 直接取视图里的真枚举。
+   */
+  const otpAuth = opts.otpAuth || (async () => null)
+  const RENEWAL_SOURCES = frozenLiteralOf('RENEWAL_SOURCES')
+
+  /**
    * 两次调用：`compileFn(名字, 自由变量名)(自由变量…值)` ⇒ 得到「零参可调体」（真函数原样执行）。
    * 「已绑定值的零参可调体」＝ `bound`；带形参的真函数（`deviceErrorText`）绑定后仍需传实参。
    */
@@ -886,6 +920,12 @@ function buildViewRuntime(options) {
   ])
   /* 提示表注入空对象 ⇒ 走真函数里的「服务端 message 原样上屏」分支（不复制任何提示文案）。 */
   const deviceErrorText = bind('deviceErrorText', ['DEVICE_REASON_HINTS'], [{}])
+  /* 凭据读取体：三个自由变量全注入（`otpAuth` 假体 / 视图真枚举 / 真号闸门）⇒ 逐字执行产品代码。 */
+  const sessionRenewalMeta = bind('sessionRenewalMeta', ['otpAuth', 'RENEWAL_SOURCES', 'isPhoneLike'], [
+    otpAuth,
+    RENEWAL_SOURCES,
+    isPhoneLike
+  ])
 
   const manualSessionIssue = bind('onIssueSessionToken', [
     'admin',
@@ -898,7 +938,9 @@ function buildViewRuntime(options) {
     'issueDeviceToken',
     'deliverTokenToHost',
     'deviceErrorText',
-    'DEVICE_SESSION_TTL_SECONDS'
+    'DEVICE_SESSION_TTL_SECONDS',
+    'sessionRenewalMeta',
+    'RENEWAL_SOURCES'
   ], [
     refs.admin,
     refs.deviceBusy,
@@ -910,7 +952,9 @@ function buildViewRuntime(options) {
     issueDeviceToken,
     deliverTokenToHost,
     deviceErrorText,
-    TTL
+    TTL,
+    sessionRenewalMeta,
+    RENEWAL_SOURCES
   ])
   /* 自动签发 ＝ `autoIssueOnce`（幂等旗标 ＋ 同一个签发体）。 */
   const auto = bind('autoIssueOnce', ['autoIssueAttempted', 'onIssueSessionToken'], [
@@ -1371,6 +1415,257 @@ section('G', '凭据携带：无票先取票 / 有票复用 / 无会话即 LOGIN
     exportedLogin: countIn(authSrc, 'export async function login('),
     exportedPasswordLogin: countIn(authSrc, 'export async function loginWithPassword(')
   })
+}
+
+/* ===========================================================================
+   H 段：续签凭据**三源尝试**（本单修订｜可执行）＋ `renewal_source` 诊断枚举
+   ---------------------------------------------------------------------------
+   真机症状：页面已能签发 8 小时会话、桥也交付了，但钥匙串里始终没有
+   `feicui.local-dist/refresh` ⇒ 零点击续签不生效。根因：`refresh_token` 只从
+   `getSession().data.session` 一处读，那条读法在真机上拿不到该字段（空串 ⇒ 不下发）。
+   修法＝**多源尝试**（任一得手即用，全空不阻断交付），并把**命中源**作为枚举放进
+   `meta.renewal_source`（只作诊断，不参与任何判定）。
+   =========================================================================== */
+section('H', '续签凭据三源：session / loginState / fallback / none（phone 多源；含凭据时 meta 带 refresh_token 且不上屏）')
+
+{
+  const RT_SESSION = 'rt_session_' + randomBytes(8).toString('hex')
+  const RT_LOGIN = 'rt_loginstate_' + randomBytes(8).toString('hex')
+  const RT_FALLBACK = 'rt_fallback_' + randomBytes(8).toString('hex')
+  const PHONE_A = '13800000001'
+  const PHONE_B = '13900000002'
+  const RENEWAL_ENUM = { session: 'session', loginState: 'loginState', fallback: 'fallback', none: 'none' }
+
+  /** 假 auth：`getSession` / `getLoginState` 由用例给（并按调用序号变招 ⇒ 可测「兜底再取一次」）。 */
+  function fakeAuth(handlers) {
+    const calls = { session: 0, loginState: 0 }
+    return {
+      calls,
+      async getSession() {
+        calls.session += 1
+        if (!handlers.getSession) return { data: { session: null } }
+        return handlers.getSession(calls.session)
+      },
+      async getLoginState() {
+        calls.loginState += 1
+        if (!handlers.getLoginState) return null
+        return handlers.getLoginState(calls.loginState)
+      }
+    }
+  }
+
+  /** 跑一次「挂载 ⇒ 自动签发 ⇒ 交付」，返回桥实际收到的 `meta` 与各源调用次数。 */
+  async function runRenewal(handlers) {
+    const auth = fakeAuth(handlers)
+    const rt = buildViewRuntime({ otpAuth: async () => auth })
+    await rt.bootstrap()
+    const delivered = rt.calls.deliver[0] || {}
+    return {
+      meta: delivered.meta || {},
+      issueCalls: rt.calls.issue.length,
+      deliverCalls: rt.calls.deliver.length,
+      authCalls: auth.calls,
+      refs: rt.refs
+    }
+  }
+
+  /* H1｜① 会话面命中（初版读法能用的那一档） */
+  const h1 = await runRenewal({
+    getSession: () => ({ data: { session: { refresh_token: RT_SESSION, user: { phone_number: PHONE_A } } } })
+  })
+  check('H1', '① `getSession().data.session` 有 `refresh_token` ⇒ 命中 `session`：meta 带该值 ＋ `session.user.phone_number` 作 phone ＋ **不再去读 loginState**', {
+    refreshLen: RT_SESSION.length,
+    refreshFp: fingerprint(RT_SESSION),
+    phone: PHONE_A,
+    source: 'session',
+    loginStateCalls: 0
+  }, {
+    refreshLen: String(h1.meta.refresh_token || '').length,
+    refreshFp: fingerprint(h1.meta.refresh_token || ''),
+    phone: h1.meta.phone,
+    source: h1.meta.renewal_source,
+    loginStateCalls: h1.authCalls.loginState
+  })
+
+  /* H2｜② 登录状态面命中（真机上真正拿得到凭据的那一档） */
+  const h2 = await runRenewal({
+    getSession: () => ({ data: { session: {} } }),
+    getLoginState: () => ({ credentials: { refresh_token: RT_LOGIN, user: { phone: PHONE_B } } })
+  })
+  check('H2', '①空 ⇒ ②`getLoginState().credentials.refresh_token` 命中 `loginState`（phone 取 `user.phone`）', {
+    refreshFp: fingerprint(RT_LOGIN),
+    phone: PHONE_B,
+    source: 'loginState'
+  }, {
+    refreshFp: fingerprint(h2.meta.refresh_token || ''),
+    phone: h2.meta.phone,
+    source: h2.meta.renewal_source
+  })
+
+  /* H3｜③ 兜底：同一实例再取一次会话，按备用形状读 */
+  const h3 = await runRenewal({
+    getSession: (n) => (n === 1 ? { data: { session: null } } : { session: { refresh_token: RT_FALLBACK } }),
+    getLoginState: () => ({ credentials: {} })
+  })
+  check('H3', '①②皆空 ⇒ ③**同一 auth 实例**再 `getSession()`，按备用形状（`reply.session`）读到 ⇒ 命中 `fallback`（getSession 恰 2 次、不新建实例）', {
+    refreshFp: fingerprint(RT_FALLBACK),
+    source: 'fallback',
+    sessionCalls: 2
+  }, {
+    refreshFp: fingerprint(h3.meta.refresh_token || ''),
+    source: h3.meta.renewal_source,
+    sessionCalls: h3.authCalls.session
+  })
+
+  /* H4｜三源全空 ⇒ 空串 ＋ `none`，**不阻断交付** */
+  const h4 = await runRenewal({
+    getSession: () => ({ data: { session: { access_token: PLATFORM_ACCESS_TOKEN } } }),
+    getLoginState: () => ({ credentials: { user: {} } })
+  })
+  check('H4', '三源全空 ⇒ `refresh_token` 空串 ＋ `renewal_source="none"`，**仍签 1 次、仍交付 1 次**（凭据取不到绝不阻断 8 小时会话）', {
+    refresh: '',
+    phone: '',
+    source: 'none',
+    issueCalls: 1,
+    deliverCalls: 1,
+    delivered: true
+  }, {
+    refresh: h4.meta.refresh_token,
+    phone: h4.meta.phone,
+    source: h4.meta.renewal_source,
+    issueCalls: h4.issueCalls,
+    deliverCalls: h4.deliverCalls,
+    delivered: h4.refs.deviceDelivered.value
+  })
+
+  /* H5｜phone 多源：会话给了凭据但没给号 ⇒ 从 loginState 补号（凭据来源仍是 session） */
+  const h5 = await runRenewal({
+    getSession: () => ({ data: { session: { refresh_token: RT_SESSION, user: {} } } }),
+    getLoginState: () => ({ credentials: { user: { phone: PHONE_B } } })
+  })
+  check('H5', 'phone 多源：`session.user.phone_number` 缺 ⇒ 回落 `loginState.user.phone`（凭据来源仍记 `session`）', {
+    phone: PHONE_B,
+    source: 'session',
+    refreshFp: fingerprint(RT_SESSION)
+  }, {
+    phone: h5.meta.phone,
+    source: h5.meta.renewal_source,
+    refreshFp: fingerprint(h5.meta.refresh_token || '')
+  })
+
+  /* H6｜getSession 抛错 ⇒ 不抛、不挡路，直接落到 loginState */
+  const h6 = await runRenewal({
+    getSession: () => {
+      throw new Error('SESSION_READ_BOOM')
+    },
+    getLoginState: () => ({ credentials: { refresh_token: RT_LOGIN } })
+  })
+  check('H6', '`getSession()` 抛错 ⇒ **不向上抛、不挡交付**，直接落到 `loginState` 并照常交付', {
+    source: 'loginState',
+    refreshFp: fingerprint(RT_LOGIN),
+    issueCalls: 1
+  }, {
+    source: h6.meta.renewal_source,
+    refreshFp: fingerprint(h6.meta.refresh_token || ''),
+    issueCalls: h6.issueCalls
+  })
+
+  /* H7｜枚举封闭：只允许 4 值，且本段四个用例各命中一个 */
+  const observed = [h1.meta.renewal_source, h2.meta.renewal_source, h3.meta.renewal_source, h4.meta.renewal_source]
+  check('H7', '`renewal_source` 是**封闭四值枚举**（`session` / `loginState` / `fallback` / `none`），四档各命中一次、无第五值', {
+    enum: RENEWAL_ENUM,
+    observed
+  }, {
+    enum: frozenLiteralOf('RENEWAL_SOURCES'),
+    observed
+  })
+
+  /* H8｜码面契约（静态）：三源都在、meta 确实把凭据与枚举交出去 */
+  check('H8', '码面契约：三源读点齐（`getSession` / `getLoginState` / 兜底再取）、`meta` 交 `refresh_token` ＋ `renewal_source`', {
+    getSession: 2,
+    getLoginState: 1,
+    fallbackBranch: 1,
+    metaRefresh: 1,
+    metaSource: 1
+  }, (() => {
+    const body = bodyOf('sessionRenewalMeta')
+    const issueBody = bodyOf('onIssueSessionToken')
+    return {
+      getSession: countIn(body, 'auth.getSession()'),
+      getLoginState: countIn(body, 'auth.getLoginState()'),
+      fallbackBranch: countIn(body, 'RENEWAL_SOURCES.fallback'),
+      metaRefresh: countIn(issueBody, 'refresh_token: renewal.refresh_token'),
+      metaSource: countIn(issueBody, 'renewal_source: renewal.renewal_source')
+    }
+  })())
+
+  /* H9｜真服务层：有凭据时三键随桥下发；无凭据时桥参数**逐字仍是旧两键** */
+  {
+    const withRefresh = fakeHost('pywebview')
+    const metaFull = {
+      expires_at: EXPIRES_AT,
+      ttl_seconds: 28800,
+      refresh_token: RT_SESSION,
+      phone: PHONE_A,
+      renewal_source: RENEWAL_ENUM.session
+    }
+    const sentFull = await feicuiSvc.deliverTokenToHost(TOKEN, metaFull, withRefresh.host)
+    const callFull = (withRefresh.record.pywebview[0] || {}).meta || {}
+    check('H9', '真 `deliverTokenToHost`：带凭据 ⇒ 桥 meta 恰 5 键 `{expires_at, phone, refresh_token, renewal_source, ttl_seconds}`，凭据逐字透传、令牌仍只在第一参', {
+      delivered: true,
+      keys: ['expires_at', 'phone', 'refresh_token', 'renewal_source', 'ttl_seconds'],
+      refreshFp: fingerprint(RT_SESSION),
+      phone: PHONE_A,
+      source: 'session',
+      tokenInMeta: false
+    }, {
+      delivered: sentFull.delivered,
+      keys: sorted(callFull),
+      refreshFp: fingerprint(callFull.refresh_token || ''),
+      phone: callFull.phone,
+      source: callFull.renewal_source,
+      tokenInMeta: JSON.stringify(callFull).includes(TOKEN)
+    })
+
+    const withoutRefresh = fakeHost('pywebview')
+    await feicuiSvc.deliverTokenToHost(TOKEN, { expires_at: EXPIRES_AT, ttl_seconds: 28800, refresh_token: '', phone: '', renewal_source: 'none' }, withoutRefresh.host)
+    const callBare = (withoutRefresh.record.pywebview[0] || {}).meta || {}
+    check('H9b', '真 `deliverTokenToHost`：**空凭据不下发空键**（`refresh_token` / `phone` 缺席）＋ `renewal_source="none"` 仍带（桌面端据此区分「取了但没拿到」与「页面根本没取」）', {
+      keys: ['expires_at', 'renewal_source', 'ttl_seconds'],
+      source: 'none',
+      hasRefresh: false,
+      hasPhone: false
+    }, {
+      keys: sorted(callBare),
+      source: callBare.renewal_source,
+      hasRefresh: 'refresh_token' in callBare,
+      hasPhone: 'phone' in callBare
+    })
+
+    /* 旧调用方（只给 `expires_at` / `ttl_seconds`，本单之前的形态）⇒ 桥参数**逐字两键**。 */
+    const legacy = fakeHost('pywebview')
+    await feicuiSvc.deliverTokenToHost(TOKEN, { expires_at: EXPIRES_AT, ttl_seconds: 28800 }, legacy.host)
+    const callLegacy = (legacy.record.pywebview[0] || {}).meta || {}
+    check('H9c', '旧调用形态（meta 只有 `expires_at` / `ttl_seconds`）⇒ 桥 meta **逐字两键**（新增键纯增量，旧调用点零变化）', {
+      keys: ['expires_at', 'ttl_seconds'],
+      ttl: 28800
+    }, {
+      keys: sorted(callLegacy),
+      ttl: callLegacy.ttl_seconds
+    })
+  }
+
+  /* H10｜凭据不上屏：模板区（含所有钩子 / 文案）零 `refresh_token` / `renewal_source` */
+  {
+    const templateSrc = viewSrc.slice(0, viewSrc.indexOf('<script setup>'))
+    check('H10', '凭据与诊断枚举**不上屏**：模板区（含 `data-*` 钩子与文案）`refresh_token` / `renewal_source` 命中 0（只在脚本层随 `meta` 离开）', {
+      refresh: 0,
+      source: 0
+    }, {
+      refresh: countIn(templateSrc, 'refresh_token'),
+      source: countIn(templateSrc, 'renewal_source')
+    })
+  }
 }
 
 /* ---------------------------------------------------------------------------

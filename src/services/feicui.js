@@ -331,11 +331,22 @@ export async function deliverTokenToHost(token, meta, host) {
   const bridge = feicuiHostBridgeOf(host)
   if (!bridge) return { delivered: false, reason: 'BRIDGE_ABSENT' }
   const options = meta || {}
+  /* 桥侧**冻结基线**（旧键逐字不变）：`expires_at` ＋ `ttl_seconds`。 */
+  const payload = {
+    expires_at: String(options.expires_at === undefined || options.expires_at === null ? '' : options.expires_at),
+    ttl_seconds: Number(options.ttl_seconds) || 0
+  }
+  /* **续签凭据（纯增量）**：页面从 OTP 会话里取到的 refresh token / 手机号 / 命中源枚举一并交给宿主
+     （桌面端存钥匙串、供下次启动零点击续签）。取不到就是空串 ⇒ **不下发这几个键**
+     —— 无凭据时的桥参数**逐字仍是旧形态**（两键），旧桌面端逐字兼容。 */
+  const refresh = String(options.refresh_token === undefined || options.refresh_token === null ? '' : options.refresh_token).trim()
+  if (refresh !== '') payload.refresh_token = refresh
+  const phone = String(options.phone === undefined || options.phone === null ? '' : options.phone).trim()
+  if (phone !== '') payload.phone = phone
+  const renewalSource = String(options.renewal_source === undefined || options.renewal_source === null ? '' : options.renewal_source).trim()
+  if (renewalSource !== '') payload.renewal_source = renewalSource
   try {
-    await bridge(plaintext, {
-      expires_at: String(options.expires_at === undefined || options.expires_at === null ? '' : options.expires_at),
-      ttl_seconds: Number(options.ttl_seconds) || 0
-    })
+    await bridge(plaintext, payload)
     return { delivered: true, reason: 'DELIVERED' }
   } catch {
     return { delivered: false, reason: 'BRIDGE_FAILED' }
