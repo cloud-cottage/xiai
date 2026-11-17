@@ -10,7 +10,7 @@
  * 断言面（本套 **45** 条 —— 原 16 条 ＋ 非 2xx 上游诊断 6 条 ＋ 2xx 形状诊断 4 条 ＋ 异步入队轮询 6 条
  * ＋ 产物族 jpeg 扩面 6 条（I 段）＋ 候選行 `row` 1 条（A5）＋ ⑨ 重复键兜底专项 6 条（J 段 · 736b340）；覆盖派单方点名的 一〜八）：
  *   A. 注册面与成功路（①）
- *      A0 `ADMIN_OPS` 注册面（恰 51 项、`ai-enhance-face` 在册且为函数）；
+ *      A0 `ADMIN_OPS` 注册面（恰 52 项、`ai-enhance-face` 在册且为函数）；
  *      A1 回包**恰 9 键**（原 8 键仍逐字在场 ＋ 新增 `row`）；`image_id` 为新编号（`img-` ＋ 8 位十六进制 ≠ 原编号，且逐字
  *         ＝ `imageIdOfIdemKey(idemKeyOf(原编号, 请求号))`）；`source_image_id` 为原编号；
  *      A2 `preview.sha256` **逐字 ＝ 上传字节的 sha256**（且上传字节与上游回图字节**逐字节相等**、
@@ -484,7 +484,7 @@ section('A', '注册面与成功路：恰 9 键 / 新编号 / sha256 逐字一�
 
 {
   const keys = Object.keys(ops.ADMIN_OPS)
-  check('A0', '`ADMIN_OPS` 恰 51 项且 `ai-enhance-face` 在册（函数；薄委派）〔2026-11-17 印譜封面 / 改名單 +3：`updateBook` / `setBookCover` / `listBookCovers` ⇒ 48 → 51；2026-11-14 1B/2C/3B 41 → 44：增 `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace`（均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason；字典序位分别在 `deleteSeal` 之后、`migrateSealValueDomains` 之前、`setAiUpstream` 之后）；前一版 41 项由 2026-11-14 詳情頁新增印面單 `addSealFace`（字典序位在首位）带入〕', { count: 51, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
+  check('A0', '`ADMIN_OPS` 恰 52 项且 `ai-enhance-face` 在册（函数；薄委派）〔2026-11-17 AI 候選圖可见性回填單 51 → 52：增 `repairAiCandidateVisibility`（函數、薄委派本文件实现点、零新 reason；字典序位在 `registerFaceImage` 之後、`repairAuthorPersonId` 之前）；前一版 51 由 2026-11-17 印譜封面 / 改名單 +3：`updateBook` / `setBookCover` / `listBookCovers` ⇒ 48 → 51；2026-11-14 1B/2C/3B 41 → 44：增 `deleteWholeSealImage` / `migrateEdgeFaces` / `setBaseFace`（均為函數、薄委派 `lib/faceLayerOps.js`、零新 reason；字典序位分别在 `deleteSeal` 之后、`migrateSealValueDomains` 之前、`setAiUpstream` 之后）；前一版 41 项由 2026-11-14 詳情頁新增印面單 `addSealFace`（字典序位在首位）带入〕', { count: 52, type: 'function' }, { count: keys.length, type: typeof ops.ADMIN_OPS['ai-enhance-face'] })
 }
 
 const RID_OK = 'rid-a-success-0001'
@@ -555,7 +555,7 @@ const okReply = await enhance({ image_id: SRC_OK, seal_id: 's-1', face_id: 'f-1'
   const newRow = fakeDb.bucketOf('xiai_images').get(okReply.image_id)
   const chargeRows = flowRowsOf(ADMIN_IDENTITY.uid).filter((row) => row.kind === 'CHARGE')
   check('A4', '⑨ 新影像行入册（`source: ai_enhance`、`displayOnly: true`、**不挂印面** —— 零 `face_image_id`）；扣金恰 10：CHARGE 行 delta −10、`ref_type` `AI_IMAGE`、`idem_key` 三段封闭、余额 40', {
-    rowKeys: ['_id', 'id', 'stamp_id', 'sealId', 'kind', 'seq', 'storage', 'storage_key', 'sha256', 'bytes', 'bytesLength', 'mime', 'width', 'height', 'source', 'displayOnly', 'source_image_id', 'charge_balance_after', 'upstream_status', 'elapsed_ms', 'created_at'].sort().join(','),
+    rowKeys: ['_id', 'id', 'stamp_id', 'sealId', 'kind', 'seq', 'storage', 'storage_key', 'sha256', 'bytes', 'bytesLength', 'mime', 'width', 'height', 'source', 'displayOnly', 'visibility', 'source_image_id', 'charge_balance_after', 'upstream_status', 'elapsed_ms', 'created_at'].sort().join(','),
     source: 'ai_enhance',
     displayOnly: true,
     faceImageIdAbsent: true,
@@ -1934,7 +1934,7 @@ let kSubmitReply = null
     taskRowCount: 1,
     taskRowKeys: 19,
     taskRowKeyList: TASK_ROW_KEYS,
-    adminOpsCount: 51,
+    adminOpsCount: 52,
     taskRowStatus: 'SUBMITTED',
     upstreamTaskId: K_ENQUEUE_TASK_ID,
     deadlineAhead: true,
