@@ -8683,7 +8683,8 @@ const ADMIN_OPS = Object.freeze({
    * `id / name / isbn / cip / author_person_id / first_publish_year / created_at / updated_at`
    * （审计键 `created_by` / `_id` 不外传）；④ 成功回包 `{ok, books, total}`（`books` / `total`
    * 由 `index.js` 按 op 收窄透传）、失败恒**恰 3 键**；⑤ **只读**（零写入、不产 `plan`）、
-   * `reason` **零新增**、**不落 `PUBLIC_OPS`**（管理员 op，匿名面仍恰 4 成员）。
+   * `reason` **零新增**、**不落 `PUBLIC_OPS`**（管理员 op；匿名面成员数由 `lib/sealCards.js::PUBLIC_OPS`
+   * 现取对拍 —— 本單 `5 → 6`，新增的是公开读 `listSealCovers`，与本 op 无关）。
    * 口径真源：`docs/book-catalog-ruling-2026-11-14.md` §3。
    * @param {object} payload 載荷（封閉 0 鍵）
    * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
@@ -10752,6 +10753,67 @@ const ADMIN_OPS = Object.freeze({
     /* 延遲 require：與其餘薄委派同法（打破加載環；離線自檢不需要 SDK）。 */
     const { setBaseFace: runSwitch } = require('./faceLayerOps.js')
     return runSwitch(payload, identity, context)
+  },
+
+  /**
+   * **管理員「改印譜」（`updateBook`｜2026-11-17 卡片矩陣單）** —— 薄委派：业务逻辑单点、
+   * 载荷封闭键面（含 `patch` 内层六键）与回包读数键面真源都在 `lib/books.js::updateBook`
+   * （本处零第二套逻辑；`require` 延迟以打破加载环）。**`ADMIN_OPS` 48 → 51**（本單三 op）。
+   *
+   * 硬口径（逐条；实现真源 ＝ `lib/books.js` 头注）：① **第一行即管理员门**
+   * （`adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋ **零读零写**）；② 载荷封闭恰
+   * 2 键 `book_id / patch`，`patch` 内层封闭恰 6 键（`name / isbn / cip / publisher /
+   * author_person_id / first_publish_year`；其余键 ⇒ `INVALID_FIELD`）；③ 值域与长度门照
+   * `createBook`（`name` ≤200、`isbn` / `cip` ≤64、`publisher` ≤200、`first_publish_year`
+   * 1000〜当年的整数、`author_person_id` 必须指向**已收录印人**）；④ 目标行不存在 ⇒
+   * `INVALID_VALUE`（本函数冻结表**无 `NOT_FOUND`**）；⑤ **写后读回比对**（不以
+   * `updated >= 1` 判成功）；⑥ 成功回包 `{ok:true, book}`（`book` 与 `listBooks` 行投影同形；
+   * **`BOOK_ROW_KEYS` 恒恰 12 键不动**，封面数据只经 `listBookCovers` 回）；
+   * ⑦ `reason` **零新增**、**零新集合**、**不产 `plan`**（写步在 op 内按确定序执行）。
+   * @param {object} payload `{book_id, patch:{…}}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async updateBook(payload, identity, context) {
+    /* 延遲 require：與 `setImageBook` / `createBook` 同法（打破加載環；離線自檢不需要 SDK）。
+       管理员门在 `lib/books.js::updateBook` 的**第一行**（零读零写地拒）。 */
+    const { updateBook: runUpdate } = require('./books.js')
+    return runUpdate(payload, identity, context)
+  },
+
+  /**
+   * **管理員「設印譜封面」（`setBookCover`｜2026-11-17 卡片矩陣單）** —— 薄委派：业务逻辑单点
+   * 在 `lib/books.js::setBookCover`（本处零第二套逻辑；`require` 延迟以打破加载环）。
+   *
+   * 硬口径：① **第一行即管理员门**（零读零写）；② 载荷封闭恰 2 键 `book_id / image_id`；
+   * ③ `image_id` 必须存在**且其 `book_id` ＝ 该书**（否则 `INVALID_VALUE` ＋ **零写入**）；
+   * `image_id` 空串 ＝ **清除封面**（合法）；④ 写到 `xiai_books` 行的 `cover_image_id`；
+   * ⑤ 写后读回比对（`cover_image_id` 是**读回值**）；⑥ 成功恰 3 键
+   * `{ok, book_id, cover_image_id}`；⑦ `reason` **零新增**、零新集合、不产 `plan`。
+   * @param {object} payload `{book_id, image_id}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async setBookCover(payload, identity, context) {
+    const { setBookCover: runSetCover } = require('./books.js')
+    return runSetCover(payload, identity, context)
+  },
+
+  /**
+   * **管理員「印譜封面表」（`listBookCovers`｜2026-11-17 卡片矩陣單）** —— 薄委派：业务逻辑
+   * 单点在 `lib/books.js::listBookCovers`（本处零第二套逻辑；`require` 延迟以打破加载环）。
+   *
+   * 硬口径：① **第一行即管理员门**（零读零写）；② 载荷封闭恰 1 键 `book_ids`（数组 ≤200，
+   * 元素五位十进制）；③ 只读、**恒零写**；④ 回包 `{ok:true, rows:[{book_id, cover_image_id,
+   * thumb_key}]}`（`thumb_key` 由 `lib/sealCards.js::thumbKeyOfDigest` **同源派生**；
+   * 取不到给空串）；⑤ `reason` **零新增**、零新集合。
+   * @param {object} payload `{book_ids:string[]}`
+   * @param {{uid:string, phone:string, role?:string}} identity 服務端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  async listBookCovers(payload, identity, context) {
+    const { listBookCovers: runListCovers } = require('./books.js')
+    return runListCovers(payload, identity, context)
   }
 })
 

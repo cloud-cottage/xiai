@@ -2685,25 +2685,40 @@ async function catalogStats(payload) {
 }
 
 /**
+ * **公开读「印章封面表」（`listSealCovers`｜2026-11-17 卡片矩陣單，本表第 6 成员）**
+ * —— 薄委派：业务逻辑单点、载荷封闭键面与 `thumb_key` 派生都在 `lib/books.js::listSealCovers`
+ * （本处零第二套逻辑；`require` **延迟**以打破加载环 —— `lib/books.js` 亦在调用期
+ * `require('./sealCards.js')` 取 `primaryFaceOf` / `thumbKeyOfDigest`，两侧都延迟 ⇒ 加载期无环）。
+ * 恒**零写入**；载荷 `{stamp_ids:[≤200]}` → `{ok:true, rows:[{stamp_id, thumb_key}]}`。
+ * @param {object} payload `{stamp_ids: string[]}`
+ */
+async function listSealCovers(payload) {
+  const { listSealCovers: runListSealCovers } = require('./books.js')
+  return runListSealCovers(payload)
+}
+
+/**
  * **匿名可调的公开 op 表**（`index.js` 在令牌校验**之前**按这张表分流；
  * 表外的一切 op 仍必须验 token）。**只读**：这里的 op 一律零写。
- * **恰 5 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
+ * **恰 6 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
  * ＋ `listPersonCards` / `getPersonCard`（人物读面改吃 CARD 主库；`2 → 4`）
- * ＋ `catalogStats`（首页页头三计数；`4 → 5`）。
+ * ＋ `catalogStats`（首页页头三计数；`4 → 5`）
+ * ＋ `listSealCovers`（卡片矩陣：印章封面 `thumb_key` 批量派生；`5 → 6`，恒零写）。
  */
 const PUBLIC_OPS = Object.freeze({
   listSealCards,
   suggestAuthors,
   listPersonCards,
   getPersonCard,
-  catalogStats
+  catalogStats,
+  listSealCovers
 })
 
 /**
  * **匿名可调的公开写 op 表**（`index.js` 在令牌 / 会话 / 配置判定**之前**按 `action:'public-write'`
  * 分流；与上面 `PUBLIC_OPS` **两张表分开可判负**）。**恰 1 成员**：`bumpSealView`
  * （印章浏览量 +1；裁定 §6）。表外 op ⇒ `FORBIDDEN` ＋ 零读零写。
- * `PUBLIC_OPS` **现恰 5 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
+ * `PUBLIC_OPS` **现恰 6 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
  */
 const PUBLIC_WRITE_OPS = Object.freeze({
   bumpSealView
@@ -2718,6 +2733,10 @@ module.exports = {
   BUMP_SEAL_VIEW_MAX_STAMP_ID_LENGTH,
   listSealCards,
   suggestAuthors,
+  /* 卡片矩陣（2026-11-17）：公開讀 `listSealCovers`（薄委派 `lib/books.js`）＋
+     `thumb_key` 的唯一派生單點（`lib/books.js` 亦取它，**同源不建第二套**）。 */
+  listSealCovers,
+  thumbKeyOfDigest,
   /* 人物读面（本单 `PUBLIC_OPS` 2 → 4）：op 本体 ＋ 冻结键面 ＋ 降级标记。 */
   listPersonCards,
   getPersonCard,

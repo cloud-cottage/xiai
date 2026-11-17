@@ -91,7 +91,7 @@ const {
 const {
   PUBLIC_OPS,
   /* **公开写面（本单新增｜`action:'public-write'`）**：`PUBLIC_WRITE_OPS` 是**另一张表**
-     （现恰 1 成员 `bumpSealView`），与 `PUBLIC_OPS`（现恰 5 成员、恒零写）**分开可判负**。 */
+     （现恰 1 成员 `bumpSealView`），与 `PUBLIC_OPS`（现恰 6 成员、恒零写）**分开可判负**。 */
   PUBLIC_WRITE_OPS,
   REPAIR_PRIMARY_FACE_READOUT_KEYS,
   REPAIR_SEAL_FACE_COUNT_READOUT_KEYS,
@@ -127,7 +127,14 @@ const {
   CREATE_BOOK_READOUT_KEYS,
   LIST_BOOKS_READOUT_KEYS,
   SET_IMAGE_BOOK_READOUT_KEYS,
-  SEARCH_BOOK_IMAGES_READOUT_KEYS
+  SEARCH_BOOK_IMAGES_READOUT_KEYS,
+  /* **卡片矩陣四 op（2026-11-17）**：三管理員 op 的讀數鍵面真源
+     （`updateBook` / `setBookCover` / `listBookCovers`）；`listSealCovers` 是**公開讀**
+     （`lib/sealCards.js::PUBLIC_OPS` 成员，本文件 `handlePublic` **原樣透傳**，
+     故不需要按 op 收窄分支）。 */
+  UPDATE_BOOK_READOUT_KEYS,
+  SET_BOOK_COVER_READOUT_KEYS,
+  LIST_BOOK_COVERS_READOUT_KEYS
 } = require('./lib/books.js')
 /* **V6-a 探测（additive）**：`sessionProbe` 的诊断通道读取器（延迟 require ＋ 懒解析）**已落在 `lib/ops.js`**
    （本函数唯一的 SDK 落点）——`index.js` 保持**零 SDK 字面**以恢复 C3 / C6 / A15 三条静态门；探针语义不变。 */
@@ -1150,6 +1157,31 @@ if (op === 'searchBookImages') {
     if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
   }
 }
+/* **卡片矩陣三管理員 op 讀數面（additive 透傳｜**按 op 收窄**｜2026-11-17）**：
+   鍵名真源 ＝ `lib/books.js` 的三個 `*_READOUT_KEYS` 常量（`lib/ops.js` 的同名薄委派共用同一份）；
+   逐 op 封閉、存在性驅動：
+   · `updateBook`     → `ok / book`（`book` 与 `listBooks` 行投影同形，`BOOK_ROW_KEYS` 恒 12 键）；
+   · `setBookCover`   → `ok / book_id / cover_image_id`（`cover_image_id` 為服務端**讀回值**）；
+   · `listBookCovers` → `ok / rows`（`rows:[{book_id, cover_image_id, thumb_key}]`）。
+   **其餘任何 op 一律不透傳這些鍵**（即使 `opResult` 意外帶同名鍵 —— 例如 `listBooks` 的
+   `books`、`pullImportRows` 的 `rows`、`setImageBook` 的 `book_id` —— 亦一個都不外泄）
+   ⇒ 既有回包**逐字不變**；失敗回包（`ok:false`）走上面的早退分支、恒 3 鍵、零讀數鍵。
+   `listSealCovers` **不在本處**：它是公開讀 op，由 `handlePublic` 原樣透傳（零收窄、零補鍵）。 */
+if (op === 'updateBook') {
+  for (const key of UPDATE_BOOK_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'setBookCover') {
+  for (const key of SET_BOOK_COVER_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'listBookCovers') {
+  for (const key of LIST_BOOK_COVERS_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
 /* **斐萃设备令牌签发读数面（additive 透传｜**按 op 收窄**｜跨仓契约 §13.2｜本单）**：
    `token` / `expires_at` **僅當 `op === 'issueFeicuiDeviceToken'` 且 `opResult` 確有該鍵時**
    才逐字疊進回包（前端拿它「複製」或「發起本地授權」）；**其餘任何 op 一律不透傳這 2 個鍵**
@@ -1169,7 +1201,7 @@ return response
  * **匿名只读动作（`action:'public'`）**：**不验令牌、不读身份、零写入**。
  *
  * 硬口径（逐条）：
- *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；现恰 5 成员
+ *   · 只放行 `lib/sealCards.js::PUBLIC_OPS` 白名单（**单一真源**；现恰 6 成员
  *     `listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats`；
  *     表外 op ⇒ `FORBIDDEN` ＋ 零读）；
  *     `repairPrimaryFace` 等管理员 op **不在这张表上** ⇒ 匿名调不到，仍必须走 `action:'verify'`
@@ -1232,7 +1264,7 @@ async function handlePublic(event) {
  *   · 与 `action:'public'` **同级**：位置在**令牌 / 会话 / 配置判定之前** ⇒ 匿名可调，
  *     且**不因令牌配置缺失而连坐**（浏览计数不该被写面配置故障拖死）；
  *   · 表外 op（含一切 `PUBLIC_OPS` 读 op 与管理员 op）⇒ `FORBIDDEN` ＋ **零读零写**；
- *     `PUBLIC_OPS` 现恰 5 成员且**恒零写** —— 两张表分开可判负；
+ *     `PUBLIC_OPS` 现恰 6 成员且**恒零写** —— 两张表分开可判负；
  *   · 载荷 / 回包键面由各 op 自己封闭（本函数**零改写、零补键** ⇒ 成功恰 1 键
  *     `{ok:true}`、失败恰 3 键 `{ok:false, reason, message}`）；
  *   · op 内部的存储故障已由 op 自己转成结构化失败（不得 5xx）；这里兜底**未预期异常**

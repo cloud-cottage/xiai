@@ -1,45 +1,46 @@
-
 <script setup>
 /**
- * 【印譜匯觀】管理页（`/books`）—— 印譜（book）清單 ＋ 新建 ＋ 批量掛圖。
+ * 【印譜匯觀】管理页（`/books`）—— 印譜（book）**卡片矩陣** ＋ 新建 ＋ 點卡開彈窗。
  *
  * 口径真源：`docs/book-catalog-ruling-2026-11-14.md`（§一 数据模型 / §二 菜单与路由 /
- * §三 写入面 / §四 前端 / §五 验收）。
+ * §三 写入面 / §四 前端 / §五 验收）；本页形态另按 Kevin 2026-11-17 定：
+ *   · 列表 ＝ **卡片矩陣：每行 5 個、共 10 行（50 個位）**；不足 50 時**剩餘位留空**（不拉伸、
+ *     欄固定五等分，不改成自動填充類寫法）；分頁沿用 `listBooks`（`limit=50` 正好一頁）；
+ *   · **封面不自動選**（選 C）：卡片封面位一律先給**統一占位圖**；封面只能由用戶在彈窗裡手動選
+ *     （`setBookCover`）；
+ *   · 點卡片 ⇒ **book 彈窗**（詳情 ＋ 全部操作 ＋ 手動選封面），見 `components/BookDetailDialog.vue`。
  *
- * 三块落点（本页只做这三块；详情页的「所屬印譜」下拉在 `SealDetailView.vue`）：
- *   ① 列表：印譜編號 / 書名 / 作者人名 / 首次出版年 / ISBN / CIP / 關聯影像數；
- *   ② 新建表单：書名（必填）／作者 `PersonPicker`（必填，候选源 `persons.referablePersons()`，
- *      無命中 ⇒ 引導提交印人提案，**不放行自由文本**）／ISBN／CIP／首次出版年（可空，1000〜當年）；
- *   ③ 批量掛圖：选一本书 → 勾选影像 → **逐张** `setImageBook`；已归属其它书的影像**明示当前归属**，
- *      改挂前须管理员二次确认（一次性提交守卫在 `runAttach` 的 `attaching` 判，不靠按钮 disabled）。
+ * 服務端接口（本页调用的 4 个 op；其中 3 个**服务端并行实现中**，未就绪时如实提示、零写入）：
+ *   · `listBooks({offset,limit,q,author,year_from,year_to})`  —— 既有
+ *   · `updateBook({book_id, patch})`                          —— 新
+ *   · `setBookCover({book_id, image_id})`                     —— 新
+ *   · 封面批量讀（一次 ≤50 個 id）                            —— 新（詳見 `loadBookCovers`）
+ *   （彈窗內沿用既有的 `searchBookImages` / `setImageBook` / `createBook`。）
+ *
+ * 取值口径：
+ *   · 卡片封面：**一次批量**讀封面行（不逐卡發請求）⇒ 對象鍵逐張走**既有取圖鏈**
+ *     `sealCards.cardCoverUrl()`（與 `SealCard` 同一個 `thumb_key` → `display_key` 單點）；
+ *     取不到 / 缺封面 ⇒ 占位圖（`sealCards.coverPlaceholderUrl()`），**不報錯**；
+ *   · 圖片一律 `loading="lazy"`；
+ *   · 接口報錯**原樣上屏**（`message || reason` 逐字），不吞成通用提示。
  *
  * 权限（双门之一｜UI 门）：**非管理员 / 未登錄 ⇒ 只渲染无权限提示，零 book 数据请求**
- * （`canManage` 前置判定，`refreshBooks` / 影像清单 / `loadBookApi` 一律不触发）—— 不得先取后藏。
- * 服务端另有管理员门（另一门，本页不替代）。
- *
- * 服務層：`../services/books.js`（`createBook` / `listBooks` / `setImageBook`）由**另一单**提供，
- * 本单写集不含该文件 ⇒ 这里用 `import.meta.glob` **晚绑定**：文件落地前构建照样通过，
- * 调用时缺模块 ⇒ 给「印譜服務尚未就緒」的可见反馈（**不伪造成功**）；落地后自动接上，
- * 签名按裁定件 §三（payload 恰 5 键 / `book_id: null` ＝ 取消归属）。
- *
- * 隐私（普通用户零泄漏）：本页仅管理员可达；`book_id` **不出现在任何普通用户可见文本**
- * （本页所有上屏内容都只在管理员态渲染）。
- * 钩子：本页新按钮一律用 `data-action`（**不得**用 `data-admin-action` —— 该族取值集合冻结为 12）。
+ * （`canManage` 前置判定，`refreshBooks` / 封面批量 / 影像清单 一律不触发）—— 不得先取后藏。
+ * 钩子：本页按钮一律 `data-action`（**不得**用 `data-admin-action` —— 该族取值集合冻结为 12）。
  * 上屏文案一律繁體（`s2t(x) === x`）。
  */
 import { computed, ref, watch } from 'vue'
-import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
+import BookCard from '../components/BookCard.vue'
+import BookDetailDialog from '../components/BookDetailDialog.vue'
 import PersonPicker from '../components/PersonPicker.vue'
 import PersonProposalDialog from '../components/PersonProposalDialog.vue'
-import { admin, corrections, persons, seals } from '../services/index.js'
+import { admin, persons, sealCards } from '../services/index.js'
 import { isLoggedIn } from '../data/session.js'
 import { toTraditionalText } from '../utils/traditional.js'
-/* 印譜（book）服务：静态命名空间导入（本页用 `createBook` / `listBooks` / `setImageBook`）。 */
+/* 印譜（book）服务：静态命名空间导入（本页用 `listBooks` / `createBook`；弹窗内用其余 op）。 */
 import * as bookService from '../services/books.js'
 
-/* ------------------------------ 服務層晚綁定 ------------------------------ */
-/* **静态接线（本批修）**：`services/books.js` 已落地，导入在文件头 import 区块 ——
-   不再用 `import.meta.glob` 晚绑定（过渡手段留着会掩盖真实接线错误）。 */
+/* ------------------------------ 服務層 ------------------------------ */
 let bookApiPromise = null
 function loadBookApi() {
   if (!bookApiPromise) bookApiPromise = Promise.resolve(bookService)
@@ -59,7 +60,39 @@ const denialMessage = computed(() => {
 const books = ref([])
 const booksState = ref('idle') // idle / loading / ready / failed / unavailable
 const booksMessage = ref('')
-const version = ref(0)
+
+/* ---------------------- 卡片矩陣（5 欄 × 10 行 ＝ 50 位） ---------------------- */
+/** 每行格數（Kevin 定：5）。 */
+const GRID_COLUMNS = 5
+/** 行數（Kevin 定：10）。 */
+const GRID_ROWS = 10
+/** 位的總數 ＝ 一頁的印譜上限（50 ＝ `listBooks` 的預設 limit，正好一頁）。 */
+const GRID_SLOT_COUNT = GRID_COLUMNS * GRID_ROWS
+
+/**
+ * 50 個位：前段放印譜（最多 50 本），**不足則補空位**（`book: null`）。
+ * 空格位照樣佔一個 grid cell ⇒ 佈局永遠是 5 × 10，最後一行不會被拉伸。
+ * @param {Array<object>} list 印譜行
+ * @param {number} [slotCount] 位數（缺省 50）
+ * @returns {Array<{key:string, book:object|null}>}
+ */
+function bookGridSlotsOf(list, slotCount = GRID_SLOT_COUNT) {
+  const source = Array.isArray(list) ? list : []
+  const total = Number.isInteger(slotCount) && slotCount > 0 ? slotCount : 50
+  const slots = []
+  const filled = source.slice(0, total)
+  for (let index = 0; index < filled.length; index += 1) {
+    const book = filled[index] && typeof filled[index] === 'object' ? filled[index] : null
+    slots.push({ key: `book-${book && book.id ? book.id : index}`, book })
+  }
+  for (let index = slots.length; index < total; index += 1) {
+    slots.push({ key: `slot-${index}`, book: null })
+  }
+  return slots
+}
+
+/** 上屏的 50 個位（每頁一屏，不虛擬滾動 —— 一頁最多 50 本）。 */
+const gridSlots = computed(() => bookGridSlotsOf(books.value, GRID_SLOT_COUNT))
 
 /* ---------------------- 分頁 ＋ 篩選（2026-11-15） ---------------------- */
 /* 口徑：篩選與分頁**一律在服務端**（`listBooks` 封閉 6 鍵）；本頁只持「已生效」條件，
@@ -147,7 +180,7 @@ function gotoNextPage() {
  *   · **主作者已在上一行顯示** ⇒ 鏈裡**排除主作者本人**，避免重複；
  *   · 角色**簡轉繁**（源站 `role` 混用「辑／輯／刻印／刻」；上屏一律繁體），空角色 ⇒ `編者`；
  *   · 人名優先本機印人快照，退行上快照（`c.name`）；皆無 ⇒ 不造名、該條**整條略過**；
- *   · 結果為空 ⇒ 模板不渲染這一鏈行（**不編造**「佚名」）。
+ *   · 結果為空 ⇒ 卡片不渲染這一鏈行（**不編造**「佚名」）。
  */
 function creatorChainOf(book) {
   const list = book && Array.isArray(book.creators) ? book.creators : []
@@ -166,30 +199,22 @@ function creatorChainOf(book) {
 }
 
 function authorNameOf(book) {
-  const id = book && book.author_person_id ? String(book.author_person_id) : ''
+  /* 卡片口徑（Kevin 2026-11-17）：**`author_name` 優先**（服務端行上快照，與本機印人快照
+     是否就緒無關）；快照缺 ⇒ 退本機印人快照 ⇒ 皆無明示「未收錄」。 */
   const snapshot = book && book.author_name ? String(book.author_name).trim() : ''
+  if (snapshot) return snapshot
+  const id = book && book.author_person_id ? String(book.author_person_id) : ''
   if (id) {
     const resolved = persons.personNameOfId(id)
     if (resolved) return resolved
   }
-  if (snapshot) return snapshot
   if (!id) return '（未著錄）'
   return '（未收錄於印人庫）'
 }
 
-/** 本页写入成功后的本地归属覆盖（影像编号 → 印譜编号；'' ⇒ 未归属），用于即时反映而不假成功。 */
-const bookOverrides = ref({})
-
-function bookIdOfImageRow(image) {
-  const id = image && image.id ? String(image.id) : ''
-  if (id && Object.prototype.hasOwnProperty.call(bookOverrides.value, id)) return bookOverrides.value[id]
-  if (!image || !Object.prototype.hasOwnProperty.call(image, 'book_id')) return ''
-  return image.book_id === null || image.book_id === undefined ? '' : String(image.book_id)
-}
-
 /**
- * 逐本印譜的關聯影像数：**服务端行上快照**（`book.image_count`）＋ 本次页面内的挂载增量
- * （`bookOverrides` 里由本页写入产生的变化）。不再从前端全量影像装配里统计。
+ * 逐本印譜的關聯影像数：**服务端行上快照**（`book.image_count`）＋ 本次弹窗内的挂载增量
+ * （`attachDelta` 里由本页写入产生的变化）。
  */
 const attachDelta = ref({}) // bookId -> +1 / -1
 
@@ -216,6 +241,127 @@ function bookLabel(bookId) {
   return book ? `${id}｜${book.name || '（無書名）'}` : `${id}（清單外）`
 }
 
+/* ---------------------- 卡片封面（**一次批量**，不逐卡發請求） ---------------------- */
+const coverRows = ref({}) // bookId -> { book_id, cover_image_id, thumb_key }
+const coverUrls = ref({}) // bookId -> 對象臨時鏈接
+const coversState = ref('idle') // idle / loading / ready / unavailable / failed
+const coversMessage = ref('')
+
+/** 取鏈失敗里**屬於「沒有封面」而非「壞了」**的原因（照 `SealCard` 同一分檔；這些不報錯）。 */
+const COVER_CONTENT_REASONS = ['MISSING_REQUIRED', 'INVALID_VALUE', 'STORAGE_FILE_NOT_FOUND', 'NOT_IMAGE']
+/** 取鏈併發上限（同屏 50 張也不一次打滿 SDK）。 */
+const COVER_URL_CONCURRENCY = 6
+
+/**
+ * **封面批量讀取（本頁唯一的封面請求點）**：本頁 50 個印譜 id **一次**取回封面行，
+ * 之後只做本地映射 —— 卡片不得各自發請求。
+ * 接口未上線 ⇒ 記 `unavailable`，卡片顯示占位圖（**不是錯誤**：還沒請求過）。
+ * 報錯 ⇒ 原樣上屏，且卡片仍走占位圖（列表不因此不可用）。
+ */
+async function loadBookCovers() {
+  if (!canManage.value) return
+  const ids = books.value
+    .map((book) => (book && book.id ? String(book.id) : ''))
+    .filter((id) => id !== '')
+    .slice(0, GRID_SLOT_COUNT)
+  if (!ids.length) {
+    coverRows.value = {}
+    coverUrls.value = {}
+    coversState.value = 'ready'
+    coversMessage.value = ''
+    return
+  }
+  coversState.value = 'loading'
+  coversMessage.value = ''
+  const api = await loadBookApi()
+  /* **本頁唯一的封面請求點**（一次取回本頁 ≤50 本的封面行；卡片一律不得自行發請求）。 */
+  const listCovers = api && typeof api.listBookCovers === 'function' ? api.listBookCovers : null
+  if (!listCovers) {
+    coverRows.value = {}
+    coverUrls.value = {}
+    coversState.value = 'unavailable'
+    return
+  }
+  let out = null
+  try {
+    out = await listCovers({ book_ids: ids })
+  } catch (err) {
+    out = { ok: false, message: (err && err.message) || '調用異常' }
+  }
+  if (!out || out.ok !== true) {
+    coverRows.value = {}
+    coverUrls.value = {}
+    coversState.value = 'failed'
+    coversMessage.value = `封面讀取失敗：${(out && (out.message || out.reason)) || '服務未回報原因'}`
+    return
+  }
+  const rows = Array.isArray(out.rows) ? out.rows : []
+  const nextRows = {}
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue
+    const id = String(row.book_id === undefined || row.book_id === null ? '' : row.book_id)
+    if (!id) continue
+    nextRows[id] = {
+      book_id: id,
+      cover_image_id: String(row.cover_image_id === undefined || row.cover_image_id === null ? '' : row.cover_image_id),
+      thumb_key: String(row.thumb_key === undefined || row.thumb_key === null ? '' : row.thumb_key)
+    }
+  }
+  coverRows.value = nextRows
+  coversState.value = 'ready'
+  await resolveCoverUrls()
+}
+
+/**
+ * 對象鍵 → 臨時鏈接：**逐張走既有取圖鏈**（`sealCards.cardCoverUrl`，抖 `{thumb_key}` 過去的
+ * 就是同一條 `thumb_key` → `display_key` 鏈），併發受限。失敗 ⇒ 該卡留空走占位圖。
+ */
+async function resolveCoverUrls() {
+  const tasks = Object.keys(coverRows.value)
+    .map((bookId) => ({ bookId, key: String((coverRows.value[bookId] || {}).thumb_key || '').trim() }))
+    .filter((item) => item.key !== '')
+  if (!tasks.length) {
+    coverUrls.value = {}
+    return
+  }
+  const next = {}
+  const reports = []
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < tasks.length) {
+      const item = tasks[cursor]
+      cursor += 1
+      const cover = await sealCards.cardCoverUrl({ thumb_key: item.key })
+      if (cover.ok) {
+        next[item.bookId] = cover.url
+        continue
+      }
+      if (COVER_CONTENT_REASONS.indexOf(cover.reason) === -1) {
+        reports.push(cover.message || '封面影像暫時無法顯示')
+      }
+    }
+  }
+  const size = Math.min(COVER_URL_CONCURRENCY, tasks.length)
+  const workers = []
+  for (let index = 0; index < size; index += 1) workers.push(worker())
+  await Promise.all(workers)
+  coverUrls.value = next
+  /* 只有「配置 / 傳輸面」的失敗才上屏（缺封面不算錯）。 */
+  if (reports.length && Object.keys(next).length === 0) {
+    coversMessage.value = `封面影像暫時無法顯示：${reports[0]}`
+  }
+}
+
+function coverOf(bookId) {
+  const id = bookId === undefined || bookId === null ? '' : String(bookId)
+  return id && Object.prototype.hasOwnProperty.call(coverRows.value, id) ? coverRows.value[id] : null
+}
+
+function coverUrlOf(bookId) {
+  const id = bookId === undefined || bookId === null ? '' : String(bookId)
+  return id && Object.prototype.hasOwnProperty.call(coverUrls.value, id) ? coverUrls.value[id] : ''
+}
+
 /* ------------------------------ ② 新建表單 ------------------------------ */
 const currentYear = new Date().getFullYear()
 const form = ref({ name: '', author_person_id: '', isbn: '', cip: '', publisher: '', first_publish_year: '' })
@@ -240,6 +386,15 @@ function onAuthorFilter(state) {
 
 function openProposal() {
   proposalOpen.value = true
+}
+
+/** 「新增印譜」入口（清單工具列按鈕）：滾到表單並聚焦書名，不另開彈窗。 */
+function focusCreateForm() {
+  if (typeof document === 'undefined') return
+  const input = document.getElementById('book-name')
+  if (!input) return
+  if (typeof input.scrollIntoView === 'function') input.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  if (typeof input.focus === 'function') input.focus()
 }
 
 /** 首次出版年校验（空 ⇒ 合规；否则须为 1000〜當年的整数）。 */
@@ -283,7 +438,7 @@ async function submitBook() {
     return
   }
   const yearText = String(form.value.first_publish_year || '').trim()
-  /* 载荷恰 5 键（裁定件 §三：未知键 ⇒ `INVALID_FIELD`）。 */
+  /* 载荷恰 6 键（裁定件 §三：未知键 ⇒ `INVALID_FIELD`）。 */
   const payload = {
     name: String(form.value.name || '').trim(),
     isbn: String(form.value.isbn || '').trim(),
@@ -310,189 +465,47 @@ async function submitBook() {
   createFeedback.value = `已建立印譜 ${bookId}《${payload.name}》。清單已重新讀取。`
   resetForm()
   await refreshBooks()
-  if (/^\d{5}$/.test(bookId)) selectedBookId.value = bookId
+  const created = bookById.value.get(bookId)
+  if (created) openBookDialog(created)
 }
 
-/* ------------------------------ ③ 批量掛圖 ------------------------------ */
-const selectedBookId = ref('')
-const selectedImages = ref([]) // [{ imageId, stampId, bookId }]
-const attaching = ref(false)
-const attachFeedback = ref('')
-/** 待确认的批量提交（`{ ids, conflicts }`；`ids` ＝ 当时全部勾选项，`conflicts` 仅用于明示当前归属）。 */
-const pendingAttach = ref(null)
+/* ------------------------------ ③ 詳情彈窗 ------------------------------ */
+/** 開啟中的印譜快照（`null` ⇒ 彈窗不掛載）。 */
+const openBook = ref(null)
 
-/* **按需检索**（2026-11-15）：不再把全部印章/影像装进浏览器 —— 输入关键词后由服务端检索
-   （`searchBookImages`：印文 / 章号 / 序号，简繁双形态），只回本页 24 条。 */
-const imageSearch = ref({ q: '', busy: false, rows: [], total: 0, searched: false, error: '' })
-const IMAGE_SEARCH_LIMIT = 24
-
-/** 执行检索（`q` 必填；空 ⇒ 本地挡，零请求）。 */
-async function runImageSearch() {
-  /* 管理员门前置：非管理员 ⇒ 零请求（不得先取后藏）。 */
+function openBookDialog(book) {
+  if (!book || typeof book !== 'object') return
   if (!canManage.value) return
-  const keyword = String(imageSearch.value.q || '').trim()
-  if (!keyword) {
-    imageSearch.value = { ...imageSearch.value, error: '請輸入檢索關鍵詞（印文 / 章號 / 序號）。', rows: [], total: 0, searched: false }
-    return
-  }
-  if (imageSearch.value.busy) return
-  imageSearch.value = { ...imageSearch.value, busy: true, error: '' }
-  const api = await loadBookApi()
-  if (!api || typeof api.searchBookImages !== 'function') {
-    imageSearch.value = { ...imageSearch.value, busy: false, error: '影像檢索尚未就緒（服務層缺 `searchBookImages`）。' }
-    return
-  }
-  let out = null
-  try {
-    out = await api.searchBookImages({ q: keyword, limit: IMAGE_SEARCH_LIMIT })
-  } catch (err) {
-    out = { ok: false, message: (err && err.message) || '調用異常' }
-  }
-  if (!out || out.ok !== true) {
-    imageSearch.value = {
-      ...imageSearch.value,
-      busy: false,
-      rows: [],
-      total: 0,
-      searched: true,
-      error: `檢索失敗：${(out && (out.message || out.reason)) || '服務未回報原因'}`
-    }
-    return
-  }
-  imageSearch.value = {
-    ...imageSearch.value,
-    busy: false,
-    rows: Array.isArray(out.rows) ? out.rows : [],
-    total: Number.isInteger(out.total) ? out.total : 0,
-    searched: true,
-    error: ''
+  openBook.value = { ...book }
+}
+
+function closeBookDialog() {
+  openBook.value = null
+}
+
+/** 詳情保存回包 ⇒ 就地更新（清單卡片與彈窗同步；不重拉整頁）。 */
+function onBookSaved(book) {
+  if (!book || !book.id) return
+  const id = String(book.id)
+  books.value = books.value.map((row) => (String(row.id) === id ? { ...row, ...book } : row))
+  if (openBook.value && String(openBook.value.id) === id) {
+    openBook.value = { ...openBook.value, ...book }
   }
 }
 
-const selectedImageIds = computed(() => new Set(selectedImages.value.map((row) => row.imageId)))
-
-function isSelected(imageId) {
-  return selectedImageIds.value.has(imageId)
+/** 封面變更 ⇒ 重取本頁封面批量（仍是同一個請求點；換封面後卡片立刻反映）。 */
+function onCoverChanged() {
+  void loadBookCovers()
 }
 
-/**
- * 勾選 / 取消（保留勾選時的歸屬快照 ⇒ 改掛確認據此明示「当前归属」）。
- * 行形态来自服务端 `searchBookImages`（**snake_case**：`image_id` / `stamp_id` / `book_id`），
- * 这里两种形态都认（兼容驼峰调用），不依赖单一命名。
- */
-function toggleImage(row) {
-  if (attaching.value) return
-  const imageId = textOfRow(row, 'image_id', 'imageId')
-  if (!imageId) return
-  if (isSelected(imageId)) {
-    selectedImages.value = selectedImages.value.filter((item) => item.imageId !== imageId)
-    return
-  }
-  selectedImages.value = [
-    ...selectedImages.value,
-    { imageId, stampId: textOfRow(row, 'stamp_id', 'stampId'), bookId: textOfRow(row, 'book_id', 'bookId') }
-  ]
-}
-
-/** 行字段读取（蛇形 / 驼峰二选一；缺 ⇒ 空串，不造值）。 */
-function textOfRow(row, snake, camel) {
-  const source = row && typeof row === 'object' ? row : {}
-  const value = source[snake] !== undefined ? source[snake] : source[camel]
-  return String(value === undefined || value === null ? '' : value)
-}
-
-function clearSelection() {
-  if (attaching.value) return
-  selectedImages.value = []
-}
-
-async function attachSelected() {
-  if (attaching.value) return
-  attachFeedback.value = ''
-  const targetId = String(selectedBookId.value || '')
-  if (!targetId) {
-    attachFeedback.value = '請先在上方選定要掛上的印譜。'
-    return
-  }
-  if (!selectedImages.value.length) {
-    attachFeedback.value = '請先勾選至少一張影像。'
-    return
-  }
-  /* 已归属其它书的影像 ⇒ 先明示当前归属、要求管理员确认（改挂需确认）。 */
-  const conflicts = selectedImages.value
-    .filter((item) => item.bookId && item.bookId !== targetId)
-    .map((item) => ({ imageId: item.imageId, currentBookId: item.bookId }))
-  if (conflicts.length) {
-    /* 确认后提交的是**当时全部勾选项**（未归属项一并挂上，不只改挂那几张）。 */
-    pendingAttach.value = { ids: selectedImages.value.map((item) => item.imageId), conflicts }
-    return
-  }
-  await runAttach(selectedImages.value.map((item) => item.imageId))
-}
-
-function cancelReassign() {
-  if (attaching.value) return
-  pendingAttach.value = null
-}
-
-async function confirmReassign() {
-  if (attaching.value) return
-  const pending = pendingAttach.value
-  pendingAttach.value = null
-  const ids = (pending && pending.ids) || []
-  if (!ids.length) return
-  await runAttach(ids)
-}
-
-/**
- * 逐张提交 `setImageBook`（**串行**，一张一判；回包须与请求一致才算成功 —— 不以
- * `updated >= 1` 判成功）。失败项保留勾选并给原因。
- */
-async function runAttach(imageIds) {
-  if (attaching.value) return
-  const targetId = String(selectedBookId.value || '')
-  if (!targetId || !imageIds.length) return
-  attaching.value = true
-  attachFeedback.value = ''
-  const api = await loadBookApi()
-  if (!api || typeof api.setImageBook !== 'function') {
-    attaching.value = false
-    attachFeedback.value = '印譜服務尚未就緒（`services/books.js` 未提供 `setImageBook`）；本次零寫入。'
-    return
-  }
-  const failures = []
-  const succeeded = []
-  for (const imageId of imageIds) {
-    let out = null
-    try {
-      out = await api.setImageBook({ image_id: imageId, book_id: targetId })
-    } catch (err) {
-      out = { ok: false, message: (err && err.message) || '調用異常' }
-    }
-    const echoedImage = out && out.image_id !== undefined && out.image_id !== null ? String(out.image_id) : ''
-    const echoedBook = out && out.book_id !== undefined && out.book_id !== null ? String(out.book_id) : ''
-    if (out && out.ok === true && (!echoedImage || echoedImage === imageId) && echoedBook === targetId) {
-      bookOverrides.value = { ...bookOverrides.value, [imageId]: targetId }
-      /* 关联数即时反映：目标书 +1；若该影像原本属于别的书 ⇒ 原书 -1（改挂）。 */
-      const previousBookId = (selectedImages.value.find((item) => item.imageId === imageId) || {}).bookId || ''
-      const nextDelta = { ...attachDelta.value }
-      nextDelta[targetId] = (nextDelta[targetId] || 0) + 1
-      if (previousBookId && previousBookId !== targetId) {
-        nextDelta[previousBookId] = (nextDelta[previousBookId] || 0) - 1
-      }
-      attachDelta.value = nextDelta
-      succeeded.push(imageId)
-    } else {
-      failures.push(`${imageId}：${(out && (out.message || out.reason)) || '回包與請求不一致'}`)
-    }
-  }
-  attaching.value = false
-  const failedIds = new Set(failures.map((line) => line.split('：')[0]))
-  selectedImages.value = selectedImages.value.filter((item) => failedIds.has(item.imageId))
-  const okText = `已掛上 ${succeeded.length} 張影像到 ${bookLabel(targetId)}。`
-  attachFeedback.value = failures.length
-    ? `${okText} ${failures.length} 張失敗 —— ${failures.join('；')}（失敗項保留勾選，可重試）。`
-    : okText
+/** 掛圖 / 取消歸屬 ⇒ 關聯數即時反映（正負增量，不清零）。 */
+function onCountChanged(event) {
+  const id = event && event.book_id ? String(event.book_id) : ''
+  const delta = Number(event && event.delta)
+  if (!id || !Number.isFinite(delta) || delta === 0) return
+  const next = { ...attachDelta.value }
+  next[id] = (next[id] || 0) + delta
+  attachDelta.value = next
 }
 
 /* ------------------------------ 讀數 ------------------------------ */
@@ -523,7 +536,10 @@ async function refreshBooks() {
   pageHasMore.value = out.hasMore === true
   if (Number.isInteger(out.offset)) pageOffset.value = out.offset
   if (Number.isInteger(out.limit) && out.limit > 0) pageSize.value = out.limit
+  /* 換頁 / 換篩選 ⇒ 舊增量清零（本頁內增量只對同一批行有意義）。 */
+  attachDelta.value = {}
   booksState.value = 'ready'
+  await loadBookCovers()
 }
 
 /* 会话水合后才变成管理员的情形：`watch` 在 `canManage` 翻真时**才**发第一次请求。 */
@@ -535,8 +551,11 @@ watch(
     } else {
       books.value = []
       booksState.value = 'idle'
-      selectedImages.value = []
-      selectedBookId.value = ''
+      coverRows.value = {}
+      coverUrls.value = {}
+      coversState.value = 'idle'
+      attachDelta.value = {}
+      openBook.value = null
     }
   },
   { immediate: true }
@@ -550,7 +569,7 @@ watch(
         <h1>印譜匯觀</h1>
         <p>
           印譜（book）資料與影像歸屬關係目前僅管理員可見：一本印譜含書名、作者（印人庫引用）、
-          ISBN、CIP 與首次出版年；一張影像至多歸一本印譜，可在此批量掛圖或取消歸屬。
+          ISBN、CIP 與首次出版年；一張影像至多歸一本印譜。點卡片開啟詳情，即場改資料、掛圖、選封面。
         </p>
       </div>
       <span class="books__gate" data-books-gate="admin">僅管理員</span>
@@ -569,7 +588,7 @@ watch(
         {{ booksMessage }}
       </p>
 
-      <!-- ① 印譜清單 -->
+      <!-- ① 印譜卡片矩陣（5 欄 × 10 行 ＝ 50 位） -->
       <section class="panel" data-books-list>
         <div class="panel__head">
           <h2>印譜清單</h2>
@@ -599,43 +618,39 @@ watch(
             <div class="books-filter__actions">
               <button class="btn btn--primary" type="submit" data-action="filter-books">查詢</button>
               <button class="btn btn--ghost" type="button" data-action="reset-books-filter" @click="resetFilters">重置</button>
+              <button class="btn btn--ghost" type="button" data-action="book-create-open" @click="focusCreateForm">
+                新增印譜
+              </button>
             </div>
           </form>
-          <table v-if="books.length" class="books-table">
-            <thead>
-              <tr>
-                <th>印譜編號</th>
-                <th>書名</th>
-                <th>作者</th>
-                <th>首次出版年</th>
-                <th>出版社</th>
-                <th>ISBN</th>
-                <th>CIP</th>
-                <th>關聯影像數</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="book in books" :key="book.id" :data-book-row="book.id">
-                <td class="books-table__id">{{ book.id }}</td>
-                <td>{{ book.name }}</td>
-                <td class="books-table__author">
-                  <span class="books-table__author-name">{{ authorNameOf(book) }}</span>
-                  <span v-if="creatorChainOf(book)" class="books-table__creator-chain" data-creator-chain>
-                    {{ creatorChainOf(book) }}
-                  </span>
-                </td>
-                <td>{{ book.first_publish_year || '未著錄' }}</td>
-                <td>{{ book.publisher || '未著錄' }}</td>
-                <td>{{ book.isbn || '未著錄' }}</td>
-                <td>{{ book.cip || '未著錄' }}</td>
-                <td data-book-image-count>{{ imageCountOf(book) }}</td>
-              </tr>
-            </tbody>
-          </table>
+
+          <!-- 封面批量讀取的錯誤才上屏（缺封面走占位圖，不報錯） -->
+          <p v-if="coversMessage" class="notice books__notice" data-books-feedback="covers">
+            {{ coversMessage }}
+          </p>
+
+          <!-- 卡片矩陣：固定 5 欄；50 個位不足則補空位（不拉伸） -->
+          <div v-if="books.length" class="books-grid-scroll">
+            <div class="books-grid" data-books-grid>
+              <template v-for="slot in gridSlots" :key="slot.key">
+                <BookCard
+                  v-if="slot.book"
+                  :book="slot.book"
+                  :cover-url="coverUrlOf(slot.book.id)"
+                  :author-name="authorNameOf(slot.book)"
+                  :creator-chain="creatorChainOf(slot.book)"
+                  :image-count="imageCountOf(slot.book)"
+                  @open="openBookDialog"
+                />
+                <div v-else class="books-grid__slot" aria-hidden="true" data-books-grid-empty-slot></div>
+              </template>
+            </div>
+          </div>
           <p v-else-if="booksState === 'ready'" class="books__empty" data-books-empty="list">
-            {{ pageTotal === 0 && !filterActive ? '尚無印譜資料，先在下方的「新增印譜」建立第一本。' : '目前篩選條件沒有符合的印譜；可調整條件或按【重置】。' }}
+            {{ pageTotal === 0 && !filterActive ? '尚無印譜資料：先在下方「新增印譜」建立第一本，建好後會是卡片矩陣的第一格。' : '目前篩選條件沒有符合的印譜；可調整條件或按【重置】。' }}
           </p>
           <p v-else class="books__empty">印譜清單尚未就緒。</p>
+
           <!-- 分頁（服務端 offset/limit；上一頁/下一頁以整頁步進） -->
           <div v-if="booksState === 'ready' && pageTotal > 0" class="books-pager" data-books-pager>
             <button
@@ -657,7 +672,7 @@ watch(
         </div>
       </section>
 
-      <!-- ② 新增印譜 -->
+      <!-- ② 新增印譜（入口保留在清單工具列，表單在本區） -->
       <section class="panel" data-book-create>
         <div class="panel__head">
           <h2>新增印譜</h2>
@@ -734,107 +749,17 @@ watch(
         </div>
       </section>
 
-      <!-- ③ 批量掛圖 -->
-      <section class="panel" data-book-batch>
-        <div class="panel__head">
-          <h2>批量掛圖</h2>
-          <span class="detail__hint">
-              選定一本印譜 → 勾選影像 → 逐張提交；已歸屬其它印譜的影像改掛前須確認。
-              目標印譜下拉只列**當前頁**（每頁 {{ pageSize }} 本）—— 先用上方篩選縮小範圍，再在此選定。
-            </span>
-        </div>
-        <div class="panel__body">
-          <div class="field">
-            <label for="book-batch-target">目標印譜</label>
-            <select id="book-batch-target" v-model="selectedBookId" data-action="book-batch-target">
-              <option value="">請選擇印譜</option>
-              <option v-for="book in books" :key="book.id" :value="String(book.id)">
-                {{ book.id }}｜{{ book.name }}
-              </option>
-            </select>
-          </div>
-          <form class="field books-search" data-books-image-search @submit.prevent="runImageSearch">
-            <label for="book-batch-search">檢索影像（按需）</label>
-            <div class="books-search__row">
-              <input
-                id="book-batch-search"
-                v-model="imageSearch.q"
-                type="search"
-                maxlength="60"
-                placeholder="輸入印文 / 章號 / 序號，如「登彼太行」或 AACBM"
-              />
-              <button class="btn btn--primary" type="submit" data-action="book-batch-search" :disabled="imageSearch.busy">
-                {{ imageSearch.busy ? '檢索中…' : '檢索' }}
-              </button>
-            </div>
-            <span class="field__hint">
-              只在檢索後才讀取（每頁 {{ IMAGE_SEARCH_LIMIT }} 張）；命中 {{ imageSearch.total }} 張，已勾選
-              {{ selectedImages.length }} 張<template v-if="imageSearch.total > imageSearch.rows.length">，
-              僅列前 {{ imageSearch.rows.length }} 張 ⇒ 請收窄關鍵詞</template>。
-            </span>
-          </form>
-
-          <p v-if="imageSearch.error" class="notice books__notice" data-books-feedback="image-search">
-            {{ imageSearch.error }}
-          </p>
-          <ul v-if="imageSearch.rows.length" class="books-images">
-            <li v-for="row in imageSearch.rows" :key="row.image_id" class="books-image" :data-image-id="row.image_id">
-              <label class="books-image__check">
-                <input
-                  type="checkbox"
-                  :checked="isSelected(row.image_id)"
-                  :disabled="attaching"
-                  :data-image-id="row.image_id"
-                  data-action="book-batch-pick"
-                  @change="toggleImage(row)"
-                />
-                <span class="books-image__id">{{ row.image_id }}</span>
-              </label>
-              <span class="books-image__meta">{{ row.seal_name || '（未命名印章）' }}（{{ row.stamp_id || '無編號' }}）· {{ row.kind || '影像' }}</span>
-              <span class="books-image__owner" :data-image-owner="row.book_id">{{ bookLabel(row.book_id) }}</span>
-            </li>
-          </ul>
-          <p v-else-if="imageSearch.searched && !imageSearch.error" class="books__empty">
-            沒有符合條件的影像；換個關鍵詞再試（印文片段也可）。
-          </p>
-          <p v-else-if="!imageSearch.searched" class="books__empty">
-            尚未檢索 —— 輸入印文 / 章號後按【檢索】。
-          </p>
-
-          <p v-if="attachFeedback" class="notice books__notice" data-books-feedback="attach">
-            {{ attachFeedback }}
-          </p>
-          <div class="books__form-foot">
-            <button class="btn btn--ghost" type="button" data-action="book-batch-clear" :disabled="attaching" @click="clearSelection">
-              清空勾選
-            </button>
-            <button
-              class="btn btn--primary"
-              type="button"
-              data-action="book-batch-attach"
-              :disabled="attaching"
-              @click="attachSelected"
-            >
-              {{ attaching ? '正在逐張提交…' : `掛上所選影像（${selectedImages.length}）` }}
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <!-- 改掛確認（已歸屬其它印譜的影像）：明示當前歸屬，確認後逐張提交。 -->
-      <ConfirmActionDialog
-        v-if="pendingAttach"
-        title="確認改掛印譜"
-        :message="`所選影像中有 ${pendingAttach.conflicts.length} 張已歸屬其它印譜；一張影像只歸一本，改掛後即從原印譜移出。`"
-        :detail="pendingAttach.conflicts.map((item) => `${item.imageId}：現屬 ${bookLabel(item.currentBookId)}`).join('；')"
-        hint="確認後逐張提交；失敗的影像會保留在勾選中並給出原因。"
-        confirm-text="確認改掛"
-        cancel-text="取消"
-        confirm-action="book-batch-confirm"
-        cancel-action="book-batch-cancel"
-        :busy="attaching"
-        @confirm="confirmReassign"
-        @cancel="cancelReassign"
+      <!-- ③ 詳情彈窗（詳情 ＋ 掛圖 ＋ 選封面，全部操作都在裡面） -->
+      <BookDetailDialog
+        v-if="openBook"
+        :book="openBook"
+        :cover="coverOf(openBook.id)"
+        :cover-url="coverUrlOf(openBook.id)"
+        :label-of-book="bookLabel"
+        @close="closeBookDialog"
+        @saved="onBookSaved"
+        @cover-changed="onCoverChanged"
+        @count-changed="onCountChanged"
       />
 
       <PersonProposalDialog v-if="proposalOpen" @close="proposalOpen = false" />
@@ -863,13 +788,6 @@ watch(
   margin-bottom: var(--s-4);
 }
 
-.books__hint {
-  display: block;
-  margin-top: var(--s-2);
-  color: var(--c-text-muted);
-  font-size: var(--t-xs);
-}
-
 .books__error {
   display: block;
   margin-top: var(--s-1);
@@ -892,24 +810,29 @@ watch(
   margin-top: var(--s-4);
 }
 
-.books-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--t-sm);
+/* ============================================================================
+   **卡片矩陣**：每行 5 個、共 10 行（50 位）。
+   · 欄固定五等分（見下一條 `grid-template-columns`）—— **不得**改成自動填充類寫法：
+     那會把不足 50 的最後一行「撐寬拉伸」，與定案相反；
+   · 位子由 `bookGridSlotsOf` 補足到 50 個（空格位是真空 div，佔格但不可見）；
+   · 窄屏不放棄 5 欄（定案如此）⇒ 容器橫向可滾，格寬有下限。
+   ============================================================================ */
+.books-grid-scroll {
+  overflow-x: auto;
+  padding-bottom: var(--s-1);
 }
 
-.books-table th,
-.books-table td {
-  padding: var(--s-2);
-  border-bottom: 1px solid var(--c-line);
-  text-align: left;
-  vertical-align: top;
+.books-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-auto-rows: auto;
+  gap: var(--s-3);
+  min-width: 880px;
 }
 
-.books-table th {
-  color: var(--c-text-muted);
-  font-weight: normal;
-  font-size: var(--t-xs);
+/* 空格位：佔一個格但不畫任何東西（不拉伸、不留假卡片）。 */
+.books-grid__slot {
+  min-height: 1px;
 }
 
 /* 篩選列（服務端過濾；窄屏自動換行） */
@@ -935,7 +858,7 @@ watch(
 
 .books-filter__field input {
   padding: 6px 8px;
-  border: 1px solid var(--border, #ddd);
+  border: 1px solid var(--c-line);
   border-radius: 6px;
   background: transparent;
   color: inherit;
@@ -944,6 +867,7 @@ watch(
 
 .books-filter__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--s-2);
 }
 
@@ -957,69 +881,7 @@ watch(
 }
 
 .books-pager__range {
-  color: var(--muted-foreground, #666);
+  color: var(--c-text-muted);
   font-variant-numeric: tabular-nums;
-}
-
-.books-table__id {
-  font-family: var(--font-mono, monospace);
-  letter-spacing: 0.06em;
-}
-
-/* 作者列：主作者一行 ＋ 创作者链一行（弱化一級；链行存在性由 `v-if` 控制）。 */
-.books-table__author-name {
-  display: block;
-}
-
-.books-table__creator-chain {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted-foreground, #666);
-  font-size: 0.86em;
-  line-height: 1.35;
-}
-
-.books-images {
-  margin: var(--s-3) 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  max-height: 420px;
-  overflow-y: auto;
-}
-
-.books-image {
-  display: flex;
-  align-items: center;
-  gap: var(--s-3);
-  padding: var(--s-2) 0;
-  border-bottom: 1px solid var(--c-line);
-}
-
-.books-image__check {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  min-width: 200px;
-  cursor: pointer;
-}
-
-.books-image__id {
-  font-family: var(--font-mono, monospace);
-  font-size: var(--t-xs);
-}
-
-.books-image__meta {
-  flex: 1 1 auto;
-  color: var(--c-text-muted);
-  font-size: var(--t-xs);
-}
-
-.books-image__owner {
-  flex: 0 0 auto;
-  color: var(--c-text-muted);
-  font-size: var(--t-xs);
 }
 </style>

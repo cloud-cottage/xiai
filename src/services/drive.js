@@ -31,6 +31,10 @@ import { currentUser, isAdmin as isAdminSessionRef } from '../data/session.js'
 /* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
    雙端同段代碼 ⇒ 前端只能**副作用導入**、API 掛 `globalThis.__XIAI_CODE_ID__`。 */
 import '../utils/codeId.js'
+/* **封面縮略圖的批量讀面（本單新增）**：公開只讀 op `listSealCovers`（**無需令牌**），
+   與 `sealCards.js` 走同一條雲函數（`xiai-user-token` 的 `public` 分流）與同一套信封。 */
+import { callCloudFunction } from '../data/cloudbaseFn.js'
+import { cloudBaseConfigured } from '../data/cloudbase.js'
 import {
   readSeallists,
   writeSeallistRows,
@@ -442,6 +446,261 @@ export function listFolderItems(folderId) {
     empty: rows.length === 0,
     message: rows.length === 0 ? '這個資料夾還是空的。' : `共 ${rows.length} 枚印章`
   })
+}
+
+/* ============================================================================
+   資料夾：重命名（**本單新增的唯一本地寫能力**）
+   ----------------------------------------------------------------------------
+   · 仅**擁有者**可改名（非擁有者 ⇒ `FORBIDDEN` ＋ 零寫入，与移出 / 分享同口径）；
+   · **空名拒**（去空白後空串 ⇒ `INVALID_VALUE`）；長度上限与「新增資料夾」同一常數；
+   · 只改該資料夾行的 `name` ＋ `updated_at`，**其它行一字不動**（引用行 / 分享行零触碰
+     —— 分享链按 `seallist_id` 关联、不持夹名 ⇒ 改名不影响已发链接）；
+   · 返回形狀与 `createFolder` 同族（`ok / row / folder_id / code / message`，另加 `changed`）。
+   ============================================================================ */
+
+/** 資料夾名稱長度上限（与「新增資料夾」表單同一門；視圖 `maxlength` 亦取此值）。 */
+export const FOLDER_NAME_MAX_LENGTH = 60
+
+/**
+ * 重新命名資料夾（僅擁有者）。
+ * @param {string} folderId 資料夾 id
+ * @param {string} name 新名稱（去首尾空白後判空 / 判長）
+ * @returns {{ok:true, changed:boolean, row:object, folder_id:string, code:string, count?:number,
+ *            previous_name:string, message:string}|{ok:false, reason:string, message:string}}
+ */
+export function renameFolder(folderId, name) {
+  const owned = ownedFolder(folderId, '重新命名該資料夾')
+  if (!owned.ok) return owned
+
+  const clean = fold(name)
+  if (!clean) return deny('INVALID_VALUE', '請先填寫資料夾名稱。')
+  if (clean.length > FOLDER_NAME_MAX_LENGTH) {
+    return deny('INVALID_VALUE', `資料夾名稱最多 ${FOLDER_NAME_MAX_LENGTH} 個字。`)
+  }
+
+  const previous = owned.folder
+  if (clean === previous.name) {
+    return allow({
+      changed: false,
+      row: previous,
+      folder_id: previous.id,
+      code: previous.code,
+      previous_name: previous.name,
+      message: '資料夾名稱未變更。'
+    })
+  }
+
+  const row = { ...previous, name: clean, updated_at: nowIso() }
+  const next = owned.rows.map((item) => (item.id === row.id ? row : item))
+  const write = writeSeallistRows(next)
+  if (!write.ok) return write
+
+  return allow({
+    changed: true,
+    row,
+    folder_id: row.id,
+    code: row.code,
+    count: write.count,
+    previous_name: previous.name,
+    message: `已更名為「${clean}」`
+  })
+}
+
+/* ============================================================================
+   封面縮略圖：**最新加入的 9 枚**（3×3 九宮格）＋ 一次性批量取 `thumb_key`
+   ----------------------------------------------------------------------------
+   · 「最新加入」＝ 引用行 `added_at` **降序**，同值時按引用行 `id` **降序** —— 与
+     `listFolderItems` / `resolveShare` 的 `byTimeDesc` **同一把尺**（行上若无 `added_at`
+     则回落到 `created_at`，再退回 `0`：不会抛、也不会把无时间的行排到最前）；
+   · 每页**恰一次** `listSealCovers` 批量调用（50 卡 × 9 格 ⇒ 一次请求、去重后的 id 全集）；
+   · 取回的只有 `{stamp_id, thumb_key}` —— 对象键 → URL 的换算**仍只在**
+     `services/sealCards.js::cardCoverUrl`（本文件不新造取图通道）。
+   ============================================================================ */
+
+/** 每张卡片的九宮格位數（3 × 3）。 */
+export const FOLDER_COVER_SLOTS = 9
+
+/** `listSealCovers` 的云函数名 / 通道 / op 名（**唯一真源**）。 */
+export const SEAL_COVERS_FUNCTION_NAME = 'xiai-user-token'
+export const SEAL_COVERS_ACTION = 'public'
+export const SEAL_COVERS_OP = 'listSealCovers'
+
+/** 单次 `stamp_ids` 上限（冻结契约：服务端 `BOOK_COVERS_MAX_IDS ＝ 200`；超上限整单拒）。 */
+export const SEAL_COVERS_MAX_IDS = 200
+
+/**
+ * **纯函数**：把 id 全集切成 ≤ `size` 的批次（保持原序、零去重副作用）。
+ * 50 卡 × 9 格 ＝ 至多 450 枚 ⇒ 至多 3 次批量请求（**仍非逐卡请求**）。
+ * @param {string[]} ids
+ * @param {number} [size]
+ * @returns {string[][]}
+ */
+export function chunkStampIds(ids, size = SEAL_COVERS_MAX_IDS) {
+  const step = Math.max(1, Math.floor(Number(size) || SEAL_COVERS_MAX_IDS))
+  const source = Array.isArray(ids) ? ids : []
+  const chunks = []
+  for (let index = 0; index < source.length; index += step) {
+    chunks.push(source.slice(index, index + step))
+  }
+  return chunks
+}
+
+/**
+ * **纯函数**：把引用行按資料夾分组，各取「最新加入」前 `limit` 枚的 `seal_id`。
+ * @param {object[]} itemRows `seallist-items` 行（`{id, seallist_id, seal_id, added_at}`）
+ * @param {number} [limit] 每组取几枚（缺省 9）
+ * @returns {Record<string, string[]>} `資料夾 id ⇒ seal_id 数组`（時間倒序）
+ */
+export function latestStampIdsByFolder(itemRows, limit = FOLDER_COVER_SLOTS) {
+  const size = Math.max(1, Math.floor(Number(limit) || FOLDER_COVER_SLOTS))
+  const grouped = new Map()
+  ;(Array.isArray(itemRows) ? itemRows : []).forEach((row) => {
+    if (!row || typeof row !== 'object') return
+    const folder = fold(row.seallist_id)
+    if (!folder) return
+    if (!grouped.has(folder)) grouped.set(folder, [])
+    grouped.get(folder).push(row)
+  })
+  const out = {}
+  grouped.forEach((rows, folder) => {
+    out[folder] = rows
+      .slice()
+      .sort(byTimeDesc)
+      .slice(0, size)
+      .map((row) => fold(row.seal_id))
+      .filter(Boolean)
+  })
+  return out
+}
+
+/**
+ * 本页的封面计划：每个資料夾的 9 枚 `seal_id` ＋ **去重后的全集**（供一次批量调用）。
+ * @param {number} [limit]
+ * @returns {{ok:true, by_folder:Record<string,string[]>, stamp_ids:string[], message:string}
+ *          |{ok:false, reason:string, message:string}}
+ */
+export function myFolderCoverPlan(limit = FOLDER_COVER_SLOTS) {
+  const listing = listMyFolders()
+  if (!listing.ok) return listing
+  const items = readSeallistItems()
+  if (!items.ok) return items
+
+  const byFolder = latestStampIdsByFolder(items.rows, limit)
+  const seen = new Set()
+  const stampIds = []
+  listing.rows.forEach((folder) => {
+    ;(byFolder[folder.id] || []).forEach((sealId) => {
+      if (seen.has(sealId)) return
+      seen.add(sealId)
+      stampIds.push(sealId)
+    })
+  })
+  return allow({
+    by_folder: byFolder,
+    stamp_ids: stampIds,
+    message: `本次封面共 ${stampIds.length} 枚印章。`
+  })
+}
+
+/**
+ * **批量**取印章主印面的缩略件对象键（公开只读 op `listSealCovers`，无需令牌）。
+ * 形狀（冻结契约）：请求 `{stamp_ids:[...]}` ⇒ 回 `{ok, rows:[{stamp_id, thumb_key}]}`。
+ *
+ * **一批 ／ 一页一次调用点**：id 全集在**内部**按服务端上限（200）切片 —— 50 卡 × 9 格最多
+ * 3 次请求，**不是逐卡请求**；调用方（视图）仍只 await 一次。
+ * @param {{stamp_ids?:string[]}|string[]} input
+ * @returns {Promise<{ok:true, rows:Array<{stamp_id:string, thumb_key:string}>, message:string}
+ *          |{ok:false, reason:string, message:string}>}
+ */
+export async function listSealCovers(input = {}) {
+  const raw = Array.isArray(input) ? input : input && input.stamp_ids
+  const ids = []
+  const seen = new Set()
+  ;(Array.isArray(raw) ? raw : []).forEach((value) => {
+    const id = fold(value)
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    ids.push(id)
+  })
+  if (ids.length === 0) return allow({ rows: [], message: '沒有需要取封面的印章。' })
+  if (!cloudBaseConfigured()) {
+    return deny('CLOUD_UNAVAILABLE', '未配置雲端服務，封面縮略圖暫不可用。')
+  }
+
+  const rows = []
+  for (const chunk of chunkStampIds(ids)) {
+    const reply = await callCloudFunction(SEAL_COVERS_FUNCTION_NAME, {
+      action: SEAL_COVERS_ACTION,
+      op: SEAL_COVERS_OP,
+      payload: { stamp_ids: chunk }
+    })
+    /* 任一批失败 ⇒ 原話上屏（不靜默丟一半封面、不假裝成功）。 */
+    if (!reply || reply.ok !== true) {
+      return deny(
+        (reply && reply.reason) || 'STORAGE_UNAVAILABLE',
+        (reply && reply.message) || '封面縮略圖暫時無法讀取，請稍後再試。'
+      )
+    }
+    const result = reply.result || {}
+    if (result.ok === false) {
+      return deny(
+        typeof result.reason === 'string' ? result.reason : 'STORAGE_UNAVAILABLE',
+        typeof result.message === 'string' && result.message ? result.message : '封面縮略圖暫時無法讀取，請稍後再試。'
+      )
+    }
+    ;(Array.isArray(result.rows) ? result.rows : []).forEach((row) => {
+      const stampId = fold(row && row.stamp_id)
+      if (!stampId) return
+      rows.push({ stamp_id: stampId, thumb_key: fold(row && row.thumb_key) })
+    })
+  }
+  return allow({ rows, message: `共取回 ${rows.length} 枚印章的封面。` })
+}
+
+/** 分享状态徽标的显示文案（卡片 / 弹窗同一套字面值）。 */
+export const FOLDER_SHARE_BADGE_TEXT = Object.freeze({
+  ACTIVE: '已分享',
+  EXPIRED: '分享已過期',
+  REVOKED: '分享已作廢',
+  UNKNOWN: '未分享'
+})
+
+/**
+ * 一次读齐多个資料夾的分享状态（**一次** `readShares`，不逐卡读盘）。
+ * @param {string[]} folderIds
+ * @returns {{ok:true, by_folder:Record<string,{state:string, code:string, count:number, text:string}>}
+ *          |{ok:false, reason:string, message:string}}
+ */
+export function folderShareBadges(folderIds) {
+  const shares = readShares()
+  if (!shares.ok) return shares
+
+  const byFolder = {}
+  ;(Array.isArray(folderIds) ? folderIds : []).forEach((value) => {
+    const id = fold(value)
+    if (!id) return
+    byFolder[id] = { state: SHARE_STATE.UNKNOWN, code: '', count: 0, text: FOLDER_SHARE_BADGE_TEXT.UNKNOWN }
+  })
+
+  shares.rows.forEach((row) => {
+    const id = fold(row && row.seallist_id)
+    const slot = byFolder[id]
+    if (!slot) return
+    slot.count += 1
+    const state = shareStateOf(row)
+    if (state === SHARE_STATE.ACTIVE && slot.state !== SHARE_STATE.ACTIVE) {
+      slot.state = SHARE_STATE.ACTIVE
+      slot.code = fold(row.code)
+      slot.text = FOLDER_SHARE_BADGE_TEXT.ACTIVE
+      return
+    }
+    if (state === SHARE_STATE.EXPIRED && slot.state === SHARE_STATE.UNKNOWN) {
+      slot.state = SHARE_STATE.EXPIRED
+      slot.code = fold(row.code)
+      slot.text = FOLDER_SHARE_BADGE_TEXT.EXPIRED
+    }
+  })
+  return allow({ by_folder: byFolder })
 }
 
 /* ============================================================================

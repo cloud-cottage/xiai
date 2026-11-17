@@ -5,6 +5,10 @@
  *   · `createBook`   —— 建书（管理员）；载荷封闭 5 键，`book_id` 由**服务端发号**（五位纯数字）。
  *   · `listBooks`    —— 印譜清單（管理员读；按 `id` 升序）。
  *   · `setImageBook` —— 影像挂书 / 取消挂书（管理员；单值 `book_id`，`null` ＝ 取消）。
+ *   · `updateBook`   —— 改印譜（管理员；`patch` 封闭 6 键，空 `patch` ＝ 零写 ＋ 回行投影）。
+ *   · `setBookCover` —— 设 / 清封面（管理员；`image_id` 空串 ＝ 清除；回包 `cover_image_id` 是**读回值**）。
+ *   · `listBookCovers` —— 按 `book_ids` 批量取封面行（管理员只读；客户端按 `BOOK_COVERS_MAX_IDS`
+ *     切片**串行**后合并，单次请求永不超过服务端上限）。
  *
  * 硬口径（逐条）：
  *   · **通道单点**：三个 op 一律经既有的登录令牌写面门 `userWriteGate`
@@ -42,6 +46,10 @@ export const BOOK_OP_LIST = 'listBooks'
 export const BOOK_OP_SET_IMAGE = 'setImageBook'
 /** 按需检索可挂影像（批量挂图面板唯一读面；2026-11-15）。 */
 export const BOOK_OP_SEARCH_IMAGES = 'searchBookImages'
+/** 卡片矩阵四 op（2026-11-17）：改印譜 / 设封面 / 封面表（`listSealCovers` 走公开读面，不在本文件）。 */
+export const BOOK_OP_UPDATE = 'updateBook'
+export const BOOK_OP_SET_COVER = 'setBookCover'
+export const BOOK_OP_LIST_COVERS = 'listBookCovers'
 
 /** `book_id` 形态（与云函数 `lib/books.js::BOOK_ID_PATTERN` **同尺**：五位纯数字）。 */
 export const BOOK_ID_PATTERN = /^\d{5}$/
@@ -53,10 +61,31 @@ export const BOOK_FIRST_YEAR_MIN = 1000
 export const BOOK_NAME_MAX_LENGTH = 200
 export const BOOK_CODE_MAX_LENGTH = 64
 
+/** 影像编号长度上界（与云函数 `lib/books.js::BOOK_IMAGE_ID_MAX_LENGTH` 同值；空串 ＝ 清除封面）。 */
+export const BOOK_IMAGE_ID_MAX_LENGTH = 128
+
+/** 「按 id 批量取封面」单次 id 上限（与云函数 `lib/books.js::BOOK_COVERS_MAX_IDS` 同值；客户端按此切片）。 */
+export const BOOK_COVERS_MAX_IDS = 200
+
+/** `updateBook.patch` 封闭恰 6 键（与云函数 `lib/books.js::BOOK_UPDATE_PATCH_KEYS` **逐字同集**）。 */
+export const BOOK_UPDATE_PATCH_KEYS = Object.freeze([
+  'name',
+  'isbn',
+  'cip',
+  'publisher',
+  'author_person_id',
+  'first_publish_year'
+])
+
 /** 回包读数键面（**与云函数 `lib/books.js::*_READOUT_KEYS` 逐字同集**）。 */
 const CREATE_BOOK_READOUT_KEYS = Object.freeze(['book_id', 'skipped'])
 const LIST_BOOKS_READOUT_KEYS = Object.freeze(['books', 'total', 'has_more', 'offset', 'limit'])
 const SET_IMAGE_BOOK_READOUT_KEYS = Object.freeze(['image_id', 'book_id'])
+/** `updateBook` → `book`（与 `listBooks` 行投影同形）；`setBookCover` → `book_id` / `cover_image_id`。 */
+const UPDATE_BOOK_READOUT_KEYS = Object.freeze(['book'])
+const SET_BOOK_COVER_READOUT_KEYS = Object.freeze(['book_id', 'cover_image_id'])
+/** `listBookCovers` → `rows`（逐 id 一行、请求序）。 */
+const LIST_BOOK_COVERS_READOUT_KEYS = Object.freeze(['rows'])
 
 /** `listBooks` 单行投影键面（服务端 `BOOK_ROW_KEYS` 的客户端副本，供视图按同一键面取值）。 */
 export const BOOK_ROW_KEYS = Object.freeze([
@@ -82,8 +111,16 @@ export const BOOK_ROW_KEYS = Object.freeze([
 /** `searchBookImages` 行投影键面（服务端 `BOOK_IMAGE_ROW_KEYS` 的客户端副本，恰 5 键）。 */
 export const BOOK_IMAGE_ROW_KEYS = Object.freeze(['image_id', 'stamp_id', 'seal_name', 'kind', 'book_id'])
 
+/** `listBookCovers` 行投影键面（服务端逐行回包键面，恰 3 键；空串 ＝ 无封面 / 取不到缩略键）。 */
+export const BOOK_COVER_ROW_KEYS = Object.freeze(['book_id', 'cover_image_id', 'thumb_key'])
+
 function text(value) {
   return String(value === undefined || value === null ? '' : value).trim()
+}
+
+/** 行上是否有该键（**看得见 `undefined` 与空串之别**；与云函数 `lib/books.js::hasKeyOf` 同尺）。 */
+function hasKeyOf(row, key) {
+  return Object.prototype.hasOwnProperty.call(row, key)
 }
 
 /** 失败面（恒**恰 3 键** `{ok:false, reason, message}` —— 与云函数 / 通道同形）。 */
@@ -196,6 +233,52 @@ export const BOOK_LIST_PAGE_SIZE = 50
 export const BOOK_LIST_MAX_PAGE_SIZE = 200
 
 /**
+ * **单行投影**（`listBooks` / `updateBook.book` **同一把尺子**；服务端 `BOOK_ROW_KEYS` 恒 12 键）。
+ *
+ * 服务端未回该键 ⇒ 文本键给 `''`、`first_publish_year` 给 `null`（**不编造其它字段**）；
+ * `creators` 只取四键、字串化，非数组 ⇒ `[]`（视图据空集不渲染链行）。
+ * @param {object} row 服务端行
+ * @returns {object} 恰 `BOOK_ROW_KEYS` 键面的行
+ */
+function projectBookRow(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  const out = {}
+  for (const key of BOOK_ROW_KEYS) {
+    if (key === 'first_publish_year') {
+      out[key] = Number.isInteger(src.first_publish_year) ? src.first_publish_year : null
+      continue
+    }
+    if (key === 'image_count') {
+      out[key] = Number.isInteger(src.image_count) ? src.image_count : 0
+      continue
+    }
+    if (key === 'creators') {
+      out[key] = (Array.isArray(src.creators) ? src.creators : [])
+        .map((item) => (item && typeof item === 'object'
+          ? { person_id: text(item.person_id), card_id: text(item.card_id), role: text(item.role), name: text(item.name) }
+          : null))
+        .filter((item) => item !== null)
+      continue
+    }
+    out[key] = text(src[key])
+  }
+  return out
+}
+
+/**
+ * **封面行投影**（`listBookCovers` 行；恰 `BOOK_COVER_ROW_KEYS` 三键）。
+ * 空串 ＝ 无封面 / 取不到缩略键（**不编造对象键**），与卡片占位图同尺。
+ * @param {object} row 服务端行
+ * @returns {{book_id:string, cover_image_id:string, thumb_key:string}}
+ */
+function projectCoverRow(row) {
+  const src = row && typeof row === 'object' ? row : {}
+  const out = {}
+  for (const key of BOOK_COVER_ROW_KEYS) out[key] = text(src[key])
+  return out
+}
+
+/**
  * **印譜清單（管理员读；分頁 ＋ 篩選）**。
  *
  * 载荷封闭 6 键（缺键由服务端取默认；客户端**只递非空键**，不递 `undefined`）：
@@ -237,31 +320,7 @@ export async function listBooks(input = {}) {
       '雲端已受理讀取，但未回傳印譜清單（books）；請稍後重試（以服務端為準）。'
     )
   }
-  const books = gate.books.map((row) => {
-    const src = row && typeof row === 'object' ? row : {}
-    const out = {}
-    for (const key of BOOK_ROW_KEYS) {
-      if (key === 'first_publish_year') {
-        out[key] = Number.isInteger(src.first_publish_year) ? src.first_publish_year : null
-        continue
-      }
-      if (key === 'image_count') {
-        out[key] = Number.isInteger(src.image_count) ? src.image_count : 0
-        continue
-      }
-      if (key === 'creators') {
-        /* 创作者链：只取四鍵、字串化；非陣列 ⇒ `[]`（视图据空集不渲染链行）。 */
-        out[key] = (Array.isArray(src.creators) ? src.creators : [])
-          .map((item) => (item && typeof item === 'object'
-            ? { person_id: text(item.person_id), card_id: text(item.card_id), role: text(item.role), name: text(item.name) }
-            : null))
-          .filter((item) => item !== null)
-        continue
-      }
-      out[key] = text(src[key])
-    }
-    return out
-  })
+  const books = gate.books.map(projectBookRow)
   const total = Number.isInteger(gate.total) ? gate.total : books.length
   const appliedOffset = Number.isInteger(gate.offset) ? gate.offset : payload.offset
   const appliedLimit = Number.isInteger(gate.limit) ? gate.limit : payload.limit
@@ -442,4 +501,242 @@ export function imageBookOf(imageId) {
   const row = findCloudImageRow(id)
   if (!row) return denial('NOT_FOUND', `雲端快照中未見該影像（image_id：${id}）。`)
   return { ok: true, book_id: imageBookIdOf(row) }
+}
+
+/* ---------------------------------------------------------------------------
+   卡片矩陣三 op（2026-11-17｜`updateBook` / `setBookCover` / `listBookCovers`）
+   ---------------------------------------------------------------------------
+   载荷键面 / 回包键面**逐字取服务端**（`cloudfunctions/xiai-user-token/lib/books.js`）：
+     · `updateBook`    `{book_id, patch:{…}}`（`patch` 内层封闭 6 键；空 `patch` ＝ 零写 ＋ 回行投影）
+     · `setBookCover`  `{book_id, image_id}`（`image_id` **必须显式出现**；空串 ＝ 清除封面）
+     · `listBookCovers` `{book_ids:[≤BOOK_COVERS_MAX_IDS]}`（客户端切片串行，合并 rows）
+   本地只做**形态护栏**（值域 / 存在性 / 授权的唯一判据仍在服务端）；回包读数面按
+   `readoutKeys` additive 透传取得 —— **服务端未回 ⇒ 如实失败，不默认成空值冒充生效**。
+   ------------------------------------------------------------------------- */
+
+/**
+ * **改印譜（管理员）** —— 只允许改 `BOOK_UPDATE_PATCH_KEYS` 六键。
+ *
+ * 判定顺序（本地只做形态护栏；存在性 / 作者门 / 值域判据仍在服务端）：
+ * ① `book_id` 必有 ＋ 五位形态门 → ② `patch` 必有、必须是对象、**内层键面封闭**（未知键 ⇒
+ * `INVALID_FIELD`，**不静默剔除**）→ ③ `name` / `author_person_id` 非空、长度与年份形态门
+ * → ④ 真源门（`local-dev` ⇒ 如实拒）→ ⑤ 写面门 `userWriteGate('updateBook', …)` → ⑥ 取回包
+ * `book`（缺 ⇒ **如实失败**，不拿本地 patch 冒充已生效）。
+ * @param {{book_id:string, patch:object}} input `patch` 内层恰 6 键（空 `patch` ＝ 零写 ＋ 回行投影）
+ * @returns {Promise<{ok:true, book:object, mode:string}|{ok:false, reason:string, message:string}>}
+ */
+export async function updateBook(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  const bookId = text(source.book_id)
+  if (!bookId) return denial('MISSING_REQUIRED', '缺少必要欄位（book_id）；本次零寫入。')
+  if (!BOOK_ID_PATTERN.test(bookId)) {
+    return denial('INVALID_VALUE', '印譜編號（book_id）必須是五位純數字（如 00001）；本次零寫入。')
+  }
+  const rawPatch = source.patch
+  if (rawPatch === undefined || rawPatch === null) {
+    return denial('MISSING_REQUIRED', '缺少必要欄位（patch）；本次零寫入。')
+  }
+  if (typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
+    return denial('INVALID_VALUE', '欄位（patch）必須是對象；本次零寫入。')
+  }
+  const unknownKeys = Object.keys(rawPatch).filter((key) => BOOK_UPDATE_PATCH_KEYS.indexOf(key) === -1)
+  if (unknownKeys.length > 0) {
+    return denial(
+      'INVALID_FIELD',
+      `patch 含不可改欄位：${unknownKeys.join('、')}（僅允許 ${BOOK_UPDATE_PATCH_KEYS.join('、')}）；本次零寫入。`
+    )
+  }
+  /* **载荷内层封闭恰 6 键**（只递 patch 里**确有的**键；值域门与 `createBook` 同常量）。 */
+  const patch = {}
+  if (hasKeyOf(rawPatch, 'name')) {
+    const name = text(rawPatch.name)
+    if (name === '') return denial('INVALID_VALUE', '書名（name）必須是非空字符串；本次零寫入。')
+    if (name.length > BOOK_NAME_MAX_LENGTH) {
+      return denial('INVALID_VALUE', `書名（name）長度不得超過 ${BOOK_NAME_MAX_LENGTH} 字；本次零寫入。`)
+    }
+    patch.name = name
+  }
+  for (const [key, maxLength] of [
+    ['isbn', BOOK_CODE_MAX_LENGTH],
+    ['cip', BOOK_CODE_MAX_LENGTH],
+    ['publisher', BOOK_NAME_MAX_LENGTH]
+  ]) {
+    if (!hasKeyOf(rawPatch, key)) continue
+    const value = rawPatch[key]
+    /* `null` 与空串同尺（服务端亦按 `text()` 归一为清空）。 */
+    if (value !== null && typeof value !== 'string') {
+      return denial('INVALID_VALUE', `欄位（${key}）必須是字符串（可留空）；本次零寫入。`)
+    }
+    const trimmed = text(value)
+    if (trimmed.length > maxLength) {
+      return denial('INVALID_VALUE', `欄位（${key}）長度不得超過 ${maxLength} 字；本次零寫入。`)
+    }
+    patch[key] = trimmed
+  }
+  if (hasKeyOf(rawPatch, 'author_person_id')) {
+    const authorPersonId = text(rawPatch.author_person_id)
+    if (authorPersonId === '') {
+      return denial('INVALID_VALUE', '作者（author_person_id）必須是非空字符串；本次零寫入。')
+    }
+    patch.author_person_id = authorPersonId
+  }
+  if (hasKeyOf(rawPatch, 'first_publish_year')) {
+    const rawYear = rawPatch.first_publish_year
+    if (rawYear === null) {
+      patch.first_publish_year = null
+    } else {
+      /* **只收整数**（不把 `''` 归一成 `0` 递上去 —— 与服务端同尺）。 */
+      if (typeof rawYear !== 'number' || !Number.isInteger(rawYear)) {
+        return denial('INVALID_VALUE', '首次出版年份（first_publish_year）必須是整數（可留空）；本次零寫入。')
+      }
+      if (rawYear < BOOK_FIRST_YEAR_MIN || rawYear > currentYear()) {
+        return denial(
+          'INVALID_VALUE',
+          `首次出版年份（first_publish_year）必須在 ${BOOK_FIRST_YEAR_MIN}〜${currentYear()} 之間；本次零寫入。`
+        )
+      }
+      patch.first_publish_year = rawYear
+    }
+  }
+  if (isLocalDevMode()) return localDevDenial('修改印譜')
+  /* **载荷封闭恰 2 键**（逐字取服务端 `BOOK_UPDATE_ALLOWED_KEYS`）。 */
+  const gate = await userWriteGate(
+    BOOK_OP_UPDATE,
+    { book_id: bookId, patch },
+    { readoutKeys: UPDATE_BOOK_READOUT_KEYS }
+  )
+  if (!gate.ok) return denial(gate.reason, gate.message)
+  const echoed = gate.book && typeof gate.book === 'object' && !Array.isArray(gate.book) ? gate.book : null
+  if (!echoed) {
+    /* 服务端未回行投影 ⇒ **如实失败**（不拿本次 patch 冒充「已生效的整行」）。 */
+    return denial(
+      'STORAGE_UNAVAILABLE',
+      '雲端已受理修改，但未回傳印譜行（book）；請稍後重新整理確認（以服務端為準）。'
+    )
+  }
+  return { ok: true, book: projectBookRow(echoed), mode: gate.mode }
+}
+
+/**
+ * **设 / 清封面（管理员）**：`image_id` **必须显式出现**，空串 ＝ 清除封面。
+ *
+ * 判定顺序：① `book_id` 必有 ＋ 形态门 → ② `image_id` 必须显式出现（缺 / `null` ⇒ 拒，
+ * **清除请传空串**）、必须是字符串、长度门 → ③ 真源门（`local-dev` ⇒ 如实拒）→ ④ 写面门
+ * `userWriteGate('setBookCover', …)` → ⑤ **读回比对**（`cover_image_id` 是服务端读回值；
+ * 缺席或与目标不等 ⇒ **如实失败**，不报假成功）。
+ * @param {{book_id:string, image_id:string}} input `image_id` 空串 ＝ 清除封面
+ * @returns {Promise<{ok:true, book_id:string, cover_image_id:string, mode:string}
+ *                  |{ok:false, reason:string, message:string}>}
+ */
+export async function setBookCover(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  const bookId = text(source.book_id)
+  if (!bookId) return denial('MISSING_REQUIRED', '缺少必要欄位（book_id）；本次零寫入。')
+  if (!BOOK_ID_PATTERN.test(bookId)) {
+    return denial('INVALID_VALUE', '印譜編號（book_id）必須是五位純數字（如 00001）；本次零寫入。')
+  }
+  const rawImageId = source.image_id
+  if (rawImageId === undefined || rawImageId === null) {
+    return denial('MISSING_REQUIRED', '缺少必要欄位（image_id）：清除封面請顯式傳空串；本次零寫入。')
+  }
+  if (typeof rawImageId !== 'string') {
+    return denial('INVALID_VALUE', '欄位（image_id）必須是字符串（清除封面傳空串）；本次零寫入。')
+  }
+  const imageId = text(rawImageId)
+  if (imageId.length > BOOK_IMAGE_ID_MAX_LENGTH) {
+    return denial(
+      'INVALID_VALUE',
+      `欄位（image_id）長度必須在 0〜${BOOK_IMAGE_ID_MAX_LENGTH} 之間；本次零寫入。`
+    )
+  }
+  if (isLocalDevMode()) return localDevDenial('設定封面')
+  /* **载荷封闭恰 2 键**（逐字取服务端 `BOOK_SET_COVER_ALLOWED_KEYS`）。 */
+  const gate = await userWriteGate(
+    BOOK_OP_SET_COVER,
+    { book_id: bookId, image_id: imageId },
+    { readoutKeys: SET_BOOK_COVER_READOUT_KEYS }
+  )
+  if (!gate.ok) return denial(gate.reason, gate.message)
+  /* ⑤ **读回比对**：`cover_image_id` 缺席 ＝ 无法确认 ⇒ 如实失败（不默认成空串冒充「已清除」）。 */
+  if (!hasKeyOf(gate, 'cover_image_id')) {
+    return denial(
+      'STORAGE_UNAVAILABLE',
+      '封面已送出，但雲端未回傳封面的讀回值（cover_image_id）⇒ 不報成功，請稍後重新整理確認。'
+    )
+  }
+  const readBackCoverId = text(gate.cover_image_id)
+  if (readBackCoverId !== imageId) {
+    return denial(
+      'STORAGE_UNAVAILABLE',
+      `封面讀回不一致（book_id：${bookId}；期望 ${imageId || '（清除）'}、讀回 ${
+        readBackCoverId || '（清除）'
+      }）⇒ 不報成功，請重新整理確認（封面以服務端為準）。`
+    )
+  }
+  return {
+    ok: true,
+    book_id: text(gate.book_id) || bookId,
+    cover_image_id: readBackCoverId,
+    mode: gate.mode
+  }
+}
+
+/**
+ * **印譜封面表（管理员只读）** —— 按 `book_ids` 批量取 `{book_id, cover_image_id, thumb_key}`。
+ *
+ * **按 `BOOK_COVERS_MAX_IDS`（200）切片、串行发出后合并**：单次请求永不超过服务端上限
+ * （一次发 450 个 id 会被服务端 `INVALID_VALUE` 整单拒）；任一批失败 ⇒ **整单如实失败**
+ * （**不回半份 rows**，避免把「部分封面」当「全部」）。id 按原序去重（同服务端）。
+ * @param {{book_ids:string[]}} [input] 元素须为五位纯数字字符串；总长不限（客户端切片）
+ * @returns {Promise<{ok:true, rows:Array<{book_id:string, cover_image_id:string, thumb_key:string}>, mode:string}
+ *                  |{ok:false, reason:string, message:string}>}
+ */
+export async function listBookCovers(input = {}) {
+  if (isLocalDevMode()) return localDevDenial('讀取印譜封面')
+  const source = input && typeof input === 'object' ? input : {}
+  const rawIds = source.book_ids
+  if (rawIds === undefined || rawIds === null) {
+    return denial('MISSING_REQUIRED', '缺少必要欄位（book_ids）；本次零讀取。')
+  }
+  if (!Array.isArray(rawIds)) {
+    return denial('INVALID_VALUE', '欄位（book_ids）必須是數組；本次零讀取。')
+  }
+  const ids = []
+  const seen = new Set()
+  for (const item of rawIds) {
+    if (typeof item !== 'string') {
+      return denial('INVALID_VALUE', '欄位（book_ids）的每一項必須是字符串；本次零讀取。')
+    }
+    const id = text(item)
+    if (id === '') continue
+    if (!BOOK_ID_PATTERN.test(id)) {
+      return denial('INVALID_VALUE', '印譜編號（book_ids）必須是五位純數字（如 00001）；本次零讀取。')
+    }
+    if (seen.has(id)) continue
+    seen.add(id)
+    ids.push(id)
+  }
+  if (ids.length === 0) return { ok: true, rows: [], mode: '' }
+  /* **切片串行**（`200 / 200 / 50 …`）：载荷恒恰 1 键 `book_ids`。 */
+  const rows = []
+  let mode = ''
+  for (let start = 0; start < ids.length; start += BOOK_COVERS_MAX_IDS) {
+    const chunk = ids.slice(start, start + BOOK_COVERS_MAX_IDS)
+    const gate = await userWriteGate(
+      BOOK_OP_LIST_COVERS,
+      { book_ids: chunk },
+      { readoutKeys: LIST_BOOK_COVERS_READOUT_KEYS }
+    )
+    if (!gate.ok) return denial(gate.reason, gate.message)
+    if (!Array.isArray(gate.rows)) {
+      /* 服务端未回行面 ⇒ **如实失败**（不默认成 `[]` 冒充「都沒有封面」）。 */
+      return denial(
+        'STORAGE_UNAVAILABLE',
+        '雲端已受理讀取，但未回傳封面行（rows）；請稍後重試（以服務端為準）。'
+      )
+    }
+    for (const row of gate.rows) rows.push(projectCoverRow(row))
+    if (typeof gate.mode === 'string' && gate.mode !== '') mode = gate.mode
+  }
+  return { ok: true, rows, mode }
 }

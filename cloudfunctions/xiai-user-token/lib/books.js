@@ -813,11 +813,579 @@ async function setImageBook(payload, identity, context) {
   return { ok: true, image_id: canonicalImageId, book_id: writtenBookId }
 }
 
+/* --------------------------------------------------------------------------
+ * 卡片矩陣四 op（2026-11-17｜`updateBook` / `setBookCover` / `listBookCovers` / `listSealCovers`）
+ * -------------------------------------------------------------------------
+ * 接口**已冻结**（前端 `/books` 与 `/my/drive` 改卡片矩阵），键名逐字不得改：
+ *   · `updateBook`    （管理員）`{book_id, patch:{name?,isbn?,cip?,publisher?,author_person_id?,first_publish_year?}}`
+ *                     → `{ok:true, book}`（`book` 与 `listBooks` 行投影**同形**）；
+ *   · `setBookCover`  （管理員）`{book_id, image_id}` → `{ok:true, book_id, cover_image_id}`
+ *                     （`image_id` 空串 ＝ 清除封面；写到 `xiai_books.cover_image_id`）；
+ *   · `listBookCovers`（管理員）`{book_ids:[≤200]}` → `{ok:true, rows:[{book_id, cover_image_id, thumb_key}]}`；
+ *   · `listSealCovers`（**公開讀**｜`lib/sealCards.js::PUBLIC_OPS` 成员，`action:'public'`）`{stamp_ids:[≤200]}`
+ *                     → `{ok:true, rows:[{stamp_id, thumb_key}]}`（**零寫入**）。
+ *
+ * 硬口径（逐条）：
+ *  ① 三个管理員 op 的**第一行**即 `adminWhitelistDenial`（缺 env / 非白名单 ⇒ 结构化拒 ＋ **零读零写**）；
+ *    `listSealCovers` 是**公开读**（不验令牌、零写）。
+ *  ② 载荷封闭键面（未知键 ⇒ `INVALID_FIELD`，判定**早于任何读**）；`updateBook.patch` 的**内层**键面
+ *     亦封闭（只许 `BOOK_UPDATE_PATCH_KEYS` 六键，其余一律 `INVALID_FIELD`）。
+ *  ③ 值域门照 `createBook`（同常量、同文案量级）：`name` 非空 ≤200、`isbn` / `cip` ≤64、
+ *     `publisher` ≤200、`first_publish_year` 1000〜当年的整数（`null` ＝ 清空）、
+ *     `author_person_id` 必须指向**已收录印人**（`readPersonRow` 同门；`tmp-` 临时行拒）。
+ *  ④ 目标行不存在 ⇒ `INVALID_VALUE` ＋「該…不存在」（本函数冻结表**无 `NOT_FOUND`**）；
+ *     `setBookCover` 的 `image_id` 必须存在**且其 `book_id` ＝ 该书**（否则 `INVALID_VALUE` ＋ 零写入）。
+ *  ⑤ 封面数据**只经 `listBookCovers` / `listSealCovers` 回**，`BOOK_ROW_KEYS` 恒恰 12 键**不动**
+ *     （封面不塞进 `listBooks` 行）。
+ *  ⑥ `thumb_key` **复用** `lib/sealCards.js::thumbKeyOfDigest` 同源逻辑
+ *     （`xiai/thumb/<sha 前兩位>/<sha>.webp`）；取不到摘要 / 无行 ⇒ 空串（**不编造对象键**）。
+ *  ⑦ 写后**读回比对**（不以 `updated >= 1` 判成功）；读不到 / 不等 ⇒ `STORAGE_UNAVAILABLE`。
+ *  ⑧ `reason` **零新增**、**零新集合**、本文件**零集合名字面**（一律经 `ops.COLLECTIONS` ＋
+ *     `ops.readRows` / `ops.readRowByAnyId` / `ops.persist`），**不产 `plan`**。
+ * ------------------------------------------------------------------------- */
+
+/** `updateBook` 载荷**封闭恰 2 键**（`patch` 内层再封闭，见下）。 */
+const BOOK_UPDATE_ALLOWED_KEYS = Object.freeze(['book_id', 'patch'])
+
+/** `updateBook.patch` **封闭恰 6 键**（仅允许改这六项；其它键 ⇒ `INVALID_FIELD`）。 */
+const BOOK_UPDATE_PATCH_KEYS = Object.freeze([
+  'name',
+  'isbn',
+  'cip',
+  'publisher',
+  'author_person_id',
+  'first_publish_year'
+])
+
+/** `setBookCover` 载荷**封闭恰 2 键**（`image_id` 必须显式出现；空串 ＝ 清除封面）。 */
+const BOOK_SET_COVER_ALLOWED_KEYS = Object.freeze(['book_id', 'image_id'])
+
+/** `listBookCovers` 载荷**封闭恰 1 键**。 */
+const BOOK_LIST_COVERS_ALLOWED_KEYS = Object.freeze(['book_ids'])
+
+/** `listSealCovers` 载荷**封闭恰 1 键**。 */
+const BOOK_LIST_SEAL_COVERS_ALLOWED_KEYS = Object.freeze(['stamp_ids'])
+
+/** 两个「按 id 批量取封面」op 的**单次 id 上限**（派单冻结值 200）。 */
+const BOOK_COVERS_MAX_IDS = 200
+
+/** `updateBook` 回包读数键面（`book` ＝ 与 `listBooks` 同形的行投影）。 */
+const UPDATE_BOOK_READOUT_KEYS = Object.freeze(['book'])
+
+/** `setBookCover` 回包读数键面（`cover_image_id` 是**读回值**）。 */
+const SET_BOOK_COVER_READOUT_KEYS = Object.freeze(['book_id', 'cover_image_id'])
+
+/** `listBookCovers` / `listSealCovers` 回包读数键面（`rows` 为 id 序行表）。 */
+const LIST_BOOK_COVERS_READOUT_KEYS = Object.freeze(['rows'])
+const LIST_SEAL_COVERS_READOUT_KEYS = Object.freeze(['rows'])
+
+/** 空串（`cover_image_id` / `thumb_key` 的「无」值；**不写 `null`**，与前端卡片同尺）。 */
+const BOOK_COVER_EMPTY = ''
+
+/** 行上是否有该键（**看得见 `undefined` 与空串之别**）。 */
+function hasKeyOf(row, key) {
+  return Object.prototype.hasOwnProperty.call(row, key)
+}
+
+/**
+ * `id` 表载荷解析（两个 list-op 共用）：缺 / 非数组 / 超上限 / 元素非字符串 ⇒ 结构化拒（零读）。
+ * 元素按**原序去重**（重复 id 不重复出镜，也不报错）。
+ * @returns {{ok:true, value:string[]}|{ok:false, reason:string, message:string}}
+ */
+function parseIdListOf(raw, keyName, pattern, shapeMessage) {
+  if (raw === undefined || raw === null) {
+    return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${keyName}）；本次零讀取。`)
+  }
+  if (!Array.isArray(raw)) {
+    return deny(REASONS.INVALID_VALUE, `欄位（${keyName}）必須是數組；本次零讀取。`)
+  }
+  if (raw.length > BOOK_COVERS_MAX_IDS) {
+    return deny(REASONS.INVALID_VALUE, `欄位（${keyName}）最多 ${BOOK_COVERS_MAX_IDS} 項；本次零讀取。`)
+  }
+  const out = []
+  const seen = new Set()
+  for (const item of raw) {
+    if (typeof item !== 'string') {
+      return deny(REASONS.INVALID_VALUE, `欄位（${keyName}）的每一項必須是字符串；本次零讀取。`)
+    }
+    const id = text(item)
+    if (id === '') continue
+    if (pattern && !pattern.test(id)) {
+      return deny(REASONS.INVALID_VALUE, `${shapeMessage}；本次零讀取。`)
+    }
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return { ok: true, value: out }
+}
+
+/**
+ * **`field ∈ values` 一次批量窄读**（主路 `where in` ⇒ 退路逐 key 窄读）。
+ *
+ * 为什么要有退路：`db.command.in` 是**服务端算子**，离线桩（`require.cache` 注入的内存假体）
+ * 与个别 SDK 版本没有它 —— 「一次批量取」不得以牺牲可测性为代价。**真存储故障会在退路里
+ * 再次抛出**（原样上抛，绝不吞成「零行」）。读仍是 `ops.readRows`，本文件零第二套行读。
+ * @param {object} ops `lib/ops.js` 模块
+ * @param {string} collection 集合名（一律经 `ops.COLLECTIONS`）
+ * @param {string} field 检索字段（`id` / `_id` / `sealId` / `stamp_id`）
+ * @param {string[]} values 检索键族
+ * @returns {Promise<object[]>} 行表（无行即不在表内）
+ */
+async function rowsByFieldIn(ops, collection, field, values) {
+  const unique = []
+  const seen = new Set()
+  for (const value of Array.isArray(values) ? values : []) {
+    const id = text(value)
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    unique.push(id)
+  }
+  if (unique.length === 0) return []
+  let command = null
+  try {
+    const db = typeof ops.resolveDb === 'function' ? ops.resolveDb() : null
+    command = db && db.command ? db.command : null
+  } catch (error) {
+    command = null
+  }
+  if (command && typeof command.in === 'function') {
+    try {
+      const rows = await ops.readRows(collection, { [field]: command.in(unique) }, { limit: unique.length })
+      return Array.isArray(rows) ? rows : []
+    } catch (error) {
+      /* 退路（**不吞真故障**）：算子不被支持 / 形态不符 ⇒ 逐 key 窄读；真故障会在下面再次抛出。 */
+    }
+  }
+  const rows = []
+  for (const id of unique) {
+    const one = await ops.readRows(collection, { [field]: id }, { limit: 1 })
+    for (const row of Array.isArray(one) ? one : []) rows.push(row)
+  }
+  return rows
+}
+
+/** 行表 ⇒ `key ⇒ 行`（**先 `id` 后 `_id`** 两轮取；缺的行自然不在表内）。 */
+async function rowsByIdOf(ops, collection, ids) {
+  const map = new Map()
+  const take = (rows) => {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = text(row && row.id) || text(row && row._id)
+      if (key === '' || map.has(key)) continue
+      map.set(key, row)
+    }
+  }
+  take(await rowsByFieldIn(ops, collection, 'id', ids))
+  const missing = ids.filter((id) => !map.has(id))
+  if (missing.length > 0) take(await rowsByFieldIn(ops, collection, '_id', missing))
+  return map
+}
+
+/**
+ * 摘要 ⇒ `thumb_key`（**唯一派生入口**：复用 `lib/sealCards.js::thumbKeyOfDigest`）。
+ * 无行 / 无摘要 / 摘要形态不符 ⇒ 空串（**不编造对象键**）。
+ * @param {object|null} row 影像行
+ * @returns {string}
+ */
+function thumbKeyOfImageRow(row) {
+  const sha = text(row && row.sha256)
+  if (sha === '') return BOOK_COVER_EMPTY
+  /* 延迟 require（与 `opsOf()` 同法；本文件不在加载期拉入 `sealCards` ⇒ 零加载环风险）。 */
+  const { thumbKeyOfDigest } = require('./sealCards.js')
+  return text(thumbKeyOfDigest(sha))
+}
+
+/** book 行 ⇒ 与 `listBooks` **同形**的回包投影（含 `image_count` 服务端计数）。 */
+async function bookProjectionWithCountsOf(ops, row) {
+  const out = bookRowProjectionOf(row)
+  const counts = await countBookImagesOf(ops)
+  out.image_count = counts.get(text(out.id)) || 0
+  return out
+}
+
+/**
+ * **管理員「改印譜」（`updateBook`）** —— 只允许改 `BOOK_UPDATE_PATCH_KEYS` 六键。
+ * @param {object} payload `{book_id, patch:{…}}`
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<{ok:true, book:object}|{ok:false, reason:string, message:string}>}
+ */
+async function updateBook(payload, identity, context) {
+  const ops = opsOf()
+  /* ① 管理员门（**第一行即判**；非管理员 ⇒ 结构化拒 ＋ 零读零写）。 */
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷封闭恰 2 键（未知键 / 身份类键 ⇒ `INVALID_FIELD`）。 */
+  const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_UPDATE_ALLOWED_KEYS)
+  if (payloadDenial) return payloadDenial
+  /* ③ `book_id` 必填 ＋ 形态门（五位十进制）。 */
+  const rawBookId = payload.book_id
+  if (rawBookId === undefined || rawBookId === null || text(rawBookId) === '') {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（book_id）；本次零寫入。')
+  }
+  if (typeof rawBookId !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '欄位（book_id）必須是字符串；本次零寫入。')
+  }
+  const bookId = text(rawBookId)
+  if (!BOOK_ID_PATTERN.test(bookId)) {
+    return deny(REASONS.INVALID_VALUE, '印譜編號（book_id）必須是五位純數字（如 00001）；本次零寫入。')
+  }
+  /* ④ `patch` 必填、必须是对象，且**内层键面封闭**（不可改的键一律 `INVALID_FIELD`）。 */
+  const rawPatch = payload.patch
+  if (rawPatch === undefined || rawPatch === null) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（patch）；本次零寫入。')
+  }
+  if (typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
+    return deny(REASONS.INVALID_VALUE, '欄位（patch）必須是對象；本次零寫入。')
+  }
+  const unknownPatchKeys = Object.keys(rawPatch).filter((key) => BOOK_UPDATE_PATCH_KEYS.indexOf(key) === -1)
+  if (unknownPatchKeys.length > 0) {
+    return deny(
+      REASONS.INVALID_FIELD,
+      `patch 含不可改欄位：${unknownPatchKeys.join('、')}（僅允許 ${BOOK_UPDATE_PATCH_KEYS.join('、')}）；本次零寫入。`
+    )
+  }
+  /* ⑤ 值域门（**纯判定、早于任何读**；与 `createBook` 同常量、同量级）。 */
+  const patch = {}
+  if (hasKeyOf(rawPatch, 'name')) {
+    if (typeof rawPatch.name !== 'string' || text(rawPatch.name) === '') {
+      return deny(REASONS.INVALID_VALUE, '書名（name）必須是非空字符串；本次零寫入。')
+    }
+    if (text(rawPatch.name).length > BOOK_NAME_MAX_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `書名（name）長度不得超過 ${BOOK_NAME_MAX_LENGTH} 字；本次零寫入。`)
+    }
+    patch.name = text(rawPatch.name)
+  }
+  for (const [key, maxLength] of [['isbn', BOOK_CODE_MAX_LENGTH], ['cip', BOOK_CODE_MAX_LENGTH], ['publisher', BOOK_NAME_MAX_LENGTH]]) {
+    if (!hasKeyOf(rawPatch, key)) continue
+    const value = rawPatch[key]
+    if (value !== null && typeof value !== 'string') {
+      return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串（可留空）；本次零寫入。`)
+    }
+    if (text(value).length > maxLength) {
+      return deny(REASONS.INVALID_VALUE, `欄位（${key}）長度不得超過 ${maxLength} 字；本次零寫入。`)
+    }
+    patch[key] = text(value)
+  }
+  if (hasKeyOf(rawPatch, 'first_publish_year')) {
+    const rawYear = rawPatch.first_publish_year
+    if (rawYear === null) {
+      patch.first_publish_year = null
+    } else {
+      const currentYear = yearOf(secondsOf(context))
+      if (!Number.isInteger(rawYear)) {
+        return deny(REASONS.INVALID_VALUE, '首次出版年份（first_publish_year）必須是整數（可留空）；本次零寫入。')
+      }
+      if (rawYear < BOOK_FIRST_YEAR_MIN || rawYear > currentYear) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `首次出版年份（first_publish_year）必須在 ${BOOK_FIRST_YEAR_MIN}〜${currentYear} 之間；本次零寫入。`
+        )
+      }
+      patch.first_publish_year = rawYear
+    }
+  }
+  /* ⑥ 目标印譜存在性（无行 ⇒ `INVALID_VALUE` ＋「該印譜不存在」，**零写入**）。 */
+  const bookRow = await ops.readRowByAnyId(ops.COLLECTIONS.books, bookId, 1)
+  if (!bookRow) {
+    return deny(REASONS.INVALID_VALUE, `該印譜不存在（book_id：${bookId}）；本次零寫入。`)
+  }
+  /* ⑦ 作者门（**必须是已收录印人**；`patch` 未带该键则免读）。 */
+  if (hasKeyOf(patch, 'author_person_id') || hasKeyOf(rawPatch, 'author_person_id')) {
+    const rawAuthor = rawPatch.author_person_id
+    if (typeof rawAuthor !== 'string' || text(rawAuthor) === '') {
+      return deny(REASONS.INVALID_VALUE, '作者（author_person_id）必須是非空字符串；本次零寫入。')
+    }
+    const authorPersonIdIn = text(rawAuthor)
+    const personRow = await ops.readPersonRow(authorPersonIdIn)
+    const personIdOfRow = text(personRow && (personRow.id || personRow.code))
+    if (!personRow || !personIdOfRow || personIdOfRow.indexOf(BOOK_TEMP_PERSON_PREFIX) === 0) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `作者（author_person_id：${authorPersonIdIn}）尚未收入印人庫 ⇒ 拒絕修改；` +
+          '請先提交印人提案並經採納；本次零寫入。'
+      )
+    }
+    patch.author_person_id = personIdOfRow
+  }
+  const changedKeys = Object.keys(patch)
+  /* ⑧ 空 `patch` ＝ 无改动（**零写**）：直接回 `listBooks` 同形投影（不报错、不写行）。 */
+  if (changedKeys.length === 0) {
+    return { ok: true, book: await bookProjectionWithCountsOf(ops, bookRow) }
+  }
+  /* ⑨ 写：只写 `patch` 六键（＋ `updated_at`）；检索式取 `_id` 优先。 */
+  const match = text(bookRow._id) ? { _id: text(bookRow._id) } : { id: text(bookRow.id) || bookId }
+  const at = new Date(secondsOf(context) * 1000).toISOString()
+  const doc = Object.assign({}, patch, { updated_at: at })
+  try {
+    await ops.persist({
+      writes: [{ kind: 'update', collection: ops.COLLECTIONS.books, match, doc, expectAtLeast: 1 }]
+    })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `印譜行修改落盤失敗（book_id：${bookId}）；改動未確認，可重試。（診斷：${
+        (error && error.message) || 'unknown'
+      }）`
+    )
+  }
+  /* ⑩ **读回比对**（不得以 `updated >= 1` 判成功）：按同一检索式重读该 book 行。 */
+  let readback = []
+  try {
+    readback = await ops.readRows(ops.COLLECTIONS.books, match, { limit: 1 })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `修改已送出，但讀回校驗失敗（book_id：${bookId}）；可重試。（診斷：${
+        (error && error.message) || 'unknown'
+      }）`
+    )
+  }
+  if (!Array.isArray(readback) || readback.length === 0) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, `修改已送出，但讀回未見該印譜行（book_id：${bookId}）⇒ 不報成功，請重試。`)
+  }
+  const writtenRow = readback[0]
+  for (const key of changedKeys) {
+    const expected = patch[key]
+    const actual = key === 'first_publish_year'
+      ? (Number.isInteger(writtenRow.first_publish_year) ? writtenRow.first_publish_year : null)
+      : text(writtenRow[key])
+    if (actual !== expected) {
+      return deny(
+        REASONS.STORAGE_UNAVAILABLE,
+        `印譜行讀回不一致（book_id：${bookId}；欄位 ${key}）⇒ 不報成功，請重試。`
+      )
+    }
+  }
+  /* ⑪ 回包：`book` 与 `listBooks` 行投影同形（`index.js` 按 `UPDATE_BOOK_READOUT_KEYS` 收窄透传）。 */
+  return { ok: true, book: await bookProjectionWithCountsOf(ops, writtenRow) }
+}
+
+/**
+ * **管理員「設封面」（`setBookCover`）**：把某影像设为该书封面（写 `xiai_books.cover_image_id`）。
+ *
+ * 硬口径：`image_id` 必须存在**且其 `book_id` ＝ 该书**（否则 `INVALID_VALUE` ＋ 零写入）；
+ * `image_id` 空串 ＝ **清除封面**（合法，不查影像行）。
+ * @param {object} payload `{book_id, image_id}`
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<{ok:true, book_id:string, cover_image_id:string}|{ok:false, reason:string, message:string}>}
+ */
+async function setBookCover(payload, identity, context) {
+  const ops = opsOf()
+  /* ① 管理员门（**第一行即判**；零读零写）。 */
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷封闭恰 2 键。 */
+  const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_SET_COVER_ALLOWED_KEYS)
+  if (payloadDenial) return payloadDenial
+  /* ③ `book_id` 必填 ＋ 形态门。 */
+  const rawBookId = payload.book_id
+  if (rawBookId === undefined || rawBookId === null || text(rawBookId) === '') {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（book_id）；本次零寫入。')
+  }
+  if (typeof rawBookId !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '欄位（book_id）必須是字符串；本次零寫入。')
+  }
+  const bookId = text(rawBookId)
+  if (!BOOK_ID_PATTERN.test(bookId)) {
+    return deny(REASONS.INVALID_VALUE, '印譜編號（book_id）必須是五位純數字（如 00001）；本次零寫入。')
+  }
+  /* ④ `image_id` **必须显式出现**（缺 / `null` ⇒ `MISSING_REQUIRED`：清除封面请显式传空串）。 */
+  const rawImageId = payload.image_id
+  if (rawImageId === undefined || rawImageId === null) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（image_id）：清除封面請顯式傳空串；本次零寫入。')
+  }
+  if (typeof rawImageId !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '欄位（image_id）必須是字符串（清除封面傳空串）；本次零寫入。')
+  }
+  const imageId = text(rawImageId)
+  if (imageId.length > BOOK_IMAGE_ID_MAX_LENGTH) {
+    return deny(REASONS.INVALID_VALUE, `欄位（image_id）長度必須在 0〜${BOOK_IMAGE_ID_MAX_LENGTH} 之間；本次零寫入。`)
+  }
+  /* ⑤ 目标印譜存在性。 */
+  const bookRow = await ops.readRowByAnyId(ops.COLLECTIONS.books, bookId, 1)
+  if (!bookRow) {
+    return deny(REASONS.INVALID_VALUE, `該印譜不存在（book_id：${bookId}）；本次零寫入。`)
+  }
+  /* ⑥ 影像归属门（**空串 ＝ 清除 ⇒ 不查影像行**）：必须存在**且**其 `book_id` ＝ 该书。 */
+  if (imageId !== BOOK_COVER_EMPTY) {
+    const imageRow = await ops.readRowByAnyId(ops.COLLECTIONS.images, imageId, 1)
+    if (!imageRow) {
+      return deny(REASONS.INVALID_VALUE, `該影像不存在（image_id：${imageId}）；本次零寫入。`)
+    }
+    const ownerBookId = imageBookIdOf(imageRow)
+    if (ownerBookId !== bookId) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `該影像不屬於該印譜（image_id：${imageId}；book_id：${bookId}）⇒ 拒絕設為封面；本次零寫入。`
+      )
+    }
+  }
+  /* ⑦ 写：`xiai_books` 行的 `cover_image_id` 一个键（空串 ＝ 清除）。 */
+  const match = text(bookRow._id) ? { _id: text(bookRow._id) } : { id: text(bookRow.id) || bookId }
+  const at = new Date(secondsOf(context) * 1000).toISOString()
+  try {
+    await ops.persist({
+      writes: [
+        {
+          kind: 'update',
+          collection: ops.COLLECTIONS.books,
+          match,
+          doc: { cover_image_id: imageId, updated_at: at },
+          expectAtLeast: 1
+        }
+      ]
+    })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `封面落盤失敗（book_id：${bookId}）；封面未確認，可重試。（診斷：${(error && error.message) || 'unknown'}）`
+    )
+  }
+  /* ⑧ **读回比对**（不得以 `updated >= 1` 判成功）。 */
+  let readback = []
+  try {
+    readback = await ops.readRows(ops.COLLECTIONS.books, match, { limit: 1 })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `封面已送出，但讀回校驗失敗（book_id：${bookId}）；可重試。（診斷：${(error && error.message) || 'unknown'}）`
+    )
+  }
+  if (!Array.isArray(readback) || readback.length === 0) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, `封面已送出，但讀回未見該印譜行（book_id：${bookId}）⇒ 不報成功，請重試。`)
+  }
+  const writtenCoverId = text(readback[0] && readback[0].cover_image_id)
+  if (writtenCoverId !== imageId) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `封面讀回不一致（book_id：${bookId}；期望 ${imageId || '（清除）'}、讀回 ${
+        writtenCoverId || '（清除）'
+      }）⇒ 不報成功，請重試。`
+    )
+  }
+  /* ⑨ 回包（`cover_image_id` 是**读回值**；`index.js` 按 `SET_BOOK_COVER_READOUT_KEYS` 收窄透传）。 */
+  return { ok: true, book_id: bookId, cover_image_id: writtenCoverId }
+}
+
+/**
+ * **管理員「印譜封面表」（`listBookCovers`｜只读）**：按 `book_ids` 回
+ * `[{book_id, cover_image_id, thumb_key}]`（**与请求 id 同序、去重、逐 id 一行**）。
+ *
+ * 一本书没有封面 / 书行不存在 / 影像行取不到摘要 ⇒ `cover_image_id` / `thumb_key` 给**空串**
+ * （前端按空串走占位图；**不编造对象键、不静默少行**）。
+ * @param {object} payload `{book_ids: string[]}`（≤200）
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<{ok:true, rows:object[]}|{ok:false, reason:string, message:string}>}
+ */
+async function listBookCovers(payload, identity, context) {
+  const ops = opsOf()
+  /* ① 管理员门（**第一行即判**；只读、零写）。 */
+  const identityDenial = ops.adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷封闭恰 1 键 ＋ id 表形态门（零读）。 */
+  const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_LIST_COVERS_ALLOWED_KEYS)
+  if (payloadDenial) return payloadDenial
+  const parsed = parseIdListOf(
+    payload.book_ids,
+    'book_ids',
+    BOOK_ID_PATTERN,
+    '印譜編號（book_ids）必須是五位純數字（如 00001）'
+  )
+  if (!parsed.ok) return parsed
+  const bookIds = parsed.value
+  if (bookIds.length === 0) return { ok: true, rows: [] }
+  /* ③ 一次批量取 book 行（`id` → `_id` 两轮）＋ 一次批量取影像行 ⇒ 循环内零读库。 */
+  const bookRows = await rowsByIdOf(ops, ops.COLLECTIONS.books, bookIds)
+  const coverIdByBook = new Map()
+  for (const bookId of bookIds) {
+    const row = bookRows.get(bookId)
+    coverIdByBook.set(bookId, text(row && row.cover_image_id))
+  }
+  const coverIds = Array.from(new Set(Array.from(coverIdByBook.values()).filter((id) => id !== '')))
+  const imageRows = coverIds.length > 0 ? await rowsByIdOf(ops, ops.COLLECTIONS.images, coverIds) : new Map()
+  /* ④ 回包（逐 id 一行、请求序、去重；`index.js` 按 `LIST_BOOK_COVERS_READOUT_KEYS` 收窄透传）。 */
+  const rows = bookIds.map((bookId) => {
+    const coverImageId = coverIdByBook.get(bookId) || BOOK_COVER_EMPTY
+    const imageRow = coverImageId === '' ? null : imageRows.get(coverImageId) || null
+    return {
+      book_id: bookId,
+      cover_image_id: coverImageId,
+      thumb_key: imageRow ? thumbKeyOfImageRow(imageRow) : BOOK_COVER_EMPTY
+    }
+  })
+  return { ok: true, rows }
+}
+
+/**
+ * **公开读「印章封面表」（`listSealCovers`｜`action:'public'`，恒零写）**。
+ *
+ * 每个印章取**主印面**（`is_primary:true`；无则 `kind='FACE'` 中 `face_no` 最小 —— 与
+ * `lib/sealCards.js::primaryFaceOf` **同一判据**）的 `face_image_id` → 影像行 → 同源派生
+ * `thumb_key`；取不到给空串。
+ * @param {object} payload `{stamp_ids: string[]}`（≤200）
+ * @returns {Promise<{ok:true, rows:object[]}|{ok:false, reason:string, message:string}>}
+ */
+async function listSealCovers(payload) {
+  const ops = opsOf()
+  /* ① 公开读：**无管理员门**（匿名可调）；载荷封闭恰 1 键 ＋ id 表形态门（零读）。 */
+  const payloadDenial = ops.pointsPayloadDenial(payload, BOOK_LIST_SEAL_COVERS_ALLOWED_KEYS)
+  if (payloadDenial) return payloadDenial
+  const parsed = parseIdListOf(payload.stamp_ids, 'stamp_ids', null, '')
+  if (!parsed.ok) return parsed
+  const stampIds = parsed.value
+  if (stampIds.length === 0) return { ok: true, rows: [] }
+  /* ② 面行：`sealId ∈ ids` 主路；未命中的章再按 `stamp_id` / `seal_id` 各补一轮（**恒 3 次批量读**）。 */
+  const facesByStamp = new Map()
+  const take = (rows) => {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = text(row && row.sealId) || text(row && row.stamp_id) || text(row && row.seal_id)
+      if (key === '' || stampIds.indexOf(key) === -1) continue
+      if (!facesByStamp.has(key)) facesByStamp.set(key, [])
+      facesByStamp.get(key).push(row)
+    }
+  }
+  take(await rowsByFieldIn(ops, ops.COLLECTIONS.faces, 'sealId', stampIds))
+  let missing = stampIds.filter((stampId) => !facesByStamp.has(stampId))
+  if (missing.length > 0) take(await rowsByFieldIn(ops, ops.COLLECTIONS.faces, 'stamp_id', missing))
+  missing = stampIds.filter((stampId) => !facesByStamp.has(stampId))
+  if (missing.length > 0) take(await rowsByFieldIn(ops, ops.COLLECTIONS.faces, 'seal_id', missing))
+  /* ③ 主印面（**唯一判据点** ＝ `lib/sealCards.js::primaryFaceOf`；本文件零第二套）。 */
+  const { primaryFaceOf } = require('./sealCards.js')
+  const primaryImageIdOfStamp = new Map()
+  for (const stampId of stampIds) {
+    const faces = facesByStamp.get(stampId) || []
+    const face = faces.length > 0 ? primaryFaceOf(faces) : null
+    primaryImageIdOfStamp.set(stampId, text(face && face.face_image_id))
+  }
+  /* ④ 影像行一次批量取（`id` → `_id` 两轮）⇒ 循环内零读库。 */
+  const imageIds = Array.from(
+    new Set(Array.from(primaryImageIdOfStamp.values()).filter((id) => id !== ''))
+  )
+  const imageRows = imageIds.length > 0 ? await rowsByIdOf(ops, ops.COLLECTIONS.images, imageIds) : new Map()
+  /* ⑤ 回包（逐章一行、请求序、去重；零写入；`index.js` 公开面**原样透传**）。 */
+  const rows = stampIds.map((stampId) => {
+    const imageId = primaryImageIdOfStamp.get(stampId) || ''
+    const imageRow = imageId === '' ? null : imageRows.get(imageId) || null
+    return {
+      stamp_id: stampId,
+      thumb_key: imageRow ? thumbKeyOfImageRow(imageRow) : BOOK_COVER_EMPTY
+    }
+  })
+  return { ok: true, rows }
+}
+
 module.exports = {
   createBook,
   listBooks,
   setImageBook,
   searchBookImages,
+  updateBook,
+  setBookCover,
+  listBookCovers,
+  listSealCovers,
   BOOK_IMAGE_SEARCH_ALLOWED_KEYS,
   BOOK_IMAGE_ROW_KEYS,
   BOOK_CREATE_ALLOWED_KEYS,
@@ -829,5 +1397,16 @@ module.exports = {
   CREATE_BOOK_READOUT_KEYS,
   LIST_BOOKS_READOUT_KEYS,
   SET_IMAGE_BOOK_READOUT_KEYS,
-  SEARCH_BOOK_IMAGES_READOUT_KEYS
+  SEARCH_BOOK_IMAGES_READOUT_KEYS,
+  /* 卡片矩陣四 op（2026-11-17）：鍵面真源 ＋ 兩個新集合面讀寫常量（`index.js` 按 op 收窄透傳）。 */
+  BOOK_UPDATE_ALLOWED_KEYS,
+  BOOK_UPDATE_PATCH_KEYS,
+  BOOK_SET_COVER_ALLOWED_KEYS,
+  BOOK_LIST_COVERS_ALLOWED_KEYS,
+  BOOK_LIST_SEAL_COVERS_ALLOWED_KEYS,
+  BOOK_COVERS_MAX_IDS,
+  UPDATE_BOOK_READOUT_KEYS,
+  SET_BOOK_COVER_READOUT_KEYS,
+  LIST_BOOK_COVERS_READOUT_KEYS,
+  LIST_SEAL_COVERS_READOUT_KEYS
 }
