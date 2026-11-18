@@ -18,7 +18,7 @@
  *   B refresh：成功（键集恰 4、phone 只取验签值、零 refresh_token）／失效（invalid_grant、
  *     200+INVALID_ACCESS_TOKEN）／上游故障四形态（网络 0、502、HTML、200 无令牌）／
  *     **裸 403 不谎报成凭据无效**／缺环境 Id／非法入参四形态（400 ＋ 零上游）。
- *   C device-token：成功（键集恰 3、claims 键序、TTL 28800、uid 口径）／签名与 `ops.js`
+ *   C device-token：成功（键集恰 3、claims 键序、TTL 604800、`expires_at` 与 TTL 自洽、uid 口径）／签名与 `ops.js`
  *     **逐字节同源**／无会话 401／非管理员 403／`refresh_token` 入参两跳顺序／
  *     二选一违规 400 零上游／缺密钥与缺白名单 503。
  *   D 零副作用与等价性：假 DB 零接触 ＋ 源码零集合句柄/零 SDK/零 `console.`／审计行键集恰四键
@@ -479,7 +479,7 @@ section('B', 'refresh：refresh_token → 新会话（键集恰 4 ／ 失效 401
 /* ===========================================================================
    C 段：device-token —— 成功 / 无会话 / 非管理员（＋两跳 ／ 二选一 ／ 缺配置）
    =========================================================================== */
-section('C', 'device-token：会话 → 8 小时设备令牌（claims 逐字 ／ TTL 28800 ／ 401 ／ 403 ／ 503）')
+section('C', 'device-token：会话 → 168 小时设备令牌（claims 逐字 ／ TTL 604800 ／ 401 ／ 403 ／ 503）')
 
 {
   const platform = fakePlatform([{ status: 200, text: JSON.stringify({ phone_number: '+86 ' + ADMIN_PHONE }) }])
@@ -503,14 +503,14 @@ section('C', 'device-token：会话 → 8 小时设备令牌（claims 逐字 ／
   const payload = decoded ? decoded.payload : {}
   check(
     'C2',
-    '令牌形态与 claims 逐字：恰 2 段 base64url；claims 键序 `v,uid,roles,iat,exp,jti`；`v=1`、`roles=[\'admin\']`、`uid=u-<sha256(号)前16>`、`exp-iat=28800`（8 小时）',
+    '令牌形态与 claims 逐字：恰 2 段 base64url；claims 键序 `v,uid,roles,iat,exp,jti`；`v=1`、`roles=[\'admin\']`、`uid=u-<sha256(号)前16>`、`exp-iat=604800`（168 小时）',
     {
       segments: 2,
       keys: ['v', 'uid', 'roles', 'iat', 'exp', 'jti'],
       v: 1,
       roles: ['admin'],
       uid: configLib.uidOf(ADMIN_PHONE),
-      ttl: 28800
+      ttl: 604800
     },
     {
       segments: decoded ? decoded.parts.length : 0,
@@ -519,6 +519,21 @@ section('C', 'device-token：会话 → 8 小时设备令牌（claims 逐字 ／
       roles: payload.roles,
       uid: payload.uid,
       ttl: Number(payload.exp) - Number(payload.iat)
+    }
+  )
+
+  /* **回包两读数自洽（本单新增）**：`expires_at` 必须是 `iat + ttl_seconds` 的同一换算 ——
+     即「回包声明的到期时刻」与「claims 里的 TTL」不许各说各话（防 TTL 改了而 expires_at 忘了跟着走）。 */
+  check(
+    'C2b',
+    '回包 `expires_at` 与 `ttl_seconds` 一致：`Date.parse(expires_at)/1000 − iat ＝ 604800`，且逐字等于 `iat + ttl` 的 ISO 串',
+    {
+      delta: 604800,
+      exactIso: new Date((Number(payload.iat) + 604800) * 1000).toISOString()
+    },
+    {
+      delta: Math.round(Date.parse(String(ok.json.expires_at)) / 1000) - Number(payload.iat),
+      exactIso: String(ok.json.expires_at)
     }
   )
 
@@ -543,7 +558,7 @@ section('C', 'device-token：会话 → 8 小时设备令牌（claims 逐字 ／
     { sameAsOps: true, sameClaimsJson: true, hmacMatches: true },
     {
       sameAsOps: String(ok.json.token) === expectedToken,
-      sameClaimsJson: JSON.stringify(sessionLib.buildDeviceClaims({ uid: configLib.uidOf(ADMIN_PHONE), roles: ['admin'], nowSeconds: Math.floor(NOW_MS / 1000), ttlSeconds: 28800, jti: payload.jti })) === JSON.stringify(sameClaims),
+      sameClaimsJson: JSON.stringify(sessionLib.buildDeviceClaims({ uid: configLib.uidOf(ADMIN_PHONE), roles: ['admin'], nowSeconds: Math.floor(NOW_MS / 1000), ttlSeconds: 604800, jti: payload.jti })) === JSON.stringify(sameClaims),
       hmacMatches: hmacOfReturned === decoded.sig
     }
   )
@@ -763,7 +778,7 @@ section('D', '零副作用与等价性：零 DB 接触 ／ 审计行四键且零
   )
 
   /* D6｜claims 构造与 `ops.js` 逐字节相等（固定 jti ⇒ JSON 文本逐字同）。 */
-  const claimInput = { uid: configLib.uidOf(ADMIN_PHONE), roles: ['ADMIN'], nowSeconds: 1000, ttlSeconds: 28800, jti: 'jti-fixed-0001' }
+  const claimInput = { uid: configLib.uidOf(ADMIN_PHONE), roles: ['ADMIN'], nowSeconds: 1000, ttlSeconds: 604800, jti: 'jti-fixed-0001' }
   const mineClaims = JSON.stringify(sessionLib.buildDeviceClaims(claimInput))
   const opsClaims = JSON.stringify(opsLib.buildFeicuiDeviceTokenClaims(Object.assign({}, claimInput, { roles: ['admin'] })))
   check(
@@ -844,7 +859,7 @@ section('E', '视图：桥 meta 带 refresh_token（可选 phone）／不上屏 
   const renewalBody = bodyOf(scriptSrc, 'sessionRenewalMeta')
   check(
     'E2',
-    '取凭据的唯一路径是**当前 OTP 会话**（`otpAuth()` → `getSession()` 的 `session.refresh_token`，与 `access_token` 同处）；取不到 ⇒ 空串（**不阻断交付**，降级为纯 8 小时会话）',
+    '取凭据的唯一路径是**当前 OTP 会话**（`otpAuth()` → `getSession()` 的 `session.refresh_token`，与 `access_token` 同处）；取不到 ⇒ 空串（**不阻断交付**，降级为纯 168 小时会话）',
     {
       usesOtpAuth: 1,
       readsRefresh: true,
@@ -905,7 +920,7 @@ section('E', '视图：桥 meta 带 refresh_token（可选 phone）／不上屏 
 
   check(
     'E6',
-    '取不到续签凭据时**不阻断交付**：`onIssueSessionToken` 里对 `sessionRenewalMeta()` 的调用被 try/catch 包住，异常 ⇒ 空 meta 继续交付（失败路径不会丢掉 8 小时令牌）',
+    '取不到续签凭据时**不阻断交付**：`onIssueSessionToken` 里对 `sessionRenewalMeta()` 的调用被 try/catch 包住，异常 ⇒ 空 meta 继续交付（失败路径不会丢掉 168 小时令牌）',
     { guarded: true, ttlSurvives: true },
     {
       guarded: /try\s*\{\s*renewal = await sessionRenewalMeta\(\)/.test(sessionBody),

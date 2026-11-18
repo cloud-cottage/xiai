@@ -1,13 +1,13 @@
 /**
- * 玺爱 · **自检：斐萃桌面版「登錄即授權」通道（8 小時會話 ＋ JS 橋交付）**
+ * 玺爱 · **自检：斐萃桌面版「登錄即授權」通道（168 小時會話 ＋ JS 橋交付）**
  * ============================================================================
  * 本单三处被测件：
  *   · `cloudfunctions/xiai-user-token/lib/ops.js` —— `issueFeicuiDeviceToken` 新增**可选**
- *     载荷 `ttl_seconds`（整数，允许区间 `[300, 43200]`；缺省仍是 30 天；非整数 / 越界
+ *     载荷 `ttl_seconds`（整数，允许区间 `[300, 604800]`；缺省仍是 30 天；非整数 / 越界
  *     ⇒ `INVALID_VALUE` ＋ 零签发）；
  *   · `src/services/feicui.js` —— `issueDeviceToken({ttlSeconds})` ＋ 宿主桥探测 / 交付
  *     （`feicuiHostBridgeOf` / `deliverTokenToHost`；pywebview → wails → 通用 → 回退複製）；
- *   · `src/views/ConnectFeicuiView.vue` —— `/connect` 第二个按钮「為斐翠桌面簽發 8 小時會話」
+ *   · `src/views/ConnectFeicuiView.vue` —— `/connect` 第二个按钮「為斐翠桌面簽發 168 小時會話」
  *     （与 30 天按钮**并存**），交付成功即清掉页面明文，并写明「若刷新本頁需重新登錄後再簽」。
  *
  * 硬事实（决定设计，不得绕）：`/connect` 的 OTP 登录用 `persistence:'none'` ⇒ 手机号会话只在
@@ -19,16 +19,16 @@
  *   断言失败 ⇒ 退出码 1。
  *
  * 覆盖面（A〜G 七段）：
- *   A 常量面（可执行）：缺省 30 天 / 会话 8 小时 / 区间 [300, 43200]；越界与非整数一律 `null`。
- *   B 服务层（可执行）：缺省载荷逐字 `{}`；28800 ⇒ `{ttl_seconds:28800}`；299 / 43201 / 1.5 /
- *     '28800' ⇒ `INVALID_VALUE` ＋ **零往返**；非管理員 ⇒ `NOT_ADMIN` ＋ 零往返。
- *   C 服务端 op（可执行）：缺省 `exp−iat ＝ 2,592,000`；28800 / 300 / 43200 逐值；越界 / 非整数
+ *   A 常量面（可执行）：缺省 30 天 / 会话 168 小时 / 区间 [300, 604800]；越界与非整数一律 `null`。
+ *   B 服务层（可执行）：缺省载荷逐字 `{}`；604800 ⇒ `{ttl_seconds:604800}`；299 / 604801 / 1.5 /
+ *     '604800' ⇒ `INVALID_VALUE` ＋ **零往返**；非管理員 ⇒ `NOT_ADMIN` ＋ 零往返。
+ *   C 服务端 op（可执行）：缺省 `exp−iat ＝ 2,592,000`；604800 / 300 逐值；越界 / 非整数
  *     ⇒ `INVALID_VALUE` ＋ **零读密钥**；非 admin 夹带 ttl ⇒ 仍是 `FORBIDDEN`（门先）。
  *   D 宿主橋（可执行，注入假 window）：无桥 ⇒ 回退；pywebview → wails → 通用三路；优先级；
  *     参数形状 `(token, {expires_at, ttl_seconds})`；桥抛错 ⇒ **不丢令牌**；全程零存储 / 零 URL / 零日志。
- *   E 页面契约（静态）：第二按钮 / 并存 / 首行 admin 守卫 / TTL 28800 / 交付后清 DOM /
+ *   E 页面契约（静态）：第二按钮 / 并存 / 首行 admin 守卫 / TTL 604800 / 交付后清 DOM /
  *     已交付块零令牌绑定 / 刷新提示文案 / 零持久层 / 刷新无残留。
- *   F 登录即自动签发（可执行）：挂载探测 / 自动签发 28800 / 无会话出内嵌表单 / 登录成功即签 / 幂等 /
+ *   F 登录即自动签发（可执行）：挂载探测 / 自动签发 604800 / 无会话出内嵌表单 / 登录成功即签 / 幂等 /
  *     失败不静默 / 匿名平台会话不算登录态。
  *   **G 凭据携带（本单根因修复｜可执行）**：`action:'verify'` 的请求体必须**顶层带 `token`**
  *     （xiai 用户令牌）—— 服务端只认「网关注入的平台会话」或 `event.token`；`/connect` 的 OTP 会话
@@ -272,11 +272,11 @@ const warmed = await userTokenSvc.ensureUserWriteSession(PLATFORM_ACCESS_TOKEN)
 /* ===========================================================================
    A 段：常量面
    =========================================================================== */
-section('A', '常量面：缺省 30 天 / 会话 8 小时 / 允许区间 [300, 43200]')
+section('A', '常量面：缺省 30 天 / 会话 168 小时 / 允许区间 [300, 604800]')
 
 {
   const ttl = feicuiSvc.FEICUI_DEVICE_TTL || {}
-  check('A1', '`FEICUI_DEVICE_TTL` 四值逐字：缺省 2,592,000 / 会话 28,800 / 下限 300 / 上限 43,200', { defaultSeconds: 2592000, sessionSeconds: 28800, minSeconds: 300, maxSeconds: 43200 }, {
+  check('A1', '`FEICUI_DEVICE_TTL` 四值逐字：缺省 2,592,000 / 会话 604,800 / 下限 300 / 上限 604,800', { defaultSeconds: 2592000, sessionSeconds: 604800, minSeconds: 300, maxSeconds: 604800 }, {
     defaultSeconds: ttl.defaultSeconds,
     sessionSeconds: ttl.sessionSeconds,
     minSeconds: ttl.minSeconds,
@@ -286,17 +286,17 @@ section('A', '常量面：缺省 30 天 / 会话 8 小时 / 允许区间 [300, 4
     feicuiSvc.deviceTtlSecondsOf(undefined),
     feicuiSvc.deviceTtlSecondsOf(null)
   ])
-  check('A3', '边界接受：300 与 43,200 原值返回（不夹取、不改写）', [300, 43200], [
+  check('A3', '边界接受：300 与 604,800 原值返回（不夹取、不改写）', [300, 604800], [
     feicuiSvc.deviceTtlSecondsOf(300),
-    feicuiSvc.deviceTtlSecondsOf(43200)
+    feicuiSvc.deviceTtlSecondsOf(604800)
   ])
-  check('A4', '越界拒绝：299 / 43,201 ⇒ `null`（边界外一位即拒）', [null, null], [
+  check('A4', '越界拒绝：299 / 604,801 ⇒ `null`（边界外一位即拒）', [null, null], [
     feicuiSvc.deviceTtlSecondsOf(299),
-    feicuiSvc.deviceTtlSecondsOf(43201)
+    feicuiSvc.deviceTtlSecondsOf(604801)
   ])
-  check('A5', '非整数拒绝：1.5 / 字符串 `"28800"` / `NaN` ⇒ `null`（不字符串转数、不四捨五入）', [null, null, null], [
+  check('A5', '非整数拒绝：1.5 / 字符串 `"604800"` / `NaN` ⇒ `null`（不字符串转数、不四捨五入）', [null, null, null], [
     feicuiSvc.deviceTtlSecondsOf(1.5),
-    feicuiSvc.deviceTtlSecondsOf('28800'),
+    feicuiSvc.deviceTtlSecondsOf('604800'),
     feicuiSvc.deviceTtlSecondsOf(Number.NaN)
   ])
 }
@@ -304,7 +304,7 @@ section('A', '常量面：缺省 30 天 / 会话 8 小时 / 允许区间 [300, 4
 /* ===========================================================================
    B 段：服务层（可执行）
    =========================================================================== */
-section('B', '服务层：缺省载荷 `{}` / 28800 ⇒ `{ttl_seconds:28800}` / 越界 ⇒ INVALID_VALUE 零往返')
+section('B', '服务层：缺省载荷 `{}` / 604800 ⇒ `{ttl_seconds:604800}` / 越界 ⇒ INVALID_VALUE 零往返')
 
 {
   const plain = await issueViaService(undefined)
@@ -327,12 +327,12 @@ section('B', '服务层：缺省载荷 `{}` / 28800 ⇒ `{ttl_seconds:28800}` / 
     keys: sorted(plain.reply)
   })
 
-  const session8h = await issueViaService(28800)
-  check('B2', '8 小時會話：载荷恰一键 `{ttl_seconds:28800}`（body 级字段；网关丢头也不受影响）', { json: '{"ttl_seconds":28800}', calls: 1 }, {
+  const session8h = await issueViaService(604800)
+  check('B2', '168 小時會話：载荷恰一键 `{ttl_seconds:604800}`（body 级字段；网关丢头也不受影响）', { json: '{"ttl_seconds":604800}', calls: 1 }, {
     json: JSON.stringify(session8h.payload),
     calls: session8h.calls
   })
-  check('B2b', '28800 签发回包仍恰 3 键、令牌逐字透传（只报长度与指纹）', { keys: ['expires_at', 'ok', 'token'], len: TOKEN.length, fp: fingerprint(TOKEN) }, {
+  check('B2b', '604800 签发回包仍恰 3 键、令牌逐字透传（只报长度与指纹）', { keys: ['expires_at', 'ok', 'token'], len: TOKEN.length, fp: fingerprint(TOKEN) }, {
     keys: sorted(session8h.reply),
     len: String(session8h.reply.token || '').length,
     fp: fingerprint(session8h.reply.token || '')
@@ -346,19 +346,19 @@ section('B', '服务层：缺省载荷 `{}` / 28800 ⇒ `{ttl_seconds:28800}` / 
   })
   const atMin = await issueViaService(300)
   check('B4', '300（下限）⇒ 放行，载荷 `{ttl_seconds:300}`', { ok: true, json: '{"ttl_seconds":300}' }, { ok: atMin.reply.ok, json: JSON.stringify(atMin.payload) })
-  const atMax = await issueViaService(43200)
-  check('B5', '43,200（上限）⇒ 放行，载荷 `{ttl_seconds:43200}`', { ok: true, json: '{"ttl_seconds":43200}' }, { ok: atMax.reply.ok, json: JSON.stringify(atMax.payload) })
-  const over = await issueViaService(43201)
-  check('B6', '43,201 ⇒ `INVALID_VALUE` ＋ 零往返', { reason: 'INVALID_VALUE', calls: 0 }, { reason: over.reply.reason, calls: over.calls })
+  const atMax = await issueViaService(604800)
+  check('B5', '604,800（上限）⇒ 放行，载荷 `{ttl_seconds:604800}`', { ok: true, json: '{"ttl_seconds":604800}' }, { ok: atMax.reply.ok, json: JSON.stringify(atMax.payload) })
+  const over = await issueViaService(604801)
+  check('B6', '604,801 ⇒ `INVALID_VALUE` ＋ 零往返', { reason: 'INVALID_VALUE', calls: 0 }, { reason: over.reply.reason, calls: over.calls })
   const fraction = await issueViaService(1.5)
   check('B7', '1.5 ⇒ `INVALID_VALUE` ＋ 零往返（不做四捨五入）', { reason: 'INVALID_VALUE', calls: 0 }, { reason: fraction.reply.reason, calls: fraction.calls })
-  const asString = await issueViaService('28800')
-  check('B8', '字符串 `"28800"` ⇒ `INVALID_VALUE` ＋ 零往返（不静默转数）', { reason: 'INVALID_VALUE', calls: 0 }, { reason: asString.reply.reason, calls: asString.calls })
+  const asString = await issueViaService('604800')
+  check('B8', '字符串 `"604800"` ⇒ `INVALID_VALUE` ＋ 零往返（不静默转数）', { reason: 'INVALID_VALUE', calls: 0 }, { reason: asString.reply.reason, calls: asString.calls })
 
   session.setUser(PLAIN_USER)
-  const notAdmin = await issueViaService(28800)
+  const notAdmin = await issueViaService(604800)
   session.setUser(ADMIN_USER)
-  check('B9', '非管理員 ＋ 8 小時 ⇒ `NOT_ADMIN` ＋ **零往返** ＋ 回包无 `token` 键', { reason: 'NOT_ADMIN', calls: 0, hasToken: false }, {
+  check('B9', '非管理員 ＋ 168 小時 ⇒ `NOT_ADMIN` ＋ **零往返** ＋ 回包无 `token` 键', { reason: 'NOT_ADMIN', calls: 0, hasToken: false }, {
     reason: notAdmin.reply.reason,
     calls: notAdmin.calls,
     hasToken: 'token' in notAdmin.reply
@@ -368,7 +368,7 @@ section('B', '服务层：缺省载荷 `{}` / 28800 ⇒ `{ttl_seconds:28800}` / 
 /* ===========================================================================
    C 段：服务端 op（真 `ops.OPS` ＋ 只读假 DB）
    =========================================================================== */
-section('C', '服务端 op：缺省 2,592,000 / 28800 / 300 / 43200 / 越界 INVALID_VALUE 零读密钥 / 非 admin FORBIDDEN')
+section('C', '服务端 op：缺省 2,592,000 / 604800 / 300 / 604800 / 越界 INVALID_VALUE 零读密钥 / 非 admin FORBIDDEN')
 
 /** 只读假 DB（零写、零联网）：`xiai_server_secrets/shadow_token` 回一行假密钥。 */
 function createStore() {
@@ -454,28 +454,28 @@ async function callOp(payload, identity) {
     ok: plain.reply.ok,
     ttl: Number(claimsOf(plain.reply.token).exp) - Number(claimsOf(plain.reply.token).iat)
   })
-  const session8h = await callOp({ ttl_seconds: 28800 }, IDENTITY_ADMIN)
-  check('C2', '`ttl_seconds: 28800` ⇒ `exp − iat ＝ 28,800`（8 小時）', { ok: true, ttl: 28800 }, {
+  const session8h = await callOp({ ttl_seconds: 604800 }, IDENTITY_ADMIN)
+  check('C2', '`ttl_seconds: 604800` ⇒ `exp − iat ＝ 604,800`（168 小時）', { ok: true, ttl: 604800 }, {
     ok: session8h.reply.ok,
     ttl: Number(claimsOf(session8h.reply.token).exp) - Number(claimsOf(session8h.reply.token).iat)
   })
   check('C2b', '成功回包仍**恰 3 键** `{ok, token, expires_at}`（不新增读数键）', 'expires_at,ok,token', shapeOf(session8h.reply))
-  check('C2c', '`expires_at` ＝ `iat + ttl` 的同一时钟换算（本地化 ISO 串）', new Date((NOW + 28800) * 1000).toISOString(), session8h.reply.expires_at)
+  check('C2c', '`expires_at` ＝ `iat + ttl` 的同一时钟换算（本地化 ISO 串）', new Date((NOW + 604800) * 1000).toISOString(), session8h.reply.expires_at)
 
   const atMin = await callOp({ ttl_seconds: 300 }, IDENTITY_ADMIN)
   check('C3', '下限 300 ⇒ 放行（`exp − iat ＝ 300`）', { ok: true, ttl: 300 }, {
     ok: atMin.reply.ok,
     ttl: Number(claimsOf(atMin.reply.token).exp) - Number(claimsOf(atMin.reply.token).iat)
   })
-  const atMax = await callOp({ ttl_seconds: 43200 }, IDENTITY_ADMIN)
-  check('C4', '上限 43,200 ⇒ 放行（`exp − iat ＝ 43,200`）', { ok: true, ttl: 43200 }, {
+  const atMax = await callOp({ ttl_seconds: 604800 }, IDENTITY_ADMIN)
+  check('C4', '上限 604,800 ⇒ 放行（`exp − iat ＝ 604,800`）', { ok: true, ttl: 604800 }, {
     ok: atMax.reply.ok,
     ttl: Number(claimsOf(atMax.reply.token).exp) - Number(claimsOf(atMax.reply.token).iat)
   })
 
   const under = await callOp({ ttl_seconds: 299 }, IDENTITY_ADMIN)
-  const over = await callOp({ ttl_seconds: 43201 }, IDENTITY_ADMIN)
-  check('C5', '299 / 43,201 ⇒ `INVALID_VALUE` ＋ 拒绝形状恰 3 键 ＋ **零读密钥 / 零写**', {
+  const over = await callOp({ ttl_seconds: 604801 }, IDENTITY_ADMIN)
+  check('C5', '299 / 604,801 ⇒ `INVALID_VALUE` ＋ 拒绝形状恰 3 键 ＋ **零读密钥 / 零写**', {
     under: { reason: 'INVALID_VALUE', denial: true, reads: 0, writes: 0 },
     over: { reason: 'INVALID_VALUE', denial: true, reads: 0, writes: 0 }
   }, {
@@ -483,9 +483,9 @@ async function callOp(payload, identity) {
     over: { reason: over.reply.reason, denial: isDenial(over.reply), reads: over.reads, writes: over.writes }
   })
   const fraction = await callOp({ ttl_seconds: 1.5 }, IDENTITY_ADMIN)
-  const asString = await callOp({ ttl_seconds: '28800' }, IDENTITY_ADMIN)
+  const asString = await callOp({ ttl_seconds: '604800' }, IDENTITY_ADMIN)
   const asNull = await callOp({ ttl_seconds: null }, IDENTITY_ADMIN)
-  check('C6', '1.5 / `"28800"` ⇒ `INVALID_VALUE` 零读；`null` ＝ 键缺席 ⇒ 仍放行（30 天）', {
+  check('C6', '1.5 / `"604800"` ⇒ `INVALID_VALUE` 零读；`null` ＝ 键缺席 ⇒ 仍放行（30 天）', {
     fraction: 'INVALID_VALUE',
     asString: 'INVALID_VALUE',
     fractionReads: 0,
@@ -501,7 +501,7 @@ async function callOp(payload, identity) {
     nullTtl: asNull.reply.ok ? Number(claimsOf(asNull.reply.token).exp) - Number(claimsOf(asNull.reply.token).iat) : 0
   })
 
-  const other = await callOp({ ttl_seconds: 28800 }, IDENTITY_OTHER)
+  const other = await callOp({ ttl_seconds: 604800 }, IDENTITY_OTHER)
   check('C7', '非 admin 夹带 `ttl_seconds` ⇒ 仍 `FORBIDDEN`（管理员门**先于**载荷键面）＋ 零读密钥 ＋ 零签发', { reason: 'FORBIDDEN', reads: 0, hasToken: false }, {
     reason: other.reply.reason,
     reads: other.reads,
@@ -557,7 +557,7 @@ function fakeHost(mode) {
   return { host, record }
 }
 
-const META = { expires_at: EXPIRES_AT, ttl_seconds: 28800 }
+const META = { expires_at: EXPIRES_AT, ttl_seconds: 604800 }
 
 {
   const absent = fakeHost('none')
@@ -582,7 +582,7 @@ const META = { expires_at: EXPIRES_AT, ttl_seconds: 28800 }
     tokenFp: fingerprint(TOKEN),
     metaKeys: ['expires_at', 'ttl_seconds'],
     expires_at: EXPIRES_AT,
-    ttl_seconds: 28800
+    ttl_seconds: 604800
   }, {
     tokenLen: String(pyCall.token || '').length,
     tokenFp: fingerprint(pyCall.token || ''),
@@ -714,7 +714,7 @@ const META = { expires_at: EXPIRES_AT, ttl_seconds: 28800 }
   const viaGlobalWindow = await feicuiSvc.deliverTokenToHost(TOKEN, META)
   if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
   else delete globalThis.window
-  check('D8', '缺省宿主 ＝ 全局 `window`（不注入第三参也能交付）：`window.pywebview.api.receive_feicui_token` 被走到 1 次', { delivered: true, calls: 1, ttl: 28800 }, {
+  check('D8', '缺省宿主 ＝ 全局 `window`（不注入第三参也能交付）：`window.pywebview.api.receive_feicui_token` 被走到 1 次', { delivered: true, calls: 1, ttl: 604800 }, {
     delivered: viaGlobalWindow.delivered,
     calls: globalRecord.length,
     ttl: (globalRecord[0] || {}).meta ? globalRecord[0].meta.ttl_seconds : 0
@@ -724,7 +724,7 @@ const META = { expires_at: EXPIRES_AT, ttl_seconds: 28800 }
 /* ===========================================================================
    E 段：页面契约（静态｜去注释后的码面）
    =========================================================================== */
-section('E', '/connect 页面契约：第二按钮（8 小時）/ 并存 / admin 守卫 / 交付后清 DOM / 刷新提示 / 零持久层')
+section('E', '/connect 页面契约：第二按钮（168 小時）/ 并存 / admin 守卫 / 交付后清 DOM / 刷新提示 / 零持久层')
 
 {
   const panelAt = viewSrc.indexOf('data-feicui-device-panel')
@@ -737,7 +737,7 @@ section('E', '/connect 页面契约：第二按钮（8 小時）/ 并存 / admin
     all: countIn(viewSrc, 'data-action="feicui-device-issue-session"'),
     inPanel: countIn(panelSrc, 'data-action="feicui-device-issue-session"')
   })
-  check('E1b', '按钮文案逐字「為斐翠桌面簽發 8 小時會話」（在按钮表达式内恰 1 处；面板其余文案只作指引可复述）', 1, countIn(panelSrc, ": '為斐翠桌面簽發 8 小時會話' }}"))
+  check('E1b', '按钮文案逐字「為斐翠桌面簽發 168 小時會話」（在按钮表达式内恰 1 处；面板其余文案只作指引可复述）', 1, countIn(panelSrc, ": '為斐翠桌面簽發 168 小時會話' }}"))
   check('E1c', '两枚并存：30 天按钮 `data-action="feicui-device-issue"` 仍在（面板内恰 1 处）', 1, countIn(panelSrc, 'data-action="feicui-device-issue"'))
   check('E2', '面板内全部 `<button>` 均 `type="button"`（不发隐式 submit）', true, (panelSrc.match(/<button\b[^>]*>/g) || []).every((tag) => tag.includes('type="button"')))
   check('E3', '动作首行即 admin 守卫 ＋ 在途去重（`if (!admin.value) return` / `if (deviceBusy.value) return`）', true, /^\{\s*if \(!admin\.value\) return/.test(sessionBody) && sessionBody.indexOf('if (deviceBusy.value) return') > 0)
@@ -746,10 +746,10 @@ section('E', '/connect 页面契约：第二按钮（8 小時）/ 并存 / admin
     const awaitAt = sessionBody.indexOf('await issueDeviceToken(')
     return clearAt >= 0 && awaitAt >= 0 && clearAt < awaitAt
   })())
-  check('E4', 'TTL 走单一常量：`issueDeviceToken({ ttlSeconds: DEVICE_SESSION_TTL_SECONDS })`，且该常量 ＝ `FEICUI_DEVICE_TTL.sessionSeconds`（28,800）', {
+  check('E4', 'TTL 走单一常量：`issueDeviceToken({ ttlSeconds: DEVICE_SESSION_TTL_SECONDS })`，且该常量 ＝ `FEICUI_DEVICE_TTL.sessionSeconds`（604,800）', {
     callSite: 1,
     constantBinding: 1,
-    constantValue: 28800
+    constantValue: 604800
   }, {
     callSite: countIn(sessionBody, 'ttlSeconds: DEVICE_SESSION_TTL_SECONDS'),
     constantBinding: countIn(scriptSrc, 'const DEVICE_SESSION_TTL_SECONDS = FEICUI_DEVICE_TTL.sessionSeconds'),
@@ -807,7 +807,7 @@ section('E', '/connect 页面契约：第二按钮（8 小時）/ 并存 / admin
    为什么不另起一个 `verify-*.mjs`：仓内 `verify-ai-relay` 的 F4 是**套件计数哨兵**，
    新增一个脚本必然顶红 ⇒ 本段并入既有套件（同批 +15 条，总数 52 → 67）。
    =========================================================================== */
-section('F', '登录即自动签发：挂载探测 ⇒ 自动签发 ttl=28800 / 无会话 ⇒ 内嵌登录表单 / 登录成功即签 / 幂等 / 失败不静默')
+section('F', '登录即自动签发：挂载探测 ⇒ 自动签发 ttl=604800 / 无会话 ⇒ 内嵌登录表单 / 登录成功即签 / 幂等 / 失败不静默')
 
 const VIEW_SCRIPT_SRC = viewSrc.slice(viewSrc.indexOf('<script setup>'), viewSrc.indexOf('</script>'))
 
@@ -875,7 +875,7 @@ function buildViewRuntime(options) {
     codeCooldown: makeRef(0)
   }
   const calls = { issue: [], deliver: [], otpSession: 0, login: [], cooldownStops: 0 }
-  const TTL = 28800
+  const TTL = 604800
 
   const issueDeviceToken = async (input) => {
     calls.issue.push(input === undefined ? { absent: true } : { ttlSeconds: input.ttlSeconds })
@@ -1008,14 +1008,14 @@ function buildViewRuntime(options) {
 }
 
 {
-  /* F1｜有会话 ⇒ 挂载即自动签发，参数 ttl=28800 */
+  /* F1｜有会话 ⇒ 挂载即自动签发，参数 ttl=604800 */
   const rt1 = buildViewRuntime()
   const mounted1 = await rt1.bootstrap()
-  check('F1', '有有效 OTP 會話 ⇒ **掛載即自動簽發**恰 1 次（零點擊），參數逐字 `ttlSeconds = 28800`', {
+  check('F1', '有有效 OTP 會話 ⇒ **掛載即自動簽發**恰 1 次（零點擊），參數逐字 `ttlSeconds = 604800`', {
     session: true,
     issued: true,
     issueCalls: 1,
-    ttl: 28800,
+    ttl: 604800,
     otpProbe: 1
   }, {
     session: mounted1.session,
@@ -1028,12 +1028,12 @@ function buildViewRuntime(options) {
   /* F2｜交付成功 ⇒ 已交付 ＋ 令牌从内存 / DOM 清掉 */
   const rt2 = buildViewRuntime()
   await rt2.bootstrap()
-  check('F2', '自動簽發 ＋ 宿主橋交付成功 ⇒ `deviceDelivered=true` 且令牌**已從記憶體 / DOM 清掉**（`deviceToken=null`）；橋收到同一枚令牌與 `ttl_seconds=28800`', {
+  check('F2', '自動簽發 ＋ 宿主橋交付成功 ⇒ `deviceDelivered=true` 且令牌**已從記憶體 / DOM 清掉**（`deviceToken=null`）；橋收到同一枚令牌與 `ttl_seconds=604800`', {
     delivered: true,
     tokenHeld: null,
     deliverCalls: 1,
     sameToken: true,
-    metaTtl: 28800
+    metaTtl: 604800
   }, {
     delivered: rt2.refs.deviceDelivered.value,
     tokenHeld: rt2.refs.deviceToken.value,
@@ -1108,11 +1108,11 @@ function buildViewRuntime(options) {
   await rt7.bootstrap()
   const formShownBeforeLogin = rt7.refs.loginRequired.value
   await rt7.login()
-  check('F7', '內嵌登錄成功 ⇒ **同一頁面加載內自動簽發**（不需再點）、`ttl=28800`、表單明文清零（`loginCode` / `loginPhone`）且表單收起', {
+  check('F7', '內嵌登錄成功 ⇒ **同一頁面加載內自動簽發**（不需再點）、`ttl=604800`、表單明文清零（`loginCode` / `loginPhone`）且表單收起', {
     formShownBeforeLogin: true,
     loginCalls: 1,
     issueCalls: 1,
-    ttl: 28800,
+    ttl: 604800,
     code: '',
     phone: '',
     loginRequired: false
@@ -1288,12 +1288,12 @@ section('G', '凭据携带：无票先取票 / 有票复用 / 无会话即 LOGIN
   })
 
   /* G2｜有票 ⇒ 复用（零额外取票）。 */
-  const reuse = await issueViaService(28800)
+  const reuse = await issueViaService(604800)
   check('G2', '管道里已有未过期的用户令牌 ⇒ **复用**：只 1 次 `verify` 往返、零 `issue`', {
     callsTotal: 1,
     order: ['verify'],
     tokenFp: fingerprint(USER_TOKEN),
-    payloadJson: '{"ttl_seconds":28800}'
+    payloadJson: '{"ttl_seconds":604800}'
   }, {
     callsTotal: reuse.callsTotal,
     order: actionsOf(),
@@ -1420,7 +1420,7 @@ section('G', '凭据携带：无票先取票 / 有票复用 / 无会话即 LOGIN
 /* ===========================================================================
    H 段：续签凭据**三源尝试**（本单修订｜可执行）＋ `renewal_source` 诊断枚举
    ---------------------------------------------------------------------------
-   真机症状：页面已能签发 8 小时会话、桥也交付了，但钥匙串里始终没有
+   真机症状：页面已能签发 168 小时会话、桥也交付了，但钥匙串里始终没有
    `feicui.local-dist/refresh` ⇒ 零点击续签不生效。根因：`refresh_token` 只从
    `getSession().data.session` 一处读，那条读法在真机上拿不到该字段（空串 ⇒ 不下发）。
    修法＝**多源尝试**（任一得手即用，全空不阻断交付），并把**命中源**作为枚举放进
@@ -1522,7 +1522,7 @@ section('H', '续签凭据三源：session / loginState / fallback / none（phon
     getSession: () => ({ data: { session: { access_token: PLATFORM_ACCESS_TOKEN } } }),
     getLoginState: () => ({ credentials: { user: {} } })
   })
-  check('H4', '三源全空 ⇒ `refresh_token` 空串 ＋ `renewal_source="none"`，**仍签 1 次、仍交付 1 次**（凭据取不到绝不阻断 8 小时会话）', {
+  check('H4', '三源全空 ⇒ `refresh_token` 空串 ＋ `renewal_source="none"`，**仍签 1 次、仍交付 1 次**（凭据取不到绝不阻断 168 小时会话）', {
     refresh: '',
     phone: '',
     source: 'none',
@@ -1604,7 +1604,7 @@ section('H', '续签凭据三源：session / loginState / fallback / none（phon
     const withRefresh = fakeHost('pywebview')
     const metaFull = {
       expires_at: EXPIRES_AT,
-      ttl_seconds: 28800,
+      ttl_seconds: 604800,
       refresh_token: RT_SESSION,
       phone: PHONE_A,
       renewal_source: RENEWAL_ENUM.session
@@ -1628,7 +1628,7 @@ section('H', '续签凭据三源：session / loginState / fallback / none（phon
     })
 
     const withoutRefresh = fakeHost('pywebview')
-    await feicuiSvc.deliverTokenToHost(TOKEN, { expires_at: EXPIRES_AT, ttl_seconds: 28800, refresh_token: '', phone: '', renewal_source: 'none' }, withoutRefresh.host)
+    await feicuiSvc.deliverTokenToHost(TOKEN, { expires_at: EXPIRES_AT, ttl_seconds: 604800, refresh_token: '', phone: '', renewal_source: 'none' }, withoutRefresh.host)
     const callBare = (withoutRefresh.record.pywebview[0] || {}).meta || {}
     check('H9b', '真 `deliverTokenToHost`：**空凭据不下发空键**（`refresh_token` / `phone` 缺席）＋ `renewal_source="none"` 仍带（桌面端据此区分「取了但没拿到」与「页面根本没取」）', {
       keys: ['expires_at', 'renewal_source', 'ttl_seconds'],
@@ -1644,11 +1644,11 @@ section('H', '续签凭据三源：session / loginState / fallback / none（phon
 
     /* 旧调用方（只给 `expires_at` / `ttl_seconds`，本单之前的形态）⇒ 桥参数**逐字两键**。 */
     const legacy = fakeHost('pywebview')
-    await feicuiSvc.deliverTokenToHost(TOKEN, { expires_at: EXPIRES_AT, ttl_seconds: 28800 }, legacy.host)
+    await feicuiSvc.deliverTokenToHost(TOKEN, { expires_at: EXPIRES_AT, ttl_seconds: 604800 }, legacy.host)
     const callLegacy = (legacy.record.pywebview[0] || {}).meta || {}
     check('H9c', '旧调用形态（meta 只有 `expires_at` / `ttl_seconds`）⇒ 桥 meta **逐字两键**（新增键纯增量，旧调用点零变化）', {
       keys: ['expires_at', 'ttl_seconds'],
-      ttl: 28800
+      ttl: 604800
     }, {
       keys: sorted(callLegacy),
       ttl: callLegacy.ttl_seconds

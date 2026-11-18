@@ -259,7 +259,7 @@ export function remainingSeconds(expiresAt, nowMs) {
    网关注入的 `callContext` 是主实例的匿名会话 ⇒ 认不出登录用户）。
    硬口径（逐条）：
      ① 载荷**封闭键面**：缺省 `{}`（不收集任何字段）；**本单新增**可选 `ttl_seconds`
-        （整数秒 ∈ `[300, 43200]`；页面「為斐翠桌面簽發 8 小時會話」传 28800）。
+        （整数秒 ∈ `[300, 604800]`；页面「為斐翠桌面簽發 168 小時會話」传 604800）。
         未给 ⇒ 载荷逐字仍是 `{}`（服务端走 30 天缺省，既有行为不变）；
      ② 回包**恰 3 键** `{ok, token, expires_at}` —— 本层只挑这三键，**不多不少**；
      ③ 失败原样透传服务端的 `{ok:false, reason, message}`（`FORBIDDEN` 就是
@@ -272,10 +272,10 @@ export function remainingSeconds(expiresAt, nowMs) {
 /** 設備令牌有效期面（服务端 `FEICUI_DEVICE_TOKEN_*` 的同值镜像；缺省 30 天）。 */
 export const FEICUI_DEVICE_TTL = Object.freeze({
   defaultSeconds: 30 * 24 * 60 * 60,
-  /** 斐萃桌面版「登錄即授權」通道：8 小時。 */
-  sessionSeconds: 8 * 60 * 60,
+  /** 斐萃桌面版「登錄即授權」通道：168 小時（7 天）。 */
+  sessionSeconds: 168 * 60 * 60,
   minSeconds: 5 * 60,
-  maxSeconds: 12 * 60 * 60
+  maxSeconds: 168 * 60 * 60
 })
 
 /** 前置拦截的取值 reason（与服务端 `REASONS.INVALID_VALUE` 同一字面值）。 */
@@ -362,7 +362,7 @@ export async function issueDeviceToken(input) {
   if (!isAdmin.value) {
     return { ok: false, reason: NOT_ADMIN, message: `僅${ADMIN_LABEL}可以簽發斐萃桌面授權。` }
   }
-  /* **可选有效期**：未给 ⇒ 载荷逐字 `{}`（服务端 30 天缺省）；给了 ⇒ 整数 `[300, 43200]`。 */
+  /* **可选有效期**：未给 ⇒ 载荷逐字 `{}`（服务端 30 天缺省）；给了 ⇒ 整数 `[300, 604800]`。 */
   const ttlGiven = options.ttlSeconds !== undefined && options.ttlSeconds !== null
   const ttlSeconds = deviceTtlSecondsOf(options.ttlSeconds)
   if (ttlSeconds === null) {

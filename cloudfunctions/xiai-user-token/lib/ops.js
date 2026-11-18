@@ -2938,7 +2938,7 @@ const IMAGE_CORRECTION_REVIEW_READOUT_KEYS = Object.freeze(['image_action'])
    ① **管理员门先于一切读**（既有单点 `adminWhitelistDenial`：会话路复核 `xiai_roles` 角色、
       令牌路比对 `XIAI_ADMIN_PHONE` 白名单）；非 admin ⇒ `FORBIDDEN` ＋ **零签发、零读密钥**。
    ② **载荷封闭两键（皆可选）**：`device_label`（字符串、可空、≤120 字）＋ `ttl_seconds`
-      （**本单新增**：整数秒，允许区间 `[300, 43200]`；缺省 ＝ 30 天 ＝ 2,592,000 s）；
+      （**本单新增**：整数秒，允许区间 `[300, 604800]`；缺省 ＝ 30 天 ＝ 2,592,000 s）；
       未登记键 / 身份类键 ⇒ `INVALID_FIELD` ＋ 零签发；`ttl_seconds` 非整数 / 越界 ⇒
       `INVALID_VALUE` ＋ 零签发（**不静默夹取、不四捨五入**）—— 身份**只取自已验签令牌 /
       平台会话**（`identity`），载荷里的 `uid` / `role` 一律**不读**。
@@ -2954,16 +2954,16 @@ const IMAGE_CORRECTION_REVIEW_READOUT_KEYS = Object.freeze(['image_action'])
 
 /** 载荷封闭键面（身份类键一律不在面内 ⇒ `INVALID_FIELD` ＋ 零签发）：
  *  `device_label`（设备标签，可空）＋ `ttl_seconds`（**本单新增**：可选有效期秒数 ——
- *  斐萃桌面版「登錄即授權」通道用 8 小時 ＝ 28,800 s；缺省仍为 30 天）。 */
+ *  斐萃桌面版「登錄即授權」通道用 168 小時（7 天）＝ 604,800 s；缺省仍为 30 天）。 */
 const FEICUI_DEVICE_TOKEN_ALLOWED_KEYS = Object.freeze(['device_label', 'ttl_seconds'])
 
 /** 令牌缺省有效期：30 天（§13.1 冻结；与 feicui-shadow `TTL_SECONDS` 同值）。 */
 const FEICUI_DEVICE_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
-/** `ttl_seconds` 允许区间（**本单新增**）：5 分钟 〜 12 小时。
+/** `ttl_seconds` 允许区间（**本单新增**）：5 分钟 〜 168 小时（7 天）。
  *  缺省（键缺席 / `null`）⇒ 走 30 天常量；区间外 / 非整数 ⇒ `INVALID_VALUE` ＋ 零签发。 */
 const FEICUI_DEVICE_TOKEN_MIN_TTL_SECONDS = 5 * 60
-const FEICUI_DEVICE_TOKEN_MAX_TTL_SECONDS = 12 * 60 * 60
+const FEICUI_DEVICE_TOKEN_MAX_TTL_SECONDS = 168 * 60 * 60
 
 /** 令牌格式版本（载荷 `v`；§13.1）。 */
 const FEICUI_DEVICE_TOKEN_FORMAT_VERSION = 1
@@ -3047,7 +3047,7 @@ async function readFeicuiDeviceTokenSecret() {
  * 判定顺序（**全部早于任何签发，且密钥读点在门后**）：
  *   ① 管理员门（非 admin ⇒ `FORBIDDEN`，零签发、零读密钥、零读集合）；
  *   ② 载荷形态 / 封闭键面（未登记键 ⇒ `INVALID_FIELD`；`device_label` 非字符串 ⇒ `INVALID_VALUE`；
- *      `ttl_seconds` 非整数 / 越出 `[300, 43200]` ⇒ `INVALID_VALUE`）；
+ *      `ttl_seconds` 非整数 / 越出 `[300, 604800]` ⇒ `INVALID_VALUE`）；
  *   ③ 身份（`uid` / `role` 只取自已验签令牌 / 平台会话；缺失 ⇒ `FORBIDDEN`）＋ 服务端时钟；
  *   ④ 密钥（两源皆缺 ⇒ `STORAGE_UNAVAILABLE`）；
  *   ⑤ 签发（键序 `v / uid / roles / iat / exp / jti`、TTL 30 天、`jti` 随机 uuid）。
@@ -3081,7 +3081,7 @@ async function runIssueFeicuiDeviceToken(payload, identity, context) {
     return deny(REASONS.INVALID_VALUE, `設備標籤不得超過 ${FEICUI_DEVICE_LABEL_MAX_LENGTH} 字；本次零簽發。`)
   }
   /* ②-b **可选有效期（本单新增）**：`ttl_seconds` 键缺席 / `null` ⇒ 保持 30 天（既有行为逐字不变）；
-     给了就必须是**整数**且落在 `[300, 43200]` 内 —— 非整数 / 越界一律 `INVALID_VALUE` ＋ 零签发
+     给了就必须是**整数**且落在 `[300, 604800]` 内 —— 非整数 / 越界一律 `INVALID_VALUE` ＋ 零签发
      （**不夹取、不四捨五入、不字符串转数**；判定早于任何身份 / 密钥读取）。 */
   const rawTtl = payload.ttl_seconds
   let ttlSeconds = FEICUI_DEVICE_TOKEN_TTL_SECONDS
@@ -4478,8 +4478,8 @@ const OPS = Object.freeze({
 
   /**
    * **管理員【斐萃桌面授權】（`issueFeicuiDeviceToken`｜跨仓契约 §13.2）**：admin 调 ⇒ 签一枚
-   * **设备令牌**（缺省 **30 天**；可选 `ttl_seconds` ∈ `[300, 43200]` 秒 —— 斐萃桌面版
-   * 「登錄即授權」通道用 8 小時；feicui-shadow 的 `verifyDeviceToken` 直接可验）；**零落盘**、令牌自包含。
+   * **设备令牌**（缺省 **30 天**；可选 `ttl_seconds` ∈ `[300, 604800]` 秒 —— 斐萃桌面版
+   * 「登錄即授權」通道用 168 小時（7 天）；feicui-shadow 的 `verifyDeviceToken` 直接可验）；**零落盘**、令牌自包含。
    *
    * 为何注册在 `OPS` 面而非 `ADMIN_OPS`：本 op 的授权判定**完全**由既有单点
    * `adminWhitelistDenial` 承担（与该单点同表同门），而 `ADMIN_OPS` 的成员表被仓内五套既有
@@ -4491,7 +4491,7 @@ const OPS = Object.freeze({
    * 硬口径（逐条）：① **第一行即管理员门**（会话路复核 `xiai_roles` 角色、令牌路比对
    * `XIAI_ADMIN_PHONE`；缺 env / 非 admin ⇒ 结构化拒 ＋ 零签发、零读密钥）；② 载荷**封闭恰
    *   一键** `device_label`（身份类键 ⇒ `INVALID_FIELD`；身份只取自已验签令牌 / 平台会话）；
-   *   ②-b 可选 `ttl_seconds`（整数 `[300, 43200]`；缺省 30 天；非整数 / 越界 ⇒ `INVALID_VALUE`）；
+   *   ②-b 可选 `ttl_seconds`（整数 `[300, 604800]`；缺省 30 天；非整数 / 越界 ⇒ `INVALID_VALUE`）；
    * ③ 密钥：集合 `xiai_server_secrets` 的 `shadow_token.secret` 优先、`SHADOW_TOKEN_SECRET`
    * 兼底，两者皆缺 ⇒ `STORAGE_UNAVAILABLE`（fail-closed，不猜默认值）；密钥值**零外泄**；
    * ④ 成功回包**恰 3 键** `{ok, token, expires_at}`（`index.js` 按 op 收窄透传这两个读数键）；

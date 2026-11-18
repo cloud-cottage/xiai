@@ -396,7 +396,7 @@ async function onSaveUpstream() {
    ---------------------------------------------------------------------------
    兩條簽發路（**並存**；本單新增第二條）：
      · 【簽發設備令牌】＝ 30 天（服務端缺省），令牌一次性顯示，由人複製後在**本機**寫入授權文件；
-     · 【為斐翠桌面簽發 8 小時會話】＝ `ttl_seconds ＝ 28800`（**登錄即授權**）：
+     · 【為斐翠桌面簽發 168 小時會話】＝ `ttl_seconds ＝ 604800`（**登錄即授權**）：
        簽發成功 ⇒ 先探宿主橋（pywebview → wails → 通用），有橋就**當場交付**給 App
        （`receive_feicui_token(token, {expires_at, ttl_seconds})`）並**立刻清掉 DOM 裡的明文**；
        無橋 / 橋拋錯 ⇒ 回退到與 30 天路同一套「一次性顯示 ＋ 一鍵複製」（**令牌不丟**）。
@@ -416,7 +416,7 @@ const deviceError = ref('')
 const deviceCopied = ref(false)
 /** **令牌唯一持有處**：`{token, expires_at}`（成功回包恰 3 鍵，`ok` 不外存）。 */
 const deviceToken = ref(null)
-/** 8 小時會話的 TTL（服务端 clamp 上界的同值镜像：`FEICUI_DEVICE_TTL.sessionSeconds`）。 */
+/** 168 小時會話的 TTL（服务端 clamp 上界的同值镜像：`FEICUI_DEVICE_TTL.sessionSeconds`）。 */
 const DEVICE_SESSION_TTL_SECONDS = FEICUI_DEVICE_TTL.sessionSeconds
 /** 宿主橋已交付（令牌明文**已從 DOM 清掉**；此後頁面只顯示「已交付」）。 */
 const deviceDelivered = ref(false)
@@ -427,7 +427,7 @@ const DEVICE_REASON_HINTS = Object.freeze({
   NOT_ADMIN: `僅${ADMIN_LABEL}可以簽發斐萃桌面授權。`,
   LOGIN_REQUIRED: '請先登錄後再申請桌面授權。',
   STORAGE_UNAVAILABLE: '雲端暫時不可用，請稍後再試。',
-  INVALID_VALUE: '有效期（ttl_seconds）不合法（需 300〜43200 的整數秒）。',
+  INVALID_VALUE: '有效期（ttl_seconds）不合法（需 300〜604800 的整數秒）。',
   TIMEOUT: '請求逾時，請稍後再試。'
 })
 
@@ -448,7 +448,7 @@ async function onIssueDeviceToken() {
   deviceBusy.value = true
   deviceError.value = ''
   deviceCopied.value = false
-  deviceDelivered.value = false /* 交付態只屬於 8 小時會話路；30 天路簽發時一併收起 */
+  deviceDelivered.value = false /* 交付態只屬於 168 小時會話路；30 天路簽發時一併收起 */
   deviceToken.value = null /* **先清** ⇒ 任何失敗路徑都不殘留舊令牌 */
   const reply = await issueDeviceToken()
   deviceBusy.value = false
@@ -579,12 +579,12 @@ async function sessionRenewalMeta() {
 }
 
 /**
- * **8 小時會話（登錄即授權｜本單新增）**：簽發 → 交付宿主橋 → **清掉頁面明文**。
+ * **168 小時會話（登錄即授權｜本單新增）**：簽發 → 交付宿主橋 → **清掉頁面明文**。
  *
  * 順序（每步都可被判據釘住）：
  *   ① 首行 admin 守衛 ＋ 在途去重（非管理員零請求）；
  *   ② **先清**上一次的令牌 / 交付態 / 錯誤（失敗路徑零殘留）；
- *   ③ 簽發 `ttl_seconds ＝ 28800`（服務端 clamp `[300, 43200]`）；
+ *   ③ 簽發 `ttl_seconds ＝ 604800`（服務端 clamp `[300, 604800]`）；
  *   ④ 成功 ⇒ 令牌進唯一持有處 `deviceToken`（與 30 天路同一文本域，仍是**唯一上屏處**）；
  *   ⑤ `deliverTokenToHost()`：pywebview → wails → 通用，有橋就交付
  *      `(token, {expires_at, ttl_seconds, refresh_token, phone, renewal_source})` ——
@@ -612,7 +612,7 @@ async function onIssueSessionToken() {
   }
   /* 与 30 天路同一持有形状 `{token, expires_at}`（複用同一張只讀文本域 ⇒ 上屏處仍恰 1 處）。 */
   deviceToken.value = { token: String(reply.token), expires_at: String(reply.expires_at) }
-  /* **续签凭据（本单新增）**：只进桥 `meta`；三源全空 ⇒ 空串（不阻断交付，降级为纯 8 小时会话）。 */
+  /* **续签凭据（本单新增）**：只进桥 `meta`；三源全空 ⇒ 空串（不阻断交付，降级为纯 168 小时会话）。 */
   let renewal = { refresh_token: '', phone: '', renewal_source: RENEWAL_SOURCES.none }
   try {
     renewal = await sessionRenewalMeta()
@@ -663,7 +663,7 @@ onUnmounted(clearDeviceToken)
    触发条件（恰好两处，且**互相幂等**）：
      · **挂载**：`bootstrapDesktopAuthorization()` 取 `otpSessionAccessToken()`
          - 非空（本页内存里确有有效 OTP 会话）⇒ 立即 `autoIssueOnce()` ⇒ 签发
-           `ttl_seconds = 28800`，有宿主桥即**当场交付**并清掉 DOM 明文；
+           `ttl_seconds = 604800`，有宿主桥即**当场交付**并清掉 DOM 明文；
          - 空 ⇒ `loginRequired = true` ⇒ 渲染内嵌登录表单（**不签发、零请求**）。
      · **内嵌登录成功**：`onInlineLogin()` 在**同一次页面加载内**直接 `autoIssueOnce()`
        —— 不跳转、不需第二下点击。
@@ -791,7 +791,7 @@ async function onInlineLogin() {
  * **挂载即判**（自动签发的唯一挂载触发点；本页只绑在 `onMounted` 恰 1 处）。
  *
  * 读取的是**当前页面内存里的 OTP 会话**（`persistence:'none'`）：取不到 ⇒ 只显示内嵌登录表单，
- * **零签发请求**；取到 ⇒ 立即自动签发（`ttl_seconds = 28800`）。
+ * **零签发请求**；取到 ⇒ 立即自动签发（`ttl_seconds = 604800`）。
  *
  * **两个条件取「与」（实测踩过）**：`otpSessionAccessToken()` 非空 **且** 本页确实是登录态
  * （`logged`）。只判非空会把**匿名平台会话**当成已登录 —— SDK 的匿名会话同样给出一枚
@@ -830,7 +830,7 @@ onUnmounted(stopCooldown)
       </div>
       <div class="panel__body">
         <p class="hint">
-          在本頁登錄後，系統會<b>自動為斐翠桌面簽發一枚 8 小時會話並直接交付</b>，不需要再按任何按鈕。
+          在本頁登錄後，系統會<b>自動為斐翠桌面簽發一枚 168 小時會話並直接交付</b>，不需要再按任何按鈕。
           <b>登錄後將自動簽發並交付桌面版；刷新本頁需重新登錄</b>
           （本頁的登錄會話只存在頁面記憶體，不落任何本地存儲）。
         </p>
@@ -1052,7 +1052,7 @@ onUnmounted(stopCooldown)
           <h2>斐萃桌面授權</h2>
           <div class="ai-head-actions">
             <button class="btn btn--ghost" type="button" data-action="feicui-device-issue-session" :disabled="deviceBusy || deviceDelivered" @click="onIssueSessionToken">
-              {{ deviceBusy ? '簽發中…' : '為斐翠桌面簽發 8 小時會話' }}
+              {{ deviceBusy ? '簽發中…' : '為斐翠桌面簽發 168 小時會話' }}
             </button>
             <button class="btn" type="button" data-action="feicui-device-issue" :disabled="deviceBusy" @click="onIssueDeviceToken">
               {{ deviceBusy ? '簽發中…' : deviceToken ? '重新簽發' : '簽發設備令牌' }}
@@ -1066,8 +1066,8 @@ onUnmounted(stopCooldown)
             本頁不寫任何本地存儲、不把令牌放進網址、也不打日誌。
           </p>
           <p class="hint">
-            <b>登錄即授權（桌面版）</b>：按右上角【為斐翠桌面簽發 8 小時會話】＝ 簽發一枚 8 小時
-            （<code>ttl_seconds = 28800</code>）的會話令牌，若偵測到宿主橋（<code>pywebview</code> →
+            <b>登錄即授權（桌面版）</b>：按右上角【為斐翠桌面簽發 168 小時會話】＝ 簽發一枚 168 小時
+            （<code>ttl_seconds = 604800</code>）的會話令牌，若偵測到宿主橋（<code>pywebview</code> →
             <code>wails</code> → 通用）就<b>當場交付給斐萃桌面版</b>（<code>receive_feicui_token</code>），
             交付後<b>頁面不再保留令牌明文</b>；沒有宿主橋（例如用普通瀏覽器打開本頁）則自動回退為
             「一次性顯示 ＋ 一鍵複製」。
@@ -1105,7 +1105,7 @@ onUnmounted(stopCooldown)
               <span class="token-box__title">已交付桌面版</span>
             </div>
             <p class="hint">
-              這枚 <b>8 小時</b>會話令牌已直接交給斐萃桌面版（宿主橋 <code>receive_feicui_token</code>），
+              這枚 <b>168 小時</b>會話令牌已直接交給斐萃桌面版（宿主橋 <code>receive_feicui_token</code>），
               <b>頁面內不再顯示、也不再保留令牌明文</b>，且未寫入任何本地存儲 / 網址 / 日誌。
               授權由桌面版自己保存；<b>若刷新本頁需重新登錄後再簽</b>。
             </p>

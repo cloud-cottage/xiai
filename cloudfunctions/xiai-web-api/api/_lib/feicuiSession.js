@@ -3,7 +3,7 @@
  * ============================================================================
  * 为什么是这两个端点：斐萃桌面版（`local-dist/src/shadow/renew.py`）启动时要「零点击续签」——
  *   ① 钥匙串里的 `refresh_token` → 换新平台会话；
- *   ② 新会话 → 换一枚 **8 小时斐萃设备令牌**（`ttl_seconds = 28800`）。
+ *   ② 新会话 → 换一枚 **168 小时（7 天）斐萃设备令牌**（`ttl_seconds = 604800`）。
  *   两步都必须是**服务端**动作：平台 `refresh_token` 的换发要用 `client_id`（＝环境 Id）与区域
  *   端点信息，且**斐萃侧永不持有任何密钥**；设备令牌的签名密钥更只能待在服务端。
  *
@@ -30,7 +30,7 @@
  *      兼容别名 `session_token`（＝`access_token`，只为让已实现的桌面端少改一行；**不是新通道**）
  *    成功 200：`{ok:true, token, expires_at}` —— **恰 3 键**；`token` 的 claims / 签名与
  *      `issueFeicuiDeviceToken`（云函数 op）**逐字节同源**（`{v,uid,roles,iat,exp,jti}` ＋ 2 段
- *      HMAC-SHA256），TTL 恒 `28800`。
+ *      HMAC-SHA256），TTL 恒 `604800`（168 小时 / 7 天）。
  *    无会话 401：`{ok:false, reason:'LOGIN_REQUIRED'}`；非管理员 403：`{ok:false, reason:'FORBIDDEN'}`；
  *    平台不可用 502 / 配置缺失 503 / 入参非法 400 同上。
  *
@@ -76,13 +76,13 @@ export const REASONS = Object.freeze({
   CONFIG_MISSING: 'CONFIG_MISSING'
 })
 
-/** 设备令牌 TTL：8 小时（**唯一一处定义点**；与 `/connect` 的 `FEICUI_DEVICE_TTL.sessionSeconds` 同值）。 */
-export const DEVICE_TTL_SECONDS = 8 * 60 * 60
+/** 设备令牌 TTL：168 小时 / 7 天（**唯一一处定义点**；与 `/connect` 的 `FEICUI_DEVICE_TTL.sessionSeconds` 同值）。 */
+export const DEVICE_TTL_SECONDS = 168 * 60 * 60
 
 /**
  * `buildDeviceClaims` 的**缺省** TTL：30 天。
  * 与 `ops.js::buildFeicuiDeviceTokenClaims` 的缺省**逐字一致**（自检 D6 钉住）——
- * 8 小时是本通道**显式传入**的值（见 device-token 路由），不是缺省。
+ * 168 小时（7 天）是本通道**显式传入**的值（见 device-token 路由），不是缺省。
  */
 export const DEVICE_TTL_FALLBACK_SECONDS = 30 * 24 * 60 * 60
 
@@ -530,7 +530,7 @@ export function createSessionHandler(options = {}) {
       })
     }
 
-    /* ---------------- ② device-token：会话 → 8 小时设备令牌 ---------------- */
+    /* ---------------- ② device-token：会话 → 168 小时设备令牌 ---------------- */
     let accessToken = payload.accessToken
     if (!accessToken) {
       const refreshed = await calls.refreshSession(payload.refreshToken)
