@@ -835,6 +835,13 @@ function bodyOf(name) {
   return source.slice(source.indexOf('{'))
 }
 
+/** 读视图里的**数字常量**（`const NAME = 50`）—— 判据不复制常量值（改动即被看见）。 */
+function numberLiteralOf(name) {
+  const match = new RegExp(`const ${name} = (\\d+)`).exec(VIEW_SCRIPT_SRC)
+  if (!match) throw new Error(`MISSING_CONSTANT:${name}`)
+  return Number(match[1])
+}
+
 function makeRef(initial) {
   return { value: initial }
 }
@@ -882,8 +889,8 @@ function buildViewRuntime(options) {
     if (opts.issueReply) return opts.issueReply
     return { ok: true, token: TOKEN, expires_at: EXPIRES_AT }
   }
-  const deliverTokenToHost = async (token, meta) => {
-    calls.deliver.push({ token, meta })
+  const deliverTokenToHost = async (token, meta, host) => {
+    calls.deliver.push({ token, meta, host })
     if (opts.delivery) return opts.delivery
     return { delivered: true, reason: 'DELIVERED' }
   }
@@ -926,6 +933,16 @@ function buildViewRuntime(options) {
     RENEWAL_SOURCES,
     isPhoneLike
   ])
+  /* **交付身份（本单新增）**：`currentUser` 由用例注入（缺省＝未登錄 ⇒ 昵稱空串）；
+     手机闸门与昵称上限都取视图真实现 / 真常量，不复制任何取值规则。 */
+  const currentUser = () => (opts.user === undefined ? null : opts.user)
+  const deliveryIdentity = bind('deliveryIdentity', ['currentUser', 'isPhoneLike', 'DELIVERY_NICKNAME_MAX'], [
+    currentUser,
+    isPhoneLike,
+    numberLiteralOf('DELIVERY_NICKNAME_MAX')
+  ])
+  /* 身份装饰体：`window` 由用例注入（缺省 undefined ⇒ 等价「无橋」，服务层照旧回退 ABSENT）。 */
+  const hostWithIdentity = bind('hostWithIdentity', ['window'], [opts.bridgeWindow])
 
   const manualSessionIssue = bind('onIssueSessionToken', [
     'admin',
@@ -940,7 +957,9 @@ function buildViewRuntime(options) {
     'deviceErrorText',
     'DEVICE_SESSION_TTL_SECONDS',
     'sessionRenewalMeta',
-    'RENEWAL_SOURCES'
+    'RENEWAL_SOURCES',
+    'deliveryIdentity',
+    'hostWithIdentity'
   ], [
     refs.admin,
     refs.deviceBusy,
@@ -954,7 +973,9 @@ function buildViewRuntime(options) {
     deviceErrorText,
     TTL,
     sessionRenewalMeta,
-    RENEWAL_SOURCES
+    RENEWAL_SOURCES,
+    deliveryIdentity,
+    hostWithIdentity
   ])
   /* 自动签发 ＝ `autoIssueOnce`（幂等旗标 ＋ 同一个签发体）。 */
   const auto = bind('autoIssueOnce', ['autoIssueAttempted', 'onIssueSessionToken'], [
@@ -1666,6 +1687,128 @@ section('H', '续签凭据三源：session / loginState / fallback / none（phon
       source: countIn(templateSrc, 'renewal_source')
     })
   }
+}
+
+/* ===========================================================================
+   I 段：交付身份（**可执行**＋静态）：meta 带 `nickname` / `phone`，且**永不夹带令牌**
+   ---------------------------------------------------------------------------
+   被测事实链：页面 `onIssueSessionToken`（真函数体）→ `deliverTokenToHost`（**真服务层**）
+   → 宿主橋（假 `window`，记录实收参数）。三处都要看，因为服务层的桥侧 payload 是**白名单组装**，
+   只读页面字面量会漏掉「身份键到不了橋」这类缺陷（本段 I5 就是这条端到端判据）。
+   =========================================================================== */
+section('I', '交付身份：meta 带 nickname / phone（空串降级、不编造），逐键无令牌，令牌只在第一参')
+
+{
+  const NICK_PHONE = '13800000009'
+  const USER = { id: 'u-' + '1'.repeat(16), role: 'admin', nickname: '  章魚小丸子  ', phone: NICK_PHONE }
+
+  /* I1｜页面 meta 键面（真函数体跑出来，不读注释） */
+  const rtI1 = buildViewRuntime({ user: USER })
+  await rtI1.bootstrap()
+  const pageCall = rtI1.calls.deliver[0] || {}
+  const pageMeta = pageCall.meta || {}
+  check('I1', '页面交付 meta 含 `nickname` 与 `phone` 两键（昵称去空白后逐字上橋；手机号 11 位原样）', {
+    keys: ['expires_at', 'nickname', 'phone', 'refresh_token', 'renewal_source', 'ttl_seconds'],
+    nickname: '章魚小丸子',
+    phone: NICK_PHONE
+  }, {
+    keys: sorted(pageMeta),
+    nickname: pageMeta.nickname,
+    phone: pageMeta.phone
+  })
+
+  /* I2｜逐键无令牌：`refresh_token` 是**既有续签凭据**（键名天然含 token，非本次会话令牌）；
+     除此之外任何带 token 的键、以及**任何键的值等于本次令牌**，一律算违规。 */
+  const tokenishKeys = Object.keys(pageMeta).filter((key) => key.toLowerCase().indexOf('token') !== -1)
+  const smugglingKeys = Object.keys(pageMeta).filter((key) => {
+    const value = pageMeta[key]
+    return typeof value === 'string' && value !== '' && String(value).indexOf(String(pageCall.token)) !== -1
+  })
+  check('I2', 'meta **不含令牌**：除既有 `refresh_token`（续签凭据）外零 token 键；且没有任何键的值是本次令牌（序列化文本零命中）', {
+    tokenishKeys: ['refresh_token'],
+    smugglingKeys: [],
+    tokenInMetaText: false
+  }, {
+    tokenishKeys,
+    smugglingKeys,
+    tokenInMetaText: JSON.stringify(pageMeta).indexOf(String(pageCall.token)) !== -1
+  })
+
+  /* I3｜昵称缺失 ⇒ 空串（不是 undefined / null，也不拿 uid 或手机号顶替） */
+  const rtI3 = buildViewRuntime()
+  await rtI3.bootstrap()
+  const bareMeta = ((rtI3.calls.deliver[0] || {}).meta) || {}
+  check('I3', '取不到用户 ⇒ `nickname` 是**空串**（`typeof === "string"`，非 undefined / null），`phone` 同样空串 —— 不编造、不用 uid 顶替', {
+    nickname: '',
+    nicknameType: 'string',
+    nicknamePresent: true,
+    phone: ''
+  }, {
+    nickname: bareMeta.nickname,
+    nicknameType: typeof bareMeta.nickname,
+    nicknamePresent: Object.prototype.hasOwnProperty.call(bareMeta, 'nickname'),
+    phone: bareMeta.phone
+  })
+
+  /* I4｜去首尾空白 ＋ 按 50 字截断（码点切，不切坏代理对） */
+  const LONG = '   ' + '章'.repeat(60) + '   '
+  const rtI4 = buildViewRuntime({ user: { nickname: LONG, phone: '1' } })
+  await rtI4.bootstrap()
+  const longMeta = ((rtI4.calls.deliver[0] || {}).meta) || {}
+  const longNick = String(longMeta.nickname || '')
+  check('I4', '昵称去首尾空白后按 **50 字**截断（60 字输入 ⇒ 恰 50 字、首尾无空白；形如手机号的非 11 位 `phone` ⇒ 空串）', {
+    length: 50,
+    value: '章'.repeat(50),
+    trimmed: true,
+    phone: ''
+  }, {
+    length: Array.from(longNick).length,
+    value: longNick,
+    trimmed: longNick === longNick.trim(),
+    phone: longMeta.phone
+  })
+
+  /* I5｜端到端（真页面 → 真服务 → 假橋）：身份键必须真的**到得了橋**，令牌仍只在第一参 */
+  const bridge = fakeHost('pywebview')
+  const rtI5 = buildViewRuntime({ user: USER, bridgeWindow: bridge.host })
+  await rtI5.bootstrap()
+  const handoff = rtI5.calls.deliver[0] || {}
+  const sent = await feicuiSvc.deliverTokenToHost(handoff.token, handoff.meta, handoff.host)
+  const bridgeCall = bridge.record.pywebview[0] || {}
+  const bridgeMeta = bridgeCall.meta || {}
+  check('I5', '端到端：真 service ＋ 页面装饰宿主 ⇒ 橋 meta 含 `nickname` / `phone`（逐字），TTL 604800；令牌**只**在第一参（meta 序列化零命中）', {
+    delivered: true,
+    keys: ['expires_at', 'nickname', 'phone', 'renewal_source', 'ttl_seconds'],
+    nickname: '章魚小丸子',
+    phone: NICK_PHONE,
+    ttl: 604800,
+    firstParamFp: fingerprint(TOKEN),
+    tokenInMeta: false
+  }, {
+    delivered: sent.delivered,
+    keys: sorted(bridgeMeta),
+    nickname: bridgeMeta.nickname,
+    phone: bridgeMeta.phone,
+    ttl: bridgeMeta.ttl_seconds,
+    firstParamFp: fingerprint(bridgeCall.token || ''),
+    tokenInMeta: JSON.stringify(bridgeMeta).indexOf(String(handoff.token)) !== -1
+  })
+
+  /* I6｜码面契约（静态）：新键在 meta 字面量各恰 1 处，旧两键逐字未动 */
+  const issueBody = bodyOf('onIssueSessionToken')
+  check('I6', '码面契约：meta 字面量有 `nickname: identity.nickname` ＋ `phone: renewal.phone || identity.phone` 各 1 处；旧键 `expires_at: reply.expires_at` / `ttl_seconds: DEVICE_SESSION_TTL_SECONDS` 逐字仍在（各 1 处）', {
+    nickname: 1,
+    phone: 1,
+    expires: 1,
+    ttl: 1,
+    decoratedHost: 1
+  }, {
+    nickname: countIn(issueBody, 'nickname: identity.nickname'),
+    phone: countIn(issueBody, 'phone: renewal.phone || identity.phone'),
+    expires: countIn(issueBody, 'expires_at: reply.expires_at'),
+    ttl: countIn(issueBody, 'ttl_seconds: DEVICE_SESSION_TTL_SECONDS'),
+    decoratedHost: countIn(issueBody, '}, hostWithIdentity(identity))')
+  })
 }
 
 /* ---------------------------------------------------------------------------

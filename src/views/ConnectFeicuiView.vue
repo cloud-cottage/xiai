@@ -578,6 +578,61 @@ async function sessionRenewalMeta() {
   return out
 }
 
+/** 交付身份里的昵称上限（**字**數，不是位元組）：桌面端標題欄「欢迎 xxx 登录」只放短名。 */
+const DELIVERY_NICKNAME_MAX = 50
+
+/**
+ * **交付身份（本單新增｜純增量）**：桌面端要顯示「欢迎 <xiai 用户名> 登录」，故交付時帶上昵稱。
+ *
+ * 硬口徑：
+ *   · 昵稱**只來自己登錄的 xiai 用戶**（`currentUser()?.nickname`）；取不到 ⇒ **空串**
+ *     —— 不編造、**不用 uid / 手機號頂替**（寧可桌面端顯示通用問候，也不顯示錯人）；
+ *   · 去首尾空白後按 **50 字**截斷（`Array.from` 按碼點切，避免切壞代理對）；
+ *   · 手機號只作附加標籤：**11 位大陸號**才帶，形狀不符 ⇒ 空串；
+ *   · 返回值是**純數據對象**（兩鍵皆字串 ⇒ 可序列化），不含任何憑證。
+ * @returns {{nickname:string, phone:string}}
+ */
+function deliveryIdentity() {
+  const user = currentUser()
+  const source = user && typeof user === 'object' ? user : {}
+  const rawNickname = source.nickname === undefined || source.nickname === null ? '' : String(source.nickname)
+  const nickname = Array.from(rawNickname.trim()).slice(0, DELIVERY_NICKNAME_MAX).join('')
+  const rawPhone = source.phone || source.phone_number || source.phoneNumber || ''
+  const phone = String(rawPhone === undefined || rawPhone === null ? '' : rawPhone).trim()
+  return { nickname, phone: isPhoneLike(phone) ? phone : '' }
+}
+
+/**
+ * **帶身份的宿主橋（本單新增）**：`services/feicui.js` 的 `deliverTokenToHost` 只按**舊白名單**
+ * 逐鍵組裝橋側 payload（`expires_at` / `ttl_seconds` / `refresh_token` / `phone` / `renewal_source`），
+ * 不認識 `nickname` ⇒ 身份鍵要**在宿主這一側**追加（本單只動本視圖，服務層逐字不動）。
+ *
+ * 形狀刻意與 `feicuiHostBridgeOf` 認得的宿主同形，探測順序**逐字一致**（pywebview → wails → 通用）：
+ *   · 有橋 ⇒ 回一個薄裝飾體：`(token, meta) => 真橋(token, {...meta, nickname})`
+ *     —— **令牌仍只走第一參**，身份鍵只落在 meta；
+ *   · 無橋 ⇒ `undefined` ⇒ 服務層照舊回退 `BRIDGE_ABSENT`（一鍵複製路徑不變）。
+ * @param {{nickname:string}} identity
+ * @returns {object|undefined}
+ */
+function hostWithIdentity(identity) {
+  const scope = typeof window === 'undefined' ? null : window
+  if (!scope) return undefined
+  const extra = { nickname: identity && typeof identity.nickname === 'string' ? identity.nickname : '' }
+  const wrap = (fn) => (token, meta) => fn(token, Object.assign({}, meta || {}, extra))
+  const api = scope.pywebview && scope.pywebview.api
+  if (api && typeof api.receive_feicui_token === 'function') {
+    return { pywebview: { api: { receive_feicui_token: wrap((token, meta) => api.receive_feicui_token(token, meta)) } } }
+  }
+  const wails = scope.wails
+  if (wails && typeof wails.receive_feicui_token === 'function') {
+    return { wails: { receive_feicui_token: wrap((token, meta) => wails.receive_feicui_token(token, meta)) } }
+  }
+  if (typeof scope.receive_feicui_token === 'function') {
+    return { receive_feicui_token: wrap((token, meta) => scope.receive_feicui_token(token, meta)) }
+  }
+  return undefined
+}
+
 /**
  * **168 小時會話（登錄即授權｜本單新增）**：簽發 → 交付宿主橋 → **清掉頁面明文**。
  *
@@ -587,9 +642,10 @@ async function sessionRenewalMeta() {
  *   ③ 簽發 `ttl_seconds ＝ 604800`（服務端 clamp `[300, 604800]`）；
  *   ④ 成功 ⇒ 令牌進唯一持有處 `deviceToken`（與 30 天路同一文本域，仍是**唯一上屏處**）；
  *   ⑤ `deliverTokenToHost()`：pywebview → wails → 通用，有橋就交付
- *      `(token, {expires_at, ttl_seconds, refresh_token, phone, renewal_source})` ——
+ *      `(token, {expires_at, ttl_seconds, refresh_token, phone, nickname, renewal_source})` ——
  *      **後三键是续签凭据 ＋ 诊断枚举**（取自当前 OTP 会话，见 `sessionRenewalMeta`；
  *      空串键不下发 ⇒ 桌面端自行降级；`renewal_source` 只作运维诊断，不参与判定）；
+ *      `nickname`（本单新增）取自已登录的 xiai 用户，供桌面端问候语；取不到 ⇒ 空串、**不编造**；
  *      **無橋 / 橋拋錯 ⇒ 不動令牌**，回退一鍵複製；
  *   ⑥ 交付成功 ⇒ `deviceDelivered = true` 並 `clearDeviceToken()` —— **DOM 不再含令牌明文**。
  */
@@ -619,14 +675,24 @@ async function onIssueSessionToken() {
   } catch {
     renewal = { refresh_token: '', phone: '', renewal_source: RENEWAL_SOURCES.none }
   }
+  /* **交付身份（本單新增）**：昵稱 / 手機號取不到 ⇒ 空串（不編造、不阻斷交付）。 */
+  let identity = { nickname: '', phone: '' }
+  try {
+    identity = deliveryIdentity()
+  } catch {
+    identity = { nickname: '', phone: '' }
+  }
   const delivery = await deliverTokenToHost(reply.token, {
     expires_at: reply.expires_at,
     ttl_seconds: DEVICE_SESSION_TTL_SECONDS,
     refresh_token: renewal.refresh_token,
-    phone: renewal.phone,
+    phone: renewal.phone || identity.phone,
+    /* **昵稱**（本單新增）：桌面端「欢迎 <昵称> 登录」；空串 ＝ 頁面取不到（桌面端自行降級）。
+       **令牌只走第一參**，meta 裡沒有任何 carry token 的鍵。 */
+    nickname: identity.nickname,
     /* 诊断枚举：**不参与判定**，只让运维知道这次凭据从哪个源命中（桌面端不回显、不上屏）。 */
     renewal_source: renewal.renewal_source || RENEWAL_SOURCES.none
-  })
+  }, hostWithIdentity(identity))
   /* 無橋 / 橋拋錯 ⇒ **不改令牌**，落回「一次性顯示 ＋ 一鍵複製」（令牌不丟）。 */
   if (!delivery.delivered) return
   deviceDelivered.value = true
