@@ -853,7 +853,12 @@ section('E', '视图：桥 meta 带 refresh_token（可选 phone）／不上屏 
     },
     {
       usesOtpAuth: countIn(renewalBody, 'await otpAuth()'),
-      readsRefresh: renewalBody.indexOf('session.refresh_token') !== -1,
+      /* 读法在 2026-11-17 由「字面 `session.refresh_token`」收敛为「经 `pairOf()` 归一」：
+         `source.refresh_token || source.refreshToken`（同一字段的两种拼法）。
+         判据强度不变 —— 仍要求**从 OTP 会话读 refresh_token**，只是不再限定字面形态。 */
+      readsRefresh: (renewalBody.indexOf('session.refresh_token') !== -1)
+        || /source\.refresh_token\s*\|\|\s*source\.refreshToken/.test(renewalBody)
+        || /refresh_token\s*=\s*String\(source\.refresh_token/.test(renewalBody),
       emptyFallback: renewalBody.indexOf("refresh_token: ''") !== -1 && renewalBody.indexOf('return out') !== -1,
       storageHits: ['localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'console.', 'URLSearchParams']
         .map((needle) => countIn(renewalBody, needle))

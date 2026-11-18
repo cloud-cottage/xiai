@@ -60,6 +60,64 @@ watch(user, (next) => {
   }
 })
 
+/* **已登錄 ＋ 有 redirect ⇒ 自動前往**（本單：真機上點【重新授權】落在
+   `/login?redirect=/connect`，用戶已登錄 ⇒ 停在「已登錄」分支，簽發流程走不下去）。
+   兩個純函數（單點、無 import ⇒ 離線可判）：白名單 ＋ 單次閘。
+
+   `redirectTarget` **白名單**（只放站內絕對路徑）：
+     · 非字串 / 空 ⇒ `''`；不以單個 `/` 開頭（外鏈 `http://` / `javascript:`）⇒ `''`；
+     · `//host` 與 `/\host`（協議相對，瀏覽器當外鏈）⇒ `''`；含控制符 ⇒ `''`；
+     · **指向登錄頁本身**（`/login`、`/login?…`、`/login#…`、`/login/…`）⇒ `''`
+       ⇒ 不可能「跳回 /login」造成自循環。
+
+   `autoRedirectPlan` **單次閘**：未登錄一律不跳（走原登錄流程）；已跳過（`jumped`）不再跳。 */
+function redirectTarget(raw) {
+  if (typeof raw !== 'string') return ''
+  const value = raw.trim()
+  if (!value.startsWith('/')) return ''
+  if (/^\/[/\\]/.test(value)) return ''
+  if (/[\u0000-\u001f]/.test(value)) return ''
+  if (
+    value === '/login' ||
+    value.startsWith('/login?') ||
+    value.startsWith('/login#') ||
+    value.startsWith('/login/')
+  ) {
+    return ''
+  }
+  return value
+}
+
+function autoRedirectPlan(user, redirect, jumped) {
+  if (!user) return { jump: false, jumped: false, target: '' }
+  if (jumped === true) return { jump: false, jumped: true, target: '' }
+  const target = redirectTarget(redirect)
+  if (!target) return { jump: false, jumped: false, target: '' }
+  return { jump: true, jumped: true, target }
+}
+
+/* **文案單點**（繁體）：只在這裡定義一次，模板只讀常量。 */
+const REDIRECT_PENDING_TEXT = '正在前往簽發頁…'
+const redirectNoticeText = REDIRECT_PENDING_TEXT
+
+/* 已跳過一次 ⇒ 同一渲染週期 / 後續 `user` 變動都不再跳（防重複導航）。 */
+const autoJumped = ref(false)
+/* 「已登錄且確有可跳目標」才顯示那行小字（非法 redirect ⇒ 維持現狀，不提要去哪）。 */
+const pendingRedirect = computed(() => autoRedirectPlan(user.value, route.query.redirect, false).jump)
+
+watch(
+  user,
+  () => {
+    const plan = autoRedirectPlan(user.value, route.query.redirect, autoJumped.value)
+    if (!plan.jump) return
+    autoJumped.value = plan.jumped
+    /* 已經在目標頁（登錄成功路徑剛跳過）⇒ 不再導航（不產生重複導航）。 */
+    if (route.fullPath === plan.target || route.path === plan.target) return
+    router.replace(plan.target)
+  },
+  { immediate: true }
+)
+
 /* 驗證碼提示由服務層給出（真短訊 / 有頻控 / 有每日上限 ⇒ 如實說明，不自稱任何取值）。 */
 const codeHint = auth.loginCodeHint()
 
@@ -257,6 +315,8 @@ function signOut() {
           >{{ logoutView.label }}</button>
           <router-link class="btn btn--primary" :to="{ name: 'square' }">返回璽印匯類</router-link>
         </div>
+        <!-- 已登錄 ＋ 有合法 redirect ⇒ 一併說明「正在前往…」（跳轉在進行中；拒絕外鏈時不顯示，文案見 script 單點常量） -->
+        <p v-if="pendingRedirect" class="login__redirect-notice" role="status" data-login-redirect-pending>{{ redirectNoticeText }}</p>
         <!-- 失敗不得靜默：原因就地上屏；原會話保留（按鈕已恢復可點 ⇒ 可直接重試） -->
         <p v-if="logoutError" class="login__logout-error" role="alert" data-logout-error>{{ logoutError }}</p>
       </div>
@@ -530,5 +590,12 @@ function signOut() {
   display: flex;
   gap: var(--s-2);
   margin-top: var(--s-5);
+}
+
+/* 「正在前往簽發頁…」小字：與兩個按鈕同一區塊的下沿，不搶主按鈕視覺。 */
+.login__redirect-notice {
+  margin-top: var(--s-2);
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
 }
 </style>
