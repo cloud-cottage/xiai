@@ -1,10 +1,13 @@
 
 <script setup>
-import { ADMIN_LABEL } from '../data/roleLabels.js'
+import { accountLabel } from '../data/roleLabels.js'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { auth } from '../services/index.js'
 import { currentUser } from '../data/session.js'
+/* **服务端角色读面**：登录成功后向服务端确认「我是谁」（`sub-admin` 掌書記 是服务端授予的
+   真实身份）；取不到 ⇒ 保持原值，**绝不**默认成管理员。 */
+import { refreshMyRole } from '../services/roles.js'
 /* **退出登錄三態**：與頁頭共用同一份壳与同一份文案（進行中 / 已退出登錄 / 退出失敗）。 */
 import { useLogout } from '../utils/useLogout.js'
 
@@ -48,9 +51,13 @@ const {
   signOut: runLogout
 } = useLogout()
 
-/* 重新登入成功后不留「已退出登錄」的旧提示（否则与「歡迎回來」自相矛盾）。 */
+/* 重新登入成功后不留「已退出登錄」的旧提示（否则与「歡迎回來」自相矛盾）。
+   同时向服务端确认角色（fire-and-forget：失败静默、**不默认任何角色**）。 */
 watch(user, (next) => {
-  if (next) logoutNotice.value = ''
+  if (next) {
+    logoutNotice.value = ''
+    refreshMyRole()
+  }
 })
 
 /* 驗證碼提示由服務層給出（真短訊 / 有頻控 / 有每日上限 ⇒ 如實說明，不自稱任何取值）。 */
@@ -238,7 +245,7 @@ function signOut() {
 
       <div v-if="user" class="login__signed">
         <p class="login__signed-who">{{ user.nickname }} · {{ user.phone }}</p>
-        <p class="login__signed-role">{{ user.role === 'admin' ? ADMIN_LABEL + '賬號' : '普通用戶賬號' }}</p>
+        <p class="login__signed-role" :data-role="user.role">{{ accountLabel(user.role) }}</p>
         <div class="login__signed-foot">
           <button
             class="btn btn--ghost"

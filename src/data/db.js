@@ -182,9 +182,19 @@ function migrateLegacyFixedAttributes(sealRows, faceRows) {
 /**
  * 按管理员手机号唯一真源（`seed.js` 的 `ADMIN_PHONE`）**就地纠正**已落盘的 `users`。
  *
- * 规则：
+ * 规则（**三值模型**；2026-11-18 增第三支）：
  *   ① 手机号 == `ADMIN_PHONE` 的账号 ⇒ `role` 强制 `admin`；该账号不存在则创建并写回；
- *   ② 手机号 ≠ `ADMIN_PHONE` 而 `role` 仍为 `admin` 的账号 ⇒ 降为 `user`。
+ *   ② 手机号 ≠ `ADMIN_PHONE` 而 `role` 仍为 `admin` 的账号 ⇒ 降为 `user`（防冒用）；
+ *   ③ **`role === 'sub-admin'`（掌書記）⇒ 原样保留** —— 它是服务端授予的真实身份
+ *      （`xiai_roles` 行），纠正逻辑**不得**把它当「非管理员」洗成 `user`；
+ *   ④ 其余未知值 ⇒ 降为 `user`（fail-closed 到最低权）。
+ *
+ * ⚠️ 分支顺序是判据的一部分：`sub-admin` 的判定必须在「`role === 'admin'` ⇒ 降 user」**之外**，
+ * 因为它是**独立身份**而不是 admin 的变体；把两条合成一条（例如 `role !== 'user' ⇒ 'user'`）
+ * 会静默抹掉这个身份，而界面上只会表现成「掌書記變回普通用戶」。
+ *
+ * 权限面**不受本函数影响**：`isAdmin` / 数据层 `forbiddenFor` / 服务端各门仍然是逐字
+ * `role === 'admin'` ⇒ `sub-admin` **不获得**任何管理员能力。
  *
  * 兼容硬约束：**只改 `role` 一个字段**（必要时补建缺失的管理员账号），用户行本身不删，
  * 其它集合（勘误 / 照片 / 积分流水 / 登录态 / 已改过的印面）一律不碰
@@ -220,7 +230,10 @@ export function reconcileAdminRoles() {
       }
       return
     }
-    if (row.role === 'admin') {
+    /* ③ 掌書記（`sub-admin`）：服务端授予的真实身份 ⇒ **原样保留**（不洗成 user）。 */
+    if (row.role === 'sub-admin') return
+    /* ② 冒用 admin ⇒ 降 user；④ 其余未知值同样降到最低权。 */
+    if (row.role !== 'user') {
       row.role = 'user'
       changed = true
     }

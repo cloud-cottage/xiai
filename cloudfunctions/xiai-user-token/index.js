@@ -500,7 +500,12 @@ async function handleVerify(event, config, callContext) {
   const authority = await resolveSessionAuthority({
     context: callContext,
     readRole: readRoleRow,
-    requiredRoles: [ROLE.USER, ROLE.ADMIN]
+    /* 【2026-11-18 增 `sub-admin`】**只放宽「身份可用」判据**：`sub-admin` 是 xiai 侧的真实身份
+       （掌書記），其角色行必须能让会话路认出这个人 —— 否则「有行但角色不足」会把**身份未被识别**
+       伪装成越权，连带拒掉该用户的普通写操作（如提交勘误）。
+       **不放大任何权限**：管理员面判据仍是 `adminWhitelistDenial` 里的逐字 `role === 'admin'`
+       （`sub-admin` 到那里必被 `FORBIDDEN`）。 */
+    requiredRoles: [ROLE.USER, ROLE.ADMIN, ROLE.SUB_ADMIN]
   })
   if (!authority.ok) {
     audit({ action: 'verify', outcome: authority.reason, op, stage: 'session-authority', serverNow: now })

@@ -37,3 +37,24 @@ export const ADMIN_LABEL = ROLE_LABEL.admin
 
 /** 子管理员（`sub-admin`）上屏文案 —— 同上（派生自 `ROLE_LABEL`）。 */
 export const SUB_ADMIN_LABEL = ROLE_LABEL['sub-admin']
+
+/** 账号身份行里「非管理员」的兜底文案（**三值投影的第三支**；不是角色值、不入 `ROLE_LABEL`）。 */
+export const ACCOUNT_FALLBACK = '普通用戶賬號'
+
+/**
+ * **账号身份行文案（三值投影，单一实现点）**：
+ *   · `admin`     ⇒ 掌書記使賬號
+ *   · `sub-admin` ⇒ 掌書記賬號
+ *   · 其余 / 空值 / 未知值 ⇒ 普通用戶賬號
+ *
+ * 为什么收在这里：登录页 / 斐萃授權頁等处的「你是什麼賬號」必须**同一口径**，且
+ * `sub-admin`（掌書記）**不得**被显示成「普通用戶」（Kevin 2026-11-18 裁定：它是真实身份）。
+ * 本函数**只做展示投影**：不参与任何判定、不返回角色值、不读存储。
+ * @param {string|null|undefined} role 内部角色值
+ * @returns {string} 上屏文案
+ */
+export function accountLabel(role) {
+  const key = role == null ? '' : String(role)
+  const label = ROLE_LABEL[key] || ''
+  return label ? `${label}賬號` : ACCOUNT_FALLBACK
+}

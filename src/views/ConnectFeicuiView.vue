@@ -19,9 +19,9 @@
  *   · 金鑰是**憑證**：頁面明確提示「勿入版本庫、勿貼群」；
  *   · 斐萃令牌區（管理員簽發）**逐字沿用**改前三態（未登錄 / 非管理員 / 管理員簽發）。
  */
-import { ADMIN_LABEL } from '../data/roleLabels.js'
+import { ADMIN_LABEL, accountLabel } from '../data/roleLabels.js'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { isAdmin, isLoggedIn } from '../data/session.js'
+import { currentUser, isAdmin, isLoggedIn } from '../data/session.js'
 import { otpAuth, otpSessionAccessToken } from '../data/cloudbaseAuth.js'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import {
@@ -52,6 +52,10 @@ import { formatDateTime } from '../utils/format.js'
 
 const logged = isLoggedIn
 const admin = isAdmin
+/* **账号身份文案（三值投影，本單）**：`admin` ⇒ 掌書記使賬號、`sub-admin` ⇒ 掌書記賬號、
+   其余 ⇒ 普通用戶賬號。**只作展示**（`isAdmin` 仍逐字 `role === 'admin'`，掌書記看不到簽發區）；
+   文案唯一实现点是 `roleLabels.accountLabel()`，本視圖不自寫一份。 */
+const accountText = computed(() => accountLabel(currentUser()?.role))
 
 /* ===========================================================================
    ① 斐萃令牌（既有；逐字未動）
@@ -1121,7 +1125,7 @@ onUnmounted(stopCooldown)
             斐萃令牌是<b>憑證</b>：持有它就能以你的身份讀取印譜讀面（朝代 / 印人 / 印譜）。
             因此本頁只對{{ ADMIN_LABEL }}開放；需要令牌請聯繫{{ ADMIN_LABEL }}。
           </p>
-          <p class="hint">你現在登錄的是普通用戶賬號，本頁不會發出任何簽發請求。</p>
+          <p class="hint" data-feicui-account-role>你現在登錄的是{{ accountText }}，本頁不會發出任何簽發請求。</p>
         </div>
       </section>
 

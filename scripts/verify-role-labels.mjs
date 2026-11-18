@@ -232,7 +232,17 @@ const DISPLAY_FILES = [
 ]
 const missingImport = DISPLAY_FILES.filter((rel) => {
   const f = SRC_FILES.find((x) => x.rel === rel)
-  return !f || !/from\s+'[./]*[^']*roleLabels\.js'/.test(f.raw) || !/\bADMIN_LABEL\b|\broleLabel\(|\bROLE_LABEL\b/.test(f.raw)
+  /* **2026-11-18 适配（本单：`sub-admin` 立为真实身份）**：接受符号面新增 `accountLabel(` ——
+     登录页的「你是什麼賬號」原来是 `role === 'admin' ? ADMIN_LABEL + '賬號' : '普通用戶賬號'`
+     的二元三目（会把掌書記显示成普通用戶），现改为单一实现的三值投影 `accountLabel()`。
+     **判据强度不变**：仍然要求该文件**从 `roleLabels.js` 导入并真的用了映射**（只是多了第三个
+     合法符号），不接受「自己写一份文案」——`accountLabel` 本身由
+     `scripts/verify-subadmin-role.mjs` 的 A 段单独锁死（恰一处定义、三值正确、表外值兜底）。 */
+  return (
+    !f ||
+    !/from\s+'[./]*[^']*roleLabels\.js'/.test(f.raw) ||
+    !/\bADMIN_LABEL\b|\broleLabel\(|\bROLE_LABEL\b|\baccountLabel\(/.test(f.raw)
+  )
 })
 check('B4', '17 个展示件全部 `import { ADMIN_LABEL } from …roleLabels.js` 且真的用了它（缺一即红）', [], missingImport)
 

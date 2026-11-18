@@ -28,6 +28,31 @@ export function setUser(user) {
   else removeKey(STORAGE_KEYS.session)
 }
 
+/**
+ * **把服务端角色并进当前登录态**（只覆盖 `role` 一个字段，其余键逐字不动）。
+ *
+ * 背景（Kevin 2026-11-18 裁定）：`sub-admin`（掌書記）是服务端授予的真实身份，真源是
+ * `xiai_roles` 行 —— 浏览器本地镜像（`users` 行）只是缓存，**不得**当权威。服务层
+ * `services/roles.js::fetchMyRole()` 取到服务端角色后经本函数合并。
+ *
+ * 硬口径：
+ *   · **只认三个已解析值**：`admin` / `sub-admin` / `user`；其余（含 `null` / 空串 /
+ *     未知串）**一律不写**（返回当前值）—— 取不到角色 ≠ 提权，也 ≠ 降权；
+ *   · 未登录（`state.user === null`）⇒ 原样返回 `null`，零副作用；
+ *   · **不持久化**：角色随每次登录 / 启动重新问服务端，不写 localStorage（避免本地成为第二真源）。
+ * @param {string|null|undefined} role 服务端解析后的角色值
+ * @returns {string|null} 合并后（或原样）的当前角色
+ */
+export function mergeServerRole(role) {
+  if (!state.user) return null
+  const next = typeof role === 'string' ? role.trim() : ''
+  if (next !== 'admin' && next !== 'sub-admin' && next !== 'user') return state.user.role
+  if (state.user.role === next) return next
+  /* **只覆盖 `role`**：其余字段（id / phone / nickname / points …）逐字保留。 */
+  state.user = { ...state.user, role: next }
+  return next
+}
+
 export function restoreSession(lookupUserById) {
   const saved = readKey(STORAGE_KEYS.session)
   if (!saved || !saved.userId) return null

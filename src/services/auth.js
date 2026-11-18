@@ -49,6 +49,9 @@ import { otpAuth, resetOtpAuth, signOutOtpSession } from '../data/cloudbaseAuth.
 /* **退出登錄三態文案單點**（`已退出登錄` / `退出失敗：…` 全仓唯一真源；純函數、零依賴）。 */
 import { LOGOUT_DONE_TEXT, logoutFailureText } from './logoutText.js'
 import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
+/* **服务端角色读面（本单）**：登录收尾 / 启动引导后向服务端确认「我是谁」（`sub-admin` 掌書記
+   是服务端授予的真实身份，真源 `xiai_roles`；取不到 ⇒ 保持原值，**绝不**默认成管理员）。 */
+import { refreshMyRole } from './roles.js'
 
 export const GOLD_INITIAL = 50
 
@@ -875,7 +878,11 @@ export async function logout() {
 }
 
 export function bootstrapSession() {
-  return restoreSession((id) => listUserRows().find((u) => u.id === id) || null)
+  const user = restoreSession((id) => listUserRows().find((u) => u.id === id) || null)
+  /* 已登录 ⇒ 向服务端确认角色（`sub-admin` 掌書記 是服务端授予的真实身份；fire-and-forget，
+     取不到 ⇒ 保持本地镜像原值，**绝不**默认成任何更高角色）。未登录 ⇒ 零请求。 */
+  if (user) refreshMyRole()
+  return user
 }
 
 export function findUserById(id) {

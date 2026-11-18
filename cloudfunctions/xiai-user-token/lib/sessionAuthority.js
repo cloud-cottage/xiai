@@ -85,9 +85,20 @@ const ROLES_COLLECTION = 'xiai_roles'
 /** 角色行 schema 版本（读面据此判形态）。 */
 const ROLES_SCHEMA = 'xiai-roles-v1'
 
-/** 角色取值面（封闭二值，与数据层 `user` / `admin` 同口径）。 */
-const ROLE = Object.freeze({ USER: 'user', ADMIN: 'admin' })
-const KNOWN_ROLES = Object.freeze([ROLE.USER, ROLE.ADMIN])
+/**
+ * 角色取值面（与数据层 `user` / `admin` 同口径；**2026-11-18 增第三值 `sub-admin`**）。
+ *
+ * 【2026-11-18 Kevin 裁定】**`sub-admin` 是 xiai 侧的真实身份**（对外文案「掌書記」，见
+ * `src/data/roleLabels.js`）⇒ 读行对账必须认得它，否则一行合法的 `sub-admin` 会被
+ * `roleFromRow` 认成空串 ⇒ 该用户在会话路被当成「有行但角色不足」而 **fail-closed 拒**
+ * （把「身份没被识别」伪装成「越权」）。
+ *
+ * **认得不等于放行**：`KNOWN_ROLES` 只决定「这个值是不是一个已知角色」，**不参与任何授权**。
+ * 授权判据仍是逐字 `role === 'admin'`（`adminWhitelistDenial` / 各 admin op 的价值门），
+ * `sub-admin` **不得**进入任何管理员面。
+ */
+const ROLE = Object.freeze({ USER: 'user', ADMIN: 'admin', SUB_ADMIN: 'sub-admin' })
+const KNOWN_ROLES = Object.freeze([ROLE.USER, ROLE.ADMIN, ROLE.SUB_ADMIN])
 
 /** **身份来源标记（additive）**：会话路 / 既有令牌路（令牌路取值沿用既有的 `SERVER_TOKEN`）。 */
 const IDENTITY_SOURCES = Object.freeze({ SESSION: 'SESSION', SERVER_TOKEN: 'SERVER_TOKEN' })

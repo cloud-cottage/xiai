@@ -52,7 +52,7 @@ const codeId = require('./codeId.js'), log = require('./log.js') /* **P2-8**：c
 const { tiffToPng } = require('./tiffToPng.js')
 /* **V6-a**：调用者**平台会话身份**判权（additive）。`IDENTITY_SOURCES` 是身份来源标记的
    **单一定义点**（既有令牌路取值 `SERVER_TOKEN` 逐字沿用；会话路为 `SESSION`）。 */
-const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsable, setAuthApiChannelProvider } = require('./sessionAuthority.js')
+const { IDENTITY_SOURCES, ROLE, isSessionIdentity, identitySourceOf, identityUsable, roleFromRow, setAuthApiChannelProvider } = require('./sessionAuthority.js')
 /* **本单改造（斐萃令牌）**：HMAC 自包含令牌的**纯函数面**（签/验 / kid 轮换 / 吊销判定；
    零 SDK、零 IO、零时钟隐依赖；密钥只从 env 读，缺即 fail-closed）。 */
 const feicuiToken = require('./feicuiToken.js')
@@ -2764,6 +2764,50 @@ function pointsPayloadDenial(payload, allowedKeys) {
 /** 勘误行状态三态（与状态机冻结字面值 / `CORRECTION_PENDING` 同值）。 */
 const CORRECTION_ROWS_STATUS_VALUES = Object.freeze(['PENDING', 'ACCEPTED', 'REJECTED'])
 
+/* ---------------------------------------------------------------------------
+   **本人角色读面（本单新增 op｜`myRole`｜零写入）**
+   ----------------------------------------------------------------------------
+   目的（Kevin 2026-11-18 裁定）：`sub-admin`（掌書記）是 xiai 侧的真实身份，客户端要知道
+   「我是谁」必须**问服务端**（角色真源 ＝ `xiai_roles` 行），**不得**在浏览器里凭手机号 /
+   本地镜像推断，**更不得**在取不到时默认成管理员。
+
+   硬口径：
+     ① **只读**：零写入、零签发、零滑续期（本 op 不产出 `plan` ⇒ `index.js` 落盘分支不触发）；
+     ② **载荷封闭零键**：任何键（含身份类键）⇒ `INVALID_FIELD` ＋ 零读取（身份只取自令牌 / 会话）；
+     ③ **角色解析单点**：行 → 角色一律走 `sessionAuthority.roleFromRow`（`role` 单值 / `roles`
+        数组都认、大小写不敏感），**不另立第二套**读法；
+     ④ **无行 / 认不出 ⇒ `user`**（**fail-closed 到最低权**，绝不回落成 `admin`）；
+     ⑤ 读失败（网络 / 内部）⇒ 抛错 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`（**不伪装 FORBIDDEN**）；
+     ⑥ 回包只经信封 `value` 面：`{role, has_row}`（**零手机号、零 uid、零行原文**）。
+   --------------------------------------------------------------------------- */
+
+/** `myRole` 载荷封闭键面（**零允许键**；身份一律服务端派生）。 */
+const MY_ROLE_ALLOWED_KEYS = Object.freeze([])
+
+/**
+ * **本人角色（本单新增 op｜`myRole`）**：回 `{ok:true, value:{role, has_row}}`。
+ * `role` ∈ `user` / `admin` / `sub-admin`（**已解析的小写单值**）；无行 / 行内角色认不出 ⇒ `user`。
+ * @param {object} payload 载荷（**零允许键**）
+ * @param {{uid:string, phone?:string, role?:string}} identity 服务端派生身份
+ * @returns {Promise<{ok:true, value:{role:string, has_row:boolean}}|{ok:false, reason:string, message:string}>}
+ */
+async function myRoleOf(payload, identity) {
+  const payloadDenial = pointsPayloadDenial(payload, MY_ROLE_ALLOWED_KEYS)
+  if (payloadDenial) return payloadDenial
+  if (!identityUsable(identity)) {
+    return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+  }
+  const row = await readRoleRow(identity.uid)
+  const resolved = roleFromRow(row)
+  return {
+    ok: true,
+    value: {
+      role: resolved === ROLE.ADMIN || resolved === ROLE.SUB_ADMIN ? resolved : ROLE.USER,
+      has_row: row !== null && row !== undefined
+    }
+  }
+}
+
 /** `listMyCorrections` 载荷封闭键面（**零身份类键**；身份一律服务端从令牌派生）。 */
 const MY_CORRECTION_ROWS_ALLOWED_KEYS = Object.freeze(['status', 'limit'])
 
@@ -4229,6 +4273,19 @@ const OPS = Object.freeze({
       row,
       plan: { writes: [{ kind: 'add', collection: COLLECTIONS.itemImports, doc: row }] }
     }
+  },
+
+  /**
+   * **本人角色（本单新增 op｜`myRole`｜零写入）**：客户端要知道「我是谁」只问服务端 ——
+   * 角色真源是 `xiai_roles` 行（`{ok:true, value:{role, has_row}}`；`role` ∈
+   * `user` / `admin` / `sub-admin`）。判定与回包口径见 `myRoleOf` 的文件内注释（载荷封闭零键、
+   * 无行 / 认不出 ⇒ `user`、读失败 ⇒ `STORAGE_UNAVAILABLE`）。
+   * **本 op 不参与任何授权**：它只回答「服务端记录的角色是什么」，判权仍各自走既有门。
+   * @param {object} payload 载荷（**零允许键**）
+   * @param {{uid:string, phone?:string, role?:string}} identity 服务端派生身份
+   */
+  async myRole(payload, identity) {
+    return await myRoleOf(payload, identity)
   },
 
   /**
@@ -11740,6 +11797,9 @@ module.exports = {
      变量；导出供离线自检直接断言（`scripts/verify-points-ledger.mjs` C7 / C8）。 */
   cloudbaseKeyPairFromEnv,
   readRoleRow,
+  /* **本人角色读面（本单 `myRole`）**：载荷封闭键面（零允许键）—— 供离线自检直接断言
+     「任何入参键 ⇒ `INVALID_FIELD` ＋ 零读取」；实现本体只经 `OPS.myRole` 调用。 */
+  MY_ROLE_ALLOWED_KEYS,
   readPersonRow,
   readPersonProposalRow,
   readPersonImportRow,
