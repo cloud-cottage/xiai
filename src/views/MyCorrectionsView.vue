@@ -986,9 +986,13 @@ function faceLabelOfRow(row) {
   return cached !== undefined ? cached : seals.faceLabelOf(faceIdOfRow(row), sealKeyOf(row))
 }
 
-/** 屬性列：IMAGE 行显示动作标签（「影像勘誤 · 刪除」／「影像勘誤 · 替換」），字段型行逐字不变。 */
+/** 屬性列：IMAGE 行显示动作标签（「影像勘誤 · 刪除」／「影像勘誤 · 替換」），字段型行逐字不变。
+ *  字段型行显示名**单点收口**：现行 `MARKABLE_FIELDS` label 优先（库中旧行的 `field_label`
+ *  可能仍是改名前的字面 ⇒ 不改写库、但上屏取现行名）⇒ 再兜底行内 `field_label` ⇒ 再兜底 `field`。 */
 function attributeLabelOf(row) {
-  return corrections.isImageCorrectionRow(row) ? corrections.imageCorrectionLabelOf(row) : row.field_label || row.field
+  return corrections.isImageCorrectionRow(row)
+    ? corrections.imageCorrectionLabelOf(row)
+    : corrections.markableLabelOf(row)
 }
 
 /** 提交值列是否为 IMAGE 行（模板据此改渲染目标影像编号 ＋ 备注）。 */
@@ -1155,7 +1159,8 @@ const revokeDialogMessage = computed(() => {
       `已發放的 ${reward} 金獎勵不扣回。`
     )
   }
-  const label = row.field_label || row.field || '該屬性'
+  /* 字段型行同 `attributeLabelOf` 收口：显示名走服务层单点（现行名优先）。 */
+  const label = corrections.markableLabelOf(row)
   const faceLabel = faceLabelOfRow(row)
   return (
     `這將把「${faceLabel}·${label}」的已採納狀態撤銷為「駁回」，展示值不再計入該勘誤` +

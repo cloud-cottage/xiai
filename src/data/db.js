@@ -752,7 +752,7 @@ const LEGACY_ENUM_SOURCES = {
            随印章行一道繁化（与印章行同一口径）；引不到该印章行 ⇒ 不转 + 登记；
          · `ref_type = correction` ⇒ 该行 `ref_label` 为空（`services/points.js` 未传）；
          · 其它情况 ⇒ 不转 + 登记（禁猜）。
-     - ★ `corrections.field_label`（我的勘误上屏 `row.field_label || row.field`）：系统派生字段名
+     - ★ `corrections.field_label`（我的勘误上屏经 `corrections.markableLabelOf(row)` 派生：现行 label 优先，库内旧行 `field_label` 不改写）：系统派生字段名
        ⇒ 走映射表（`印面内容/印面风格/印文释义 ⇒ 印面內容/印面風格/印文釋義`）。
      - `seals` / `faces`：首版已覆盖（清退役键 + 枚举映射 + 非用户行自由文本），本版沿用。
      - `photos`（**不转**）：`note` / `file_name` 是用户上传时填的 ⇒ 用户输入；`status` 是 ASCII 枚举；
@@ -784,7 +784,7 @@ const LEDGER_TYPE_CURRENT = {
 const LEDGER_TYPE_INITIAL_LABEL = '新用戶初始贈送'
 
 /** `services/corrections.js` 的 `MARKABLE_FIELDS[*].label` **只读字面值副本**（同上，跨层引用）。 */
-const MARKABLE_FIELD_LABELS = ['印文', '朝代', '印面內容', '印面風格', '作者', '印文釋義']
+const MARKABLE_FIELD_LABELS = ['內容', '朝代', '印面內容', '印面風格', '作者', '印文釋義']
 
 /**
  * **显式值映射表（R-60 扩展）**：`集合 → 字段 → {旧形态: 目标形态}`。

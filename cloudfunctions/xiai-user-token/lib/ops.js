@@ -435,7 +435,7 @@ const OPTIONAL_READ_COLLECTIONS = Object.freeze([
  *   新增字段时两处必须同改，否则断言立即失败（**不让副本静默漂移**）。
  */
 const MARKABLE_FIELDS = Object.freeze({
-  seal_name: '印文',
+  seal_name: '內容',
   dynasty: '朝代',
   seal_type: '印面內容',
   face_style: '印面風格',

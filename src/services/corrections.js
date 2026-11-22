@@ -287,7 +287,7 @@ export function syncLocalCorrectionSummary(faceId, sealId, field, value) {
  * （两表**逐字相等**由自检机械断言）。
  */
 export const MARKABLE_FIELDS = [
-  { key: 'seal_name', label: '印文' },
+  { key: 'seal_name', label: '內容' },
   { key: 'dynasty', label: '朝代' },
   { key: 'seal_type', label: '印面內容' },
   { key: 'face_style', label: '印面風格' },
@@ -477,8 +477,36 @@ function nowIso() {
   return new Date().toISOString()
 }
 
-function markableMeta(field) {
+/** 字段元数据（`MARKABLE_FIELDS` 单点；**视图层收口显示名时复用，不得另写字典**）。 */
+export function markableMeta(field) {
   return MARKABLE_FIELDS.find((item) => item.key === field) || null
+}
+
+/**
+ * **字段型勘误行的上屏显示名（唯一派生点）** —— **视图层唯一收口点**（不得在调用点另写第二套优先级）：
+ * 采纳 / 驳回 / 撤销的回执、确认弹窗、toast 与列表上屏**一律经此取值**。
+ *
+ * 优先级＝**现行名优先**：`MARKABLE_FIELDS` 现行 `label` ⇒ 行内 `field_label`
+ * （库内旧行存的**改名前旧值**）⇒ `field` ⇒ `該屬性`。
+ * ⚠️ 反向写法（先取 `field_label`）会让旧勘误行的成功回执吐**旧字面**（`印文`），
+ * 与列表上屏的现行名（`內容`）**同屏不一致** —— 本函数是唯一收口点。
+ *
+ * **只读不写**：`field_label` 仍按原值写库与回写（提交时 `field_label: meta.label` 写现行名；
+ * 库内旧行旧值**不改写、不描新**）。
+ * 影像行（`isImageCorrectionRow`）在 `review` / `revokeAcceptance` 里**先于**本函数返回
+ * （`reviewImageCorrection` / 影像撤销面自成文案）⇒ 本函数只服务**字段型行**，影像面不受影响。
+ * @param {object|null} row 勘误行（本机行 / 云端回包权威行 / 本机镜像行）
+ * @returns {string} 现行字段显示名
+ */
+export function markableLabelOf(row) {
+  const source = row && typeof row === 'object' ? row : null
+  const meta = markableMeta(source && source.field)
+  if (meta && meta.label) return meta.label
+  const stored = source && source.field_label
+  if (stored) return String(stored)
+  const field = source && source.field
+  if (field) return String(field)
+  return '該屬性'
 }
 
 /* ============================================================================
@@ -1468,7 +1496,7 @@ export async function review(actor, correctionId, decision, note = '', options =
             }
           }
         }
-        const label = reconciled.row.field_label || (markableMeta(reconciled.row.field) || {}).label || '該屬性'
+        const label = markableLabelOf(reconciled.row)
         const faceLabel = faceLabelOf(reconciled.row.faceId, sealIdOf(reconciled.row))
         const verb = reconciled.accepted ? '採納' : '駁回'
         return {
@@ -1506,7 +1534,7 @@ export async function review(actor, correctionId, decision, note = '', options =
       }
     }
   }
-  const label = decided.row.field_label || (markableMeta(decided.row.field) || {}).label || '該屬性'
+  const label = markableLabelOf(decided.row)
   const faceLabel = faceLabelOf(decided.row.faceId, sealIdOf(decided.row))
   return {
     ok: true,
@@ -1669,7 +1697,7 @@ export async function revokeAcceptance(actor, correctionId, note = '') {
   if (gate.summary && typeof gate.summary === 'object') mirrorCorrectionSummaryRow(gate.summary)
   else syncLocalCorrectionSummary(mirrored.faceId, sealIdOf(mirrored), mirrored.field, mirrored.value)
 
-  const label = mirrored.field_label || (markableMeta(mirrored.field) || {}).label || '該屬性'
+  const label = markableLabelOf(mirrored)
   const faceLabel = faceLabelOf(mirrored.faceId, sealIdOf(mirrored))
   return {
     ok: true,
