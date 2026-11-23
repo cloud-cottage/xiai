@@ -181,6 +181,25 @@ const SUBMIT_CLEANUP_GRACE_MS = 6000
  *  **读旧行缺该键 ⇒ 按 `CHARGED` 处理**（历史行一行不改、照旧走退款护栏）。 */
 const CHARGE_STATE = Object.freeze({ PENDING: 'PENDING', CHARGED: 'CHARGED' })
 
+/** 提交段**阶段游标**（封闭表；`ai-enhance-submit` 段级超时指纹的 `phase=` **只允许取本表字面值**）。
+ *  **零敏感纯枚举** —— 不含 URL / key / 请求体 / 任何载荷。推进顺序（唯一推进点在
+ *  `submitEnhanceTask` 内，逐段随流程写入）：
+ *  `PRECHECK`（幂等预查读任务行）→ `SOURCE`（读源影像行 / 读源字节）→ `CONFIG`（解上游配置）→
+ *  `LAYOUT`（先落任务行 `SUBMITTED`）→ `CHARGE`（预扣 ＋ 扣费实况回写）→ `POST`（上游 POST；
+ *  其内「取图下载」相位经回传缝推进到 `DOWNLOAD`）→ `COMMIT`（行回写 `upstream_task_id`）
+ *  / `INGEST`（产物入册）→ `COMMIT`（`READY` 行回写）。 */
+const SUBMIT_STAGE = Object.freeze({
+  PRECHECK: 'PRECHECK',
+  SOURCE: 'SOURCE',
+  CONFIG: 'CONFIG',
+  LAYOUT: 'LAYOUT',
+  CHARGE: 'CHARGE',
+  POST: 'POST',
+  DOWNLOAD: 'DOWNLOAD',
+  INGEST: 'INGEST',
+  COMMIT: 'COMMIT'
+})
+
 /** 单轮推进预算（status op）：单查 20 秒 / 下载 25 秒 / 入册段 45 秒 / **整轮 45 秒**
  *  （整轮 45 秒 ＝ 规范 §3.80.6 / `AC-698`「單次完成（下載 ＋ 轉碼 ＋ 入庫）整體控制在 45 秒以內」；
  *   显著低于 CloudBase 网关约 60 秒掐断线 —— 该上限并不精确（实测 53 秒可回、106 秒必被掐），
@@ -494,7 +513,8 @@ function upstreamFailureMessage(status, detail) {
  *  ③ 脱敏沿用本文件既有规则：**≥40 位长串一律 `<redacted>`**（同 `diagnoseOf` /
  *     `upstreamDetailOf` 的 `REDACT` 口径），错误名截 40 字；指纹里**只带**相位 / 状态码 /
  *     耗时 / 错误名四个数 —— **不带 URL、不带 key、不带请求体、不带任何载荷**。
- * @param {string} phase 相位字面（本文件只产出 `POST` / `DOWNLOAD` 两个）
+ * @param {string} phase 相位字面（**封闭两源**：`submitUpstreamTask` 产 `POST` / `DOWNLOAD`；
+ *   段级超时出口产 `SUBMIT_STAGE` 表内九个阶段字面值 —— 两处各只取自自己的封闭表）
  * @param {number} httpStatus **本相位**观察到的 HTTP 状态码（网络层 / 未取到 ⇒ 0）
  * @param {number} startedAt 本跳起始时刻（`Date.now()` 尺度）
  * @param {string} [errorName] 异常名（非异常失败如「非 2xx」「缺任务号」⇒ 空 ⇒ 记 `-`）
@@ -642,9 +662,11 @@ function taskErrorOf(parsed) {
  * **只在失败分支追加**，成功回包键面 / 文案零变化，`reason` 零新增）。
  * @param {{base_url:string, model:string, key:string, timeout_ms:number}} upstream 解出的上游配置
  * @param {string} imageDataUrl 输入图 `data:` URL
+ * @param {function(string):void} [onStage] **阶段游标回传缝**（可选；缺省不报 ⇒ 零行为差）：
+ *   恰在相位切换点各报一次 `POST` / `DOWNLOAD`（供外层段级超时指纹取 `phase=`；纯字符串回调、零 I/O）
  * @returns {Promise<{ok:true, task_id:string, status:number}|{ok:true, bytes:Buffer, status:number}|{ok:false, reason:string, message:string}>}
  */
-async function submitUpstreamTask(upstream, imageDataUrl) {
+async function submitUpstreamTask(upstream, imageDataUrl, onStage) {
   const startedAt = Date.now()
   const url = `${text(upstream.base_url).replace(/\/+$/, '')}/images/edits`
   const body = JSON.stringify({
@@ -662,6 +684,10 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
      `downloadStatus`（网络层 / 未取到 ⇒ 0），两相位各记各的、不互相冒充。 */
   let phase = 'POST'
   let downloadStatus = 0
+  /* **阶段游标回传缝（可选；缺省不报 ⇒ 零行为差）**：恰在两个相位切换点各报一次，把本函数的
+     相位（`POST` → `DOWNLOAD`）同步给调用方的段级阶段游标（段超时指纹用）；纯函数调用、零 I/O。 */
+  const reportStage = typeof onStage === 'function' ? onStage : null
+  if (reportStage) reportStage(phase)
   /** 失败回包（**唯一失败出口形状**）：既有 `upstreamFailureMessage` 文案**逐字保留**，
    *  只在末尾追加相位指纹；`reason` 仍是既有 `UPSTREAM_ERROR`（零新增字面值）。 */
   const fail = (message, errorName) => ({
@@ -707,6 +733,7 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
         /* 换相位：此后（含外层 catch）指纹只报**取图下载**相位的读数。 */
         phase = 'DOWNLOAD'
         downloadStatus = 0
+        if (reportStage) reportStage(phase)
         try {
           download = await fetchImpl(first.url, { signal: AbortSignal.timeout(remain) })
           downloadStatus = Number(download && download.status) || 0
@@ -1051,6 +1078,10 @@ function submitReplay(taskId, row) {
  * 扣费 / 上游 POST **每步都经 `withinBudget` 封顶** ⇒ 超限即**先退款、再把行转
  * `FAILED(UPSTREAM_ERROR, 「提交超過 45 秒…」)`** 并返回失败（**绝不等网关约 60 秒**）；
  * 收尾写库（退款 ＋ 转 `FAILED`）另给 ≤6 秒宽限 ⇒ **最坏总时长 ≤ 56 秒（50 ＋ 6）**。
+ * **段级超时出口带相位指纹（本单）**：上述段超限失败的 `error_message` 末尾追加
+ * `（診斷：phase=<SUBMIT_STAGE 阶段游标>，HTTP=0，耗時=<段起点起算>，錯誤=BUDGET_EXPIRED）` ——
+ * 前缀文案一字不改、`reason` 零新增、成功回包键面零变化、纯字符串拼接零 I/O（不占收尾宽限）；
+ * **不与内层重叠**：外层只在段级出口追加，`submitUpstreamTask` 只在其自身失败回包上追加 ⇒ 一条文案至多一枚括注。
  * **行未落 ⇒ 无失败行可转**（此时尚未扣费 ⇒ 回 4 键失败、`refunded:false`）；**本次未真扣费的
  * 失败路径一律零退款**（不给未扣费的行凭空 +10 金）。
  * @param {object} payload 载荷（封闭四键 `image_id` / `seal_id` / `face_id` / `request_id`）
@@ -1073,16 +1104,29 @@ async function submitEnhanceTask(payload, identity, context) {
      **开工前不另查预算** —— 段内任一步到点都会以哨兵收口，不再新发请求。 */
   const budgeted = (promise) => withinBudget(promise, submitDeadlineAt)
   const cleanupBudgeted = (promise) => withinBudget(promise, cleanupDeadlineAt)
+  /* **阶段游标（段级超时相位指纹）**：随本提交流程逐段推进（封闭表 `SUBMIT_STAGE`）；
+     段级超时出口据此把「卡在哪一步」写进既有文案**末尾**（前缀一字不改）。 */
+  let stage = SUBMIT_STAGE.PRECHECK
+  /* 段级超时指纹（`submitPhaseFingerprint` 纯函数、零 I/O、**内部异常回空串** ⇒ 原失败判定与
+     `reason` 一字不变）：`phase` ＝ 当前阶段游标；`HTTP=0` ＝ 本层未观察到状态码；`耗時` 自
+     **段起点** `submitStartedAt`（＝ `submitDeadlineAt` 对应那个起点）计；`錯誤` ＝ 段预算哨兵名。 */
+  const stageFingerprint = () => submitPhaseFingerprint(stage, 0, submitStartedAt, 'BUDGET_EXPIRED')
   /* 段超限文案头（回包与行内 `error_message` 同源；**恒以「提交超過 <上游 POST 预算秒> 秒」起头**
      —— 秒数一律由 `SUBMIT_POST_BUDGET_MS` 格式化（**零字面秒数**），括注另给整段硬上限常量）。 */
   const overBudgetHead = `提交超過 ${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒（上游 POST 預算；整段牆鐘硬上限 ${Math.round(SUBMIT_SEGMENT_BUDGET_MS / 1000)} 秒）`
-  const overBudgetMessage = (refunded) =>
-    refunded === true
-      ? `${overBudgetHead} ⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
-      : `${overBudgetHead} ⇒ 退款未能完成，請重試本操作以補退款。`
+  /* **段级超时出口的指纹追加点（恰此两处 ＋ ⑦b 落行超限一处）**：既有文案逐字保留，只在末尾
+     追加相位指纹；`submitUpstreamTask` 自带指纹的失败文案（`posted.message`）**不经过这里**
+     ⇒ 一条失败文案至多一枚 `（診斷：…）` 括注（不重叠规则）。 */
+  const overBudgetMessage = (refunded) => {
+    const head =
+      refunded === true
+        ? `${overBudgetHead} ⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
+        : `${overBudgetHead} ⇒ 退款未能完成，請重試本操作以補退款。`
+    return `${head}${stageFingerprint()}`
+  }
   /* 段超限且**行未落**（此前零扣费、零上游）。 */
   const overBudgetBeforeRow = () =>
-    submitFailure(REASONS.UPSTREAM_ERROR, `${overBudgetHead} ⇒ 本次未扣費、未落任務行、未調上游。`, false)
+    submitFailure(REASONS.UPSTREAM_ERROR, `${overBudgetHead} ⇒ 本次未扣費、未落任務行、未調上游。${stageFingerprint()}`, false)
   /* 写行结果 → 并入文案的诊断串（`BUDGET_EXPIRED` ＝ 收尾超限，不是抛错）。 */
   const writeNoteOf = (outcome) =>
     outcome === BUDGET_EXPIRED ? '（任務行落盤超過收尾寬限、未完成）' : text(outcome)
@@ -1142,6 +1186,7 @@ async function submitEnhanceTask(payload, identity, context) {
   if (existing && !resumable) return submitReplay(taskId, existing)
 
   /* ③ 读源影像行 → 拼对象键 → 取字节（与同步面 ④ 步同一套拒绝面：全部零扣费、未调上游）。 */
+  stage = SUBMIT_STAGE.SOURCE
   const sourceRow = await budgeted(readImageRow(imageId))
   if (sourceRow === BUDGET_EXPIRED) return overBudgetBeforeRow()
   if (!sourceRow) {
@@ -1192,6 +1237,7 @@ async function submitEnhanceTask(payload, identity, context) {
 
   /* ④ 上游配置（缺 ⇒ `CONFIG_MISSING` ＋ 零扣费 —— 未预扣即拒）。 */
   const aiUpstream = require('./aiUpstream.js')
+  stage = SUBMIT_STAGE.CONFIG
   const upstreamOutcome = await budgeted(aiUpstream.resolveUpstreamSecret())
   if (upstreamOutcome === BUDGET_EXPIRED) return overBudgetBeforeRow()
   const upstream = upstreamOutcome
@@ -1228,6 +1274,7 @@ async function submitEnhanceTask(payload, identity, context) {
     updated_at: createdAt,
     deadline_at: rowDeadlineAt
   }
+  stage = SUBMIT_STAGE.LAYOUT
   try {
     const persisted = await budgeted(persistTaskRow(taskId, pendingDoc))
     if (persisted === BUDGET_EXPIRED) return overBudgetBeforeRow()
@@ -1274,6 +1321,7 @@ async function submitEnhanceTask(payload, identity, context) {
   }
 
   /* ⑤b 预扣 10 金（`idem_key` 三段封闭；余额不足 ⇒ `INSUFFICIENT_POINTS` ＋ 零扣费）。 */
+  stage = SUBMIT_STAGE.CHARGE
   const chargedOutcome = await budgeted(chargeTen(uid, idemKey, taskId))
   if (chargedOutcome === BUDGET_EXPIRED) {
     /* 扣费未在段内返回 ⇒ 结果未知：**先退款**（账本幂等键保证只退一次）再转 `FAILED`。 */
@@ -1356,7 +1404,15 @@ async function submitEnhanceTask(payload, identity, context) {
   /* ⑥ 调上游取异步任务号（**上游 POST 预算 45 秒 / 整段墙钟 50 秒**：非 2xx / 超时 / 网络错 / 缺任务号 / 段超限
      ⇒ 先退款、再置 `FAILED` —— **绝不等网关约 60 秒**）。 */
   const imageDataUrl = dataUrlOf(sourceMime, sourceBytes)
-  const postedOutcome = await budgeted(submitUpstreamTask(upstream, imageDataUrl))
+  stage = SUBMIT_STAGE.POST
+  /* 内层相位回传缝（本调用点恒传；**只在相位切换点各报一次**、零 I/O）：把 `POST` / `DOWNLOAD`
+     同步进本层阶段游标 ⇒ 段墙钟掐在**取图下载**时，外层指纹也能报 `phase=DOWNLOAD`；
+     表外字面值一律忽略（游标封闭在 `SUBMIT_STAGE`）。 */
+  const postedOutcome = await budgeted(
+    submitUpstreamTask(upstream, imageDataUrl, (next) => {
+      if (next === SUBMIT_STAGE.POST || next === SUBMIT_STAGE.DOWNLOAD) stage = next
+    })
+  )
   if (postedOutcome === BUDGET_EXPIRED) {
     return await failAfterRow({
       reason: REASONS.UPSTREAM_ERROR,
@@ -1393,6 +1449,7 @@ async function submitEnhanceTask(payload, identity, context) {
   /* ⑦a 异步入队（老形态不在场）：行回写 `SUBMITTED` ＋ 上游任务号。回写失败 ⇒ 全额退款
      （行上没有任务号 ⇒ 本面无从轮询）。 */
   if (posted.task_id) {
+    stage = SUBMIT_STAGE.COMMIT
     try {
       const updated = await budgeted(
         updateTaskRow(
@@ -1425,6 +1482,7 @@ async function submitEnhanceTask(payload, identity, context) {
   /* ⑦b 同步回图的老形态：**submit 内直接完成入库并置 `READY`**（回包形状不变、仍不带 `image_id`）。
      入册段吃**同一段预算**（到点即停等待 ⇒ 由下面统一按段超限收口）。 */
   const elapsedMs = Date.now() - submitStartedAt
+  stage = SUBMIT_STAGE.INGEST
   const ingestOutcome = await budgeted(
     registerProductImage({
       bytes: posted.bytes,
@@ -1449,6 +1507,7 @@ async function submitEnhanceTask(payload, identity, context) {
     })
   }
   const ingested = ingestOutcome
+  stage = SUBMIT_STAGE.COMMIT
   try {
     const updated = await budgeted(
       updateTaskRow(
@@ -1463,7 +1522,7 @@ async function submitEnhanceTask(payload, identity, context) {
       /* 候选影像行已入册（确定性 `_id` ⇒ 重放不建第二行）⇒ **不退款**：重放同 request_id 只补任务行。 */
       return submitFailure(
         REASONS.UPSTREAM_ERROR,
-        `${overBudgetHead} ⇒ 候選影像行已入册但任務行落盤未完成；請重放本次提交（同請求號不重複扣費、不重複入册）。`,
+        `${overBudgetHead} ⇒ 候選影像行已入册但任務行落盤未完成；請重放本次提交（同請求號不重複扣費、不重複入册）。${stageFingerprint()}`,
         false
       )
     }
