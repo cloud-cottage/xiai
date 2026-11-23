@@ -362,8 +362,12 @@ export function indexRowOfPrId(prId) {
  */
 export function personAttributesOf(prIdOrRow) {
   const localRow = prIdOrRow && typeof prIdOrRow === 'object' ? prIdOrRow : localPersonRowOf(prIdOrRow)
+  /* 定位键（**本单补末一项 `person_id`**）：既有的 `id` / `code` / `_id` 是本地印人行的编号，
+     末一项让**索引行本身**（`normalizeIndexRow` 的封闭键面，只有九位 `person_id`）也能原样
+     走进来 ⇒ `data/db.js::resolveAuthorName` 可直接把 `indexRowOfPrId` 拿到的索引行喂给
+     `personDisplayName`（**取名仍单点**，不另写名表、不复制一份属性）。 */
   const key = localRow
-    ? textOf(localRow.id) || textOf(localRow.code) || textOf(localRow._id)
+    ? textOf(localRow.id) || textOf(localRow.code) || textOf(localRow._id) || textOf(localRow.person_id)
     : textOf(prIdOrRow)
   const cardRow = indexRowOfPrId(key) || (() => {
     /* 行对象可能只有 `card_id`（thin 行）：直接按 `card_id` 命中索引。 */

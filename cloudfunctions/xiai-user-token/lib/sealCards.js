@@ -4,7 +4,7 @@
  * ============================================================================
  * 背景（线上实测）：首页曾一次性水合全库（1,251 印章 ＋ 1,741 印面 ＋ 6,439 影像 ≈ 11,800 行）
  * ⇒ 首屏 28〜42 秒。本模块把「读面」改成**服务端分页 ＋ 聚合 DTO**：
- *   · 一页只回 ≤60 枚**卡片**（每枚恰 14 键的扁平 DTO），**不回 URL、不回字节**；
+ *   · 一页只回 ≤60 枚**卡片**（每枚恰 16 键的扁平 DTO），**不回 URL、不回字节**；
  *   · 缩略图 / 展示件键由服务端**按主印面影像行的真实 `storage_key` 派生**（**不是**一律 `.png`）：
  *       - `storage !== 'server'`（如 bundled 占位行 `placeholder/seal-no-image`）⇒
  *         `display_key` / `thumb_key` **皆空串**（云端桶里没有这个对象 ⇒ 前端自渲染本地占位图）；
@@ -45,11 +45,13 @@
  *          的章数 —— 零面章不计），`has_more` / `next_cursor` 按同一命中集分页。
  *      回包键面封闭 `{ ok:true, rows, next_cursor, has_more, total }`；`ok:false` ⇒ 恰 3 键
  *      `{ ok:false, reason, message }`（`reason` 只用 `lib/config.js::REASONS` 冻结值）。
- *      `rows` 每枚**恰 14 键**：`stamp_id / seal_name / dynasty / category / primary_face_id /
+ *      `rows` 每枚**恰 16 键**：`stamp_id / seal_name / dynasty / category / primary_face_id /
  *      face_count / edge_count / image_id / image_sha256 / image_mime / width / height /
- *      thumb_key / display_key`（**键名与键数冻结**；`thumb_key` / `display_key` 的**取值规则**
- *      见本文件头部「按影像行真实 `storage_key` 派生」五条 —— bundled 占位行与**无引用的**
- *      无影像行两键皆空串，由前端渲染本地占位图）。
+ *      thumb_key / display_key / author_person_id / author_card_id`（**键名与键数冻结**；
+ *      `thumb_key` / `display_key` 的**取值规则**见本文件头部「按影像行真实 `storage_key` 派生」
+ *      五条 —— bundled 占位行与**无引用的**无影像行两键皆空串，由前端渲染本地占位图；
+ *      末两键 ＝ **作者指针翻译**（`author_card_id` ＝ CARD 九位 `person_id`），服务端**不取名**，
+ *      指针解析不出 ⇒ 两键皆空串）。
  *   ② 管理员 op：`repairPrimaryFace`（落 `ADMIN_OPS`）—— 扫「有 FACE 面但无任何
  *      `is_primary=true`」的章，把 `face_no` 最小的 FACE 行置 `is_primary:true`；`EDGE` 永不置；
  *      幂等（已有 primary 的章不碰）；`dry_run`（缺省 true）**零写**；回包恰 6 键
@@ -97,7 +99,7 @@
  *     每页少一个往返，读次数与命中集口径一字未改。
  *   · **中间层只搬用得上的键（P2-9）**：窗口印章行按 `CARD_SEAL_PROJECTION_KEYS`、影像行按
  *     `CARD_IMAGE_PROJECTION_KEYS` **当场收窄**（印文 / 转录 / 印主 / `bytes` /
- *     容器事实字段不进内存）；**回包仍是那条 14 键卡片 DTO**，键名与取值规则一字未改。
+ *     容器事实字段不进内存）；**回包仍是那条 16 键卡片 DTO**，键名与取值规则一字未改。
  *   · `has_more` **不由客户端推算**：本轮多取 1 枚卡片（`limit + 1`）作为判据；窗口耗尽且无
  *     多余枚 ⇒ `false`。
  *
@@ -203,7 +205,14 @@ const LIST_SEAL_CARDS_SEARCH_FIELDS = Object.freeze([
   'author'
 ])
 
-/** 卡片行封闭键面（**恰 14 键**；顺序即回包顺序）。 */
+/**
+ * 卡片行封闭键面（**恰 16 键**；顺序即回包顺序）。
+ *
+ * **本单（广场卡片显示作者）追加末两键**：`author_person_id`（本地印人号 `PR…`）＋
+ * `author_card_id`（CARD 九位 `person_id`）。**服务端只做指针翻译、不取名**（显示名由前端按
+ * 已加载的 CARD 人物索引解析）；两键**同生同灭** —— 指针解析不出（人号 / `card_id` 任一拿不到）
+ * ⇒ **两键皆空串**（不落 `null`、不删键，键面恒 16）。
+ */
 const CARD_ROW_KEYS = Object.freeze([
   'stamp_id',
   'seal_name',
@@ -218,8 +227,22 @@ const CARD_ROW_KEYS = Object.freeze([
   'width',
   'height',
   'thumb_key',
-  'display_key'
+  'display_key',
+  'author_person_id',
+  'author_card_id'
 ])
+
+/**
+ * **作者指针值域门（本单｜双端同判）**：只有 `PR` ＋ 9 位（本地印人号）或 9 位纯数字
+ * （CARD `person_id`）两种**形态**才允许进 `author_person_id` / `author_card_id`。
+ *
+ * 为什么必须有：`xiai_corrections_public` 的 `field='author'` ∧ `status='ACCEPTED'` 里混着
+ * **旧自由文本时代的遗留值**（值是人名，如 `黃士陵`）—— 这类值**当作没有勘误**：退回印面行
+ * 原值、**不报错**、**不把人名塞进指针两键**。面行原值同门（形态不合法 ⇒ 视作解析不出 ⇒
+ * 两键皆空串）。前端 `src/data/db.js::resolveAuthorName` 走索引取名前判**同一形态**
+ * （两侧各一份字面值；云函数与前端不共享模块，故逐字同判）。
+ */
+const AUTHOR_PERSON_REF_PATTERN = /^(?:PR\d{9}|\d{9})$/
 
 /** `listSealCards` 成功回包键面（**恰 5 键**）。 */
 const LIST_SEAL_CARDS_SUCCESS_KEYS = Object.freeze(['ok', 'rows', 'next_cursor', 'has_more', 'total'])
@@ -321,7 +344,7 @@ const CARD_IMAGE_BATCH_MAX = 60
 const CARD_FALLBACK_SCAN_CAP = 5000
 
 /**
- * **投影键面（P2-9 传输瘦身；本文件内部约定，不是回包契约 —— 回包仍是 14 键卡片 DTO）**
+ * **投影键面（P2-9 传输瘦身；本文件内部约定，不是回包契约 —— 回包仍是 16 键卡片 DTO）**
  * ============================================================================
  * 列表读面把整行搬进内存之前先按这里收窄：下游（`cardDetailsOfSealRows` /
  * `primaryMatches` / `coverKeysOf`）只读这些键，其余字段一律不进内存、也不随 Map 流转。
@@ -1028,7 +1051,7 @@ function parseListSealCardsPayload(payload) {
  * 一页印章 ⇒ 卡片 DTO 列表（**0 面印章一律不出**）。
  * @param {object} db DB 句柄
  * @param {Array<object>} sealRows 本页印章行（已按 `stamp_id` 升序）
- * @returns {Promise<Array<object>>} 卡片（每枚恰 14 键）
+ * @returns {Promise<Array<object>>} 卡片（每枚恰 16 键）
  */
 async function cardsOfSealRows(db, sealRows) {
   const detailed = await cardDetailsOfSealRows(db, sealRows)
@@ -1092,6 +1115,9 @@ async function cardDetailsOfSealRows(db, sealRows) {
     }
   }
   const detailed = []
+  /* ③ **作者指针翻译（本单｜只读、零写）**：本页 ≤60 枚一次性翻完（两次批量 `in`，
+     逐卡 N+1 依然零）。解析不出的印章 ⇒ 两键皆空串（见 `authorPointersOf`）。 */
+  const authorBySeal = await authorPointersOf(db, rows, facesBySeal)
   for (const sealRow of rows) {
     const stampId = sealKeyOf(sealRow)
     const faces = facesBySeal.get(stampId) || []
@@ -1102,7 +1128,7 @@ async function cardDetailsOfSealRows(db, sealRows) {
     const image = imageId !== '' ? imageById.get(imageId) || null : null
     /* **读面闸门（2026-11-17｜`hidden` 影像一律不外泄）**：主印面影像行逐字 `hidden` ⇒
        卡片的五个影像键（`image_id` / `image_sha256` / `image_mime` / `thumb_key` /
-       `display_key`）**全给空串**（**键面仍恰 14 键** —— 不删键、不落 `null`）。
+       `display_key`）**全给空串**（**键面仍恰 16 键** —— 不删键、不落 `null`）。
        判据单点 ＝ `lib/ops.js::imageRowVisibilityOf`（缺键 / 表外值一律当 `visible`）。
        `width` / `height` 不在冻结的置空清单内 ⇒ 维持原样（不擅自扩面）。 */
     const imageHidden =
@@ -1113,6 +1139,9 @@ async function cardDetailsOfSealRows(db, sealRows) {
     /* 封面两键：**按影像行真实 `storage_key` 派生**（唯一派生处 `coverKeysOf`）；
        `hidden` ⇒ 两键皆空（与上面五个置空键同批，不派生任何对象键）。 */
     const cover = imageHidden ? { displayKey: '', thumbKey: '' } : coverKeysOf(image, primary, sha256)
+    /* **作者两键（本单）**：`{personId, cardId}` 同生同灭 —— 拿不到 CARD 九位号 ⇒ 两键皆空串
+       （不落 `null`、不删键）。**服务端不取名**（显示名由前端按人物索引解析）。 */
+    const author = authorBySeal.get(stampId) || { personId: '', cardId: '' }
     detailed.push({
       faces,
       card: {
@@ -1129,11 +1158,129 @@ async function cardDetailsOfSealRows(db, sealRows) {
         width: dimensionOf(image && image.width),
         height: dimensionOf(image && image.height),
         thumb_key: cover.thumbKey,
-        display_key: cover.displayKey
+        display_key: cover.displayKey,
+        author_person_id: author.personId,
+        author_card_id: author.cardId
       }
     })
   }
   return detailed
+}
+
+/**
+ * **作者指针翻译（本单｜只读、零写；唯一实现点）**：把一页印章主印面的人号翻成
+ * `{personId, cardId}` 两键。**两次批量 `in` 查询**（本页 ≤60 枚；逐卡 N+1 依然零）：
+ *
+ *   ① **已采纳作者勘误覆盖**：`xiai_corrections_public` 里 `faceId ∈ 本页主印面` ∧
+ *      `field:'author'` ∧ `status:'ACCEPTED'` 的行 —— `value` 字段就是印人号（一面对一值 ⇒
+ *      **命中即覆盖**面行原 `author_person_id`）；
+ *   ② **人号 → CARD 九位号**：`xiai_persons` 按 `_id ∈ 本页人号` 取 `card_id`；`_id` 未命中的
+ *      余量再按业务键 `id` / `code` 各补一批（仍各是**一次** `in`；只补漏、不重复读）。
+ *
+ * 口径四条：① **值域门**（`AUTHOR_PERSON_REF_PATTERN`）—— 勘误值与面行原值**只认 `PR` ＋ 9 位 /
+ * 9 位纯数字**，人名等旧自由文本遗留值**当作没有勘误**（退回面行原值、不报错、不进指针两键）；
+ * ② **解析不出 ⇒ 两键皆空串**（键面恒 16，不落 `null`、不删键）；③ 行上字段在**本函数内再判一次**
+ * （退路读不判 `match`，不能只信 DB 侧条件）；④ **读失败按空集继续**并 `log.warn` 如实记
+ * （不把失败伪装成「有勘误」，也不因一条读失败把整页打成 STORAGE_UNAVAILABLE）。
+ * **零写入、零取名、`reason` / 集合零新增。**
+ *
+ * @param {object} db DB 句柄
+ * @param {Array<object>} rows 本页印章行
+ * @param {Map<string, Array<object>>} facesBySeal 印章键 ⇒ 该章面行
+ * @returns {Promise<Map<string,{personId:string, cardId:string}>>} 键 ＝ 印章键（`stamp_id`）
+ */
+async function authorPointersOf(db, rows, facesBySeal) {
+  const ops = opsOf()
+  const out = new Map()
+  /* 本页主印面：`faceId`（勘误按面）与原 `author_person_id`（人号）一并先收齐。 */
+  const plan = []
+  const faceIds = []
+  for (const sealRow of rows) {
+    const sealKey = sealKeyOf(sealRow)
+    if (sealKey === '') continue
+    const faces = facesBySeal.get(sealKey) || []
+    const primary = primaryFaceOf(faces)
+    const faceId = text(primary && (primary.id || primary._id))
+    const personId = text(primary && primary.author_person_id)
+    if (faceId === '' && personId === '') continue
+    plan.push({ sealKey, faceId, personId })
+    if (faceId !== '') faceIds.push(faceId)
+  }
+  if (plan.length === 0) return out
+  /* ① 已采纳作者勘误（本页一次 `in`；命中即覆盖）。 */
+  const overrideByFace = new Map()
+  const uniqueFaceIds = [...new Set(faceIds)]
+  if (uniqueFaceIds.length > 0) {
+    try {
+      const correctionRows = await readOrderedWindow(db, ops.COLLECTIONS.correctionsPublic, {
+        match: { field: 'author', status: 'ACCEPTED' },
+        idField: 'faceId',
+        idIn: uniqueFaceIds,
+        limit: Math.max(uniqueFaceIds.length * 4, 60)
+      })
+      for (const doc of correctionRows) {
+        /* 逐行复判（退路读不判 `match`）；一面对一值 ⇒ 先到先得、后到不覆盖。 */
+        if (text(doc && doc.field) !== 'author') continue
+        if (text(doc && doc.status) !== 'ACCEPTED') continue
+        const faceId = text(doc.faceId)
+        const value = text(doc.value)
+        if (faceId === '' || value === '' || overrideByFace.has(faceId)) continue
+        /* **值域门**：形态不成立（人名等旧自由文本遗留值）⇒ **当作没有勘误**：不覆盖、不报错。 */
+        if (!AUTHOR_PERSON_REF_PATTERN.test(value)) continue
+        overrideByFace.set(faceId, value)
+      }
+    } catch (error) {
+      log.warn('sealCards.authorCorrections.read.failed', {
+        message: '讀已採納作者勘誤失敗 ⇒ 本頁按面行原值繼續（不覆蓋、不寫入）',
+        errorMessage: text(error && error.message)
+      })
+    }
+  }
+  /* ② 人号集合（覆盖值优先）⇒ `xiai_persons.card_id`。 */
+  const wanted = new Set()
+  const refOf = (item) => {
+    const personId = (item.faceId !== '' && overrideByFace.get(item.faceId)) || item.personId
+    /* **值域门（面行原值同门）**：形态不成立 ⇒ 视作解析不出（不拿人名 / 垃圾值去查号）。 */
+    return AUTHOR_PERSON_REF_PATTERN.test(personId) ? personId : ''
+  }
+  for (const item of plan) {
+    const personId = refOf(item)
+    if (personId !== '') wanted.add(personId)
+  }
+  const cardIdByPerson = new Map()
+  if (wanted.size > 0) {
+    let missing = [...wanted]
+    for (const idField of ['_id', 'id', 'code']) {
+      if (missing.length === 0) break
+      try {
+        const personRows = await readOrderedWindow(db, ops.COLLECTIONS.persons, {
+          match: {},
+          idField,
+          idIn: missing,
+          limit: missing.length
+        })
+        for (const doc of personRows) {
+          const key = text(doc && doc[idField]) || text(doc && doc._id)
+          const cardId = text(doc && doc.card_id)
+          if (key === '' || cardId === '' || !wanted.has(key) || cardIdByPerson.has(key)) continue
+          cardIdByPerson.set(key, cardId)
+        }
+      } catch (error) {
+        log.warn('sealCards.personCardId.read.failed', {
+          message: `按 \`${idField}\` 批量讀印人 \`card_id\` 失敗 ⇒ 本批按未解析繼續（兩鍵空串）`,
+          errorMessage: text(error && error.message)
+        })
+      }
+      missing = missing.filter((personId) => !cardIdByPerson.has(personId))
+    }
+  }
+  /* ③ 落表：**两键同生同灭** —— 拿不到 `card_id` ⇒ 人号一并置空（不落 null、不删键）。 */
+  for (const item of plan) {
+    const personId = refOf(item)
+    const cardId = personId !== '' ? cardIdByPerson.get(personId) || '' : ''
+    out.set(item.sealKey, cardId === '' ? { personId: '', cardId: '' } : { personId, cardId })
+  }
+  return out
 }
 
 /** 主印面筛选命中（空筛选 ⇒ 恒真；`EDGE` 从不参与）。 */

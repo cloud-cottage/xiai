@@ -26,7 +26,7 @@
  *   V6. **回填 `repairSealViewCount`**（`AC-736`）：`dry_run` 不写；真写后 `view_count` 回读为 `0`
  *       且 `written` ＝ `eligible`；**同参重放 `written === 0`（幂等）**；回包**恒恰 5 键**；
  *       非管理员 ⇒ 拒 ＋ 零读写。
- *   V7. **卡片 DTO 仍恰 14 键且不含 `view_count`**（`AC-733`）。
+ *   V7. **卡片 DTO 仍恰 16 键且不含 `view_count`**（`AC-733`）。
  *
  * 纪律：不打印任何密钥 / 令牌；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
@@ -379,7 +379,7 @@ section('V2', '排序三键：view_count 降序 → 同值按 created_at 降序�
     const reply = await publicCall('listSealCards', { limit: 10 })
     const rows = Array.isArray(reply.rows) ? reply.rows : []
     const order = rows.map((row) => row.stamp_id)
-    /* 卡片 DTO **不带** `view_count`（恰 14 键，AC-733）⇒ 序的判据取「种子值 → 编号」映射
+    /* 卡片 DTO **不带** `view_count`（恰 16 键，AC-733）⇒ 序的判据取「种子值 → 编号」映射
        （不是从回包里读，回包里本就没有这个字段）。 */
     const seedValueOf = new Map(seeds.map((item) => [item.stamp_id, item.view_count]))
     const orderValues = order.map((id) => seedValueOf.get(id))
@@ -808,15 +808,17 @@ section('V6', 'repairSealViewCount：dry_run 零写、真写后回读 view_count
 }
 
 /* ===========================================================================
-   V7：卡片 DTO 仍恰 14 键且不含 view_count
+   V7：卡片 DTO 仍恰 16 键且不含 view_count
    =========================================================================== */
-section('V7', '卡片 DTO 仍恰 14 键、零 `view_count` 键、零 `view_count` 值（浏览数不上屏）')
+section('V7', '卡片 DTO 仍恰 16 键、零 `view_count` 键、零 `view_count` 值（浏览数不上屏）')
 {
   const v7Store = createStore(sealSeedRows([{ stamp_id: 'SV000000040', view_count: 12, created_at: '2026-01-01T00:00:00.000Z' }]))
   await withStore(v7Store, async () => {
     const reply = await publicCall('listSealCards', { limit: 5 })
     const row = (reply.rows || [])[0] || {}
     const cardKeys = [
+      'author_card_id',
+      'author_person_id',
       'category',
       'display_key',
       'dynasty',
@@ -832,13 +834,32 @@ section('V7', '卡片 DTO 仍恰 14 键、零 `view_count` 键、零 `view_count
       'thumb_key',
       'width'
     ]
-    check('V7a', '`rows` 每元素**恰 14 键**且键名逐字 ＝ 冻结表（`CARD_ROW_KEYS`）', {
-      count: 14,
+    check('V7a', '`rows` 每元素**恰 16 键**且键名逐字 ＝ 冻结表（`CARD_ROW_KEYS`）', {
+      count: 16,
       keys: cardKeys
     }, {
       count: Object.keys(row).length,
       keys: sorted(Object.keys(row))
     })
+    /* **V7an 负对照（键面类）**：14 键样本（删两键）喂**同一条**判据 ⇒ 必须判红；16 键 ⇒ 判绿。 */
+    {
+      const v7aActual = { count: Object.keys(row).length, keys: sorted(Object.keys(row)) }
+      const v7aMutant14 = {
+        count: 14,
+        keys: cardKeys.filter((key) => key !== 'author_card_id' && key !== 'author_person_id')
+      }
+      check('V7an', '负对照：14 键样本喂 V7a 同一判据 ⇒ **判红**；16 键样本 ⇒ **判绿**', {
+        mutantRed: true,
+        realGreen: true,
+        mutantCount: 14,
+        realCount: 16
+      }, {
+        mutantRed: JSON.stringify(v7aMutant14) !== JSON.stringify(v7aActual),
+        realGreen: JSON.stringify({ count: 16, keys: cardKeys }) === JSON.stringify(v7aActual),
+        mutantCount: v7aMutant14.keys.length,
+        realCount: v7aActual.keys.length
+      })
+    }
     check('V7b', '卡片行**零 `view_count`**（既无键、也无值；热度序只影响顺序、不上屏）', {
       hasKey: false,
       values: 0

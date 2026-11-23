@@ -10,7 +10,7 @@
  *   P0. **七张冻结常量逐字**（唯一真源，直接引用被测件导出、不重抄）：
  *       `LIST_SEAL_CARDS_ALLOWED_KEYS`(7：`limit,cursor,dynasty,seal_type,face_style,category,q`) /
  *       `LIST_SEAL_CARDS_SUCCESS_KEYS`(5：
- *       ok,rows,next_cursor,has_more,total) / `CARD_ROW_KEYS`(14) /
+ *       ok,rows,next_cursor,has_more,total) / `CARD_ROW_KEYS`(16) /
  *       `SUGGEST_AUTHORS_ALLOWED_KEYS`(3：face_id,name,limit) /
  *       `SUGGEST_AUTHORS_SUCCESS_KEYS`(4：ok,query,normalized,candidates) /
  *       `AUTHOR_CANDIDATE_KEYS`(7) / `MATCHED_FIELDS`(5：name,alias,courtesy,art,contains)。
@@ -18,7 +18,7 @@
  *       `getPersonCard` / `catalogStats` / `listSealCovers`，皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
  *   P2. **两 op 载荷封闭**：未知键 / **身份类键**（`user_id` / `phone`）⇒ `INVALID_FIELD`
  *       ＋ 恰 3 键拒绝 ＋ 零读（判定早于任何读）。
- *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 14 键**。
+ *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 16 键**。
  *   P4. `suggestAuthors` 回包**恰 4 键**、候选每元素**恰 7 键**、`matched_field` 封闭五值。
  *   P5. **0 面印章不进 `rows`，也不计 `total`**（印章侧 where 恒带 `face_count >= 1` ⇒ 零面章在数据层即被排除）。
  *   P6. **匿名可调**（`main({action:'public', op})` 无令牌即成功）；**非 public action 仍被拦**
@@ -272,25 +272,30 @@ const publicCall = (op, payload) => fn.main({ action: 'public', op, payload })
    P0：七张冻结常量逐字（唯一真源；直接引用被测件导出）
    =========================================================================== */
 section('P0', '冻结常量逐字：载荷 / 回包 / 卡片行 / 候选行 / 命中字段七张表')
-check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5）', {
+/* 卡片行冻结表（**16 键、字典序**；本单 14 → 16 追加 `author_card_id` / `author_person_id`，
+   a 开头按字典序排在 `category` 前）。P0 与下方 P0n 负对照共用同一字面，避免两处各抄一份。 */
+const P0_CARD_ROW = [
+  'author_card_id',
+  'author_person_id',
+  'category',
+  'display_key',
+  'dynasty',
+  'edge_count',
+  'face_count',
+  'height',
+  'image_id',
+  'image_mime',
+  'image_sha256',
+  'primary_face_id',
+  'seal_name',
+  'stamp_id',
+  'thumb_key',
+  'width'
+]
+check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 16 / 3 / 4 / 7 / 5）', {
   listAllowed: ['category', 'cursor', 'dynasty', 'face_style', 'limit', 'q', 'seal_type'],
   listSuccess: ['has_more', 'next_cursor', 'ok', 'rows', 'total'],
-  cardRow: [
-    'category',
-    'display_key',
-    'dynasty',
-    'edge_count',
-    'face_count',
-    'height',
-    'image_id',
-    'image_mime',
-    'image_sha256',
-    'primary_face_id',
-    'seal_name',
-    'stamp_id',
-    'thumb_key',
-    'width'
-  ],
+  cardRow: P0_CARD_ROW,
   suggestAllowed: ['face_id', 'limit', 'name'],
   suggestSuccess: ['candidates', 'normalized', 'ok', 'query'],
   candidate: [
@@ -303,7 +308,7 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5
     'score'
   ],
   matchedFields: ['alias', 'art', 'contains', 'courtesy', 'name'],
-  sizes: [7, 5, 14, 3, 4, 7, 5]
+  sizes: [7, 5, 16, 3, 4, 7, 5]
 }, {
   listAllowed: sorted(sealCards.LIST_SEAL_CARDS_ALLOWED_KEYS),
   listSuccess: sorted(sealCards.LIST_SEAL_CARDS_SUCCESS_KEYS),
@@ -322,6 +327,23 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 14 / 3 / 4 / 7 / 5
     authorMatch.MATCHED_FIELDS.length
   ]
 })
+/* **P0n 负对照（本单 14 → 16 的键面类正/负对照）**：把两键从冻结表删掉成 14 键行喂**同一条**
+   `JSON.stringify` 判据 ⇒ 必须判红；16 键全表 ⇒ 判绿。判据本体一字未改（只换喂进去的样本）。 */
+{
+  const cardRowActual = sorted(sealCards.CARD_ROW_KEYS)
+  const cardRowMutant14 = P0_CARD_ROW.filter((key) => key !== 'author_card_id' && key !== 'author_person_id')
+  check('P0n', '负对照：卡片行 14 键（删两键）喂 P0 同一判据 ⇒ **判红**；16 键全表 ⇒ **判绿**', {
+    mutantRed: true,
+    realGreen: true,
+    mutantCount: 14,
+    realCount: 16
+  }, {
+    mutantRed: JSON.stringify(cardRowMutant14) !== JSON.stringify(cardRowActual),
+    realGreen: JSON.stringify(P0_CARD_ROW) === JSON.stringify(cardRowActual),
+    mutantCount: cardRowMutant14.length,
+    realCount: cardRowActual.length
+  })
+}
 
 /* ===========================================================================
    P1：`PUBLIC_OPS` 恰 6 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
@@ -415,17 +437,17 @@ section('P2', '载荷封闭：未知键与身份类键一律 INVALID_FIELD（恰
 }
 
 /* ===========================================================================
-   P3：`listSealCards` 回包恰 5 键 ＋ `rows` 每元素恰 14 键
+   P3：`listSealCards` 回包恰 5 键 ＋ `rows` 每元素恰 16 键
    =========================================================================== */
-section('P3', 'listSealCards：回包恰 5 键 / rows 每元素恰 14 键 / total 与 rows 同尺')
+section('P3', 'listSealCards：回包恰 5 键 / rows 每元素恰 16 键 / total 与 rows 同尺')
 {
   const reply = await publicCall('listSealCards', { limit: 10 })
   const rows = Array.isArray(reply.rows) ? reply.rows : []
-  check('P3', '`listSealCards` 成功回包**恰 5 键**、`rows` 每元素**恰 14 键**（＝ `CARD_ROW_KEYS`）', {
+  check('P3', '`listSealCards` 成功回包**恰 5 键**、`rows` 每元素**恰 16 键**（＝ `CARD_ROW_KEYS`）', {
     keys: 'has_more,next_cursor,ok,rows,total',
     ok: true,
     rowCount: 1,
-    rowShapes: ['category,display_key,dynasty,edge_count,face_count,height,image_id,image_mime,image_sha256,primary_face_id,seal_name,stamp_id,thumb_key,width'],
+    rowShapes: ['author_card_id,author_person_id,category,display_key,dynasty,edge_count,face_count,height,image_id,image_mime,image_sha256,primary_face_id,seal_name,stamp_id,thumb_key,width'],
     thumbIsContentAddressed: true
   }, {
     keys: shapeOf(reply),
@@ -433,6 +455,20 @@ section('P3', 'listSealCards：回包恰 5 键 / rows 每元素恰 14 键 / tota
     rowCount: rows.length,
     rowShapes: rows.map((row) => shapeOf(row)),
     thumbIsContentAddressed: rows.every((row) => row.thumb_key === `xiai/images/${FACE_SHA.slice(0, 2)}/${FACE_SHA}.png`)
+  })
+  /* **P3n 负对照（键面类）**：把两键从形状串里删掉成 14 键行喂**同一条**判据 ⇒ 必须判红；
+     16 键形状串 ⇒ 判绿。判据本体一字未改（只换喂进去的样本）。 */
+  const shape16 = 'author_card_id,author_person_id,category,display_key,dynasty,edge_count,face_count,height,image_id,image_mime,image_sha256,primary_face_id,seal_name,stamp_id,thumb_key,width'
+  const shape14 = shape16.replace('author_card_id,author_person_id,', '')
+  const actualShapes = rows.map((row) => shapeOf(row))
+  check('P3n', '负对照：14 键行形状串喂 P3 同一判据 ⇒ **判红**；16 键形状串 ⇒ **判绿**', {
+    mutantRed: true,
+    realGreen: true,
+    mutantShapeHas14: true
+  }, {
+    mutantRed: actualShapes.length === 1 && actualShapes[0] !== shape14,
+    realGreen: actualShapes.length === 1 && actualShapes[0] === shape16,
+    mutantShapeHas14: shape14.split(',').length === 14
   })
 }
 

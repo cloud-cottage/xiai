@@ -17,9 +17,12 @@
  * 【凍結契約（本文件只消費，不自造字段）】
  *   請求 payload：`{ limit, cursor, dynasty, seal_type, face_style, category, q }`（**恰 7 鍵**；
  *   `q` 空串 ＝ 不檢索，**仍佔一鍵** —— 與規範 §3.81.4 載荷字面 `q: ''` 逐字同形）
- *   回包：`{ ok, rows, next_cursor, has_more, total }`；`rows` 元素**恰 14 鍵**：
+ *   回包：`{ ok, rows, next_cursor, has_more, total }`；`rows` 元素**恰 16 鍵**：
  *     `stamp_id, seal_name, dynasty, category, primary_face_id, face_count, edge_count,
- *      image_id, image_sha256, image_mime, width, height, thumb_key, display_key`
+ *      image_id, image_sha256, image_mime, width, height, thumb_key, display_key,
+ *      author_person_id, author_card_id`
+ *   （末兩鍵 ＝ **作者指針**：`author_card_id` 是 CARD 九位 `person_id`；服務端只翻指針不取名，
+ *     **顯示名由本端按已載入的人物索引解析** —— 見 `data/db.js::resolveAuthorName`。）
  *   **0 面印章不會出現**在 rows（本層另做一道防禦性過濾，契約側漏了也不上屏空卡）。
  *
  * 【降級路徑（必須保留）】無雲端（未配置 / 呼叫失敗）⇒ 走**本機示範資料**：用既有的
@@ -108,7 +111,7 @@ export async function catalogStats() {
   }
 }
 
-/** `rows` 元素**恰 14 鍵**（順序即契約順序；取證可逐字比對）。 */
+/** `rows` 元素**恰 16 鍵**（順序即契約順序；取證可逐字比對）。 */
 export const SEAL_CARD_ROW_KEYS = Object.freeze([
   'stamp_id',
   'seal_name',
@@ -123,7 +126,9 @@ export const SEAL_CARD_ROW_KEYS = Object.freeze([
   'width',
   'height',
   'thumb_key',
-  'display_key'
+  'display_key',
+  'author_person_id',
+  'author_card_id'
 ])
 
 /**
@@ -150,7 +155,7 @@ const LOCAL_CURSOR_PREFIX = 'off:'
 /**
  * **卡片行來源標記（符號鍵）**：`'cloud'`（雲端 `listSealCards` 回包經 `normalizeSealCardRow` 收窄）
  * ／ `'local'`（本機示範資料經 `cardRowOfLocalSeal` 組裝）。
- * 用符號而非字串鍵：**不進 `Object.keys`** ⇒ 14 鍵面一字不變；標成 `enumerable`
+ * 用符號而非字串鍵：**不進 `Object.keys`** ⇒ 16 鍵面一字不變；標成 `enumerable`
  * ⇒ `{...row}` 展開複製也不丟。為什麼需要它：雲端行在 bundled 占位行 / 無影像行上
  * **兩鍵皆空串**（與本機行同形），`SealCard` 必須仍認得出「這是雲端分頁行」才走封面四級回落，
  * 而不是誤入本機解碼路徑（那條路上雲端行多半查無影像 ⇒ 只剩字形，占位圖出不來）。
@@ -218,7 +223,10 @@ export function sealCardsRequestOf(input = {}) {
 }
 
 /**
- * 把一行雲端回包**收窄成恰 14 鍵**的卡片行（型別歸一；不新增、不改名、不補編造值）。
+ * 把一行雲端回包**收窄成恰 16 鍵**的卡片行（型別歸一；不新增、不改名、不補編造值）。
+ *
+ * **末兩鍵是作者指針**（`author_person_id` ／ `author_card_id` ＝ CARD 九位號）：只做**文本歸一**，
+ * **不在這裡取名、也不補缺值**（解析不出 ⇒ 服務端已落空串 ⇒ 本層維持空串）。
  * @returns {object|null} 收不下（無 `stamp_id` / 0 面）⇒ `null`（呼叫方統計後丟棄）
  */
 export function normalizeSealCardRow(raw) {
@@ -237,11 +245,13 @@ export function normalizeSealCardRow(raw) {
     width: intOf(raw.width),
     height: intOf(raw.height),
     thumb_key: textOf(raw.thumb_key).trim(),
-    display_key: textOf(raw.display_key).trim()
+    display_key: textOf(raw.display_key).trim(),
+    author_person_id: textOf(raw.author_person_id).trim(),
+    author_card_id: textOf(raw.author_card_id).trim()
   }
   /* 契約明文「0 面印章不會出現」——照收但不讓它上屏（防禦性過濾，零猜值）。 */
   if (!row.stamp_id || row.face_count <= 0) return null
-  /* 來源標記（符號鍵，不佔 14 鍵面）：雲端分頁行 ⇒ 封面走四級回落。 */
+  /* 來源標記（符號鍵，不佔 16 鍵面）：雲端分頁行 ⇒ 封面走四級回落。 */
   row[CARD_ROW_SOURCE] = 'cloud'
   return row
 }
@@ -264,7 +274,7 @@ export function sealCardsReadoutsOf(result) {
 }
 
 /**
- * 由可辨識的回包讀數組出**一頁**（純函數；`rows` 逐行收窄成恰 14 鍵、`has_more` 以服務端為準）。
+ * 由可辨識的回包讀數組出**一頁**（純函數；`rows` 逐行收窄成恰 16 鍵、`has_more` 以服務端為準）。
  * @param {{rows:Array, next_cursor?:string, has_more?:boolean, total?:number}} readouts
  */
 export function sealCardPageOfReadouts(readouts) {
@@ -291,7 +301,7 @@ export function sealCardPageOfReadouts(readouts) {
  * ------------------------------------------------------------------------- */
 
 /**
- * 由本機印章視圖模型（`seals.listSeals()` 的行）組出**同名 14 鍵**的卡片行。
+ * 由本機印章視圖模型（`seals.listSeals()` 的行）組出**同名 16 鍵**的卡片行。
  * 本機行沒有內容尋址對象鍵 ⇒ `thumb_key` / `display_key` 一律空串
  * （卡片據此走既有的本機解碼路徑，**不編造**對象鍵、也不假裝是雲端展示件）。
  */
@@ -315,9 +325,14 @@ function cardRowOfLocalSeal(seal) {
     width: primary ? intOf(primary.width) : 0,
     height: primary ? intOf(primary.height) : 0,
     thumb_key: '',
-    display_key: ''
+    display_key: '',
+    /* 作者兩鍵（與雲端行同形）：人號取印章視圖模型的**主印面引用**（`seals.listSeals()` 已按
+       `primaryFaceIn` 單點派生）；`author_card_id` 本機**不自行翻號**（留空串，由取名單點
+       `resolveAuthorName` 按人物索引 / 本地鏡像解析）⇒ **不編造、不落第二套名表**。 */
+    author_person_id: textOf(seal.author_person_id).trim(),
+    author_card_id: ''
   }
-  /* 來源標記（符號鍵，不佔 14 鍵面）：本機示範資料行 ⇒ 封面維持本機解碼路徑。 */
+  /* 來源標記（符號鍵，不佔 16 鍵面）：本機示範資料行 ⇒ 封面維持本機解碼路徑。 */
   card[CARD_ROW_SOURCE] = 'local'
   return card
 }

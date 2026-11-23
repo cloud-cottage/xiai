@@ -39,15 +39,18 @@ import * as aiAccess from './aiAccess.js'
    op 名 / 讀數鍵面真源）。页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as aiEnhance from './aiEnhance.js'
 /* **「廣場卡片分頁」门面（本單新增）**：首屏 48 枚 ＋ `next_cursor` 續拉 ＋ 四維篩選下推
-   ＋ 封面走 `thumb_key`/`display_key`（`sealCards.js`；請求鍵面 / 14 鍵行面 / 篩選映射表真源）。
+   ＋ 封面走 `thumb_key`/`display_key`（`sealCards.js`；請求鍵面 / 16 鍵行面 / 篩選映射表真源）。
    页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as sealCards from './sealCards.js'
 /* **「校驗作者」候选匹配门面（本單新增）**：公開只讀 op `suggestAuthors` 的唯一消費點
    （`authorMatch.js`；請求鍵面 / 候選 7 鍵面 / 命中字段中文名真源）。
    页面与组件仍**只**经本门面访问数据（不得直接 import `../data/*`）。 */
 import * as authorMatch from './authorMatch.js'
+/* **CARD 人物索引门面（本单新增）**：广场首屏要触发索引预热（`loadPersonIndex` ＝ 进程内单例，
+   并发合并、**不是第二条拉取路径、更不是轮询**）—— 页面与组件仍**只**经本门面访问服务层。 */
+import * as personCards from './personCards.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards }
 export default services

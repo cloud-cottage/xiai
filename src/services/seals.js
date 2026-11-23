@@ -83,6 +83,13 @@ import {
 import '../utils/codeId.js'
 const CODE_ID = globalThis.__XIAI_CODE_ID__ || {}
 import { currentUser } from '../data/session.js'
+/* **作者显示名对齐详情页口径（本单）**：导出 / 文本导出曾用裸 `resolveAuthorName`（不含**已采纳
+   勘误**）⇒ 对 `AACQG` 会写面行原值「巴慰祖」而详情页显示「陳巨來」。改经
+   `corrections.resolveAuthorDisplayName`（先合成 ACCEPTED 值、再调同一数据层单点）⇒ **同名**。
+   **循环依赖已知且有界**：`services/corrections.js` 也 import 本文件（`primaryFaceOf` /
+   `getFaceById` / `FACE_KIND` …）；两侧**都只在函数体内**用对方导出（无模块顶层调用），
+   与 `data/db.js ↔ services/personCards.js` 先例同族 —— 任一方向先求值都不会踩 TDZ。 */
+import { resolveAuthorDisplayName } from './corrections.js'
 import {
   FACE_KIND,
   SLICE_META_FIELD,
@@ -289,9 +296,11 @@ export function faceViewModel(row) {
     seal_class: sealClassValue(row),
     faceImage: byId(row.face_image_id), // 固定属性「印面图片」解析结果
     edgeImages, // 固定属性「边款图片 ID」解析结果
-    /* **作者显示名（§3.54.9｜单点派生）**：`author_person_id` → 印人 display_name → 旧 `author`
-       →「佚名」；供文本导出等按印面取名（**同一单点**，不另写名表）。 */
-    author_display: resolveAuthorName(row),
+    /* **作者显示名（§3.54.9｜单点派生；本单对齐详情页口径）**：
+       `corrections.resolveAuthorDisplayName` 先把**已采纳作者勘误**（ACCEPTED、值＝印人号）合成进
+       `author_person_id` 再调数据层单点 `resolveAuthorName`（引用命中 → 旧 `author` →「佚名」）
+       ⇒ 文本导出 / 详情 / 卡片**同名**（裸 `resolveAuthorName` 会漏掉已采纳勘误）。 */
+    author_display: resolveAuthorDisplayName(row),
     missingEdgeIds: edgeIds.filter((id) => !byId(id)) // 解析不到的编号 ⇒ 页面出空态
   }
 }
@@ -462,13 +471,20 @@ export function listSeals({ dynasty = '', content = '', style = '', sealClass = 
       const faceClasses = faces
         .map((face) => (face.seal_class === undefined || face.seal_class === null ? '' : String(face.seal_class)))
         .filter(Boolean)
-      /* **作者显示名（§3.54.9｜单点派生）**：`author_person_id` → 印人 display_name → 旧 `author`
-         →「佚名」；卡片 / 详情 / 导出 / 文本导出**同一单点**（数据层 `resolveAuthorName`），
-         本服务不另写第二套名表。 */
-      const authorDisplay = resolveAuthorName({
-        author: resolved.author,
-        author_person_id: (primary && primary.author_person_id) || ''
-      })
+      /* **作者显示名（§3.54.9｜单点派生；本单对齐详情页口径）**：主印面在场 ⇒ 走与详情页
+         **同一口径** `corrections.resolveAuthorDisplayName`（已采纳勘误合成 → 数据层单点
+         `resolveAuthorName`），本服务不另写第二套名表；改前的两条读值**逐字保留**：
+           · `resolved.author` ＝「面值 → 印章行镜像」的既有回落（面行空时用印章行旧值）
+             ⇒ 此时**浅拷贝**盖到主印面上（**不改原行**）；面行自己有值 ⇒ 原样传原行；
+           · 无主印面（0 面 / 认不出）⇒ 与改前同形调用数据层单点（引用位恒空串）。 */
+      const authorFace = primary
+        ? primary.author
+          ? primary
+          : { ...primary, author: resolved.author }
+        : null
+      const authorDisplay = authorFace
+        ? resolveAuthorDisplayName(authorFace)
+        : resolveAuthorName({ author: resolved.author, author_person_id: '' })
       return {
         view: {
           ...row,

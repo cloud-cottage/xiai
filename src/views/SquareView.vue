@@ -12,7 +12,7 @@ import SealFolderPicker from '../components/SealFolderPicker.vue'
    編碼入口已上收**頁頭單框雙態搜索**（`HeaderSearch`）—— 本頁只按 `route.query.code` 精確查，
    不再另設獨立 OTP 控件（全站唯一入口，任何頁面可用、鏈接可分享）。 */
 import { findSealByCode } from '../services/seals.js'
-import { seals, corrections, points, imageFaces, sealCards } from '../services/index.js'
+import { seals, corrections, points, imageFaces, sealCards, personCards } from '../services/index.js'
 import { DYNASTY_OPTIONS, FACE_CONTENT_OPTIONS, FACE_STYLE_OPTIONS, SEAL_CLASS_OPTIONS } from '../data/seed.js'
 import { isLoggedIn } from '../data/session.js'
 import { saveLocalBinary } from '../utils/file.js'
@@ -59,7 +59,7 @@ const canUploadSeal = computed(() => seals.canUploadSeal())
    ============================================================================ */
 const PAGE_SIZE = sealCards.SQUARE_PAGE_SIZE
 
-/** 累積的卡片行（雲端回包的 14 鍵行 / 本機降級行）。 */
+/** 累積的卡片行（雲端回包的 16 鍵行 / 本機降級行）。 */
 const cards = ref([])
 /** 服務端不透明游標（本層不解析、不猜測）。 */
 const nextCursor = ref('')
@@ -180,6 +180,11 @@ watch(dataVersion, () => { void loadCatalogStats() })
 
 onMounted(() => {
   void loadCatalogStats()
+  /* **人物索引在本页首屏预热一次（本单）**：卡片作者显示名要按**已加载**的 CARD 人物索引解析
+     （`db.js::resolveAuthorName` 零 `await`、零网络）⇒ 进到广场就触发 `loadPersonIndex`。
+     它是**进程内单例**：已加载 ⇒ 直接返回、失败 60s 内不再发请求、并发合并成一次 ⇒
+     **不是第二条拉取路径、更不是轮询**（`services/bootstrap.js` 启动引导里预热的也是同一个）。 */
+  personCards.loadPersonIndex().catch(() => {})
   if (typeof IntersectionObserver !== 'function') return
   sentinelObserver = new IntersectionObserver(
     (entries) => {

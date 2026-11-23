@@ -80,7 +80,11 @@ import { storeArtifactBytes, AUTHORITY_STORAGE_SERVER } from '../services/imageA
    `card_persons`）。`personDisplayName` 因此先取 CARD 索引（服务层 `services/personCards.js`
    的**已加载快照**，同步只读、零 `await`），CARD 缺席才回退本地属性字段。
    注：data → services 的 import 在本文件已有先例（上一行的 `imageAuthority.js`）。 */
-import { personAttributesOf, cardsOnlyMode } from '../services/personCards.js'
+/* **作者指针单点（本单）**：`resolveAuthorName` 第一级「按 id 取索引行」只经
+   `indexRowOfPrId`（先 CARD 九位号 `author_card_id`、再 `author_person_id`），**取名仍调
+   `personDisplayName`** —— 两边都只在**函数体内**使用对方导出，与既有 `personAttributesOf`
+   循环同族（见 `services/personCards.js` 头注）。 */
+import { personAttributesOf, cardsOnlyMode, indexRowOfPrId } from '../services/personCards.js'
 import {
   SEED_SEALS,
   SEED_FACES,
@@ -2682,19 +2686,46 @@ export function personReferenceDenial(personId) {
 }
 
 /**
+ * **作者指针值域门（与云函数 `lib/sealCards.js::AUTHOR_PERSON_REF_PATTERN` 逐字同判）**：
+ * 只有 `PR` ＋ 9 位（本地印人号）或 9 位纯数字（CARD `person_id`）才**走索引取名** ——
+ * 形态不成立（人名等旧自由文本遗留值混进了 id 位）⇒ **当作没这个 id**，直接回落，
+ * **绝不把人名喂给索引 / 当 id 解**。云函数侧的同一道门保证正常链路里这两个键恒是 id 形态；
+ * 本端这道是**防御性同判**（两侧各一份字面值：云函数是 CJS、前端是 ESM，不共享模块）。
+ */
+const AUTHOR_PERSON_REF_PATTERN = /^(?:PR\d{9}|\d{9})$/
+
+/**
  * **作者显示名解析（§4.1｜单点，冻结）**：
- *   `author_person_id` → **命中**（印人存在且有派生显示名）⇒ `xiai_persons.display_name` →
- *   **未命中** ⇒ 旧 `author` 自由文本 → 皆空 ⇒「佚名」。
+ *   ① **已加载的 CARD 人物索引快照**（`personCards.indexRowOfPrId`；**同步、零 `await`、零新增
+ *      网络**）：先看卡片行的 `author_card_id`（CARD 九位 `person_id`，本单新增键）、再看
+ *      `author_person_id` —— **两键都先过值域门**，命中索引行 ⇒ **取名仍走 `personDisplayName`**
+ *      （繁体姓＋名 → 旧 `family_name`/`given_name` → `name` → 字 → 號）。
+ *      **索引未就绪 / 该人不在索引 ⇒ 本帧回落到 ②**（不编造名字、不缓存假值；`shallowRef`
+ *      快照到位后由响应式重算自动补上正确值）。
+ *   ② **既有链一字未改**：`author_person_id` → 本地印人行 `personById` → `personDisplayName`。
+ *   ③ 旧 `author` 自由文本 → 皆空 ⇒「佚名」。
  * **解析恰一处、零第二套名表**；卡片 / 详情 / 导出（`sealExport.js`）/ 文本导出（`utils/file.js`）
  * **一律经本函数**取名，**不得各自再实现一套**。
- * @param {object|null} row 印面行 / 印章行（带可空 `author_person_id` 与历史 `author` 文本）
- * @returns {string} 印人显示名 / 旧作者文本 /「佚名」
+ * @param {object|null} row 印面行 / 印章行 / 卡片行（带可空 `author_card_id`、
+ *   `author_person_id` 与历史 `author` 文本）
+ * @returns {string} 印人显示名 / 旧作者文本 /「佚名」（**永不回空串**）
  */
 export function resolveAuthorName(row) {
+  const rawCardId = row ? row.author_card_id : ''
+  const cardId = rawCardId === null || rawCardId === undefined ? '' : String(rawCardId).trim()
   const pid = row ? row.author_person_id : ''
-  const id = pid === null || pid === undefined ? '' : String(pid).trim()
-  if (id) {
-    const person = personById(id)
+  const personId = pid === null || pid === undefined ? '' : String(pid).trim()
+  /* ① 已加载的人物索引快照（**先过值域门**；`indexRowOfPrId` 未就绪 / 未命中 ⇒ `null` ⇒ 本帧回落）。 */
+  const indexed =
+    (cardId !== '' && AUTHOR_PERSON_REF_PATTERN.test(cardId) ? indexRowOfPrId(cardId) : null) ||
+    (personId !== '' && AUTHOR_PERSON_REF_PATTERN.test(personId) ? indexRowOfPrId(personId) : null)
+  if (indexed) {
+    const indexedName = personDisplayName(indexed)
+    if (indexedName) return indexedName
+  }
+  /* ② 既有链（本地镜像；一字未改）。 */
+  if (personId) {
+    const person = personById(personId)
     const derived = person ? personDisplayName(person) : ''
     if (derived) return derived
   }

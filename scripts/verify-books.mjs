@@ -22,7 +22,7 @@
  *   B 静态红线：`lib/books.js` 零集合名字面、`lib/ops.js` 三 op 薄委派、
  *     `reason` 仍 13 值 ＋ `[data-admin-action]` 仍 12 值。
  *   C 前端与可见性：侧栏项位置 / glyph / 管理员包裹、`/books` 懒加载路由、
- *     `/books` 非管理员前置返回（零请求）、详情页挂书下拉只 `data-action`、卡片 14 键零 `book_id`。
+ *     `/books` 非管理员前置返回（零请求）、详情页挂书下拉只 `data-action`、卡片 16 键零 `book_id`。
  *   D 行为（离线桩）：首本 `00001` / 第二本 `00002` / 幂等不回建 / 未收录作者零写 /
  *     年份越界零写 / 挂书读回一致（含**读回不一致必拒**）/ 清空 `null` / 书不存在拒 / 清单升序。
  *   E 变异负对照：五条（E1〜E4 必红、E5 正对照必绿）。
@@ -1097,7 +1097,7 @@ check('B3', '`lib/books.js` 零新增 `reason` 字面值（全表仍 **13 值**�
 })
 
 /* --------------------------------- C 前端与可见性 ------------------------ */
-section('C', '前端与可见性：侧栏项（位置/字形/管理员包裹）、`/books` 懒加载路由、非管理员零请求、挂书只 `data-action`、卡片 14 键零 `book_id`')
+section('C', '前端与可见性：侧栏项（位置/字形/管理员包裹）、`/books` 懒加载路由、非管理员零请求、挂书只 `data-action`、卡片 16 键零 `book_id`')
 
 const sidebarJudge = judgeSidebar(read('src/components/AppSidebar.vue'))
 check('C1', '侧栏【印譜匯觀】位于 `my-drive` **之前**、glyph ＝ `譜`、`label` ＝ `印譜匯觀`、路由 `name: \'books\'`；push 在 `if (isAdmin.value)` 块内（非管理员 **0 渲染**，非 `disabled` / CSS 隐藏冒充）且全件仅 1 项', {
@@ -1149,14 +1149,34 @@ check('C4', '详情页挂书钩子**只用 `data-action`**（`assign-face-image-
 })
 
 const cardJudge = judgeCardDto()
-check('C5', '普通用户零泄漏：卡片 DTO **14 键不变**（服务端 `CARD_ROW_KEYS` ＋ 客户端 `SEAL_CARD_ROW_KEYS` 同集），且三处 DTO 文件里 `book_id` **0 命中**', {
-  serverCount: 14,
-  clientCount: 14,
+/* C5 冻结期望（**16 键**；本单 14 → 16。`dtoBookIdHits: 0` 属「不得改弱」判据，**一字不动**）。 */
+const C5_EXPECTED = {
+  serverCount: 16,
+  clientCount: 16,
   sameSet: true,
   serverHasBookId: false,
   clientHasBookId: false,
   dtoBookIdHits: 0
-}, cardJudge)
+}
+check('C5', '普通用户零泄漏：卡片 DTO **16 键不变**（服务端 `CARD_ROW_KEYS` ＋ 客户端 `SEAL_CARD_ROW_KEYS` 同集），且三处 DTO 文件里 `book_id` **0 命中**', C5_EXPECTED, cardJudge)
+/* **C5n 负对照（键面类）**：把服务端 / 客户端两处键数打回 14 喂**同一条**判据 ⇒ 必须判红；
+   真实 16 / 16 读数 ⇒ 判绿。判据本体一字未改（只换喂进去的读数）。 */
+{
+  const mutant14 = Object.assign({}, cardJudge, { serverCount: 14, clientCount: 14 })
+  check('C5n', '负对照：`serverCount/clientCount` 14 喂 C5 同一判据 ⇒ **判红**；16 / 16 ⇒ **判绿**（`dtoBookIdHits` 仍 0）', {
+    mutantRed: true,
+    realGreen: true,
+    mutantServer: 14,
+    mutantClient: 14,
+    mutantBookIdHits: 0
+  }, {
+    mutantRed: JSON.stringify(C5_EXPECTED) !== JSON.stringify(mutant14),
+    realGreen: JSON.stringify(C5_EXPECTED) === JSON.stringify(cardJudge),
+    mutantServer: mutant14.serverCount,
+    mutantClient: mutant14.clientCount,
+    mutantBookIdHits: mutant14.dtoBookIdHits
+  })
+}
 
 /* --------------------------------- D 行为（离线桩） ---------------------- */
 section('D', '行为（离线桩，零网络零库）：发号递增 / 幂等 / 未收录作者零写 / 年份越界零写 / 挂书读回 / 清空 / 书不存在 / 清单升序')
