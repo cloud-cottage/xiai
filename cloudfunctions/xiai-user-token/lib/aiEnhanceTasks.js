@@ -480,6 +480,39 @@ function upstreamFailureMessage(status, detail) {
   return `AI 修復上游調用失敗（${statusText}${detail ? `：${detail}` : ''}）⇒ 本次未建候選影像行、未改印面指向。`
 }
 
+/**
+ * **`submitUpstreamTask` 失败的相位指纹**（本单「失败相位指纹」新增；纯函数、绝不自抛、**零敏感**）。
+ *
+ * 形态（沿用本仓既有 `（診斷：…）` 括注形态，追加在失败 `error_message` **末尾**）：
+ * `（診斷：phase=POST|DOWNLOAD，HTTP=<status|0>，耗時=<ms>，錯誤=<name>）`
+ * —— 下一次重试据此一眼分清卡在「上游 POST 入队」「取图下载」还是**网络层**（`HTTP=0`），不必再猜。
+ *
+ * 硬口径（逐条）：
+ *  ① **只在失败分支追加**：成功回包（`submitSuccess`）与其它任何键面**零变化**；
+ *  ② **`reason` 字面值零新增**：本函数只产括注，判定面仍由 `upstreamFailureMessage` 那条
+ *     `UPSTREAM_ERROR` 说了算，**不改写既有文案一字**（只在末尾追加）；
+ *  ③ 脱敏沿用本文件既有规则：**≥40 位长串一律 `<redacted>`**（同 `diagnoseOf` /
+ *     `upstreamDetailOf` 的 `REDACT` 口径），错误名截 40 字；指纹里**只带**相位 / 状态码 /
+ *     耗时 / 错误名四个数 —— **不带 URL、不带 key、不带请求体、不带任何载荷**。
+ * @param {string} phase 相位字面（本文件只产出 `POST` / `DOWNLOAD` 两个）
+ * @param {number} httpStatus **本相位**观察到的 HTTP 状态码（网络层 / 未取到 ⇒ 0）
+ * @param {number} startedAt 本跳起始时刻（`Date.now()` 尺度）
+ * @param {string} [errorName] 异常名（非异常失败如「非 2xx」「缺任务号」⇒ 空 ⇒ 记 `-`）
+ * @returns {string} 括注（内部任何异常 ⇒ 空串 ⇒ 逐字等于追加前，绝不影响判定）
+ */
+function submitPhaseFingerprint(phase, httpStatus, startedAt, errorName) {
+  try {
+    const status = Number.isInteger(httpStatus) && httpStatus > 0 ? String(httpStatus) : '0'
+    const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.round(Date.now() - startedAt)) : 0
+    const tag = typeof phase === 'string' && phase.trim() !== '' ? phase.trim() : 'POST'
+    const raw = typeof errorName === 'string' && errorName.trim() !== '' ? errorName.trim() : '-'
+    const name = raw.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 40) || '-'
+    return `（診斷：phase=${tag}，HTTP=${status}，耗時=${elapsed}，錯誤=${name}）`
+  } catch {
+    return ''
+  }
+}
+
 /** 上游非 2xx 错误体的可读摘要（同 `lib/aiEnhance.js::upstreamDetailOf` 口径的最小版）。 */
 function upstreamDetailOf(rawText) {
   const LIMIT = 120
@@ -604,6 +637,9 @@ function taskErrorOf(parsed) {
  *     （调用方在 submit 内直接完成入库并置 `READY`）；
  *   · 两条都没有 / 非 2xx / 超时 / 网络错 ⇒ `{ok:false, reason: UPSTREAM_ERROR, message}`。
  * 明文 key 永不进回包、不打印。
+ * **失败回包的 `message`（＝ 行上的 `error_message`）末尾追加相位指纹**
+ * `（診斷：phase=POST|DOWNLOAD，HTTP=<status|0>，耗時=<ms>，錯誤=<name>）`（见 `submitPhaseFingerprint`；
+ * **只在失败分支追加**，成功回包键面 / 文案零变化，`reason` 零新增）。
  * @param {{base_url:string, model:string, key:string, timeout_ms:number}} upstream 解出的上游配置
  * @param {string} imageDataUrl 输入图 `data:` URL
  * @returns {Promise<{ok:true, task_id:string, status:number}|{ok:true, bytes:Buffer, status:number}|{ok:false, reason:string, message:string}>}
@@ -621,6 +657,18 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
   const configured = Number(upstream.timeout_ms) > 0 ? Number(upstream.timeout_ms) : 60000
   const timeoutMs = Math.max(1000, Math.min(configured, SUBMIT_POST_BUDGET_MS))
   let status = 0
+  /* **相位（本单「失败相位指纹」）**：`POST` ＝ 上游入队调用；`DOWNLOAD` ＝ 取图下载。
+     指纹里 `HTTP=` 恒为**本相位**观察到的状态码 —— POST 相位取 `status`、下载相位取
+     `downloadStatus`（网络层 / 未取到 ⇒ 0），两相位各记各的、不互相冒充。 */
+  let phase = 'POST'
+  let downloadStatus = 0
+  /** 失败回包（**唯一失败出口形状**）：既有 `upstreamFailureMessage` 文案**逐字保留**，
+   *  只在末尾追加相位指纹；`reason` 仍是既有 `UPSTREAM_ERROR`（零新增字面值）。 */
+  const fail = (message, errorName) => ({
+    ok: false,
+    reason: REASONS.UPSTREAM_ERROR,
+    message: `${message}${submitPhaseFingerprint(phase, phase === 'DOWNLOAD' ? downloadStatus : status, startedAt, errorName)}`
+  })
   try {
     const fetchImpl = resolveFetch()
     const response = await fetchImpl(url, {
@@ -632,7 +680,7 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
     status = Number(response && response.status) || 0
     /* 上游 POST 预算 45 秒（**响应到手也超时即拒** —— 后续还要下载 / 落行，不能把预算吃光）。 */
     if (Date.now() - startedAt > SUBMIT_POST_BUDGET_MS) {
-      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, `提交超過時限（${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒）`) }
+      return fail(upstreamFailureMessage(status, `提交超過時限（${Math.round(SUBMIT_POST_BUDGET_MS / 1000)} 秒）`))
     }
     if (!response || response.ok !== true) {
       let raw = ''
@@ -641,7 +689,7 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
       } catch {
         raw = ''
       }
-      return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, upstreamDetailOf(raw)) }
+      return fail(upstreamFailureMessage(status, upstreamDetailOf(raw)))
     }
     const payload = await response.json()
     const first = payload && Array.isArray(payload.data) && payload.data.length > 0 ? payload.data[0] : null
@@ -651,18 +699,23 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
       if (typeof first.b64_json === 'string' && first.b64_json !== '') {
         const bytes = Buffer.from(first.b64_json, 'base64')
         if (bytes.length > 0) return { ok: true, bytes, status }
-        return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, '回圖字節為空') }
+        return fail(upstreamFailureMessage(status, '回圖字節為空'))
       }
       if (typeof first.url === 'string' && first.url !== '') {
         const remain = Math.max(1000, Math.min(STATUS_DOWNLOAD_BUDGET_MS, SUBMIT_POST_BUDGET_MS - (Date.now() - startedAt)))
         let download = null
+        /* 换相位：此后（含外层 catch）指纹只报**取图下载**相位的读数。 */
+        phase = 'DOWNLOAD'
+        downloadStatus = 0
         try {
           download = await fetchImpl(first.url, { signal: AbortSignal.timeout(remain) })
+          downloadStatus = Number(download && download.status) || 0
         } catch {
           download = null
+          downloadStatus = 0
         }
         if (!download || download.ok !== true) {
-          return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, '取圖下載失敗') }
+          return fail(upstreamFailureMessage(status, '取圖下載失敗'))
         }
         let bytes = null
         try {
@@ -671,19 +724,15 @@ async function submitUpstreamTask(upstream, imageDataUrl) {
           bytes = null
         }
         if (!bytes || bytes.length === 0) {
-          return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, '取圖下載失敗') }
+          return fail(upstreamFailureMessage(status, '取圖下載失敗'))
         }
         return { ok: true, bytes, status }
       }
     }
-    return { ok: false, reason: REASONS.UPSTREAM_ERROR, message: upstreamFailureMessage(status, `回包缺任務號（形狀＝${upstreamShapeOf(payload)}）`) }
+    return fail(upstreamFailureMessage(status, `回包缺任務號（形狀＝${upstreamShapeOf(payload)}）`))
   } catch (error) {
     const name = error && error.name ? String(error.name) : 'error'
-    return {
-      ok: false,
-      reason: REASONS.UPSTREAM_ERROR,
-      message: upstreamFailureMessage(0, name === 'AbortError' || name === 'TimeoutError' ? '超時' : name)
-    }
+    return fail(upstreamFailureMessage(0, name === 'AbortError' || name === 'TimeoutError' ? '超時' : name), name)
   }
 }
 

@@ -111,6 +111,32 @@ export const AI_ENHANCE_COST = 10
  */
 export const AI_ENHANCE_TIMEOUT_MS = 120000
 
+/**
+ * **`ai-enhance-submit` 的雲端調用超時預算（毫秒）**（本單「提交超時對齊」新增；**只對 submit 一個 op 生效**）。
+ *
+ * 為什麼是 60000：服務端提交段的**段牆鐘預算**＝ `SUBMIT_SEGMENT_BUDGET_MS`（50000）＋ 收尾寬限
+ * `SUBMIT_CLEANUP_GRACE_MS`（6000）⇒ 最壞 **56000 ms**（真源 `cloudfunctions/xiai-user-token/lib/
+ * aiEnhanceTasks.js` 的「提交段三個預算數」注塊；仍在雲網關約 60 秒掐斷線以內）—— 本值取 60000
+ * ＝ 56000 ＋ 4000 餘量，**恰好高於服務端最壞牆鐘**。
+ *
+ * 起因（已被生產事實推翻的舊假設）：本文件原口徑讓 `ai-enhance-submit` 與狀態輪詢**同走全局默認
+ * 15000 ms**，註釋寫著「它們都是快回包」；而服務端光上游 `POST` 預算就是 **45 秒**、整段 50 秒 ⇒
+ * 只要上游真等超過 15 秒，**客戶端必然先判 `TIMEOUT` 傳輸層失敗**並上屏
+ * 「雲端連線失敗；本次修復任務可能仍在進行…」，服務端卻仍在跑到 45〜50 秒才判上游超時＋退款
+ * ⇒ 用戶**永遠看不到真實失敗原因**。把 submit 一路補到 60 秒後，這個錯配不再可能。
+ *
+ * 硬口徑（逐條）：
+ *  ① **按 op 收窄**：只有 `ai-enhance-submit` 帶 `timeoutMs: AI_ENHANCE_SUBMIT_TIMEOUT_MS`
+ *     （經 `userWriteGate(…, { readoutKeys, timeoutMs })` → `token.js::gate` →
+ *     `callCloudFunction` 的 `options.timeoutMs`）；`ai-enhance-status` / `ai-enhance-list` /
+ *     `ai-enhance-discard` **逐字不動、仍走全局默認**；
+ *  ② **全局默認一字不改**：`data/cloudbaseFn.js::CLOUD_FUNCTION_TIMEOUT_MS`（15000）原樣，
+ *     本常量**不是**抬高全局，只是這一個 op 的顯式覆蓋；
+ *  ③ SDK app 級 `CLOUD_FN_SDK_TIMEOUT_MS`（120000）本就大於本值 ⇒ 不會先於外層掐斷；
+ *  ④ legacy `ai-enhance-face` 的 `AI_ENHANCE_TIMEOUT_MS`（120000）**逐字不變**。
+ */
+export const AI_ENHANCE_SUBMIT_TIMEOUT_MS = 60000
+
 /* ============================================================================
    「提交 ＋ 輪詢狀態」的節奏與上屏文案（本單；**凍結值，逐字照抄上屏**）
    ============================================================================ */
@@ -599,6 +625,14 @@ export async function enhanceFaceImage(input, runtime) {
      ⇒ **不再 submit**，直接輪詢同一個 `task_id`）。
      提交 / 狀態兩發都走**全局默認超時預算**（15000 ms；它們都是**快回包**）——
      只有 legacy 的 `ai-enhance-face` 才需要 `AI_ENHANCE_TIMEOUT_MS`（120000），全局默認逐字不變。
+     【取代注 · 本單「提交超時對齊」——**上一段已被生產事實推翻，舊文逐字保留如上、不刪歷史**】
+     「兩發都是快回包」只對 `ai-enhance-status` 成立：`ai-enhance-submit` 服務端段牆鐘是
+     50 秒 ＋ 收尾 6 秒（上游 POST 預算 45 秒）⇒ 15000 ms 的全局預算**方向相反** —— 上游一慢，
+     客戶端必先判 `TIMEOUT` 上屏「雲端連線失敗」，服務端卻還在跑到 45〜50 秒才判超時＋退款，
+     用戶永遠看不到真因。**取代結論**：本跳改帶 `timeoutMs: AI_ENHANCE_SUBMIT_TIMEOUT_MS`
+     （60000，＝ 服務端最壞 56000 ＋ 4000 餘量）；`ai-enhance-status` **仍走全局默認 15000**
+     （它是真快回包，本注不改它）；`ai-enhance-list` / `ai-enhance-discard` 與全局默認
+     `CLOUD_FUNCTION_TIMEOUT_MS`（15000）**逐字不變**（本文件零改動那個常量）。
      ------------------------------------------------------------------ */
   const shouldCancel = typeof opts.shouldCancel === 'function' ? opts.shouldCancel : null
   const onTask = typeof opts.onTask === 'function' ? opts.onTask : null
@@ -610,7 +644,7 @@ export async function enhanceFaceImage(input, runtime) {
     const submitted = await userWriteGate(
       AI_ENHANCE_SUBMIT_OP,
       { image_id: imageId, seal_id: sealId, face_id: faceId, request_id: makeRequestId() },
-      { readoutKeys: SUBMIT_READOUT_KEYS }
+      { readoutKeys: SUBMIT_READOUT_KEYS, timeoutMs: AI_ENHANCE_SUBMIT_TIMEOUT_MS }
     )
     if (submitted && submitted.ok === true && submitted.dev === true) {
       /* dev / 離線形態：門放行但**未經雲端** ⇒ 如實結構化拒絕（不編造修復影像 / 扣費假讀數）。 */
