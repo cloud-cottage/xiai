@@ -355,6 +355,123 @@ function diagnoseOf(error) {
 }
 
 /* --------------------------------------------------------------------------- *
+  传输层 `error.cause` 链诊断（**本单主目标**）
+ * --------------------------------------------------------------------------- *
+ * 生产实况（日志＋任务行双证，2026-11-24 08:15）：`ai-enhance-status` 单轮 10170 ms 卡在
+ * `GET {base}/tasks/{id}` 的**传输层**，而失败文案只写了 `error.name`（＝`TypeError`）——
+ * `error.cause` 链（`ConnectTimeoutError` / `UND_ERR_CONNECT_TIMEOUT` / `ENOTFOUND` /
+ * `ENETUNREACH` / `ECONNRESET` …）整条被丢 ⇒ 看不出真因。本组纯函数把链**脱敏后**拼回文案。
+ *
+ * 硬口径（逐条）：
+ *  ① **纯函数、绝不自抛**：内部任何异常 ⇒ 回**空串** ⇒ 调用方据此让文案**逐字等于改动前**；
+ *  ② **最多往下展 3 层**（本层 ＋ 至多三层 `cause`；`cause.errors` 数组形态的 `AggregateError`
+ *     在**本层内联**展开子码，不另占层）；
+ *  ③ **零敏感**：逐层只取 `name` / `code` / `message` 三个字段 —— **零明文、零 URL**（URL 形态
+ *     一律 `<redacted>`）、**零 key**（≥40 位长串一律 `<redacted>`，沿用 `diagnoseOf` /
+ *     `upstreamDetailOf` 的 `REDACT` 口径）、**零载荷**；每项截 40 字；
+ *  ④ 无链且本层无码 / 无子码 ⇒ 空串（`TypeError` 裸回包不产生 `cause=` 噪声）。
+ */
+
+/** 单查轻重试的**退避时长**（毫秒；经 `withinBudget` 封顶 ⇒ 假时钟可注入、离线可测）。 */
+const QUERY_RETRY_BACKOFF_MS = 800
+
+/** 传输层错误判据的 `name` 封闭三值（**只判错误形态**；非 2xx 是回包不是异常 ⇒ 永不进重试）。 */
+const TRANSPORT_ERROR_NAMES = Object.freeze(['TypeError', 'AbortError', 'TimeoutError'])
+
+/** cause 链**最多往下展 3 层**（本层 ＋ 至多三层 `cause`）。 */
+const CAUSE_CHAIN_MAX_HOPS = 3
+/** 单项护栏：≥40 位长串抹 `<redacted>`、单项截 40 字。 */
+const CAUSE_ITEM_LIMIT = 40
+const CAUSE_LONG_RUN = /[A-Za-z0-9+/=]{40,}/g
+/** URL 形态一律抹除（`http(s):` / `data:` —— **零 URL**）。 */
+const CAUSE_URL_PATTERN = /(?:https?|data):[^\s"'<>]+/gi
+/** `AggregateError` 内联子码最多收 4 个（短串护栏；`ECONNREFUSED|ENETUNREACH` 形态在内）。 */
+const CAUSE_CHILD_CODE_LIMIT = 4
+
+/** 单项脱敏（URL 抹除 → ≥40 位长串抹除 → 截 40 字）。 */
+function causeItemOf(value) {
+  const raw = typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value)
+  return raw.replace(CAUSE_URL_PATTERN, '<redacted>').replace(CAUSE_LONG_RUN, '<redacted>').slice(0, CAUSE_ITEM_LIMIT)
+}
+
+/**
+ * 单层渲染：`<name|message|unknown>` ＋（本层子码 `(A|B)` ／ 本层 `code` `(cause:CODE)`）。
+ * 形态对齐派单方样例：`ConnectTimeoutError(cause:UND_ERR_CONNECT_TIMEOUT)`、
+ * `AggregateError(ECONNREFUSED|ENETUNREACH)`。
+ * @param {any} node 链上的一层（对象）
+ * @returns {{text:string, extra:boolean}} `extra` ＝ 该层带来了码 / 子码（判定「有没有链」用）
+ */
+function causeLayerOf(node) {
+  const name = causeItemOf(node.name)
+  const rawCode = node.code !== undefined && node.code !== null && node.code !== '' ? node.code : node.errCode
+  const code = causeItemOf(rawCode)
+  const message = causeItemOf(node.message)
+  const label = name !== '' ? name : message !== '' ? message : 'unknown'
+  const codes = []
+  const push = (value) => {
+    const item = causeItemOf(value)
+    if (item !== '' && codes.indexOf(item) === -1) codes.push(item)
+  }
+  if (Array.isArray(node.errors)) {
+    for (const child of node.errors.slice(0, CAUSE_CHILD_CODE_LIMIT)) {
+      if (child && typeof child === 'object') {
+        const childCode = causeItemOf(child.code)
+        if (childCode !== '') push(childCode)
+        else push(child.name)
+      } else {
+        push(child)
+      }
+    }
+  }
+  if (codes.length > 0) return { text: `${label}(${codes.join('|')})`, extra: true }
+  if (code !== '') return { text: `${label}(cause:${code})`, extra: true }
+  return { text: label, extra: false }
+}
+
+/**
+ * **传输层 `error.cause` 链**（**纯函数、绝不自抛、零敏感**）：沿 `error.cause` **最多往下展 3 层**
+ * （含 `cause.errors` 数组形态的 `AggregateError`），逐层取 `name` / `code` / `message`，拼成
+ * `TypeError>ConnectTimeoutError(cause:UND_ERR_CONNECT_TIMEOUT)` /
+ * `TypeError>AggregateError(ECONNREFUSED|ENETUNREACH)` 形态的短串。
+ * @param {any} error 上游 fetch 抛出的异常（或任何值）
+ * @returns {string} 链串；**无链 / 内部异常 ⇒ 空串**（调用方据此让文案逐字等于改动前）
+ */
+function transportCauseOf(error) {
+  try {
+    if (error === null || (typeof error !== 'object' && typeof error !== 'function')) return ''
+    const segments = []
+    const seen = []
+    let extra = false
+    let node = error
+    for (let hop = 0; hop <= CAUSE_CHAIN_MAX_HOPS && node !== null && node !== undefined; hop += 1) {
+      if (typeof node !== 'object' && typeof node !== 'function') break
+      if (seen.indexOf(node) !== -1) break /* 环：到此为止（绝不无限展开）。 */
+      seen.push(node)
+      const layer = causeLayerOf(node)
+      segments.push(layer.text)
+      if (layer.extra) extra = true
+      node = node.cause
+    }
+    /* 无链且本层无码 / 无子码 ⇒ 空串（裸 `TypeError` 不产生 `cause=` 噪声）。 */
+    if (segments.length === 0 || (!extra && segments.length === 1)) return ''
+    return segments.join('>')
+  } catch {
+    return ''
+  }
+}
+
+/** 传输层错误判据（**只判错误形态**：`name` ∈ 封闭三值，或带 `cause`；**非 2xx 不在此列**）。 */
+function isTransportError(error) {
+  try {
+    const name = error && error.name ? String(error.name) : ''
+    if (TRANSPORT_ERROR_NAMES.indexOf(name) !== -1) return true
+    return !!(error && typeof error === 'object' && error.cause !== undefined && error.cause !== null)
+  } catch {
+    return false
+  }
+}
+
+/* --------------------------------------------------------------------------- *
   读点 / 写点（一律经 `lib/ops.js` 的既有导出；本文件零集合句柄字面）
  * --------------------------------------------------------------------------- */
 
@@ -503,8 +620,9 @@ function upstreamFailureMessage(status, detail) {
  * **`submitUpstreamTask` 失败的相位指纹**（本单「失败相位指纹」新增；纯函数、绝不自抛、**零敏感**）。
  *
  * 形态（沿用本仓既有 `（診斷：…）` 括注形态，追加在失败 `error_message` **末尾**）：
- * `（診斷：phase=POST|DOWNLOAD，HTTP=<status|0>，耗時=<ms>，錯誤=<name>）`
- * —— 下一次重试据此一眼分清卡在「上游 POST 入队」「取图下载」还是**网络层**（`HTTP=0`），不必再猜。
+ * `（診斷：phase=POST|DOWNLOAD|QUERY，HTTP=<status|0>，耗時=<ms>，錯誤=<name>[, cause=<cause 链>]）`
+ * —— 下一次重试据此一眼分清卡在「上游 POST 入队」「取图下载」「单查轮询」还是**网络层**
+ * （`HTTP=0`），`cause=` 只在 `transportCauseOf(error)` 给出非空链时才出现，不必再猜。
  *
  * 硬口径（逐条）：
  *  ① **只在失败分支追加**：成功回包（`submitSuccess`）与其它任何键面**零变化**；
@@ -512,22 +630,30 @@ function upstreamFailureMessage(status, detail) {
  *     `UPSTREAM_ERROR` 说了算，**不改写既有文案一字**（只在末尾追加）；
  *  ③ 脱敏沿用本文件既有规则：**≥40 位长串一律 `<redacted>`**（同 `diagnoseOf` /
  *     `upstreamDetailOf` 的 `REDACT` 口径），错误名截 40 字；指纹里**只带**相位 / 状态码 /
- *     耗时 / 错误名四个数 —— **不带 URL、不带 key、不带请求体、不带任何载荷**。
+ *     耗时 / 错误名四个数 —— **不带 URL、不带 key、不带请求体、不带任何载荷**；`cause=` 段只由
+ *     `transportCauseOf` 给出（同样零 URL / 零 key / 零载荷，非空才在场）。
  * @param {string} phase 相位字面（**封闭两源**：`submitUpstreamTask` 产 `POST` / `DOWNLOAD`；
- *   段级超时出口产 `SUBMIT_STAGE` 表内九个阶段字面值 —— 两处各只取自自己的封闭表）
+ *   段级超时出口产 `SUBMIT_STAGE` 表内九个阶段字面值 —— 两处各只取自自己的封闭表；
+ *   `queryUpstreamTask` 单查失败出口产 `QUERY` —— **唯一第三源、仅此一处**）
  * @param {number} httpStatus **本相位**观察到的 HTTP 状态码（网络层 / 未取到 ⇒ 0）
  * @param {number} startedAt 本跳起始时刻（`Date.now()` 尺度）
  * @param {string} [errorName] 异常名（非异常失败如「非 2xx」「缺任务号」⇒ 空 ⇒ 记 `-`）
+ * @param {string} [causeChain] `transportCauseOf(error)` 的 cause 链（**非空才追加 `，cause=`**；
+ *   空串 / 缺省 ⇒ 括注与本函数改动前**逐字相等**；入参再脱敏一道 —— URL 与 ≥40 位长串抹 `<redacted>`）
  * @returns {string} 括注（内部任何异常 ⇒ 空串 ⇒ 逐字等于追加前，绝不影响判定）
  */
-function submitPhaseFingerprint(phase, httpStatus, startedAt, errorName) {
+function submitPhaseFingerprint(phase, httpStatus, startedAt, errorName, causeChain) {
   try {
     const status = Number.isInteger(httpStatus) && httpStatus > 0 ? String(httpStatus) : '0'
     const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.round(Date.now() - startedAt)) : 0
     const tag = typeof phase === 'string' && phase.trim() !== '' ? phase.trim() : 'POST'
     const raw = typeof errorName === 'string' && errorName.trim() !== '' ? errorName.trim() : '-'
     const name = raw.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 40) || '-'
-    return `（診斷：phase=${tag}，HTTP=${status}，耗時=${elapsed}，錯誤=${name}）`
+    const cause =
+      typeof causeChain === 'string' && causeChain.trim() !== ''
+        ? causeChain.replace(/[A-Za-z0-9+/=]{40,}/g, '<redacted>').slice(0, 200)
+        : ''
+    return `（診斷：phase=${tag}，HTTP=${status}，耗時=${elapsed}，錯誤=${name}${cause === '' ? '' : `，cause=${cause}`}）`
   } catch {
     return ''
   }
@@ -658,8 +784,10 @@ function taskErrorOf(parsed) {
  *   · 两条都没有 / 非 2xx / 超时 / 网络错 ⇒ `{ok:false, reason: UPSTREAM_ERROR, message}`。
  * 明文 key 永不进回包、不打印。
  * **失败回包的 `message`（＝ 行上的 `error_message`）末尾追加相位指纹**
- * `（診斷：phase=POST|DOWNLOAD，HTTP=<status|0>，耗時=<ms>，錯誤=<name>）`（见 `submitPhaseFingerprint`；
- * **只在失败分支追加**，成功回包键面 / 文案零变化，`reason` 零新增）。
+ * `（診斷：phase=POST|DOWNLOAD，HTTP=<status|0>，耗時=<ms>，錯誤=<name>[，cause=<cause 链>]）`（见
+ * `submitPhaseFingerprint`；**只在失败分支追加**，成功回包键面 / 文案零变化，`reason` 零新增；
+ * `cause` 段只在 `transportCauseOf(error)` 给出非空链时在场 —— 传输层真因 `ConnectTimeoutError` /
+ * `UND_ERR_CONNECT_TIMEOUT` / `ECONNRESET` … 据此一眼可见）。
  * @param {{base_url:string, model:string, key:string, timeout_ms:number}} upstream 解出的上游配置
  * @param {string} imageDataUrl 输入图 `data:` URL
  * @param {function(string):void} [onStage] **阶段游标回传缝**（可选；缺省不报 ⇒ 零行为差）：
@@ -689,11 +817,12 @@ async function submitUpstreamTask(upstream, imageDataUrl, onStage) {
   const reportStage = typeof onStage === 'function' ? onStage : null
   if (reportStage) reportStage(phase)
   /** 失败回包（**唯一失败出口形状**）：既有 `upstreamFailureMessage` 文案**逐字保留**，
-   *  只在末尾追加相位指纹；`reason` 仍是既有 `UPSTREAM_ERROR`（零新增字面值）。 */
-  const fail = (message, errorName) => ({
+   *  只在末尾追加相位指纹；`reason` 仍是既有 `UPSTREAM_ERROR`（零新增字面值）。
+   *  `causeChain` 非空 ⇒ 指纹多一段 `，cause=<链>`（`transportCauseOf` 空串 ⇒ 与改动前逐字相等）。 */
+  const fail = (message, errorName, causeChain) => ({
     ok: false,
     reason: REASONS.UPSTREAM_ERROR,
-    message: `${message}${submitPhaseFingerprint(phase, phase === 'DOWNLOAD' ? downloadStatus : status, startedAt, errorName)}`
+    message: `${message}${submitPhaseFingerprint(phase, phase === 'DOWNLOAD' ? downloadStatus : status, startedAt, errorName, causeChain)}`
   })
   try {
     const fetchImpl = resolveFetch()
@@ -730,6 +859,8 @@ async function submitUpstreamTask(upstream, imageDataUrl, onStage) {
       if (typeof first.url === 'string' && first.url !== '') {
         const remain = Math.max(1000, Math.min(STATUS_DOWNLOAD_BUDGET_MS, SUBMIT_POST_BUDGET_MS - (Date.now() - startedAt)))
         let download = null
+        /* 取图下载的**传输层异常**（本单）：记下错误本体 ⇒ `cause` 链进 `錯誤=` 旁的 `cause=` 段。 */
+        let downloadError = null
         /* 换相位：此后（含外层 catch）指纹只报**取图下载**相位的读数。 */
         phase = 'DOWNLOAD'
         downloadStatus = 0
@@ -737,21 +868,31 @@ async function submitUpstreamTask(upstream, imageDataUrl, onStage) {
         try {
           download = await fetchImpl(first.url, { signal: AbortSignal.timeout(remain) })
           downloadStatus = Number(download && download.status) || 0
-        } catch {
+        } catch (error) {
           download = null
           downloadStatus = 0
+          downloadError = error
         }
         if (!download || download.ok !== true) {
-          return fail(upstreamFailureMessage(status, '取圖下載失敗'))
+          return fail(
+            upstreamFailureMessage(status, '取圖下載失敗'),
+            downloadError && downloadError.name ? String(downloadError.name) : undefined,
+            transportCauseOf(downloadError)
+          )
         }
         let bytes = null
         try {
           bytes = Buffer.from(await download.arrayBuffer())
-        } catch {
+        } catch (error) {
           bytes = null
+          downloadError = error
         }
         if (!bytes || bytes.length === 0) {
-          return fail(upstreamFailureMessage(status, '取圖下載失敗'))
+          return fail(
+            upstreamFailureMessage(status, '取圖下載失敗'),
+            downloadError && downloadError.name ? String(downloadError.name) : undefined,
+            transportCauseOf(downloadError)
+          )
         }
         return { ok: true, bytes, status }
       }
@@ -759,12 +900,22 @@ async function submitUpstreamTask(upstream, imageDataUrl, onStage) {
     return fail(upstreamFailureMessage(status, `回包缺任務號（形狀＝${upstreamShapeOf(payload)}）`))
   } catch (error) {
     const name = error && error.name ? String(error.name) : 'error'
-    return fail(upstreamFailureMessage(0, name === 'AbortError' || name === 'TimeoutError' ? '超時' : name), name)
+    /* **网络类失败带同一 cause 串**（本单）：`transportCauseOf` 空串 ⇒ 括注与改动前逐字相等。 */
+    return fail(upstreamFailureMessage(0, name === 'AbortError' || name === 'TimeoutError' ? '超時' : name), name, transportCauseOf(error))
   }
 }
 
 /**
  * **单查**上游任务（`GET <base_url>/tasks/<task_id>`；**单次预算 20 秒 ＋ 整轮剩余预算封顶**）。
+ *
+ * **传输层轻重试（本单「轮询轻重试」）**：`fetch` 抛**传输层错**（`name` ∈ `TypeError` /
+ * `AbortError` / `TimeoutError`，或带 `cause`）⇒ **在本轮剩余预算内恰重试一次**（`800ms` 退避，
+ * 经本文件既有的 `withinBudget` 封顶 ⇒ 假时钟可注入、离线可测）；**非 2xx 是业务回包、不是传输错
+ * ⇒ 一律不重试**；两跳都失败才回 `UPSTREAM_ERROR`。**`reason` 零新增、不延长整轮 45 秒预算**
+ * （每跳超时与退避都以 `deadlineAt` ＝ 起点 ＋ 传入预算为绝对截止）。
+ *
+ * 失败 `message` 末尾追加 `（診斷：phase=QUERY，HTTP=<status|0>，耗時=<ms>，錯誤=<name>，cause=<链>）`
+ * （见 `submitPhaseFingerprint`）；**`transportCauseOf` 回空串 ⇒ 文案与本单改动前逐字相等**。
  * @param {number} [budgetMs] 整轮剩余预算（毫秒；status 轮必传 ⇒ 与 20 秒取小者为超时上限）
  * @returns {Promise<{ok:true, state:string, resultUrls:string[], errorText:string, httpStatus:number}
  *          |{ok:false, reason:string, message:string}>}
@@ -774,9 +925,15 @@ async function queryUpstreamTask(upstream, upstreamTaskId, budgetMs) {
   const url = `${text(upstream.base_url).replace(/\/+$/, '')}/tasks/${encodeURIComponent(text(upstreamTaskId))}`
   const configured = Number(upstream.timeout_ms) > 0 ? Number(upstream.timeout_ms) : 60000
   const roundBudget = Number(budgetMs) > 0 ? Number(budgetMs) : STATUS_QUERY_BUDGET_MS
-  const timeoutMs = Math.max(1000, Math.min(configured, STATUS_QUERY_BUDGET_MS, roundBudget))
+  /* **单查起始 ＋ 本轮剩余预算的绝对截止**：每跳超时、800ms 退避、重试一概不许越过
+     （**不延长整轮 45 秒预算**；单查每跳仍封顶 `STATUS_QUERY_BUDGET_MS` 20 秒）。 */
+  const startedAt = Date.now()
+  const deadlineAt = startedAt + roundBudget
   let status = 0
-  try {
+  /** 一跳（一次 `GET`）。**非 2xx 原样回包**（业务错 ⇒ 调用方不重试）；异常一律上抛给重试环。 */
+  const attemptOnce = async () => {
+    status = 0 /* 每跳重置：上一跳观察到的状态码不冒充本跳。 */
+    const timeoutMs = Math.max(1000, Math.min(configured, STATUS_QUERY_BUDGET_MS, deadlineAt - Date.now()))
     const fetchImpl = resolveFetch()
     const response = await fetchImpl(url, {
       method: 'GET',
@@ -801,31 +958,52 @@ async function queryUpstreamTask(upstream, upstreamTaskId, budgetMs) {
       errorText: taskErrorOf(payload),
       httpStatus: status
     }
-  } catch (error) {
-    const name = error && error.name ? String(error.name) : 'error'
-    return {
-      ok: false,
-      reason: REASONS.UPSTREAM_ERROR,
-      message: upstreamFailureMessage(status, name === 'AbortError' || name === 'TimeoutError' ? '超時' : name)
+  }
+  /* **重试环（恰一发）**：只有「第 1 跳 ＋ 传输层错 ＋ 退避整段落在剩余预算内」才重试；
+     第 2 跳仍抛 / 非传输层错 / 预算不够退避 ⇒ 立即收口（**不新增 reason**）。 */
+  let failure = null
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      return await attemptOnce()
+    } catch (error) {
+      failure = error
+      if (attempt !== 1 || !isTransportError(error)) break
+      if (Date.now() + QUERY_RETRY_BACKOFF_MS > deadlineAt) break
+      const backoff = await withinBudget(new Promise((resolve) => setTimeout(resolve, QUERY_RETRY_BACKOFF_MS)), deadlineAt)
+      if (backoff === BUDGET_EXPIRED) break /* 退避越过整轮截止 ⇒ 不重试（不延长预算）。 */
     }
+  }
+  const name = failure && failure.name ? String(failure.name) : 'error'
+  const base = upstreamFailureMessage(status, name === 'AbortError' || name === 'TimeoutError' ? '超時' : name)
+  /* **cause 链进失败文案（本单主目标）**：链为空 ⇒ 括注不追加、文案与改动前逐字相等。 */
+  const causeChain = transportCauseOf(failure)
+  return {
+    ok: false,
+    reason: REASONS.UPSTREAM_ERROR,
+    message: causeChain === '' ? base : `${base}${submitPhaseFingerprint('QUERY', status, startedAt, name, causeChain)}`
   }
 }
 
-/** 下载产物字节（**预算 25 秒**；失败 / 空字节 ⇒ `null`）。 */
+/**
+ * 下载产物字节（**预算 25 秒**）。
+ * **本单**：回 `{bytes, error}` —— `error` ＝ 传输层异常本体（供调用方把 `cause` 链写进
+ * 「取圖下載失敗」文案；无异常 / 非 2xx / 空字节 ⇒ `error` 为 `null` ⇒ 调用方文案与改动前逐字相等）。
+ * @returns {Promise<{bytes:Buffer|null, error:any}>}
+ */
 async function downloadResultBytes(fetchImpl, resultUrl, budgetMs) {
   const timeoutMs = Math.max(1000, Math.min(STATUS_DOWNLOAD_BUDGET_MS, budgetMs))
   let response = null
   try {
     response = await fetchImpl(resultUrl, { signal: AbortSignal.timeout(timeoutMs) })
-  } catch {
-    response = null
+  } catch (error) {
+    return { bytes: null, error }
   }
-  if (!response || response.ok !== true) return null
+  if (!response || response.ok !== true) return { bytes: null, error: null }
   try {
     const bytes = Buffer.from(await response.arrayBuffer())
-    return bytes && bytes.length > 0 ? bytes : null
-  } catch {
-    return null
+    return { bytes: bytes && bytes.length > 0 ? bytes : null, error: null }
+  } catch (error) {
+    return { bytes: null, error }
   }
 }
 
@@ -1702,9 +1880,21 @@ async function statusEnhanceTask(payload, identity, context) {
 
   /* ⑥ 单查上游（单查预算 20 秒 ＋ **整轮剩余预算封顶** —— 段预算与剩余预算取小者）。查询本身
      失败（超时 / 网络 / 坏 JSON / 非 2xx）⇒ **不退款不改状态**（状态未知 ⇒ 保持可重试；期限兜底），
-     回结构化失败。 */
+     回结构化失败（文案末尾带 cause 诊断，见 `queryUpstreamTask`）。
+     **例外＝整轮预算已尽**：按 ④「整轮超过预算 ⇒ 退款并置 `FAILED`」**同一既有口径**收口
+     （`reason` 仍取查询失败的既有值、**零新增**；文案前缀逐字保留、cause 诊断在场）。
+     护栏口径注：单查每跳封顶 20 秒 ＋ 800ms 退避 ⇒ 两跳 ≤ 40.8 秒 < 45 秒 ⇒ 生产不可达，
+     仅离线推时钟可触发；预算未尽一律走下面的「不退款不改状态」原口径。 */
   const queried = await queryUpstreamTask(upstream, upstreamTaskId, remainingRoundBudgetMs(roundStartedAt))
   if (!queried.ok) {
+    if (remainingRoundBudgetMs(roundStartedAt) <= 0) {
+      return await failTask(
+        taskId,
+        row,
+        queried.reason,
+        `${queried.message}；人工智能修復任務單輪推進超過預算（${Math.round(STATUS_ROUND_BUDGET_MS / 1000)} 秒）⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
+      )
+    }
     return statusFailure(queried.reason, `${queried.message}；本次未退款、未改狀態，可稍後重試。${roundNote()}`, false, current)
   }
 
@@ -1764,18 +1954,30 @@ async function statusEnhanceTask(payload, identity, context) {
     return await runningContinuation(taskId, row, roundStartedAt)
   }
   let bytes = null
+  let downloadError = null
+  const downloadStartedAt = Date.now()
   try {
     const fetchImpl = resolveFetch()
-    bytes = await downloadResultBytes(fetchImpl, resultUrls[0], beforeDownload)
-  } catch {
+    const downloaded = await downloadResultBytes(fetchImpl, resultUrls[0], beforeDownload)
+    bytes = downloaded && downloaded.bytes
+    downloadError = downloaded ? downloaded.error : null
+  } catch (error) {
     bytes = null
+    downloadError = error
   }
   if (!bytes) {
+    /* **取图下载失败带 cause 链（本单）**：`transportCauseOf` 空串 ⇒ 文案与改动前逐字相等
+       （前缀「取圖下載失敗 ⇒ 已全額退回 10 金；可重新提交。」一字不改，只在末尾追加诊断括注）。 */
+    const causeChain = transportCauseOf(downloadError)
+    const downloadName = downloadError && downloadError.name ? String(downloadError.name) : ''
+    const downloadMessage = `取圖下載失敗 ⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
     return await failTask(
       taskId,
       row,
       REASONS.UPSTREAM_ERROR,
-      `取圖下載失敗 ⇒ 已全額退回 ${AI_ENHANCE_COST} 金；可重新提交。`
+      causeChain === ''
+        ? downloadMessage
+        : `${downloadMessage}${submitPhaseFingerprint(SUBMIT_STAGE.DOWNLOAD, 0, downloadStartedAt, downloadName, causeChain)}`
     )
   }
   /* 下载后重查（段间重查）：预算已尽 ⇒ 退款置 `FAILED`；仍不足 5 秒 ⇒ 回 `RUNNING` 续做。 */
