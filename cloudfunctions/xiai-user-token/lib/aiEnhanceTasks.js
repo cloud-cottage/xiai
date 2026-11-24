@@ -1088,6 +1088,16 @@ async function registerProductImage(params) {
   if (budgetExhausted()) return budgetFail()
   const faceImageSeqs = await withinBudget(ops.imageSeqsOf(text(params.sealId), 'FACE'), deadlineAt)
   if (faceImageSeqs === BUDGET_EXPIRED) return budgetFail()
+  /* ②′ 印谱归属继承（本单 · AC-891 起）：入册前**一次按 id 读源行** —— 单实现点
+     `aiEnhance.readInheritedBookId`（与 `lib/aiEnhance.js::enhanceFace` ⑨′ **共用同一函数**，
+     零第二套读取逻辑、每产物行恰一次读 ⇒ 零 N+1）。段内预算沿同文件既有法：**开工前查预算**
+     （到点连读请求都不新发）＋ **赛跑到点停等待**（`withinBudget` ＋ `BUDGET_EXPIRED` 哨兵）。
+     读抛错 / 超时报预算 / 空集 / 形态不符 ⇒ `null` ＋ `log.warn` ⇒ **不写 `book_id` 键**、
+     **绝不阻断入册**（入册是钱路、归属只是展示面）。 */
+  const inheritedBookId = await aiEnhance.readInheritedBookId(text(params.sourceImageId), {
+    run: (read) => (budgetExhausted() ? BUDGET_EXPIRED : withinBudget(read(), deadlineAt)),
+    expired: BUDGET_EXPIRED
+  })
   const doc = {
     id: imageId,
     stamp_id: text(params.sealId),
@@ -1112,6 +1122,11 @@ async function registerProductImage(params) {
     elapsed_ms: Number.isInteger(params.elapsedMs) ? params.elapsedMs : 0,
     created_at: now
   }
+  /* 印谱归属（本单）：源行有合法 `book_id` 才落键 —— `null` ⇒ **不写该键**（既有产物行键面
+     逐字不变、绝不写 `book_id: null` / 空串；读面 `text(row.book_id) || null` 自然归一）。
+     幂等语义：确定性 `doc(id).set` ⇒ 重放用**当时**读到的源行归属覆盖既有值（既有幂等语义的
+     自然延伸 —— 不加锁、不加新状态）。 */
+  if (inheritedBookId !== null) doc.book_id = inheritedBookId
   /* ③ 影像行入册（同上：开工前查预算 ＋ 赛跑封顶）。 */
   if (budgetExhausted()) return budgetFail()
   try {
@@ -2474,6 +2489,9 @@ module.exports = {
   taskFetchInjected,
   taskIdOf,
   projectTaskRow,
+  /* **入册段实现点（本单 · 供离线自检直接断言 book_id 继承与段内预算接线）**：
+     生产仍只经 `submitEnhanceTask` ⑦b / `statusEnhanceTask` ⑥c 两处调用。 */
+  registerProductImage,
   submitEnhanceTask,
   statusEnhanceTask,
   listEnhanceTasks,

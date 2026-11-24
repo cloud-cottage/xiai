@@ -58,6 +58,8 @@
 const crypto = require('crypto')
 const { REASONS } = require('./config.js')
 const { AI_ENHANCE_PROMPT } = require('./aiEnhancePrompt.js')
+/* 结构化日志单点（本仓 `console.*` 唯一落点；产物行继承的降级只 `log.warn`、不进回包）。 */
+const log = require('./log.js')
 
 /* --------------------------------------------------------------------------- *
   常量面（封闭；客户端一律不可改）
@@ -442,6 +444,69 @@ async function readEnhanceRow(imageId) {
   const ops = opsModule()
   const rows = await ops.readRows(ops.COLLECTIONS.images, { id: text(imageId) }, { limit: 1 })
   return rows.length > 0 ? rows[0] : null
+}
+
+/** 印谱归属形态（**五位定长十进制字符串**；与 `lib/books.js` §⑩ 的 `book_id` 口径同尺 ——
+ *  只认字符串：非字符串 / 含空白 / 位数不符一律按脏数据，**不继承**）。 */
+const BOOK_ID_PATTERN = /^\d{5}$/
+
+/**
+ * 读源影像行的印谱归属（`book_id`）—— **AI 修復产物行继承的唯一实现点**
+ * （`enhanceFace` ⑨ 与 `lib/aiEnhanceTasks.js::registerProductImage` 两处落库**共用本函数**；
+ * 调用侧禁止复制第二套读取 / 判定逻辑）。
+ *
+ * 口径（2026-11-24 Zang 裁定 · AC-891 起）：
+ *  ① **一次按 id 读源行**（`readRows(COLLECTIONS.images, {id}, {limit:1})`）—— 每产物行恰一次
+ *     ⇒ **零 N+1**；
+ *  ② 源行 `book_id` **命中 `^\d{5}$`** ⇒ 逐字返回同值；源无值 / `null` / 形态不符（脏数据
+ *     `abc` / `1234` / `123456` / 非字符串）⇒ `null` —— 调用侧 `null` ⇒ **不写 `book_id` 键**
+ *     （既有产物行键面逐字不变；读面 `text(row.book_id) || null` 自然归一 `null`）；
+ *  ③ **失败降级、绝不阻断入册**：读抛错 / 段内预算超时 / 空集 ⇒ `null` ＋ `log.warn`
+ *     （**入册是钱路、归属只是展示面**）；
+ *  ④ **本函数恒不抛**（任何异常一律吞成 `null` ＋ `log.warn`）。
+ *
+ * **幂等语义**：产物行是确定性 `doc(id).set` ⇒ 重放会用**当时**读到的源行 `book_id` 覆盖既有值；
+ * 这是既有幂等语义的自然延伸 —— **不为它加锁、不加新状态**。
+ *
+ * @param {string} sourceImageId 源影像行 id
+ * @param {{run?: (read: () => Promise<any>) => Promise<any>, expired?: any}} [options]
+ *   `run` ＝ 段内执行器（`aiEnhanceTasks` 传其「开工前查预算 ＋ `withinBudget` 赛跑」；拿到的是
+ *   **惰性读 thunk** ⇒ 预算已尽时连请求都不新发）；缺省 ＝ 直接执行（同步老路无段预算）。
+ *   `expired` ＝ 该执行器的超时哨兵（命中 ⇒ 按「无归属」降级）。
+ * @returns {Promise<string|null>} 合法归属逐字同值；其余一律 `null`（**恒不抛**）
+ */
+async function readInheritedBookId(sourceImageId, options) {
+  const opts = options !== null && typeof options === 'object' ? options : {}
+  const run = typeof opts.run === 'function' ? opts.run : (read) => read()
+  const expired = opts.expired
+  let outcome = null
+  try {
+    outcome = await run(() => {
+      const ops = opsModule()
+      return ops.readRows(ops.COLLECTIONS.images, { id: text(sourceImageId) }, { limit: 1 })
+    })
+  } catch (error) {
+    log.warn('aiEnhance.inheritBookId.read.failed', {
+      message: '讀源影像行失敗 ⇒ 按「無歸屬」繼續落行（不阻斷入冊；入冊是錢路、歸屬是展示面）',
+      errorMessage: error && error.message ? error.message : error
+    })
+    return null
+  }
+  if (expired !== undefined && outcome === expired) {
+    log.warn('aiEnhance.inheritBookId.budgetExpired', {
+      message: '源影像行讀取超段預算 ⇒ 按「無歸屬」繼續落行（不阻斷入冊；入冊是錢路、歸屬是展示面）'
+    })
+    return null
+  }
+  if (!Array.isArray(outcome) || outcome.length === 0 || !outcome[0] || typeof outcome[0] !== 'object') {
+    log.warn('aiEnhance.inheritBookId.empty', {
+      message: '源影像行讀不到（空集）⇒ 按「無歸屬」繼續落行（不阻斷入冊；入冊是錢路、歸屬是展示面）'
+    })
+    return null
+  }
+  const raw = outcome[0].book_id
+  /* 合法 ⇒ 逐字同值；其余（缺键 / `null` / 脏数据 / 非字符串）⇒ `null`（调用侧不写该键）。 */
+  return typeof raw === 'string' && BOOK_ID_PATTERN.test(raw) ? raw : null
 }
 
 /* **影像 `seq` 分配（本单收单点）**：本地的 `readImageRowsForSeq` / `nextImageSeq` **已删除** ——
@@ -1092,6 +1157,11 @@ async function enhanceFace(payload, identity, context) {
      **本单收单点**：既有行读取与算号一律经 `lib/ops.js` 的 `imageSeqsOf` / `nextImageSeqOf`
      （与印章导入采纳 / 无审核直写**同一套实现**；本地第二套已删，语义逐条同）。 */
   const seq = ops.nextImageSeqOf(sealId, 'FACE', await ops.imageSeqsOf(sealId, 'FACE'))
+  /* ⑨′ 印谱归属继承（本单 · AC-891 起）：与 `lib/aiEnhanceTasks.js::registerProductImage`
+     **共用同一实现点** `readInheritedBookId`（一次按 id 读源行、零 N+1；本同步老路无段预算 ⇒
+     不传执行器）。读抛错 / 空集 / 形态不符 ⇒ `null` ＋ `log.warn` ⇒ **不写 `book_id` 键**、
+     **绝不阻断入册**（入册是钱路、归属只是展示面）。 */
+  const inheritedBookId = await readInheritedBookId(imageId)
   const doc = {
     id: newImageId,
     stamp_id: sealId,
@@ -1121,6 +1191,11 @@ async function enhanceFace(payload, identity, context) {
     elapsed_ms: Number.isInteger(upstreamCall.elapsedMs) ? upstreamCall.elapsedMs : 0,
     created_at: now
   }
+  /* 印谱归属（本单）：源行有合法 `book_id` 才落键 —— `null` ⇒ **不写该键**（既有产物行键面
+     逐字不变、绝不写 `book_id: null` / 空串；读面 `text(row.book_id) || null` 自然归一）。
+     幂等语义：确定性 `doc(id).set` ⇒ 重放用**当时**读到的源行归属覆盖既有值（既有幂等语义的
+     自然延伸 —— 不加锁、不加新状态）。 */
+  if (inheritedBookId !== null) doc.book_id = inheritedBookId
   /* 入册前 doc 清洗：`undefined` / `NaN` 一律不落（缺键 ≠ 非法值）；其余字段与取值不变。 */
   sanitizeEnhanceDoc(doc)
   /* ⑨ 首次 `doc(id).set` 失败 ⇒ 先判**重复键类**（错误链 message 命中 `DUPLICATE_KEY_ANCHORS`
@@ -1236,5 +1311,6 @@ module.exports = {
   idemKeyOf,
   imageIdOfIdemKey,
   sniffImageMime,
+  readInheritedBookId,
   enhanceFace
 }
