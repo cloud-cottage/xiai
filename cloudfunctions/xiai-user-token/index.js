@@ -105,6 +105,12 @@ const { REPAIR_AUTHOR_PERSON_ID_READOUT_KEYS } = require('./lib/authorMatch.js')
    ＝ 該 op 的**讀數鍵面真源**（6 鍵并集、**存在性驅動**、按 op 收窄透傳 ⇒ 建面輪與冪等輪
    各恰如 op 契約；其餘 op 回包逐字不變）。 */
 const { ADD_SEAL_FACE_READOUT_KEYS } = require('./lib/addSealFace.js')
+/* **AI 修復產物「無人認領清掃」（定時面｜本單）**：`isTimerSweepEvent` ＝ 分流判据（**带 `op`
+   的事件任何情况下都不进清扫**），`sweepUnclaimedProductImages` ＝ 清扫单实现点（72h 保留期
+   ＋ 引用三面全护 ＋ 删行 / 去重删对象共用 `lib/aiEnhanceDiscard.js` 的单实现点）。
+   本文件只做**分流 ＋ 不自抛兜底**：零集合名字面、零 SDK 字面、**零新增对外 op / reason /
+   读数键**（`AI_ENHANCE_READOUT_KEYS` 仍恰 8 项）照旧。 */
+const { isTimerSweepEvent, sweepUnclaimedProductImages } = require('./lib/aiEnhanceSweep.js')
 /* **face 层三 op（`migrateEdgeFaces` / `deleteWholeSealImage` / `setBaseFace`）**：
    三个读数键面常量是各 op **回包键面的唯一真源**（`lib/faceLayerOps.js` 与 `lib/ops.js` 的
    薄委派共用同一份）；本文件只按 `op` **收窄透传**（存在性驱动）⇒ 其余 op 回包逐字不变。
@@ -1320,12 +1326,56 @@ async function handlePublicWrite(event) {
 }
 
 /**
+ * **定時清掃分流（`Timer` 事件｜本單）**：把云函数定时触发器投来的事件引到
+ * `lib/aiEnhanceSweep.js::sweepUnclaimedProductImages`，**本函数只兜底、不自抛**。
+ * 硬口径（逐条）：
+ *   · **分流判据单点** ＝ `isTimerSweepEvent`：`event.Type === 'Timer'`，或 `event.TriggerName`
+ *     为非空字符串**且无 `op`**；**任何 `op` 有值的事件（含非字符串、含同时带 `Type` /
+ *     `TriggerName`）恒不进清扫** ⇒ **零客户端可传 op 映射到清扫**（本文件亦不新增任何对外
+ *     op、reason、读数键 —— 本面回包不是 op 回包，恰 6 键 `SWEEP_REPLY_KEYS`）；
+ *   · **位置在令牌 / 会话 / 配置判定之前**（定时事件无 `action`、无令牌、无载荷）；
+ *   · **异常一律吞成结构化回包**：`sweepUnclaimedProductImages` 自带 `catch`（读失败 ⇒
+ *     `ok:false` ＋ 零删除），这里再兜一层 —— 任何未预期异常 ⇒ `log.error` ＋
+ *     `ok:false` 恰 6 键零计数，**绝不把异常抛到云端定时任务**（不得让定时任务因本面失败）。
+ * @returns {Promise<object>} 恰 6 键（`SWEEP_REPLY_KEYS`）
+ */
+async function handleTimerSweep() {
+  const startedAt = Date.now()
+  try {
+    const summary = await sweepUnclaimedProductImages()
+    log.info('aiEnhanceSweep.timer', {
+      durationMs: Date.now() - startedAt,
+      ok: summary.ok,
+      scanned: summary.scanned,
+      deleted: summary.deleted,
+      kept_referenced: summary.kept_referenced,
+      freed_bytes: summary.freed_bytes,
+      objects_deleted: summary.objects_deleted
+    })
+    return summary
+  } catch (error) {
+    log.error('aiEnhanceSweep.timer.failed', { durationMs: Date.now() - startedAt, error })
+    return {
+      ok: false,
+      scanned: 0,
+      deleted: 0,
+      kept_referenced: 0,
+      freed_bytes: 0,
+      objects_deleted: 0
+    }
+  }
+}
+
+/**
  * 函数入口（CloudBase 事件型）。
  * **任何未预期异常一律转成结构化拒绝**（`STORAGE_UNAVAILABLE`）—— 不得抛未捕获异常、不得伪装 `FORBIDDEN`。
- * @param {object} event `{action:'issue'|'verify', ...}`
+ * @param {object} event `{action:'issue'|'verify', ...}`（定时触发器投递时为 `{Type:'Timer', ...}`）
  */
 exports.main = async function main(event, context) {
   const input = event && typeof event === 'object' ? event : {}
+  /* **定時清掃分流（本單）**：在**令牌 / 会话 / 配置判定之前** —— 定时事件没有 `action`、
+     没有令牌、没有载荷；判据单点 `isTimerSweepEvent`（**带 `op` ⇒ 恒不分流**）。 */
+  if (isTimerSweepEvent(input)) return await handleTimerSweep()
   const action = typeof input.action === 'string' ? input.action.trim() : ''
   /* **匿名只读面**：`action:'public'` 在**令牌 / 会话 / 配置判定之前**分流 ——
      只放行 `PUBLIC_OPS` 白名单（`listSealCards` / `suggestAuthors` / `listPersonCards` /
@@ -1388,4 +1438,8 @@ exports.handleVerifySession = handleVerifySession
    注入缝只用于「无真实 access_token 时验判否逻辑」，不改变任何生产行为）。 */
 exports.handleIssue = handleIssue
 exports.PLATFORM_DETAILS = PLATFORM_DETAILS
+/* **定時清掃分流（本單）**：供 `scripts/verify-ai-enhance-sweep.mjs` 离线断言
+   「`event.Type === 'Timer'` 进清扫；**任何带 `op` 的事件都不进**；兜底回包恰 6 键不自抛」。 */
+exports.isTimerSweepEvent = isTimerSweepEvent
+exports.handleTimerSweep = handleTimerSweep
 exports.normalizePlatformPhone = normalizePlatformPhone

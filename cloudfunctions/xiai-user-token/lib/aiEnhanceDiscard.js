@@ -22,6 +22,10 @@
  *     `ops.deleteArtifactObject` 删对象（对象键：行内 `storage_key` 合法则用之，否则按
  *     `sha256` ＋ `mime` 推导；行无合法摘要 ⇒ 只删行）；否则**只删行**。回包 `deleted_objects`
  *     恒为布尔（对象删除抛错 ⇒ 如实 `false`，**不谎报已删**）。
+ *     **⑤＋⑥ 已抽成本文件导出 `deleteProductImageRow(ops, row)`**（本单「无人认领产物清扫」
+ *     与弃除面**共用同一实现点**）：抽导出**零行为变化**（`_id` 优先回落值、读写顺序、异常
+ *     语义、`deleted_objects` 布尔口径逐字不变 ⇒ `scripts/verify-ai-enhance-discard.mjs`
+ *     必须仍全绿）；**任何调用方禁止复写第二套 dedupe / 对象键推导**。
  *  ⑦ **回包封闭**：成功恰 3 键（`ok, image_id, deleted_objects`）；失败恰 3 键（`ok, reason,
  *     message`）—— **零 `refunded`**（本面零计费 ⇒ 零退款面；与修復面的 4 键失败回包不同）。
  *  ⑧ **幂等**：同一 `image_id` 重放 ⇒ 行已不存在 ⇒ **成功回放** `deleted_objects: false`
@@ -160,6 +164,49 @@ function objectKeyOf(row, digest) {
 }
 
 /* --------------------------------------------------------------------------- *
+  **删行 ＋ 内容寻址去重删对象：唯一实现点**（本单抽出；弃除面 `discardCandidate` 与
+  「无人认领产物清扫」`lib/aiEnhanceSweep.js` **共用本函数** —— 调用方**禁止**复写第二套
+  dedupe 判定 / 对象键推导；本函数自己零集合名字面、零取库句柄字面（`ops` 由调用方传入）。
+ * --------------------------------------------------------------------------- */
+
+/**
+ * **删一行 AI 修復產物行 ＋ 去重保护下删对象**（契约 ⑤ ＋ ⑥ 两步的**单实现点**）。
+ * 顺序与口径（与抽导出前**逐字一致 ⇒ 零行为变化**）：
+ *   · 删行：`ops.deleteRow(ops.COLLECTIONS.images, docId)`，`docId` ＝ 行内 `_id` 优先、
+ *     回落行内 `id`（弃除面按 `id` 字段等值读回 ⇒ 两值同字，回落语义与旧码逐字等价）；
+ *   · 删对象：仅当摘要形态合法（64 位小写十六进制）且**同 `sha256` 再无其它行**且对象键
+ *     可得时，才 `ops.deleteArtifactObject(objectKey)`；**对象删除抛错 ⇒ 如实 `false`**；
+ *   · 摘要 / 对象键形态不合法 ⇒ **只删行**（沿弃除口径）；去重读或删行抛错 ⇒ **原样上抛**
+ *     （由调用方转结构化失败，绝不吞成「已删」）。
+ * @param {object} ops 已取得的 `lib/ops.js` 模块（延迟 require 由调用方负责）
+ * @param {object} row 影像行（本函数不关心集合名，取值走 `ops.COLLECTIONS.images`）
+ * @returns {Promise<{docId:string, deletedObject:boolean}>} `deletedObject` 恒布尔
+ */
+async function deleteProductImageRow(ops, row) {
+  /* ⑤ 删行（文档 `_id` 优先、回落行内 `id` —— 修復面入册行两值同字）。 */
+  const docId = text(row && row._id) || text(row && row.id)
+  await ops.deleteRow(ops.COLLECTIONS.images, docId)
+
+  /* ⑥ 删对象（内容寻址去重保护：同摘要仍有其它行 ⇒ 只删行；对象删除抛错 ⇒ 如实 `false`）。 */
+  let deletedObject = false
+  const rawDigest = text(row && row.sha256)
+  const digest = rawDigest.toLowerCase()
+  if (DIGEST_PATTERN.test(digest)) {
+    const shared = await digestSharedByOtherRow(rawDigest, docId)
+    const objectKey = objectKeyOf(row, digest)
+    if (!shared && objectKey) {
+      try {
+        await ops.deleteArtifactObject(objectKey)
+        deletedObject = true
+      } catch {
+        deletedObject = false
+      }
+    }
+  }
+  return { docId, deletedObject }
+}
+
+/* --------------------------------------------------------------------------- *
   主流程
  * --------------------------------------------------------------------------- */
 
@@ -223,30 +270,13 @@ async function discardCandidate(payload, identity, context) {
     )
   }
 
-  /* ⑧ 删行（文档 `_id` 优先、回落 `image_id` —— 修復面入册行两值同字）。 */
-  const docId = text(row._id) || imageId
-  await ops.deleteRow(ops.COLLECTIONS.images, docId)
-
-  /* ⑨ 删对象（内容寻址去重保护：同摘要仍有其它行 ⇒ 只删行；对象删除抛错 ⇒ 如实 `false`）。 */
-  let deletedObjects = false
-  const rawDigest = text(row.sha256)
-  const digest = rawDigest.toLowerCase()
-  if (DIGEST_PATTERN.test(digest)) {
-    const shared = await digestSharedByOtherRow(rawDigest, docId)
-    const objectKey = objectKeyOf(row, digest)
-    if (!shared && objectKey) {
-      try {
-        await ops.deleteArtifactObject(objectKey)
-        deletedObjects = true
-      } catch {
-        deletedObjects = false
-      }
-    }
-  }
+  /* ⑧ 删行 ＋ ⑨ 去重保护下删对象 —— **单实现点** `deleteProductImageRow`（本文件导出；
+     「无人认领产物清扫」`lib/aiEnhanceSweep.js` 共用同一份，**禁第二套 dedupe / 对象键推导**）。 */
+  const { deletedObject } = await deleteProductImageRow(ops, row)
 
   /* ⑩ 幂等註记 ＋ 成功回包（恰 3 键）。 */
   noteDiscarded(imageId)
-  return success(imageId, deletedObjects)
+  return success(imageId, deletedObject)
 }
 
 module.exports = {
@@ -256,6 +286,7 @@ module.exports = {
   AI_ENHANCE_DISCARD_SUCCESS_KEYS,
   AI_ENHANCE_DISCARD_FAILURE_KEYS,
   IMAGE_OBJECT_KEY_PATTERN,
+  deleteProductImageRow,
   discardTombstoned,
   discardCandidate
 }

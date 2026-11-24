@@ -4,6 +4,7 @@
   "//timeout": "秒；四个函数的 timeout / memorySize 与旧环境（liwu-d8gek6jjdab1d087c）逐项对齐：xiai-user-token 900s/1024MB、xiai-admin-token 10s/256MB（读自 `cloudbase fn detail`，2026-11-09）。runtime 一律 Nodejs18.15 —— 函数里用到 fetch / AbortSignal.timeout，Nodejs10.15 跑不了。",
   "//installDependency": "installDependency=true ⇒ 部署时云端 `npm install`（本仓 cloudfunctions/** 本地不带 node_modules，与 liwu 同一做法）。",
   "//env": "环境变量（XIAI_*_SECRET / FEICUI_TOKEN_SECRET / YINYUAN_API_KEY …）**不在本文件**：密钥不入仓，由控制台 / 有权限的角色注入到新环境；本文件零密钥字面量。",
+  "//triggers": "定时触发器（本单：AI 修復產物「無人認領清掃」，每日 04:00 CST 一轮）。CloudBase cron 是 **7 段**：秒 分 时 日 月 星期 年 ⇒ 每日 04:00 ＝ `0 0 4 * * * *`（**不是 5 段写法**）。配置挂在**函数对象**上（`functions[].triggers`，元素恰三键 `{name, type:'timer', config}`）；线上创建命令（发布时执行、**本单不执行**）：`cloudbase fn trigger create xiai-user-token -e <envId>` —— `<envId>` 取本文件顶部 `envId` 字面（单一真源，此处不重复）；注意 CLI 1.5.2 限制「一个函数目前只能配置一个触发器」。",
   "functions": [
     {
       "name": "xiai-spa",
@@ -31,7 +32,14 @@
       "timeout": 900,
       "memorySize": 1024,
       "runtime": "Nodejs18.15",
-      "installDependency": true
+      "installDependency": true,
+      "triggers": [
+        {
+          "name": "ai-enhance-sweep-daily",
+          "type": "timer",
+          "config": "0 0 4 * * * *"
+        }
+      ]
     }
   ]
 }
