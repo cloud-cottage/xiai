@@ -3157,6 +3157,14 @@ async function listSealImages(payload) {
   try {
     const ops = opsOf()
     const db = dbOf()
+    /* **复筛只在退路生效（本单线上修复）**：`commandOf(db)` 非空 ⇒ 主路（真 SDK
+       `where(sealMatch).orderBy.limit`）已由 DB 侧按同一 `sealMatch` 判过命中，读回行直接信任、
+       不再逐行 `rowMatchesQuery` 复筛；只有退路（注入式假体无 `command`，此时 `sealMatch` 恰为
+       wire 形态、内存判定器认得）才复筛 —— 与 `listSealCards` 主路「DB 已判、不再复筛」同尺。
+       **为什么必须分路**：主路上 `sealMatch.face_count` 是 `db.command.gte(1)` 命令对象、关键词是
+       `db.RegExp` 对象，`rowMatchesQuery` 只认 wire 形态（`{$gte:1}` / `{$regularExpression:…}`）
+       ⇒ 主路复筛会把整窗滤空（线上实测：`total` 正常、`rows` 恒 0）。 */
+    const isFallbackDb = !commandOf(db)
     /* 印章侧 where（**与 `listSealCards` 同一套单点**：四维 ＋ `q` ＋ `face_count >= 1`）。 */
     const sealMatch = {}
     if (input.dynasty !== '') sealMatch.dynasty = input.dynasty
@@ -3185,8 +3193,11 @@ async function listSealImages(payload) {
         idIn: [cursor.sealId],
         limit: 1
       })
+      /* ① 主路不复筛（DB 侧已按 `sealMatch` 判过）；退路才逐行判（此时 match 为 wire 形态）。 */
       resumeSealRow =
-        resumeRows.length > 0 && rowMatchesQuery(resumeRows[0], sealMatch) ? resumeRows[0] : null
+        resumeRows.length > 0 && (!isFallbackDb || rowMatchesQuery(resumeRows[0], sealMatch))
+          ? resumeRows[0]
+          : null
     }
     /* ③ 逐章展开：候选按「章 `_id` 升序 → 章内影像 `id` 升序」累积，多取 1 张做判据。 */
     const candidates = []
@@ -3214,7 +3225,10 @@ async function listSealImages(payload) {
         rawCount += more.length
         /* 窗口游标以**原始读回的末行**推进（退路不判 match 时也绝不回头重读）。 */
         if (more.length > 0) afterSeal = text(more[more.length - 1]._id) || afterSeal
-        for (const row of more) if (rowMatchesQuery(row, sealMatch)) batch.push(row)
+        /* 逐行复筛**只在退路**（`isFallbackDb`）生效：主路 DB 侧已按同一 `sealMatch` 判过命中，
+           再用只认 wire 形态的判定器去判 `db.command.gte(1)` 命令对象会把整窗滤空
+           （线上 `rows` 恒 0、`total` 正常的真因）。 */
+        for (const row of more) if (!isFallbackDb || rowMatchesQuery(row, sealMatch)) batch.push(row)
       }
       if (rawCount === 0) {
         sealExhausted = true

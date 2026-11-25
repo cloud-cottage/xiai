@@ -38,7 +38,10 @@
  *       三发皆**零读零写**）；成功回包**恰 5 键**且**键序固定**（`ok,rows,next_cursor,has_more,total`）；
  *       `rows` 每元素**恰 13 键**且**键序固定**；`hidden` 影像与非 `server`（bundled 占位行）
  *       **整条不出**；游标**三页走完不重不漏**且每页 ≤ `limit`；DB 不可用 ⇒ 回**恰 5 键降级包**
- *       且**不抛异常**；本节全程**零写入**。
+ *       且**不抛异常**；**P10k 主路复筛回归**（`createStore(p10Seed, {commandGte:true})` 的带
+ *       `command` 假 DB ⇒ `sealMatch.face_count` 为命令对象、走主路）：同一命令对象 DB 侧判得过
+ *       （4 枚）而内存判定器判不过（`[]`，＝修复前恒 0 行的机制）⇒ 修复后整页 `rows` 恰 9、
+ *       游标续拉 `rows` 恰 3；本节全程**零写入**。
  *
  * 纪律：不打印任何密钥 / 令牌；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
@@ -90,11 +93,13 @@ const section = (name, title) => console.log(JSON.stringify({ section: name, tit
 /* ---------------------------------------------------------------------------
    2. 注入式内存假 DB（`createStore` 形态：`collection(name).where(match).get()` ＋ 计数探针）
    匹配器与**主路同尺**：认等值键、`$or` / `$and` / `$nor` 组、`$regularExpression` 关键词子句
-   与 `command.gt` / `command.in` 哨兵 —— 即 `db.command` 在场时 `readOrderedWindow` 下发给
-   DB 的 `where` 片段，假体**逐条同判**（关键词 `q` 的行级命中因此在本套件里可观测；
-   无 `command` 时被测件走退路 `readOrderedWindowFallback`，只按 idIn / 游标收口、**不判 match**）。
+   与 `command.gt` / `command.in` / `command.gte`（仅 `options.commandGte`）哨兵 —— 即 `db.command`
+   在场时 `readOrderedWindow` 下发给 DB 的 `where` 片段，假体**逐条同判**（关键词 `q` 的行级命中
+   因此在本套件里可观测；无 `command` 时被测件走退路 `readOrderedWindowFallback`，只按 idIn /
+   游标收口、**不判 match**）。被测件内存判定器（`rowMatchesQuery`）**只认 wire 形态** ⇒
+   命令对象喂它恒 0 命中 —— 这正是「主路复筛把整窗滤空」的机制，P10k 用它做负对照。
    --------------------------------------------------------------------------- */
-function createStore(seedRows) {
+function createStore(seedRows, options) {
   const collections = new Map()
   const stats = { writes: [], reads: 0 }
   const mapOf = (name) => {
@@ -112,10 +117,15 @@ function createStore(seedRows) {
   }
   ;(seedRows || []).forEach(seedRow)
   /* DB 命令面（`commandOf` 只认 `gt`；`readOrderedWindow` 另认 `in`）。哨兵形态自定 ——
-     只要假体自己的匹配器认得（与 `db.RegExp` 同法：句柄没有 ⇒ 落 wire 字面值）。 */
+     只要假体自己的匹配器认得（与 `db.RegExp` 同法：句柄没有 ⇒ 落 wire 字面值）。
+     `gte`（印章侧 `face_count >= 1`）**只在 `options.commandGte` 时给**：缺省仍无 ⇒
+     `faceCountMatchOf` 落 wire 字面值 `{ $gte: 1 }`（**既有 wire 形态断言一字不动**）；
+     P10k 的「带 command 假 DB」才要它。哨兵刻意**不用** `$gte` —— 内存判定器认得 `$gte`
+     ⇒ 主路复筛恒过、回归测不出「命令对象被复筛滤空」。 */
   const command = {
     gt: (value) => ({ __op: 'gt', value }),
-    in: (values) => ({ __op: 'in', values: Array.isArray(values) ? values.slice() : [] })
+    in: (values) => ({ __op: 'in', values: Array.isArray(values) ? values.slice() : [] }),
+    ...(options && options.commandGte === true ? { gte: (value) => ({ __op: 'gte', value }) } : {})
   }
   const literal = (value) => (value === undefined || value === null ? '' : String(value))
   const matches = (row, match) =>
@@ -135,6 +145,12 @@ function createStore(seedRows) {
         }
         if (expected.__op === 'gt') return literal(row[key]) > literal(expected.value)
         if (expected.__op === 'in') return expected.values.map((value) => String(value)).indexOf(String(row[key])) !== -1
+        if (expected.__op === 'gte') {
+          /* 数值下界（`options.commandGte` 假 DB 的 `db.command.gte(1)` 命令对象形态；
+             口径与 `expected.$gte` 分支逐字一致：缺字段 / 非数值 ⇒ 恒假）。 */
+          const num = Number(row[key])
+          return Number.isFinite(num) && num >= Number(expected.value)
+        }
         if (expected.$gte !== undefined) {
           /* 数值下界（`listSealCards` 印章侧 `face_count >= 1` 的 wire 字面值形态；
              口径与被测件 `rowMatchesQuery` 逐字一致：缺字段 / 非数值 ⇒ 恒假）。 */
@@ -860,7 +876,7 @@ p10Seed.push({
   height: 480
 })
 const p10Store = createStore(p10Seed)
-section('P10', '影像读面 listSealImages（v1.130）：载荷门零读 / 回包恰 5 键且键序固定 / 行恰 13 键且键序固定 / hidden 与 bundled 整条不出 / 三页不重不漏 / DB 不可用降级 / 全程零写')
+section('P10', '影像读面 listSealImages（v1.130）：载荷门零读 / 回包恰 5 键且键序固定 / 行恰 13 键且键序固定 / hidden 与 bundled 整条不出 / 三页不重不漏 / DB 不可用降级 / 主路复筛回归（带 command 假 DB）/ 全程零写')
 await withInjectedStore(p10Store, async () => {
   const P10_REPLY_KEYS = 'has_more,next_cursor,ok,rows,total'
   const P10_REPLY_ORDER = 'ok,rows,next_cursor,has_more,total'
@@ -1071,6 +1087,69 @@ await withInjectedStore(p10Store, async () => {
 
   /* P10j：本节全程零写入（P10a〜P10i 八发调用合共一字不写）。 */
   check('P10j', '本节 P10a〜P10i **八发调用全程零写入**（假 DB 写账恒 0；`listSealImages` 恒零写）', 0, p10Store.stats.writes.length)
+
+  /* P10k：**主路复筛回归**（带 `command` 的假 DB —— `db.command.gte` 在场 ⇒ `listSealImages`
+     走**主路**，`sealMatch.face_count` 是 `db.command.gte(1)` 的**命令对象**、不再是 wire 字面值）。
+     线上真因复刻：主路读回印章窗后若再用 `rowMatchesQuery` 复筛，命令对象不在判定器的 wire
+     认知内 ⇒ 整窗被滤空（`rows` 恒 0，而 `total` / `has_more` 正常）。三段读数：
+       · 正对照 `dbSideHits`：同一命令对象喂**假 DB 匹配器**（＝ DB 侧 `where`）⇒ 恰 4 枚命中；
+       · 负对照 `memoryHits`：同一命令对象喂被测件内存判定器（`sealCards.matchRows`）⇒ **`[]`**
+         ⇒ **修复前**该形态主路逐行复筛恒 0 行（这就是回归判据成立的原因）；
+       · 修复后：整页 `rows` 恰 9 ＋ 游标续拉（站点①续读 ＋ 站点②窗口复筛两处）`rows` 恰 3、
+         两页 `total` 恒 4、回包与行键序不变、零写。
+     既有 wire 形态（`createStore` 缺省无 `gte` ⇒ `{ $gte: 1 }`）断言 P10a〜P10j 一字未动。 */
+  const p10kStore = createStore(p10Seed, { commandGte: true })
+  const p10kDb = p10kStore.provider()
+  const p10kGte = typeof p10kDb.command.gte === 'function' ? p10kDb.command.gte(1) : null
+  const p10kDbSide = await p10kDb.collection('xiai_seals').where({ face_count: p10kGte }).get()
+  const p10kMemoryHits = sealCards.matchRows(p10kStore.rows('xiai_seals'), { face_count: p10kGte })
+  const p10kCursor = Buffer.from(JSON.stringify({ seal_id: 'SI000000001', image_id: 'img-si1-3' }), 'utf8').toString('base64')
+  let p10kFull = null
+  let p10kResume = null
+  ops.setOpsDbProvider(p10kStore.provider)
+  try {
+    p10kFull = await publicCall('listSealImages', { limit: 96 })
+    p10kResume = await publicCall('listSealImages', { limit: 3, cursor: p10kCursor })
+  } finally {
+    ops.setOpsDbProvider(p10Store.provider)
+  }
+  const p10kFullRows = p10kFull && Array.isArray(p10kFull.rows) ? p10kFull.rows : []
+  const p10kResumeRows = p10kResume && Array.isArray(p10kResume.rows) ? p10kResume.rows : []
+  check('P10k', '**主路复筛回归**（`createStore(p10Seed, {commandGte:true})` ⇒ `db.command.gte` 在场、`sealMatch.face_count` 为命令对象、`listSealImages` 走主路）：同一命令对象 DB 侧判得过（4 枚）＋ 内存判定器判不过（`[]`，＝**修复前恒 0 行**的机制）⇒ 修复后整页 `rows` 恰 9、游标续拉 `rows` 恰 3（续读点与窗口复筛两处）＋ 两页 `total` 恒 4 ＋ 键序不变 ＋ 零写', {
+    gteIsFunction: true,
+    dbSideHits: 4,
+    memoryHits: [],
+    fullKeys: 'has_more,next_cursor,ok,rows,total',
+    fullOrder: 'ok,rows,next_cursor,has_more,total',
+    fullRowOrders: [P10_ROW_ORDER],
+    fullRowCount: 9,
+    fullTotal: 4,
+    fullHasMore: false,
+    fullNextCursor: '',
+    resumeRowCount: 3,
+    resumeIds: ['img-si2-1', 'img-si2-2', 'img-si2-3'],
+    resumeTotal: 4,
+    resumeHasMore: true,
+    resumeNextCursor: p10CursorOf('SI000000002', 'img-si2-3'),
+    writes: 0
+  }, {
+    gteIsFunction: typeof p10kDb.command.gte === 'function',
+    dbSideHits: Array.isArray(p10kDbSide.data) ? p10kDbSide.data.length : -1,
+    memoryHits: p10kMemoryHits,
+    fullKeys: shapeOf(p10kFull),
+    fullOrder: p10kFull ? Object.keys(p10kFull).join(',') : null,
+    fullRowOrders: [...new Set(p10kFullRows.map((row) => Object.keys(row).join(',')))],
+    fullRowCount: p10kFullRows.length,
+    fullTotal: p10kFull ? p10kFull.total : null,
+    fullHasMore: p10kFull ? p10kFull.has_more : null,
+    fullNextCursor: p10kFull ? p10kFull.next_cursor : null,
+    resumeRowCount: p10kResumeRows.length,
+    resumeIds: p10kResumeRows.map((row) => row.image_id),
+    resumeTotal: p10kResume ? p10kResume.total : null,
+    resumeHasMore: p10kResume ? p10kResume.has_more : null,
+    resumeNextCursor: p10kResume ? p10kResume.next_cursor : null,
+    writes: p10kStore.stats.writes.length
+  })
 })
 
 /* ===========================================================================
