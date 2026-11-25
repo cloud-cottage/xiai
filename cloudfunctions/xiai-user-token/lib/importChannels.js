@@ -374,6 +374,11 @@ async function importFaceImages(payload, identity, context) {
           id,
           idem_key: `image:${digest}`
         }
+        /* **跟随同印面唯一印谱归属（`book_id`｜2026-11-24 Kevin 选 A 后半；单点 `ops.followBookIdInto`）**：
+           本通道 `stamp_id` 恒为**占位** `imp-…`（见上 ⑩）⇒ 单点内**零读短路**（占位组逐行唯一、恒
+           0 候选 ⇒ 与改前逐字同：不写键）；若日后落真 `stamp_id`，则在同一次入册里复用既有那次
+           `imageSeqsOf` 读（**同组绝不读第二次**）。冲突 / 空集 / 读失败一律**不写键、不阻断入册**。 */
+        await ops.followBookIdInto(doc, doc.stamp_id, kind)
         /* 单行独立一次 `persist`（恰一个 `set` 步；`_id` 由 `persist` 剔）⇒ 一行失败不拖累他行。 */
         await ops.persist({ writes: [{ kind: 'set', collection: ops.COLLECTIONS.images, id, doc }] })
         seen.add(digest)

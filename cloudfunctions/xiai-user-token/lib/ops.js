@@ -2146,6 +2146,136 @@ async function imageStampWriteStepsOf(stampId, imageRows, takenByKind, handled) 
   return steps
 }
 
+/* --------------------------------------------------------------------------- *
+   **新入册影像自动跟随同印面唯一印谱归属（`book_id`｜Kevin 2026-11-24 选 A 后半）**
+   背景：`xiai_images.book_id` ＝ **单值**印谱归属（五位定长十进制 `^\d{5}$`，`null` ＝ 未归属，
+   引用 `xiai_books._id`；见 `lib/books.js` ⑤⑥⑩）。生产库 2026-11-24 已回填完：**同印面多归属
+   冲突 ＝ 0**、且已无「同印面唯一归属但自身未归属」的普通影像行 ⇒ 此后新入册的行**按组内唯一
+   归属自动跟随**，既不与既有行冲突、也不必再人工补挂。
+   口径（Zang 裁定，逐条对应实现）：
+     ① 判定：同 `(stamp_id, kind)` 既有行中非空 `book_id` **去重后恰 1 个**且过形态门 ⇒ 新行写
+        同值；**0 个 或 ≥ 2 个（多书冲突）⇒ 不写 `book_id` 键**（**不猜、不抽、不覆盖已有值**）；
+     ② **单实现点（本块）**：`followedBookIdOf`（纯函数）＋ `followedBookIdFrom`（读取包装）＋
+        `followBookIdInto`（落地单点）。读**只走既有 `imageSeqsOf`** —— 调用方把那次读到的行
+        **直接传入**（复用、**零再读**）；拿不到那份行才由包装内读 **恰一次**；**同一个
+        `(stamp_id, kind)` 组在一个请求里绝不读第二次**（调用侧禁止自行再拉集合）；
+     ③ 降级：读失败（`imageSeqsOf` 已按空集降级 ＋ `log.warn`）/ 空集 / 形态不符 ⇒ **不写键**
+        且**绝不阻断入册**（**零新增 `reason`**、回包键面与改前逐字相同）；
+     ④ 范围：只影响 `kind:'FACE'` 的**普通**影像行（同 `imageSeqsOf` 口径）；AI 修复产物行
+        （`source='ai_enhance'`，`lib/aiEnhance.js:533` / `lib/aiEnhanceTasks.js:1133`）**不走本
+        函数** —— 它们按源图继承（AC-893），本单零改动；
+     ⑤ 幂等与可见性：`doc(id).set` 重放用**当时**组内读数（同组同值 ⇒ 恒同写）；`book_id` 仍
+        **不进**任何普通用户可见 DTO / 卡片（`lib/books.js` ⑩）。
+ * --------------------------------------------------------------------------- */
+
+/** `book_id` 形态门（**五位定长十进制**；与 `lib/books.js::BOOK_ID_PATTERN` 同一契约、同一值）。 */
+const IMAGE_BOOK_ID_PATTERN = /^\d{5}$/
+
+/**
+ * 行上 `book_id` 是否**合法候选**（只认 `^\d{5}$`；脏值 `abc` / `1234` / `123456` / `null` /
+ * 布尔 / 对象一律 **不参与候选**，也**不纠错、不补零**）。
+ * @param {*} value 行上 `book_id` 原值
+ * @returns {boolean}
+ */
+function isImageBookId(value) {
+  if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'object') {
+    return false
+  }
+  return IMAGE_BOOK_ID_PATTERN.test(value)
+}
+
+/**
+ * 同印面**唯一**印谱归属（**纯函数单点**；零 I/O、零自抛、不触库）。
+ *
+ * @param {string} stampId 印章 id（组标识；行上给出且与之不同 ⇒ 跳过，防串组）
+ * @param {string} kind 影像类别（**只认 `FACE`**；其余 ⇒ `null` —— 本规则只覆盖普通 FACE 行）
+ * @param {Array<object>} rows 该 `(stamp_id, kind)` 组内既有行（`imageSeqsOf` 的返回本体）
+ * @returns {string|null} 恰 1 个合法候选 ⇒ **该值**；0 个 / ≥ 2 个 / 形态不符 ⇒ `null`
+ *   （**不猜、不抽** —— 冲突与空集一律「不写键」）
+ */
+function followedBookIdOf(stampId, kind, rows) {
+  if (text(kind) !== 'FACE') return null
+  if (!Array.isArray(rows) || rows.length === 0) return null
+  const wantStamp = text(stampId)
+  const seen = new Set()
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue
+    /* 行对象只认同组（与 `nextImageSeqOf` 同一防串组口径：`stamp_id` / `kind` 行上给出且不同 ⇒ 跳过）。 */
+    const rowStamp = row.stamp_id === undefined || row.stamp_id === null ? '' : text(row.stamp_id)
+    const rowKind = row.kind === undefined || row.kind === null ? '' : text(row.kind)
+    if (wantStamp && rowStamp && rowStamp !== wantStamp) continue
+    if (rowKind && rowKind !== 'FACE') continue
+    if (!isImageBookId(row.book_id)) continue
+    seen.add(text(row.book_id))
+    if (seen.size > 1) return null /* ≥ 2 个不同归属 ＝ 多书冲突 ⇒ 立即判「不写」。 */
+  }
+  return seen.size === 1 ? Array.from(seen)[0] : null
+}
+
+/**
+ * 同印面唯一归属（**读取包装**；复用那次读、同组绝不读第二次）。
+ *
+ *   · `rows` 是 `Array` ⇒ **直接复用**调用方那次 `imageSeqsOf` 的结果（**零再读**）；
+ *   · `rows` 是 `undefined` ⇒ 调用方拿不到那份行 ⇒ 本函数内部读 **恰一次**；
+ *   · `rows` 是 `null` ⇒ 调用方**本轮刻意不读**（同 `id` 重写轮）⇒ **零读**、不跟随；
+ *   · 占位 `stamp_id`（`imp-…`）⇒ 直接 `null`（**零读**：占位组逐行唯一、恒 0 候选）；
+ *   · 读失败 ⇒ `imageSeqsOf` 已按空集降级 ＋ `log.warn` ⇒ `null`（**不阻断入册**）。
+ *
+ * @param {string} stampId 印章 id
+ * @param {string} kind 影像类别（只认 `FACE`）
+ * @param {Array<object>|null|undefined} [rows] 调用方那次 `imageSeqsOf` 结果（见上）
+ * @returns {Promise<string|null>}
+ */
+async function followedBookIdFrom(stampId, kind, rows) {
+  if (Array.isArray(rows)) return followedBookIdOf(stampId, kind, rows)
+  if (rows === null) return null
+  if (text(kind) !== 'FACE') return null
+  if (isImageStampPlaceholder(stampId)) return null
+  return followedBookIdOf(stampId, kind, await imageSeqsOf(stampId, kind))
+}
+
+/**
+ * 把跟随值落进**新入册影像行**（**唯一落地点**；调用侧只此一行，且**永不抛**）。
+ *
+ * 判定序（顺序即语义）：
+ *   ① 非对象行 / `kind !== 'FACE'` ⇒ 零改动（AI 产物行与 EDGE 行不参与本规则）；
+ *   ② 新行**自身已有** `book_id`（显式传入 / 已带原值）⇒ **不覆盖**、零改动（**不写键**）；
+ *   ③ `ownRow`（被本行覆写的原行）已有合法 `book_id` ⇒ **原值带走**（同 `id` 重写不丢既有归属，
+ *      零读、不猜）；
+ *   ④ 组内唯一归属 ⇒ 写同值；0 个 / ≥ 2 个 / 读失败 ⇒ **不写该键**（键面与改前逐字相同）。
+ *
+ * @param {object} doc 待落盘行（**就地**加键；原样返回亦不改）
+ * @param {string} stampId 印章 id（组标识）
+ * @param {string} kind 影像类别（只认 `FACE`）
+ * @param {Array<object>|null|undefined} [rows] 调用方那次 `imageSeqsOf` 结果（见 `followedBookIdFrom`）
+ * @param {object|null} [ownRow] 与 `doc` 同 `id` 的**原行**（被覆写者；供 ③ 沿用原值）
+ * @returns {Promise<boolean>} 是否写入了 `book_id`
+ */
+async function followBookIdInto(doc, stampId, kind, rows, ownRow) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
+  if (text(kind) !== 'FACE') return false
+  const own = doc.book_id
+  if (own !== undefined && own !== null && text(own) !== '') return false /* ② 已有值 ⇒ 不覆盖 */
+  if (ownRow && ownRow !== doc && isImageBookId(ownRow.book_id)) {
+    doc.book_id = text(ownRow.book_id) /* ③ 同 id 原行归属原值带走（零读） */
+    return true
+  }
+  let bookId = null
+  try {
+    bookId = await followedBookIdFrom(stampId, kind, rows)
+  } catch (error) {
+    /* ④ 降级：**绝不阻断入册**（`imageSeqsOf` 已自行 warn；这里只兜底、不回包、不加 reason）。 */
+    log.warn('imageBookFollow.degraded', {
+      message: '讀同印面既有影像行失敗 ⇒ 新行不寫 `book_id`（不阻斷入冊、不猜歸屬）',
+      errorMessage: error && error.message ? error.message : error
+    })
+    return false
+  }
+  if (!bookId) return false
+  doc.book_id = bookId
+  return true
+}
+
 /* ---------------------------------------------------------------------------
    item 通道切片 A（v1.61）：印谱導入辅助（值域 / 形態門 ＋ 本體归一 ＋ 讀行）
    --------------------------------------------------------------------------- */
@@ -3445,9 +3575,10 @@ const OPS = Object.freeze({
       })
     }
     const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
-    const seq = sameSealExisting
-      ? Number(existing.seq)
-      : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
+    /* 组内既有行 **恰读一次**（同时供 `seq` 取号 与 `book_id` 跟随；同组绝不读第二次）：
+       同 `id` 重写轮（`sameSealExisting`）本轮**刻意不读组** ⇒ `groupRows = null`（零读、不跟随）。 */
+    const groupRows = sameSealExisting ? null : await imageSeqsOf(sealId, kind)
+    const seq = sameSealExisting ? Number(existing.seq) : nextImageSeqOf(sealId, kind, groupRows)
     /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`
        ＋ **准入三键（2026-11-17 `marked` 裁定）**：用户提交件**必须经审核** ⇒ `marked:false`
        ＋ `marked_by:''` / `marked_at:''`（**不自动准入**、不给「谁标记的」留假归属）。
@@ -3467,6 +3598,9 @@ const OPS = Object.freeze({
       marked_by: admission.by,
       marked_at: admission.at
     }
+    /* 跟随同印面唯一印谱归属（`book_id`｜单点 `followBookIdInto`：复用上面那次组内读、**零额外读**；
+       冲突 / 空集 / 读失败 ⇒ **不写键**、不阻断入册、回包键面与改前逐字相同）。 */
+    await followBookIdInto(row, sealId, kind, groupRows, existing)
     /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
     return {
       ok: true,
@@ -9840,9 +9974,10 @@ const ADMIN_OPS = Object.freeze({
       })
     }
     const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
-    const seq = sameSealExisting
-      ? Number(existing.seq)
-      : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
+    /* 组内既有行 **恰读一次**（同时供 `seq` 取号 与 `book_id` 跟随；同组绝不读第二次）：
+       同 `id` 重写轮（`sameSealExisting`）本轮**刻意不读组** ⇒ `groupRows = null`（零读、不跟随）。 */
+    const groupRows = sameSealExisting ? null : await imageSeqsOf(sealId, kind)
+    const seq = sameSealExisting ? Number(existing.seq) : nextImageSeqOf(sealId, kind, groupRows)
     /* ⑥ 行体 ＝ `buildDirectImageRow` 字段面（含条件 `seq`）＋ `stamp_id` 回填 `seal_id`
        ＋ **`visibility`（缺省即 `visible`，恒落该键 —— 不落空串、不落 `null`）**
        ＋ **`marked` / `marked_by` / `marked_at`（2026-11-17 准入裁定，三键恒落）**：
@@ -9861,6 +9996,9 @@ const ADMIN_OPS = Object.freeze({
       marked_by: markedBy,
       marked_at: marked.value ? at : ''
     }
+    /* 跟随同印面唯一印谱归属（`book_id`｜单点 `followBookIdInto`：复用上面那次组内读、**零额外读**；
+       `kind` 为 `EDGE` / 冲突 / 空集 / 读失败 ⇒ **不写键**、不阻断入册、回包键面不变）。 */
+    await followBookIdInto(row, sealId, kind, groupRows, existing)
     /* ⑦ 成功 ＝ 恰 2 键（`plan` 是内部落盘计划，`index.js` 绝不外传）。 */
     return {
       ok: true,
@@ -10131,9 +10269,10 @@ const ADMIN_OPS = Object.freeze({
     }
     /* ⑦′ **`seq` 单点取号**（同 `id` 已有行且属同印 ⇒ 沿用；**本 op 不自算号**）。 */
     const sameSealExisting = existing && text(existing.stamp_id) === sealId && isImageSeq(existing.seq)
-    const seq = sameSealExisting
-      ? Number(existing.seq)
-      : nextImageSeqOf(sealId, kind, await imageSeqsOf(sealId, kind))
+    /* 组内既有行 **恰读一次**（同时供 `seq` 取号 与 `book_id` 跟随；同组绝不读第二次）：
+       同 `id` 重写轮（`sameSealExisting`）本轮**刻意不读组** ⇒ `groupRows = null`（零读、不跟随）。 */
+    const groupRows = sameSealExisting ? null : await imageSeqsOf(sealId, kind)
+    const seq = sameSealExisting ? Number(existing.seq) : nextImageSeqOf(sealId, kind, groupRows)
     /* ⑦″ **准入继承（2026-11-17 `marked` 裁定）**：新行 `marked` ＝ **被替换行**的准入态
        —— 换图不改变「该印面这张图是否已过审」的裁定（管理员换图不是审核动作）。
          · 被替换行**不存在** / **无 `marked` 键**（旧行 6444 条那一态）/ 值非布尔 `true` ⇒ `false`；
@@ -10177,6 +10316,9 @@ const ADMIN_OPS = Object.freeze({
       marked_by: admission.by,
       marked_at: admission.at
     }
+    /* 跟随同印面唯一印谱归属（`book_id`｜单点 `followBookIdInto`：复用上面那次组内读、**零额外读**；
+       冲突 / 空集 / 读失败 ⇒ **不写键**、不阻断入册、回包键面与改前逐字相同）。 */
+    await followBookIdInto(row, sealId, kind, groupRows, existing)
     try {
       await persist({ writes: [{ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row }] })
     } catch (error) {
@@ -11674,6 +11816,14 @@ module.exports = {
   nextImageSeqOf,
   imageSeqsOf,
   isImageSeq,
+  /* **新入册影像跟随同印面唯一印谱归属（`book_id`｜2026-11-24 Kevin 选 A 后半）**：形态门 ＋ 纯函数
+     ＋ 读取包装（**复用 `imageSeqsOf` 那次读、零额外读**）＋ 落地单点 —— `lib/importChannels.js`
+     与离线自检 `scripts/verify-book-follow.mjs` 共用同一份实现（零第二套）。 */
+  IMAGE_BOOK_ID_PATTERN,
+  isImageBookId,
+  followedBookIdOf,
+  followedBookIdFrom,
+  followBookIdInto,
   /* **占位 `stamp_id`（2026-11-09 真因修）**：前缀唯一字面来源 ＋ 构造 / 判定两个纯函数，
      加回填单点本体 `imageStampWriteStepsOf`（写行侧 `lib/importChannels.js` 与离线自检共用；
      实现零第二套）。 */
