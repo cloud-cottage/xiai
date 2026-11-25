@@ -13,17 +13,17 @@
     {
       "source": "/xiai/:path*",
       "destination": "/:path*",
-      "permanent": true
+      "statusCode": 301
     },
     {
       "source": "/xiai/",
       "destination": "/",
-      "permanent": true
+      "statusCode": 301
     },
     {
       "source": "/xiai",
       "destination": "/",
-      "permanent": true
+      "statusCode": 301
     }
   ],
   "rewrites": [
