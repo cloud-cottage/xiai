@@ -742,7 +742,7 @@ async function confirmClearLocal() {
         :aria-pressed="imageView ? 'true' : 'false'"
         @click="toggleImageView"
       >
-        【單獨列出影像】
+        單獨列出影像
       </button>
     </div>
 
