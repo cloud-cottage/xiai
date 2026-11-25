@@ -89,10 +89,95 @@ async function copyDiagText() {
 /* 固定属性保存后 +1，使下面的派生读数与影像都重新读取。 */
 const dataVersion = ref(0)
 
-const seal = computed(() => {
+/* ---------------------- 數據源狀態（硬導航首屏不得顯示終態） ---------------------- */
+/* **線上實據（2026-09-28）**：直接打開 / 刷新 `/seal/1` 時，雲端快照尚未落定 ⇒
+   `seals.getSealById()` 返回 `null`。此刻若渲染「未找到這枚印章」，等於把「還沒讀到」
+   說成「不存在」（實據：等 14 秒仍是「未找到」，而同一構建在本地／快照到位後能出內容）。
+   ⇒ 一律讀**數據層的數據源讀數**：`pending` ⇒ 載入態；`failed` ⇒ 可重試的失敗態；
+   落定（`ready` / `off`）後才允許「未找到」這類終態文案。讀數是響應式的
+   （數據層 `shallowRef`）⇒ 水合落定時本頁自動重算，無需手動刷新。
+   **本單把它整塊提到 `seal` 之前宣告**（原文一字未改）：下面 `seal` 的快照兜底要在
+   **未落定**（`pending` / `failed`）時才生效 ⇒ 它必須在 `seal` 這個 computed 首次求值前
+   就可取（watch 源在 setup 裏即刻求值，晚於宣告位置會踩 TDZ）。 */
+const dataSource = computed(() => seals.dataSourceState())
+
+/* ============================================================================
+   **V1（本单）：上一份可用视图模型快照 —— 水合 pending 期间不换占位、不丢滚动**
+   ----------------------------------------------------------------------------
+   缺陷（线上实测）：采纳 AI 修復新图后 `retryDataSource()` ⇒ 数据层先 `setStatus('pending')`
+   ⇒ `db.js` 读序②（`pending` ⇒ 返回空集，**本单一字未改**）⇒ `seals.getSealById()` 变
+   `null` ⇒ 本页 `<section v-if="seal">` 整块换成「正在讀取藏品資料」占位 ⇒ 页面先空白、
+   页面高度塌陷把滚动位置一起丢掉（观感＝整页重新加载；**不是** `location.reload()`）。
+   口径：**记住上一份可用的视图模型** —— `seal` 本身已是派生后的完整视图对象（`faces` /
+   `wholeSealImages` / `images` 都从它取），缓存它即缓存整棵派生树，**不再单缓存 `faces`**。
+   与哪个单点同形：数据层 `db.js::mergeCloudSnapshotRows` 族的纯度（**只改内存、零网络、
+   零 localStorage**）—— 但本块是**读面兜底**，不动数据层快照、不新增任何状态字面值；
+   状态读数仍只认服务层唯一读数 `seals.dataSourceState()`（不另立第二套状态）。
+   边界（逐条对应验收 a–d）：
+     a. **跨印章不串**：槽位带 `id`，与当前 `route.params.id` **逐字相等**才兜底；
+        路由换印章的 watch 立即作废槽位 ⇒ 编号不等回到原载入态；
+     b. **不吞真实终态**：兜底只在 `pending` / `failed`（**未落定**）生效；落定 `ready` / `off`
+        一律以实时读数为准 ⇒ 真缺失照旧走「未找到這枚印章」；`failed` 且**从未有过可用
+        快照**时 `sealUnavailable`（`failed` + 无 seal）照旧上屏，且段内既有 O-1 失败提示
+        ＋「重新讀取」按钮照旧渲染（失败不因缓存而失声）；
+     c. **不刷弹窗状态**：有快照时 `<section v-if="seal">` 不再卸载 ⇒ 勘误表单 / 作者选择
+        等弹窗留在原组件实例上；`dataVersion` 触发的既有 watch 也**没有**清 `imageUrls`
+        的逻辑（全文件唯一的 `delete imageUrls[…]` 在服务层失效口的登记清理函数里，
+        按编号清、与 `dataVersion` 无关）；
+     d. **落定无缝替换**：`ready` 后实时读数非空 ⇒ `seal` 直接返回实时值，槽位不再参与
+        渲染（用户不感知）。
+   滚动：整页占位不再出现 ⇒ 页面高度不塌 ⇒ 滚动自然不跳；**不引入** `scrollRestoration`
+   或任何手动 `window.scrollTo` 去「补」。
+   ============================================================================ */
+/** 上一份可用视图模型（单槽 `{ id, seal }`；**只由下面两个 watch 写**）。 */
+const sealSnapshot = ref(null)
+
+/** 数据层**实时**读数（＝本块之前 `seal` 的原语义，一字未改；快照写入口只认它）。 */
+const sealLive = computed(() => {
   void dataVersion.value
   return seals.getSealById(route.params.id)
 })
+
+/**
+ * 页面渲染面的 `seal` ＝ **实时读数 ∪ 同编号上一份可用快照（仅未落定时兜底）**。
+ * 实时有值 ⇒ 一律用实时值（与改前逐字同路径）；实时为空才看槽位，且必须同时满足
+ * 「编号相等」＋「读数未落定」，否则交回 `null`（原载入态 / 原终态，见上节边界 a、b）。
+ */
+const seal = computed(() => {
+  const live = sealLive.value
+  if (live) return live
+  const snapshot = sealSnapshot.value
+  if (!snapshot || !snapshot.seal) return null
+  if (snapshot.id !== String(route.params.id || '')) return null
+  const state = dataSource.value
+  if (!state.pending && !state.failed) return null
+  return snapshot.seal
+})
+
+/* **写入上一份可用视图模型**：只认实时读数（空值不覆盖 —— 否则 pending 一来就把上一份
+   冲掉，兜底无从谈起）；`id` 取写入当刻的路由编号，与读取侧的比对同一把尺。
+   `immediate`：首屏求值若已拿到 seal（热导航 / 数据早已落定）也要立刻入槽，
+   否则「第一次 pending」发生时槽位是空的、兜底不生效。 */
+watch(
+  sealLive,
+  (value) => {
+    if (!value) return
+    sealSnapshot.value = { id: String(route.params.id || ''), seal: value }
+  },
+  { immediate: true }
+)
+
+/* **换印章 ⇒ 快照立即作废**（验收 a：编号不等回到原载入态；单槽不留上一枚的内容）。
+   与上面的写入 watch 谁先跑都对：本 watch 只在「槽位编号 ≠ 新编号」时清，
+   而写入 watch 只写「当前路由编号」的值 —— 两种次序下都不会把新一枚的内容清掉。 */
+watch(
+  () => String(route.params.id || ''),
+  (id) => {
+    const snapshot = sealSnapshot.value
+    if (snapshot && snapshot.id !== id) sealSnapshot.value = null
+  },
+  { immediate: true }
+)
 /** 印面是属性归属的载体：固定属性、可标记属性都按印面分块展示。 */
 const faces = computed(() => (seal.value ? seal.value.faces : []))
 /**
@@ -215,14 +300,12 @@ watch(
   { immediate: true }
 )
 
-/* ---------------------- 數據源狀態（硬導航首屏不得顯示終態） ---------------------- */
-/* **線上實據（2026-09-28）**：直接打開 / 刷新 `/seal/1` 時，雲端快照尚未落定 ⇒
-   `seals.getSealById()` 返回 `null`。此刻若渲染「未找到這枚印章」，等於把「還沒讀到」
-   說成「不存在」（實據：等 14 秒仍是「未找到」，而同一構建在本地／快照到位後能出內容）。
-   ⇒ 一律讀**數據層的數據源讀數**：`pending` ⇒ 載入態；`failed` ⇒ 可重試的失敗態；
-   落定（`ready` / `off`）後才允許「未找到」這類終態文案。讀數是響應式的
-   （數據層 `shallowRef`）⇒ 水合落定時本頁自動重算，無需手動刷新。 */
-const dataSource = computed(() => seals.dataSourceState())
+/* ---------------------- 載入態 / 失敗態（數據源讀數＝上方 `dataSource`；此處只留判據） ---------------------- */
+/* **V1（本單）之後 `seal` ＝ 實時讀數 ∪ 同編號上一份可用快照（僅未落定時兜底）**：
+   有可用快照 ⇒ 下面兩判據都為假 ⇒ 整頁繼續渲染上一份視圖模型（不換佔位、不丟捲動）；
+   **從未有過任何可用快照**（硬導航首屏 / 換印章 / 槽位編號與當前路由不等）⇒ 與改前
+   **逐字同態**（載入態、失敗態各自照舊上屏）。判據本身一字未改：仍是「無 seal 且
+   pending / failed」—— 只是這裡的 `seal` 已經是合成後的視圖模型。 */
 const sealLoading = computed(() => !seal.value && dataSource.value.pending)
 const sealUnavailable = computed(() => !seal.value && dataSource.value.failed)
 
@@ -2888,10 +2971,13 @@ function aiWriteMessageOf(message) {
  * 【取】：把本印面 `face_image_id` 指向修復影像 —— **复用现有换图写面**
  * `seals.updateSealFixedAttributes(null, faceId, patch)`（与「編輯固定屬性」同一入口；
  * 与 replace-face-image 同语义：只改指向、**旧行不删**；**不新增写面 op**）。
- * 成功 ⇒ 顶部反馈「影像編號 旧 → 新；舊影像與二進制保留（可回溯）」＋
+ * 成功 ⇒ 顶部反馈「影像編號 旧 → 新；舊影像與二进制保留（可回溯）」＋
  * **① 作废旧编号 dataUrl 缓存**（服务层唯一失效口 `seals.invalidateImageDataUrl`）
- * ＋ **② 云端快照重读**（`retryDataSource()`：清一次性读数 ＋ 重拉云端 —— 印面指向已在
- * 服务端改写，只有重读云端 `faceImageIds` 才含新编号）＋ `dataVersion + 1`
+ * ＋ **② 新指向就地写进内存云端快照**（单点 `seals.patchCloudSnapshotRow`：不写
+ * localStorage、不发网络、不置 pending；快照缺席 ⇒ 空操作）⇒ `dataVersion + 1`
+ * ⇒ 新图**当帧**上屏 ＋ **③ 云端快照重读**（`retryDataSource()`：清一次性读数 ＋ 重拉云端
+ * —— 印面指向已在服务端改写，只有重读云端 `faceImageIds` 才含新编号；那一轮 `pending`
+ * 由本页 V1 的上一份视图模型兜住，**不换占位、不丢滚动**）
  * ⇒ **不刷整页也立即显示新图**（旧图行与二进制仍保留、可回溯）。
  */
 async function acceptAiEnhance() {
@@ -2913,9 +2999,24 @@ async function acceptAiEnhance() {
     /* **强制失效旧 id 的 dataUrl 缓存**（服务层唯一失效口；页面登记的清理函数按编号清）。
        旧影像**本身不删** —— 作废的只是缓存条目，下次取它仍会照常读回。 */
     if (previousId) seals.invalidateImageDataUrl(previousId)
-    /* **立即显示新图（不刷整页）**：派生读数重算 ＋ 清一次性读数（新编号若早先取字节失败，
-       错误缓存会永久挡住它）＋ **云端快照重读**（服务端指向已改，重读后 `faceImageIds`
-       才含新编号 ⇒ 才会去取新图）。 */
+    /* **V3（本单）：新指向先就地写进内存云端快照** —— 单点 `db.js::patchCloudSnapshotRow`
+       （与上傳成功併入的 `mergeCloudSnapshotRows` **同族**：只改内存快照、不写 localStorage、
+       不发网络、不置 pending、不臆造 `_id`）。
+       行身份用**本页正在渲染的印面行**（它就是快照行的读出形态，`_id` / `id` 与快照行同一
+       把尺 `overlayIdentityOf`）；本页行缺 `_id` 时回落到服务端刚回包的行（快照行是服务端行，
+       它的 `_id` 必能配对）。快照缺席（未配置 / 未落定 / 已回落）⇒ 该单点自会空操作，
+       照旧走下面的既有路径。
+       **顺序不得颠倒**：必须在 `dataVersion + 1` **之前** —— 那一 bump 立刻重算派生读数，
+       快照里还是旧指向就只会读回旧图；先盖再 bump ⇒ 新图**当帧**上屏。 */
+    const snapshotRowIdentity = face._id ? face : written.face && written.face._id ? written.face : face
+    seals.patchCloudSnapshotRow('faces', {
+      _id: snapshotRowIdentity._id,
+      id: snapshotRowIdentity.id,
+      face_image_id: nextId
+    })
+    /* **立即显示新图（不刷整页）**：派生读数重算（新指向已在快照里 ⇒ 当帧读到新编号）
+       ＋ **云端快照重读**（服务端指向已改，重读后 `faceImageIds` 才含新编号 ⇒ 才会去取新图）；
+       重读那一轮的 `pending` 由 V1 的上一份视图模型兜住（不再换占位、不丢滚动）。 */
     dataVersion.value += 1
     retryDataSource()
     closeAiEnhance()

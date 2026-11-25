@@ -77,6 +77,11 @@ import {
   sealDisplayName,
   PermissionError
 } from '../data/db.js'
+/* **雲端快照行就地改寫（本單唯一改寫點｜與 `mergeCloudSnapshotRows` 同族）**：【取】採納
+   修復圖成功後，把本印面行的 `face_image_id` 就地蓋進當前內存快照（**不寫 localStorage、
+   不發網絡、不置 pending**；快照缺席 ⇒ 空操作）。**轉口導出**（與 `admin.js` 轉口
+   `PermissionError` 同形）：視圖一律經本服務門面取用，**不直碰 `data/*`**。 */
+export { patchCloudSnapshotRow } from '../data/db.js'
 /* **識別編碼（sid / fid）純函數**：`src/utils/codeId.js`（與雲函數副本**逐字節相同**）。
    該文件是**雙端同段代碼**（不寫 `export`，見其文件頭「雙端可載紀律」）⇒ 前端只能**副作用導入**、
    API 掛 `globalThis.__XIAI_CODE_ID__`。 */
