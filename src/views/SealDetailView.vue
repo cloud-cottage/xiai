@@ -227,6 +227,43 @@ const sealLoading = computed(() => !seal.value && dataSource.value.pending)
 const sealUnavailable = computed(() => !seal.value && dataSource.value.failed)
 
 /* ============================================================================
+   **HTML 標題（`document.title`）＝印文 · 路由標題**
+   ------------------------------------------------------------------------------
+   · 印文真源與頁面 `<h1>` **同一條**：`corrections.resolveSealDisplayName(seal)`
+     （全站單點名表；不內聯 `seal_name || '佚名'`、不另立第二套取名）。
+   · 就緒（`seal` 非空）且印文非空 ⇒ `${印文}｜印章詳情 · 璽愛`（分隔＝全角豎線「｜」）。
+   · 未就緒 / 查無此印 / 印文空 ⇒ 退回路由標題（本路由逐字 `印章詳情 · 璽愛`，與
+     `router.afterEach` 同一拼法）—— 決不寫 `undefined` / `null` / ` · 璽愛` 這類髒值。
+   · 離開本頁的回落**由既有 `router.afterEach` 負責**（每次導航都重寫）⇒ 本處不碰
+     卸載面、不新增 / 修改任何路由邏輯、不改 `meta.title`、不改任何上屏可見文本
+     （只動 `document.title`）、不引入新依賴。
+   · `immediate: true`：硬導航首屏先落路由標題；水合落定 / 勘誤採納重算後**印文一變即重寫**
+     （依賴面＝印文 ＋ `seal` 就緒態，經下面兩個 computed 傳導；全部聲明在本 watch **之前**
+     ⇒ `immediate` 同步回調不在 setup 過程中觸 TDZ）。
+   ============================================================================ */
+/** 路由標題（與 `router.afterEach` 逐字同拼法；**只讀**，不寫路由、不改 `meta.title`）。 */
+const routeDocumentTitle = computed(() => (route.meta.title ? `${route.meta.title} · 璽愛` : '璽愛'))
+/** 印文（與 `<h1>` 同一真源）；`seal` 未就緒 / 取不到名 ⇒ 空串（不參與標題拼接）。 */
+const sealDocumentName = computed(() => {
+  const row = seal.value
+  if (!row) return ''
+  const name = corrections.resolveSealDisplayName(row)
+  /* 只做型別與空白防呆（不改上屏 `<h1>` 的取值面）：空 / 全空白 ⇒ 走路由標題兜底。 */
+  return typeof name === 'string' ? name.trim() : ''
+})
+watch(
+  /* 依賴面＝印文 ＋ 就緒態 ＋ 路由標題：任一變 ⇒ 重寫；`immediate` 覆蓋首屏與熱導航。 */
+  () => {
+    const name = sealDocumentName.value
+    return name ? `${name}｜${routeDocumentTitle.value}` : routeDocumentTitle.value
+  },
+  (title) => {
+    if (typeof document !== 'undefined') document.title = title
+  },
+  { immediate: true }
+)
+
+/* ============================================================================
    **影像錨點（`?face=`｜裁定件 ③：廣場影像瀑布流點入 ⇒ 直達該印面）**
    ----------------------------------------------------------------------------
    · 只認 `^[A-Za-z0-9_-]{1,64}$`：**非法值 ⇒ 不取節點、不滾動、不報錯**；
