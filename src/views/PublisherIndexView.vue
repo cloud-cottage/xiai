@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 出版社匯典（`/publishers`）—— 出版社（publisher）管理页（本單新增）。
+ * 梓行匯溯（`/publishers`）—— 出版社（publisher）管理页（本單新增）。
  * ===================================================================
  * 形态照 `BookIndexView.vue`（同级做法）：
  *   · **页面本体做管理员门**：非管理员 / 未登录 ⇒ 只渲染一段提示（`data-publishers-denied`）
@@ -267,7 +267,7 @@ async function save() {
   <section>
     <div class="page-head publishers__head">
       <div>
-        <h1>出版社匯典</h1>
+        <h1>梓行匯溯</h1>
         <p>
           出版社（publisher）規範行：一家出版機構 / 印社 / 書肆一行，以 `PB` + 9 位碼為同一性
           （join 只認 id 不認名字）。社團與出版法人**分列不合并**；ISBN 反查只認出版法人的號段。

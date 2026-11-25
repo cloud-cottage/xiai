@@ -19,7 +19,7 @@ import { isAdmin, isLoggedIn } from '../data/session.js'
  * **与三个视图文件一律保留**——顶部弹出菜单（`AppHeader.vue` 的 `go('my-corrections')` /
  * `go('my-photos')` / `go('points')`）仍在用它们。**删入口 ≠ 删路由 / 删页面**。
  *
- * 除【印譜匯觀】与【出版社匯典】（本單新增，**两条皆管理员专属**）外，管理员与普通用户看到
+ * 除【印譜匯觀】与【梓行匯溯】（本單新增，**两条皆管理员专属**）外，管理员与普通用户看到
  * **同一套**菜单：管理员的差异主要体现在页面内的「管理员专属按钮」，不体现为独立入口。
  * 该管理员入口的可见性**只**作用于它自己这一项。
  * 【我的雲盤】是**普通用户能力入口**（不是管理员按钮）⇒ **三态（未登錄 / 普通 / 管理员）
@@ -39,10 +39,10 @@ const items = computed(() => {
   /* 【印譜匯觀】（管理员专属）：非管理员 / 未登录 ⇒ push 不执行 ⇒ 该项**零渲染**。 */
   if (isAdmin.value) {
     list.push({ key: 'books', to: { name: 'books' }, glyph: '譜', label: '印譜匯觀' })
-    /* 【出版社匯典】（本單｜xiai.spec §3.107）：同样**仅管理员可见**，判定取法仍是同一处
+    /* 【梓行匯溯】（本單｜xiai.spec §3.107）：同样**仅管理员可见**，判定取法仍是同一处
        `data/session.js` 的 `isAdmin`（**不另造第二种取法**）；位置在 `books` 之后、`my-drive` 之前。
        **条件 push（不在上面的基础数组里）** ⇒ 基础四项的结构面一字不动。 */
-    list.push({ key: 'publishers', to: { name: 'publishers' }, glyph: '社', label: '出版社匯典' })
+    list.push({ key: 'publishers', to: { name: 'publishers' }, glyph: '梓', label: '梓行匯溯' })
   }
   list.push({ key: 'my-drive', to: { name: 'my-drive' }, glyph: '盤', label: '我的雲盤' })
   return list
