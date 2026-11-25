@@ -225,6 +225,15 @@ const COLLECTIONS = Object.freeze({
      ⇒ 客户端零读面）、**零直写入口**（唯一写点是 `ADMIN_OPS.createBook`）。
      影像侧关系字段 `book_id` 落在既有 `images`（`xiai_images`）行上，**不新增集合**。 */
   books: 'xiai_books',
+  /* **出版社（publisher）集合（xiai.spec §3.107.1 / §3.33.3 追加修訂注（v1.133）｜本單）**：
+     `xiai_publishers` —— 出版社規範行的正式落點（`_id = code` ＝ `^PB[0-9]{9}$`、14 業務鍵 ＋ `_id`；
+     影子庫對側 ＝ `feicui_publishers`，口徑歸 feicui 線）。**只在此登记**（集合名仍只活在本文件；
+     实现点零第二套集合名字面），**不进客户端云读面**（不入 `CLOUD_COLLECTIONS` /
+     `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL` ⇒ 客户端零读面）、**唯一写点是
+     `ADMIN_OPS.putPublisher`**（本单；发号面见下方 `issuePublisherCodes` —— 内部函数、
+     **不注册为 op**：`index.js` 成功回包只透传 `row` ⇒ 号必须随 `row` 回，且只由号段账本
+     `kind=publisher` 消费）。 */
+  publishers: 'xiai_publishers',
   /* **CARD 主庫憑據（本單）**：`xiai_server_secrets`（`xiai_` 前綴；**服務端專屬私有**）——
      本文件只**讀**其中 `card_api` 文檔的 `key` 字段（CARD API 密鑰明文，本單新建該集合，
      客戶端權限 ＝ 全部不可讀不可寫）。**不進**客戶端雲讀面（不入 `CLOUD_COLLECTIONS` /
@@ -424,7 +433,14 @@ const OPTIONAL_READ_COLLECTIONS = Object.freeze([
    「集合不存在 ≡ 零行」在本集合上是**真语义**（还没有任何书）⇒ 进可选读面白名单；
    **非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧上抛**（判定单点
    `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）。 */
-  COLLECTIONS.books
+  COLLECTIONS.books,
+  /* **出版社（本單）**：`xiai_publishers` 是**新建集合**（可能尚未被任何写入创建）⇒ 首次
+   `putPublisher` 的幂等预查 / `counterSeedBaseOf('publisher')` 的播种扫描 / `occupiedNosOf('publisher')`
+   的占号扫描都不能因「集合不存在」整笔失败（`persist` 的 `set` 分支另有建集自愈）。
+   「集合不存在 ≡ 零行」在本集合上是**真语义**（还没有任何出版社行）⇒ 进可选读面白名单；
+   **非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧上抛**（判定单点
+   `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）。 */
+  COLLECTIONS.publishers
 ])
 
 /**
@@ -2501,14 +2517,50 @@ function rowsOf(result) {
    · 号域上限沿编码器容量（`codeId.SID_MAX - 1` / `codeId.FID_MAX - 1`）⇒ 越界结构化拒绝。
    --------------------------------------------------------------------------- */
 const COUNTERS_COLLECTION = 'xiai_counters'
-const COUNTER_IDS = Object.freeze({ seal: 'seal', face: 'face', book: 'book' })
-/* `book` 号域：**五位定长十进制** ⇒ 可发号 `1…99999`（`'00001'`）；裁定件 §1.1「管理员不可改」。 */
+/* **出版社（本單）**：`_id` ＝ `publisher`（`kind=publisher` 号别；行面 `_id = code` ＝ `^PB[0-9]{9}$`）。 */
+const COUNTER_IDS = Object.freeze({ seal: 'seal', face: 'face', book: 'book', publisher: 'publisher' })
+/* `book` 号域：**五位定长十进制** ⇒ 可发号 `1…99999`（`'00001'`）；裁定件 §1.1「管理员不可改」。
+   `publisher` 号域：**九位定长十进制** ⇒ 可发号 `1…999999999`（`'PB000000001'`；
+   §3.107.1 `^PB[0-9]{9}$` 形态封顶）。 */
 const COUNTER_CAPACITY = Object.freeze({
   seal: codeId.SID_MAX - 1,
   face: codeId.FID_MAX - 1,
-  book: 99999
+  book: 99999,
+  publisher: 999999999
 })
 const COUNTER_MAX_ATTEMPTS = 8
+
+/* --------------------------------------------------------------------------- 出版社（publisher）号面 */
+
+/** `^PB[0-9]{9}$`（§3.107.1 冻结形态；与 `src/services/publishers.js::PUBLISHER_ID_PATTERN` 同尺）。 */
+const PUBLISHER_CODE_PATTERN = /^PB[0-9]{9}$/
+
+/** 号段账本**单次领号上限**（§3.107.3：`kind=publisher`、单次 ≤ 64）。 */
+const PUBLISHER_ISSUE_MAX = 64
+
+/** `org_type` 封闭三值（缺键按 `publisher` 读；第 4 值 ⇒ `INVALID_VALUE` ＋零写入）。 */
+const PUBLISHER_ORG_TYPES = Object.freeze(['publisher', 'society', 'unknown'])
+
+/** `isbn_prefix` 封闭两值（缺省 `978`；**不得**自造第三种前缀）。 */
+const PUBLISHER_ISBN_PREFIXES = Object.freeze(['978', '979'])
+
+/** `isbn_publisher_codes[].status` 恆两值。 */
+const PUBLISHER_ISBN_CODE_STATUS = Object.freeze(['current', 'legacy'])
+
+/** `name` / `name_cht` 长度上界（§3.107.2：1..200）。 */
+const PUBLISHER_NAME_MAX = 200
+
+/**
+ * `PB` 码 → **号值**（**必须按前缀解析**：`Number('PB000000001')` 是 `NaN` —— 这正是原三元链
+ * 只覆盖 `seal` / `book` / `face` 时 `publisher` 落不进来的坑）。形态不符的脏行 ⇒ `null`
+ * （**不猜、不补编**，既不计入播种基线也不计入占号集）。
+ * @param {*} value 行上的 `code`（缺则回退 `_id`）
+ * @returns {number|null} 后 9 位的十进号值
+ */
+function publisherNoOf(value) {
+  const matched = /^PB([0-9]{9})$/.exec(text(value))
+  return matched ? Number(matched[1]) : null
+}
 
 /**
  * 号源**播种基线**（**单点**）：既有行的最大业务号（`seal_no` / `face_no`；单次 1000 行护栏），
@@ -2518,7 +2570,7 @@ const COUNTER_MAX_ATTEMPTS = 8
  *   · `issueCodeNumber` 首次建计数文档时播种 `seq`；
  *   · `lib/sealDelete.js` 删印后**补建**计数文档（该文档此前从未建过）时播种 `seq` ——
  *     两处口径若各写一份，必然漂移出「重号」。
- * @param {'seal'|'face'} kind 号别
+ * @param {'seal'|'face'|'book'|'publisher'} kind 号别
  * @returns {Promise<number>} 播种基线（非负整数）
  */
 async function counterSeedBaseOf(kind) {
@@ -2539,6 +2591,17 @@ async function counterSeedBaseOf(kind) {
     books.forEach((row) => {
       const own = Number(row && row.id)
       if (Number.isInteger(own) && own > base) base = own
+    })
+  } else if (kind === 'publisher') {
+    /* **出版社（本單）**：既有行的 `_id = code` ＝ `PB` + 9 位 ⇒ 号值须**按前缀解析**
+       （`publisherNoOf`；`Number('PB…')` 是 `NaN`，直接 `Number` 会把基线永远留在 0）。
+       形态不符的脏行不计入基线（不猜、不补编）；集合不存在 ⇒ `readRows` 按可选读面白名单
+       降级为 `[]`（新建集合首建时基线为 0）。
+       **判定类**（发号播种）：取不全 ⇒ 基线偏低 ⇒ 发号撞号 ⇒ **结构化拒绝**（抛错）。 */
+    const publishers = await guardedRowsOf(COLLECTIONS.publishers)
+    publishers.forEach((row) => {
+      const own = publisherNoOf(row && (row.code || row._id))
+      if (own !== null && own > base) base = own
     })
   } else {
     /* **判定类**（发号播种）：同 `seal` 支。 */
@@ -2582,19 +2645,28 @@ const RELEASE_CAS_MAX_MISSES = 2
  * 手工回填）⇒ 直接把释放号发出去就会造出**同一编号两枚印章**（AC §6.4 红线）。
  * **印譜（本單）**：号别 `book` 的占号面是 `xiai_books.id`（五位定长十进制 ⇒ `Number` 即号值）；
  * 由 `lib/books.js::createBook` 在发号前取用（`isTaken` 判据），**不另立第二套占号扫描**。
- * @param {'seal'|'face'|'book'} kind 号别
+ * @param {'seal'|'face'|'book'|'publisher'} kind 号别
  * @returns {Promise<Set<number>>} 已占用号集合
  */
 async function occupiedNosOf(kind) {
   const collection =
-    kind === 'seal' ? COLLECTIONS.seals : kind === 'book' ? COLLECTIONS.books : COLLECTIONS.faces
-  const field = kind === 'seal' ? 'seal_no' : kind === 'book' ? 'id' : 'face_no'
+    kind === 'seal'
+      ? COLLECTIONS.seals
+      : kind === 'book'
+        ? COLLECTIONS.books
+        : kind === 'publisher'
+          ? COLLECTIONS.publishers
+          : COLLECTIONS.faces
+  const field =
+    kind === 'seal' ? 'seal_no' : kind === 'book' ? 'id' : kind === 'publisher' ? 'code' : 'face_no'
   /* **判定类**（发号换号 / 占号判定）：取不全 ⇒ 占用集缺号 ⇒ 释放号会被重复发出（AC §6.4 红线）
      ⇒ **结构化拒绝**（抛错；返回形态仍是 `Set`，调用方逐字不变）。 */
   const rows = await guardedRowsOf(collection)
   const used = new Set()
   rows.forEach((row) => {
-    const n = Number(row && row[field])
+    /* **出版社（本單）**：`Number('PB000000001')` 是 `NaN` ⇒ 必须按 `PB` 前缀解析取后 9 位
+       （`publisherNoOf`）；形态不符的脏行不计入占号集（不猜、不补编）。其余号别逐字不变。 */
+    const n = kind === 'publisher' ? publisherNoOf(row && (row.code || row._id)) : Number(row && row[field])
     if (Number.isInteger(n) && n > 0) used.add(n)
   })
   return used
@@ -2660,7 +2732,7 @@ async function releasedNoClaimedOnServer(counterId, no, seqBefore) {
  * 而读回与另一路的 `inc` 交错会把同一个号发给两路 ⇒ 违反 AC §6.4。故取 CAS：
  * 认领成功与否由**服务端单文档更新**裁决，号由「被锁住的旧值 + 1」确定性得出，**无重号**。
  *
- * @param {'seal'|'face'} kind 号别
+ * @param {'seal'|'face'|'book'|'publisher'} kind 号别
  * @returns {Promise<{ok:true, no:number}|{ok:false, reason:string, message:string}>}
  */
 async function issueCodeNumber(kind) {
@@ -2754,7 +2826,7 @@ async function issueCodeNumber(kind) {
 
 /**
  * 发号 ＋ **避开既有行占位**（采纳路径专用）：撞号继续取下一个号，**绝不改写既有行**。
- * @param {'seal'|'face'} kind 号别
+ * @param {'seal'|'face'|'book'|'publisher'} kind 号别
  * @param {(no:number)=>boolean} isTaken 既有行是否已占该号
  */
 async function issueCodeNumberAvoiding(kind, isTaken) {
@@ -2764,6 +2836,464 @@ async function issueCodeNumberAvoiding(kind, isTaken) {
     if (!isTaken(issued.no)) return issued
   }
   return deny(REASONS.STORAGE_UNAVAILABLE, '識別編號發號撞號重試超限；本次零寫入。')
+}
+
+/* --------------------------------------------------------------------------- 出版社（publisher）写面
+   **本單新增两件（只在本文件落地；集合名 / 号别单点均已由上文登记）**：
+   · `issuePublisherCodes(count)` —— **内部发号函数，不注册为 op**。为什么不能单开 op：云函数
+     `index.js` 的成功回包**只透传 `row / projection / summary / value / artifact / display`**
+     ⇒ 号单开一个 op 也回不到前端手里；发号必须在 `putPublisher` 内完成、随 `row` 一起回包。
+   · `putPublisher(payload, identity, context)` —— **admin op**（`ADMIN_OPS` 52 → 53；**不进**
+     `OPS` 用户面、**不进** sub-admin 能力集：`adminWhitelistDenial` 只放 `admin`）。
+   行面：`_id = code` ＝ `^PB[0-9]{9}$`；14 業務鍵 ＋ `_id`（§3.107.2 冻结表）。
+   --------------------------------------------------------------------------- */
+
+/** `putPublisher` 载荷 / 行面**封闭键面**：14 業務鍵 ＋ `_id`（与 `code` 恒等的文档标识别名）。
+ *  未知键（含身份类键）⇒ `INVALID_FIELD` ＋ 零读零写。 */
+const PUBLISHER_ROW_KEYS = Object.freeze([
+  '_id',
+  'code',
+  'name',
+  'name_cht',
+  'isbn_prefix',
+  'isbn_group',
+  'isbn_publisher_codes',
+  'aliases',
+  'region',
+  'founded_year',
+  'note',
+  'created_at',
+  'created_by',
+  'updated_at',
+  'org_type'
+])
+
+/** 载荷**外层包装键**（`{publisher:{…}}` 形态，与前端服务层 `userWriteGate` 递的整行同形；
+ *  平铺行形态同样受理 —— 两形态都只认 `PUBLISHER_ROW_KEYS` 一套键面）。 */
+const PUBLISHER_PAYLOAD_WRAPPER_KEY = 'publisher'
+
+/** `isbn_group` 长度上界（组区号；与服务层同尺 8 位）。 */
+const PUBLISHER_ISBN_GROUP_MAX = 8
+
+/** `isbn_publisher_codes[].code` 数字串长度上界（与服务层同尺 32）。 */
+const PUBLISHER_ISBN_CODE_MAX = 32
+
+/** `founded_year` 合法区间（1〜9999；`0` / `-1` 特值与非整数一律 `INVALID_VALUE`）。 */
+const PUBLISHER_FOUNDED_YEAR_MIN = 1
+const PUBLISHER_FOUNDED_YEAR_MAX = 9999
+
+/** 业务键**缺键缺省**（新建时补齐 14 键键面；读侧同值：`org_type` 按 `publisher` 读、
+ *  `isbn_prefix` 按 `978` 读、`isbn_group` 按 `7` 读）。 */
+const PUBLISHER_BUSINESS_DEFAULTS = Object.freeze({
+  name: '',
+  name_cht: null,
+  isbn_prefix: '978',
+  isbn_group: '7',
+  isbn_publisher_codes: [],
+  aliases: [],
+  region: null,
+  founded_year: null,
+  note: null,
+  org_type: 'publisher'
+})
+
+/**
+ * **号段账本领号（内部函数；不注册为 op）** —— `kind=publisher` 单次 **1〜64** 枚。
+ *   · 形态 ＝ `PB` ＋ 9 位零填充（`PB000000001`）；同批**顺序取自同一计数文档** ⇒ 连续；
+ *   · **不重用**：号只经既有号段机制 `issueCodeNumber('publisher')`（CAS 认领 ＋ 释放号先回库
+ *     核占用 ＋ 播种基线取既有行最大号）—— 与 `book` / `seal` / `face` **同一套实现、零第二套**；
+ *   · 中途失败 ⇒ 已领的号**留空洞不回退**（宁留空洞、绝不重号），返回结构化拒绝。
+ * @param {number} count 领号枚数（1〜64）
+ * @returns {Promise<{ok:true, codes:string[]}|{ok:false, reason:string, message:string}>}
+ */
+async function issuePublisherCodes(count) {
+  const n = Number(count)
+  if (!Number.isInteger(n) || n < 1 || n > PUBLISHER_ISSUE_MAX) {
+    return deny(
+      REASONS.INVALID_VALUE,
+      `號段賬本單次領號必須是 1〜${PUBLISHER_ISSUE_MAX} 的整數（kind=publisher）；本次零領號。`
+    )
+  }
+  const codes = []
+  for (let index = 0; index < n; index += 1) {
+    const issued = await issueCodeNumber('publisher')
+    if (!issued.ok) return { ok: false, reason: issued.reason, message: issued.message }
+    const code = `PB${String(issued.no).padStart(9, '0')}`
+    if (!PUBLISHER_CODE_PATTERN.test(code)) {
+      return deny(REASONS.STORAGE_UNAVAILABLE, '出版社編號形態異常（號源超界）；本次零領號。')
+    }
+    if (codes.indexOf(code) !== -1) {
+      return deny(REASONS.STORAGE_UNAVAILABLE, '號段賬本重複發號；本次零領號。')
+    }
+    codes.push(code)
+  }
+  return { ok: true, codes }
+}
+
+/**
+ * `isbn_publisher_codes` 归一 ＋ **值域门③**：元素**恰三键** `{code, status, note?}` ——
+ * 多一键 / 缺 `code` / 缺 `status` ⇒ `INVALID_VALUE`；`status ⊆ {current, legacy}`；
+ * `code` 必须是**数字串**（1〜32 位）；`note` 给出即必须是字符串（空串不落键）。
+ * @param {*} value 载荷值
+ * @returns {{ok:true, value:object[]}|{ok:false, reason:string, message:string}}
+ */
+function publisherIsbnCodesOf(value) {
+  if (value === null || value === undefined) return { ok: true, value: [] }
+  if (!Array.isArray(value)) return deny(REASONS.INVALID_VALUE, 'isbn_publisher_codes 必須是數組；本次零寫入。')
+  const out = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return deny(REASONS.INVALID_VALUE, 'isbn_publisher_codes 元素必須是對象；本次零寫入。')
+    }
+    const keys = Object.keys(item)
+    const extra = keys.filter((key) => key !== 'code' && key !== 'status' && key !== 'note')
+    if (extra.length > 0) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `isbn_publisher_codes 元素恰封閉三鍵（code / status / note），多出「${extra.join('、')}」；本次零寫入。`
+      )
+    }
+    if (keys.indexOf('code') === -1 || keys.indexOf('status') === -1) {
+      return deny(REASONS.INVALID_VALUE, 'isbn_publisher_codes 元素必填 code 與 status（note 可選）；本次零寫入。')
+    }
+    const code = text(item.code)
+    if (!/^[0-9]+$/.test(code) || code.length > PUBLISHER_ISBN_CODE_MAX) {
+      return deny(
+        REASONS.INVALID_VALUE,
+        `isbn_publisher_codes[].code 必須是 1〜${PUBLISHER_ISBN_CODE_MAX} 位數字串；本次零寫入。`
+      )
+    }
+    const status = text(item.status)
+    if (PUBLISHER_ISBN_CODE_STATUS.indexOf(status) === -1) {
+      return deny(REASONS.INVALID_VALUE, 'isbn_publisher_codes[].status 只能是 current / legacy；本次零寫入。')
+    }
+    const entry = { code, status }
+    if (Object.prototype.hasOwnProperty.call(item, 'note')) {
+      if (item.note !== null && item.note !== undefined && typeof item.note !== 'string') {
+        return deny(REASONS.INVALID_VALUE, 'isbn_publisher_codes[].note 必須是字符串；本次零寫入。')
+      }
+      const note = text(item.note)
+      if (note !== '') entry.note = note
+    }
+    out.push(entry)
+  }
+  return { ok: true, value: out }
+}
+
+/**
+ * `aliases` 归一 ＋ **值域门④a**：必须是**字符串数组**（元素非字符串 / 整体非数组 ⇒
+ * `INVALID_VALUE`）；去空、去重、保序。
+ * @param {*} value 载荷值
+ * @returns {{ok:true, value:string[]}|{ok:false, reason:string, message:string}}
+ */
+function publisherAliasesOf(value) {
+  if (value === null || value === undefined) return { ok: true, value: [] }
+  if (!Array.isArray(value)) return deny(REASONS.INVALID_VALUE, 'aliases 必須是字符串數組；本次零寫入。')
+  const out = []
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      return deny(REASONS.INVALID_VALUE, 'aliases 必須是字符串數組（元素非字符串）；本次零寫入。')
+    }
+    const one = text(item)
+    if (one !== '' && out.indexOf(one) === -1) out.push(one)
+  }
+  return { ok: true, value: out }
+}
+
+/**
+ * `founded_year` 归一 ＋ **值域门④b**：`null` / 缺 / 空串 ⇒ `null`；其余必须是
+ * **1〜9999 的整数**（非整数、`0` / `-1` 特值、字符串数字 ⇒ `INVALID_VALUE`）。
+ * @param {*} value 载荷值
+ * @returns {{ok:true, value:number|null}|{ok:false, reason:string, message:string}}
+ */
+function publisherFoundedYearOf(value) {
+  if (value === null || value === undefined || value === '') return { ok: true, value: null }
+  if (!Number.isInteger(value)) return deny(REASONS.INVALID_VALUE, 'founded_year 必須是整數或 null；本次零寫入。')
+  if (value < PUBLISHER_FOUNDED_YEAR_MIN || value > PUBLISHER_FOUNDED_YEAR_MAX) {
+    return deny(
+      REASONS.INVALID_VALUE,
+      `founded_year 必須是 ${PUBLISHER_FOUNDED_YEAR_MIN}〜${PUBLISHER_FOUNDED_YEAR_MAX} 的整數或 null（0 / -1 特值判負）；本次零寫入。`
+    )
+  }
+  return { ok: true, value }
+}
+
+/**
+ * 可空串业务键（`region` / `note` / `name_cht`）归一 ＋ **值域门④c**：给出即必须是**字符串**
+ * （非字符串 ⇒ `INVALID_VALUE`）；空串 ⇒ `null`。
+ * @param {*} value 载荷值
+ * @param {string} key 字段名（文案用）
+ * @returns {{ok:true, value:string|null}|{ok:false, reason:string, message:string}}
+ */
+function publisherNullableTextOf(value, key) {
+  if (value === null || value === undefined) return { ok: true, value: null }
+  if (typeof value !== 'string') return deny(REASONS.INVALID_VALUE, `${key} 必須是字符串或 null；本次零寫入。`)
+  const out = text(value)
+  return { ok: true, value: out === '' ? null : out }
+}
+
+/**
+ * **四道值域门 ＋ 业务面归一**（纯函数、零 I/O、绝不自抛 I/O）：只归一**载荷确实给出**的键，
+ * 未给出的键取 `base`（编辑轮 ＝ 既有行，字段不被静默清空）／`PUBLISHER_BUSINESS_DEFAULTS`
+ * （新建轮）⇒ 落行恒 14 業務鍵齐备。**任一门不合 ⇒ `INVALID_VALUE` ＋ 整行零写入**。
+ *   ① `org_type ⊆ {publisher, society, unknown}`（缺省 `publisher`）；
+ *   ② `isbn_prefix ⊆ {978, 979}`（缺省 `978`）；`isbn_group` 字符串 ≤8（缺省 `7`）；
+ *   ③ `isbn_publisher_codes` 见 `publisherIsbnCodesOf`；
+ *   ④ `name` / `name_cht` ≤200 字符串、`aliases` 字符串数组、`founded_year` 整数或 `null`、
+ *      `region` / `note` 字符串或 `null`。
+ * @param {object} raw 载荷中的行对象
+ * @param {object|null} base 既有行（新建轮传 `null`）
+ * @returns {{ok:true, value:object}|{ok:false, reason:string, message:string}}
+ */
+function normalizePublisherBusiness(raw, base) {
+  const src = raw && typeof raw === 'object' ? raw : {}
+  const has = (key) => Object.prototype.hasOwnProperty.call(src, key)
+  const carry = (key) =>
+    base && typeof base === 'object' && Object.prototype.hasOwnProperty.call(base, key)
+      ? base[key]
+      : PUBLISHER_BUSINESS_DEFAULTS[key]
+  const value = {}
+
+  /* ① `org_type`（门一）。 */
+  if (has('org_type')) {
+    const orgType =
+      src.org_type === null || src.org_type === undefined || text(src.org_type) === ''
+        ? 'publisher'
+        : text(src.org_type)
+    if (PUBLISHER_ORG_TYPES.indexOf(orgType) === -1) {
+      return deny(REASONS.INVALID_VALUE, 'org_type 只能是 publisher / society / unknown（缺省 publisher）；本次零寫入。')
+    }
+    value.org_type = orgType
+  } else {
+    value.org_type = text(carry('org_type')) || 'publisher'
+  }
+
+  /* ② `isbn_prefix` ＋ `isbn_group`（门二）。 */
+  if (has('isbn_prefix')) {
+    const prefix =
+      src.isbn_prefix === null || src.isbn_prefix === undefined || text(src.isbn_prefix) === ''
+        ? '978'
+        : text(src.isbn_prefix)
+    if (PUBLISHER_ISBN_PREFIXES.indexOf(prefix) === -1) {
+      return deny(REASONS.INVALID_VALUE, 'isbn_prefix 只能是 978 / 979（缺省 978）；本次零寫入。')
+    }
+    value.isbn_prefix = prefix
+  } else {
+    value.isbn_prefix = text(carry('isbn_prefix')) || '978'
+  }
+  if (has('isbn_group')) {
+    if (src.isbn_group !== null && src.isbn_group !== undefined && typeof src.isbn_group !== 'string') {
+      return deny(REASONS.INVALID_VALUE, 'isbn_group 必須是字符串；本次零寫入。')
+    }
+    const group = text(src.isbn_group)
+    if (group.length > PUBLISHER_ISBN_GROUP_MAX) {
+      return deny(REASONS.INVALID_VALUE, `isbn_group 過長（≤${PUBLISHER_ISBN_GROUP_MAX}）；本次零寫入。`)
+    }
+    value.isbn_group = group === '' ? text(carry('isbn_group')) || '7' : group
+  } else {
+    value.isbn_group = text(carry('isbn_group')) || '7'
+  }
+
+  /* ③ `isbn_publisher_codes`（门三）。 */
+  if (has('isbn_publisher_codes')) {
+    const codes = publisherIsbnCodesOf(src.isbn_publisher_codes)
+    if (codes.ok !== true) return codes
+    value.isbn_publisher_codes = codes.value
+  } else {
+    const carried = carry('isbn_publisher_codes')
+    value.isbn_publisher_codes = Array.isArray(carried) ? carried.slice() : []
+  }
+
+  /* ④ `name` / `name_cht` / `aliases` / `founded_year` / `region` / `note`（门四）。 */
+  if (has('name')) {
+    if (src.name !== null && src.name !== undefined && typeof src.name !== 'string') {
+      return deny(REASONS.INVALID_VALUE, 'name 必須是字符串；本次零寫入。')
+    }
+    const name = text(src.name)
+    if (name.length > PUBLISHER_NAME_MAX) {
+      return deny(REASONS.INVALID_VALUE, `name 過長（≤${PUBLISHER_NAME_MAX}）；本次零寫入。`)
+    }
+    value.name = name
+  } else {
+    value.name = text(carry('name'))
+  }
+  if (has('name_cht')) {
+    const nameCht = publisherNullableTextOf(src.name_cht, 'name_cht')
+    if (nameCht.ok !== true) return nameCht
+    if (nameCht.value !== null && nameCht.value.length > PUBLISHER_NAME_MAX) {
+      return deny(REASONS.INVALID_VALUE, `name_cht 過長（≤${PUBLISHER_NAME_MAX}）；本次零寫入。`)
+    }
+    value.name_cht = nameCht.value
+  } else {
+    const carried = carry('name_cht')
+    value.name_cht = carried === undefined || carried === '' ? null : carried
+  }
+  if (has('aliases')) {
+    const aliases = publisherAliasesOf(src.aliases)
+    if (aliases.ok !== true) return aliases
+    value.aliases = aliases.value
+  } else {
+    const carried = carry('aliases')
+    value.aliases = Array.isArray(carried) ? carried.slice() : []
+  }
+  if (has('founded_year')) {
+    const founded = publisherFoundedYearOf(src.founded_year)
+    if (founded.ok !== true) return founded
+    value.founded_year = founded.value
+  } else {
+    const carried = carry('founded_year')
+    value.founded_year = Number.isInteger(carried) ? carried : null
+  }
+  if (has('region')) {
+    const region = publisherNullableTextOf(src.region, 'region')
+    if (region.ok !== true) return region
+    value.region = region.value
+  } else {
+    const carried = carry('region')
+    value.region = typeof carried === 'string' && carried !== '' ? carried : null
+  }
+  if (has('note')) {
+    const note = publisherNullableTextOf(src.note, 'note')
+    if (note.ok !== true) return note
+    value.note = note.value
+  } else {
+    const carried = carry('note')
+    value.note = typeof carried === 'string' && carried !== '' ? carried : null
+  }
+
+  return { ok: true, value }
+}
+
+/**
+ * **管理員「出版社新建 / 改行」（`putPublisher`｜`ADMIN_OPS` 52 → 53）** —— 唯一出版社写点。
+ *
+ * 硬口径（逐条）：
+ *   ① **第一行即管理员门**（既有 `adminWhitelistDenial`；缺 env / 非白名单 / 会话角色非
+ *      `admin` ⇒ 结构化拒 ＋ **零读零写**）—— `sub-admin` **不放行**（不进 sub-admin 能力集）；
+ *   ② 载荷形态 ＋ **封闭键面 `PUBLISHER_ROW_KEYS`**（14 業務鍵 ＋ `_id`；外层可带
+ *      `{publisher:{…}}` 包装）。未知键 / 身份类键 ⇒ `INVALID_FIELD` ＋ 零读零写；
+ *   ③ **新建不接受自带 `code`**：载荷带 `code` / `_id` 但库内无该行 ⇒ `INVALID_FIELD`
+ *      （新行 `_id = code` **只由号段账本发**）；带了但形态非 `^PB[0-9]{9}$` ⇒ `INVALID_VALUE`；
+ *      `code` 与 `_id` 并存且不等 ⇒ `INVALID_VALUE`；
+ *   ④ **四道门**（`org_type` / `isbn_prefix` / `isbn_publisher_codes` / 其余业务键值域）——
+ *      任一不合 ⇒ `INVALID_VALUE` ＋ **整行零写入**（判定早于发号与一切写）；
+ *   ⑤ **发号**：新建轮 `issuePublisherCodes(1)`（内部函数，**不注册为 op** —— 回包只透传
+ *      `row` ⇒ 号必须随 `row` 回）；编辑轮**不发号**、按 `_id = code` 命中既有行；
+ *   ⑥ **服务端盖章** `created_at` / `created_by` / `updated_at`（载荷自带一律不采信；
+ *      `created_by` ＝ `uid:<uid>`，取不到 uid ⇒ `ops`；编辑轮保留原 `created_at` /
+ *      `created_by`）；
+ *   ⑦ **幂等**：同 `code` 再写 ＝ 编辑**同一条**（确定性文档键 `set`）⇒ **不新增第二行**；
+ *   ⑧ 落盘后**读回比对**（不以写回执判成功）；失败 ⇒ `STORAGE_UNAVAILABLE`；
+ *   ⑨ 成功回包 `{ok:true, row}`（`row` 含最终 `code`；`index.js` 对 `row` 零过滤）、
+ *      失败恒**恰 3 键**；`reason` **零新增**、**零新集合**（写点＝既有
+ *      `COLLECTIONS.publishers`）、**不产 `plan`**（写步在 op 内按确定序执行）。
+ * @param {object} payload 载荷（封闭 `PUBLISHER_ROW_KEYS`，可带 `publisher` 包装）
+ * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+ * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+ * @returns {Promise<{ok:true, row:object}|{ok:false, reason:string, message:string}>}
+ */
+async function putPublisher(payload, identity, context) {
+  /* ① 管理员门（**任何读之前**；`sub-admin` / 普通用户 / 缺 env 一律结构化拒）。 */
+  const identityDenial = adminWhitelistDenial(identity, context && context.adminPhone)
+  if (identityDenial) return identityDenial
+  /* ② 载荷形态 ＋ 封闭键面（`{publisher:{…}}` 与平铺两形态共用同一套键面）。 */
+  if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+  }
+  let raw = payload
+  if (Object.prototype.hasOwnProperty.call(payload, PUBLISHER_PAYLOAD_WRAPPER_KEY)) {
+    const outerUnknown = Object.keys(payload).filter((key) => key !== PUBLISHER_PAYLOAD_WRAPPER_KEY)
+    if (outerUnknown.length > 0) {
+      return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${outerUnknown.join('、')}；本次零寫入。`)
+    }
+    const inner = payload[PUBLISHER_PAYLOAD_WRAPPER_KEY]
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) {
+      return deny(REASONS.INVALID_FIELD, '載荷鍵 publisher 必須是出版社行對象；本次零寫入。')
+    }
+    raw = inner
+  }
+  const unknown = Object.keys(raw).filter((key) => PUBLISHER_ROW_KEYS.indexOf(key) === -1)
+  if (unknown.length > 0) {
+    const identityKeys = unknown.filter((key) => IDENTITY_KEYS.indexOf(key) !== -1)
+    const hint =
+      identityKeys.length > 0
+        ? `其中身份類欄位（${identityKeys.join('、')}）由服務端記錄，一律不採信前端自稱`
+        : '如實報回，不靜默丟鍵'
+    return deny(REASONS.INVALID_FIELD, `載荷含未知欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+  }
+  /* ③ `code`（＝ `_id`）：新建不收自带 code；编辑按 `_id = code` 找既有行。 */
+  const codeFromCode = text(raw.code)
+  const codeFromId = text(raw._id)
+  if (codeFromCode !== '' && codeFromId !== '' && codeFromCode !== codeFromId) {
+    return deny(REASONS.INVALID_VALUE, 'code 與 _id 必須一致（兩者恒等）；本次零寫入。')
+  }
+  const requested = codeFromCode || codeFromId
+  let existing = null
+  if (requested !== '') {
+    if (!PUBLISHER_CODE_PATTERN.test(requested)) {
+      return deny(REASONS.INVALID_VALUE, 'code 形態必須是 PB+9 位（^PB[0-9]{9}$）；本次零寫入。')
+    }
+    /* 幂等预查（**判定类**读面；集合不存在 ⇒ 可选读面白名单降级 `[]` ⇒ 视为无既有行）。 */
+    const rows = await guardedRowsOf(COLLECTIONS.publishers)
+    existing = rows.find((row) => text(row && (row._id || row.code)) === requested) || null
+    if (!existing) {
+      return deny(
+        REASONS.INVALID_FIELD,
+        '新建不接受自帶 code（新行 `_id = code` 只由號段賬本 kind=publisher 發）；本次零寫入。'
+      )
+    }
+  }
+  /* ④ 四道值域门（任一不合 ⇒ `INVALID_VALUE` ＋ **整行零写入**；判定早于发号与一切写）。 */
+  const normalized = normalizePublisherBusiness(raw, existing)
+  if (normalized.ok !== true) return normalized
+  const business = normalized.value
+  /* ⑤ 发号（**仅新建**；编辑轮不发号、不改 `_id`）。 */
+  let code = requested
+  if (!existing) {
+    const issued = await issuePublisherCodes(1)
+    if (issued.ok !== true) return { ok: false, reason: issued.reason, message: issued.message }
+    code = issued.codes[0]
+  }
+  /* ⑥ 服务端盖章（`created_at` / `created_by` / `updated_at`；载荷自带一律不采信）。 */
+  const seconds = Number(context && context.nowSeconds) || Math.floor(Date.now() / 1000)
+  const at = new Date(seconds * 1000).toISOString()
+  const uid = text(identity && identity.uid)
+  const createdBy = uid ? `uid:${uid}` : 'ops'
+  const row = Object.assign({}, existing || {}, business, {
+    _id: code,
+    code,
+    created_at: existing ? text(existing.created_at) || at : at,
+    created_by: existing ? text(existing.created_by) || createdBy : createdBy,
+    updated_at: at
+  })
+  /* ⑦ 落盘（单步确定性 `set`：同 `code` 再写 ＝ 编辑同一条 ⇒ **不新增第二行**）。 */
+  try {
+    await persist({ writes: [{ kind: 'set', collection: COLLECTIONS.publishers, id: code, doc: row }] })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `出版社行落盤失敗（code：${code}）；本次未落成，可重試。（診斷：${(error && error.message) || 'unknown'}）`
+    )
+  }
+  /* ⑧ 读回比对（**不以写回执判成功**；样板 ＝ `lib/books.js::createBook`）。 */
+  let written = []
+  try {
+    written = await readRows(COLLECTIONS.publishers, { _id: code }, { limit: 1 })
+  } catch (error) {
+    return deny(
+      REASONS.STORAGE_UNAVAILABLE,
+      `出版社行已送出，但讀回校驗失敗（code：${code}）；可重試。（診斷：${(error && error.message) || 'unknown'}）`
+    )
+  }
+  const back = written.length > 0 ? written[0] : null
+  if (!back) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, `出版社行已送出，但讀回未見該行（code：${code}）⇒ 不報成功，請重試。`)
+  }
+  if (text(back._id || back.code) !== code || text(back.updated_at) !== at) {
+    return deny(REASONS.STORAGE_UNAVAILABLE, `出版社行讀回不一致（code：${code}）⇒ 不報成功，請重試。`)
+  }
+  /* ⑨ 回包经 `row`（`index.js` 对 `row` 零过滤 ⇒ 最终 `code` 随行回传）。 */
+  return { ok: true, row }
 }
 
 /**
@@ -11411,7 +11941,29 @@ const ADMIN_OPS = Object.freeze({
   async listBookCovers(payload, identity, context) {
     const { listBookCovers: runListCovers } = require('./books.js')
     return runListCovers(payload, identity, context)
-  }
+  },
+
+  /**
+   * **管理員「出版社新建 / 改行」（`putPublisher`｜xiai.spec §3.107｜本單）** —— 实现单点
+   * ＝ 本文件上文「出版社写面」段的 `putPublisher`（本处只做注册，**零第二套逻辑**）。
+   * **`ADMIN_OPS` 52 → 53**（字典序位在 `pullImportRows` 之后、`querySealByFingerprint` 之前）。
+   *
+   * 硬口径（逐条；详见实现本体 JSDoc）：① **第一行即管理员门**（`adminWhitelistDenial`；
+   * 非 admin ⇒ `FORBIDDEN` ＋ 零读零写；**`sub-admin` 不放行**、本 op **不进** sub-admin 能力集）；
+   * ② 载荷封闭键面 `PUBLISHER_ROW_KEYS`（14 業務鍵 ＋ `_id`，可带 `{publisher:{…}}` 包装；
+   * 未知键 / 身份类键 ⇒ `INVALID_FIELD`）；③ **新建不接受自带 `code`**（带了 ⇒ `INVALID_FIELD`；
+   * 由内部 `issuePublisherCodes(1)` 发号 —— **不注册为 op**，因 `index.js` 成功回包只透传
+   * `row` ⇒ 号必须随 `row` 回），编辑按 `_id = code`；④ **四道门**（`org_type` ⊆ 三值 /
+   * `isbn_prefix` ⊆ 两值 / `isbn_publisher_codes` 元素恰三键且 `status` ⊆ 两值、`code` 数字串 /
+   * 其余业务键值域）任一不合 ⇒ `INVALID_VALUE` ＋ **整行零写入**；⑤ **服务端盖章**
+   * `created_at` / `updated_at` / `created_by`；⑥ **幂等**：同 `code` 再写 ＝ 编辑同一条
+   * （确定性 `_id = code`）⇒ **不新增第二行**；⑦ 成功回包 `{ok:true, row}`（含最终 `code`）、
+   * 失败恒恰 3 键；`reason` **零新增**、**零新集合**、**不产 `plan`**。
+   * @param {object} payload 载荷（封闭 `PUBLISHER_ROW_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   */
+  putPublisher
 })
 
 /**
@@ -12080,5 +12632,19 @@ module.exports = {
   /* **審計載體 preflight（本單新增）**：唯一建集点（`db.createCollection`）＋「已存在」判据 ——
      `lib/sealDelete.js` 删任何行之前先确保 `COLLECTIONS.adminAudit` 在库（离线自检可注入假 DB）。 */
   ensureCollection,
-  persist
+  persist,
+  /* **出版社写面（本單 `putPublisher`｜`ADMIN_OPS` 52 → 53）**：op 本体 ＋ 内部发号单点
+     （`issuePublisherCodes` —— **不注册为 op**，号只随 `row` 回包）＋ 载荷封闭键面 ＋
+     值域常量 ＋ 四道门归一单点 —— 供离线自检直接断言（实现单点均在本文件上文，零第二套）。 */
+  putPublisher,
+  issuePublisherCodes,
+  normalizePublisherBusiness,
+  PUBLISHER_ROW_KEYS,
+  PUBLISHER_PAYLOAD_WRAPPER_KEY,
+  PUBLISHER_CODE_PATTERN,
+  PUBLISHER_ISSUE_MAX,
+  PUBLISHER_ORG_TYPES,
+  PUBLISHER_ISBN_PREFIXES,
+  PUBLISHER_ISBN_CODE_STATUS,
+  PUBLISHER_NAME_MAX
 }

@@ -493,6 +493,66 @@ export function mergeCloudSnapshotRows(incoming = {}) {
 }
 
 /* ============================================================================
+   **雲端快照行就地改寫（唯一單點｜本單）—— 與 `mergeCloudSnapshotRows` **同族**
+   ----------------------------------------------------------------------------
+   缺陷（線上實測）：管理员在详情页【人工智能修復】并【取】用新图后，服务端已把本印面行的
+   `face_image_id` 改写，但**當前內存雲端快照**裏那一行還是舊指向 ⇒ 緊接著 `dataVersion + 1`
+   觸發的重讀仍讀回**舊圖**；而同一刻 `retryDataSource()` 又把讀取面置 `pending`
+   （`readCollection` 的 pending 分支 ⇒ 空集，**本單一字未改**）⇒ 新圖非得等下一輪水合落定
+   才上屏。本函數把**單行的若乾鍵**就地蓋進快照裡的**既有行**，讓「服務端已生效、快照還沒
+   跟上」這段窗口在**當帧**閉合（調用序：先蓋 ⇒ 再 `dataVersion + 1` ⇒ 才 `retryDataSource()`）。
+   與哪個單點同形（逐條對齊 `mergeCloudSnapshotRows`）：
+     · 行身份**同一把尺** `overlayIdentityOf`（`_id` ⇒ `id` ⇒ `stamp_id`）——配對不另立判據；
+     · 改寫後**替換集合數組身份**（`snapshot[key] = [...]`）⇒ `readCollection` 的讀緩存
+       （判 `cloudRows` 身份）自動失效 —— **不另立第二套失效口**；
+     · 純度同族：只改 `cloudbase.js` 交出的快照對象 —— **不寫 localStorage、不發網絡、
+       不改雲端、不臆造 `_id`**；快照缺席（未配置 / 未落定 / 已回落）⇒ **空操作**早退；
+     · `patched` 與 `merged` 同義：**快照真的被改寫**才算 true（重複蓋同一批鍵 ⇒ 第二次
+       是空操作 ⇒ 冪等）。
+   與併入的差別（本函數的本分）：併入只**補新行**（行不在才加），本函數**只改已存在行** ——
+   行不在快照裡 ⇒ **不追加**（半截行比缺行更害人：只有 `face_image_id` 的印面行會被讀路徑
+   當成真行渲染），照舊交回空操作、由既有下一輪水合補齊。
+   ============================================================================ */
+
+/**
+ * 把 `row` 裏的鍵就地蓋進當前雲端快照的**同身份既有行**（**改已存在行的唯一單點**）。
+ * @param {string} key 雲集合鍵（`CLOUD_COLLECTION_KEYS` 之外 ⇒ 空操作，不往快照塞野鍵）
+ * @param {object} row 行身份（`overlayIdentityOf`，與併入同一把尺）＋ 要覆蓋的鍵；
+ *   值為 `undefined` 的鍵**不參與覆蓋**（避免把既有 `_id` 抹成空缺 —— 不臆造也不抹除）
+ * @returns {{patched:boolean}} `patched`＝快照真的被改寫
+ */
+export function patchCloudSnapshotRow(key, row) {
+  const snapshot = cloudBaseSnapshot()
+  if (!snapshot || typeof snapshot !== 'object') return { patched: false }
+  if (!CLOUD_COLLECTION_KEYS.includes(key)) return { patched: false }
+  if (!row || typeof row !== 'object') return { patched: false }
+  const id = overlayIdentityOf(row)
+  if (!id) return { patched: false }
+  const base = Array.isArray(snapshot[key]) ? snapshot[key] : null
+  if (!base) return { patched: false }
+  const index = base.findIndex((item) => overlayIdentityOf(item) === id)
+  if (index < 0) return { patched: false }
+  const current = base[index]
+  const patch = {}
+  Object.keys(row).forEach((name) => {
+    if (row[name] !== undefined) patch[name] = row[name]
+  })
+  const merged = { ...current, ...patch }
+  /* **身份不得被改寫**：蓋完若身份尺讀出另一個值（例如把 `_id` 蓄成空串）⇒ 拒寫交回
+     空操作 —— 身份是配對依據，改了它這一行就再也配不上（本函數寧可不改）。 */
+  if (overlayIdentityOf(merged) !== id) return { patched: false }
+  /* **冪等**：行內容沒變 ⇒ 不動快照（也就不用白換一次數組身份）。行是 `normalize*Row`
+     出來的純 JSON 行，`{...current, ...patch}` 的鍵序＝原行鍵序（覆蓋不改位置、新鍵才
+     追加在尾）⇒ 逐字序列比即可判定「真的改過」。 */
+  if (JSON.stringify(merged) === JSON.stringify(current)) return { patched: false }
+  const next = base.slice()
+  next[index] = merged
+  /* **新數組身份** ⇒ 讀緩存失效（與 `mergeCloudSnapshotRows` 同一條）。 */
+  snapshot[key] = next
+  return { patched: true }
+}
+
+/* ============================================================================
    **孤兒印章行讀數（本單）**
    ----------------------------------------------------------------------------
    `orphanSealState` 只由 `withLocalOverlay('seals', …)` 寫（雲端快照 ready 才會跑到那裡）；
@@ -2328,6 +2388,37 @@ export function listPersonProposalRows() {
 /** 写印人提案行。 */
 export function savePersonProposalRows(rows) {
   return writeCollection(PERSON_PROPOSAL_COLLECTION_KEY, rows)
+}
+
+/* ============================================================================
+   **出版社（publisher）集合读写（xiai.spec §3.107 / §4.1.22｜v1.133 入册）
+   ----------------------------------------------------------------------------
+   落点 ＝ 新集合 `xiai_publishers`（集合清單 30 → 31；`xiai_` 前綴）的**本機鏡像**
+   （真实键名 `xiai:v1:publishers`；**代际登记**见 `data/storage.js::STORAGE_KEYS` 的
+   `publishers` 项 —— 全工程「存储键登记表」唯一落点仍是那一处，本处只放同名同值的常量）。
+   · 行面 ＝ **14 業務鍵 ＋ `_id`**（逐字 §3.107.2 冻结表；`_id = code` 恒等、`^PB[0-9]{9}$`）；
+     影子库侧对侧集合 ＝ `feicui_publishers`（另加 `_shadow`），**不进本键**。
+   · **读写只经本节两个助手**（服务层 `services/publishers.js` 是唯一业务入口）；
+     **不在数据层做任何判权 / 值域判定**（判权在服务层 `isAdmin`，值域门在服务层）。
+   · 本集合**已登记进** `cloudbase.js::CLOUD_COLLECTIONS`（`publishers: 'xiai_publishers'`，
+     与云函数侧 `COLLECTIONS.publishers` 逐字同值）；云读面**逐集合降级**（集合不存在 / 查询抛错
+     ⇒ **仅本集合**置空集 ＋ 诊断量 `publishers_unavailable`，**不回落整轮、不阻断其它集合**，
+     口径见 xiai.spec §3.107.7）⇒ 云端未建集合时本机镜像仍是该集合的兜底读面，
+     如实登记、不假装云端有行。
+   ============================================================================ */
+
+/** 出版社本机集合键（真实键名 `xiai:v1:publishers`；代际登记见 `storage.js::STORAGE_KEYS`）。 */
+const PUBLISHER_COLLECTION_KEY = 'publishers'
+
+/** 读出版社行（本机镜像；云读面已接管 `publishers` ⇒ 走既有 `readCollection`（云快照 ∪ 本机覆盖层），
+ *  集合不存在时按上条逐集合降级回本机镜像，键面与行为与其余集合一字同）。 */
+export function listPublisherRows() {
+  return readCollection(PUBLISHER_COLLECTION_KEY, [])
+}
+
+/** 写出版社行（**唯一写点**＝服务层 `upsertPublisher` / `addIsbnCode` / `removeIsbnCode`）。 */
+export function savePublisherRows(rows) {
+  return writeCollection(PUBLISHER_COLLECTION_KEY, rows)
 }
 
 /* ---------------------------------------------------------------------------

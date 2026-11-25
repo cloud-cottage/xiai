@@ -56,6 +56,17 @@ function openProposalEntry() {
   proposalOpen.value = true
 }
 
+/* **深链（本單）**：`/persons?propose=1` ⇒ **直接打开** `PersonProposalDialog`
+   （读到 query 就打开，**不是只滚动定位**）。`immediate` 覆盖首屏落地；query 变化（含登录回跳后
+   带 `redirect=/persons?propose=1` 回本页）同样触发。值非 `'1'` ⇒ 不动（与既有入口行为一致）。 */
+watch(
+  () => route.query.propose,
+  (value) => {
+    if (String(value) === '1') openProposalEntry()
+  },
+  { immediate: true }
+)
+
 /* ------------------------------ 數據面（只讀） ------------------------------ */
 
 /** 正式印人行（雲端快照 / 本機鏡像；`readCollection` 已做讀緩存，逐次讀取不重解析）。 */

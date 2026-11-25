@@ -16,7 +16,7 @@
  *     放宽 `book_id` 正则 / 原样全绿正对照）必须逐条见红。
  *
  * 判据分段：
- *   A 数据模型与写面：三 op 在 `ADMIN_OPS`（恰 52）、载荷封闭键面、必填 / 可空 / 年份值域、
+ *   A 数据模型与写面：三 op 在 `ADMIN_OPS`（恰 53）、载荷封闭键面、必填 / 可空 / 年份值域、
  *     作者引用门、`listBooks` 行投影 11 键与升序、`setImageBook` 形态门与 `null` 取消、
  *     幂等、发号（`issueCodeNumberAvoiding('book', isTaken)` ＋ `padStart(5)`）、`index.js` 读出面收窄。
  *   B 静态红线：`lib/books.js` 零集合名字面、`lib/ops.js` 三 op 薄委派、
@@ -766,8 +766,8 @@ const notInPublicOps = BOOK_OPS.filter((op) => Object.prototype.hasOwnProperty.c
 
 check(
   'A1',
-  '三 op 全落 `ADMIN_OPS` 且均为 function；`ADMIN_OPS` 恰 52（51 → 52，2026-11-17 AI 候選圖可见性回填單增 `repairAiCandidateVisibility`：函數、薄委派本文件实现点、零新 reason，字典序位在 `registerFaceImage` 之後、`repairAuthorPersonId` 之前；前一版 51 由 2026-11-17 印譜封面/改名單增 `updateBook` / `setBookCover` / `listBookCovers` 带入 48 → 51）；三 op 不落 `OPS` / `PUBLIC_OPS`（零用户读面）',
-  { types: ['function', 'function', 'function'], adminOpsCount: 52, contains: true, userOpsLeak: [], publicOpsLeak: [] },
+  '三 op 全落 `ADMIN_OPS` 且均为 function；`ADMIN_OPS` 恰 53（52 → 53，2026-11-26 出版社写面单增 `putPublisher`（函数、零新 reason、只落 `ADMIN_OPS` ⇒ 52 → 53）；前一版 52 由 51 → 52，2026-11-17 AI 候選圖可见性回填單增 `repairAiCandidateVisibility`：函數、薄委派本文件实现点、零新 reason，字典序位在 `registerFaceImage` 之後、`repairAuthorPersonId` 之前；前一版 51 由 2026-11-17 印譜封面/改名單增 `updateBook` / `setBookCover` / `listBookCovers` 带入 48 → 51）；三 op 不落 `OPS` / `PUBLIC_OPS`（零用户读面）',
+  { types: ['function', 'function', 'function'], adminOpsCount: 53, contains: true, userOpsLeak: [], publicOpsLeak: [] },
   {
     types: BOOK_OPS.map((op) => typeof adminOps[op]),
     adminOpsCount: adminOpKeys.length,

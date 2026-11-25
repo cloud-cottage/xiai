@@ -49,8 +49,12 @@ import * as authorMatch from './authorMatch.js'
 /* **CARD 人物索引门面（本单新增）**：广场首屏要触发索引预热（`loadPersonIndex` ＝ 进程内单例，
    并发合并、**不是第二条拉取路径、更不是轮询**）—— 页面与组件仍**只**经本门面访问服务层。 */
 import * as personCards from './personCards.js'
+/* **出版社（publisher）门面（xiai.spec §3.107｜v1.133 入册）**：名录读面 ＋ ISBN 最长匹配反查 ＋
+   管理员新建·改行·号段增删（新行 `_id = code` 只由号段账本发）。页面与组件仍**只**经本门面访问数据
+   （不得直接 import `../data/*`）。 */
+import * as publishers from './publishers.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards, publishers }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards, publishers }
 export default services

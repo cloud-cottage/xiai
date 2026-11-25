@@ -62,7 +62,15 @@ export const CLOUD_COLLECTIONS = Object.freeze({
   personProposals: 'xiai_person_proposals',
   /* **item 通道切片 A（v1.61）**：正式印谱（`xiai_items`，canonical；只经采纳路径产生）。
      本机镜像键见 `data/db.js` 的 `items`（**恰好同名**，不经 `CLOUD_KEY_OF_LOCAL` 翻译）。 */
-  items: 'xiai_items'
+  items: 'xiai_items',
+  /* **出版社（publisher）（本单读面接线）**：`xiai_publishers` —— 出版社规范行的正式落点
+     （`_id = code` ＝ `^PB[0-9]{9}$`、14 业务键 ＋ `_id`；集合名与云函数侧
+     `cloudfunctions/xiai-user-token/lib/ops.js::COLLECTIONS.publishers` 逐字同值）。
+     **本表之所以敢收它**：水合已改**逐集合降级**（见 `hydrate()`）—— 集合不存在 / 查询抛错
+     ⇒ **仅该集合**置空集 ＋ 诊断量 `publishers_unavailable`，**不回落整轮、不阻断其它集合**
+     ⇒ 「新建集合尚未建」不再把整站拖回本机示範資料。
+     本机镜像键见 `data/db.js` 的 `publishers`（**恰好同名**，不经 `CLOUD_KEY_OF_LOCAL` 翻译）。 */
+  publishers: 'xiai_publishers'
   /* **阶段乙（2026-10-12）撤出三族导入集合**：`personImports` / `sealImports` / `itemImports`
      已自本表**移除**（连同 `db.js::CLOUD_KEY_OF_LOCAL` 的三条映射）—— 外部批量导入的
      「包 / 導入行 / 待審導入批次」＝**本機專屬面**（真源 `docs/local-only-import-plan-2026-10-12.md`
@@ -345,11 +353,17 @@ const statusRef = shallowRef({
   reason: 'NOT_CONFIGURED',
   message: '未配置 CloudBase 数据源，使用本地实现',
   envId: '',
-  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
+  counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0, publishers: 0 },
   /* **空集诊断（§3c）**：`emptyVerified` ＝ 诚实空态（云端 0 行 + 本地也空 ⇒ 不回落）；
      `emptySuspect` ＝ 可疑空集（云端 0 行 + 本地有数据 ⇒ 已走失败状态机回落本地）。 */
   emptyVerified: [],
   emptySuspect: [],
+  /* **逐集合降级读数（本单）**：一轮水合里「集合不存在 / 查询抛错 ⇒ 仅该集合置空集」的两份同源
+     读数 —— `unavailable` ＝ 被降级的**集合键**数组（如 `['publishers']`）；`diagnostics` ＝
+     同一事实的**诊断量**（键形如 `publishers_unavailable`、值 `1`）。两者都只在本轮内有效
+     （新一轮 `pending` 即清零），**不改变任何 reason 字面值、不进失败状态机**。 */
+  unavailable: [],
+  diagnostics: {},
   /* **v3 T1（阶段预算 / 冷启动重试）读数**：`attempt` ＝ 本轮是第几轮（1 首轮 / 2 自动重试轮）；
      `timeoutStage` ＝ **最近一次阶段超时的阶段名**（`sdk-load` / `anonymous-login` / `<集合>@<游标>`）。
      生命周期（**与实现的真实取值序列逐字对齐**；读数见 `qa/probes/probe-c-timeoutstage.mjs` 的
@@ -531,7 +545,13 @@ export const CLOUD_EMPTY_VERDICT_EXEMPT = Object.freeze([
      集合未建立 / 尚未接线时云端恒 0 行（本机镜像可能已有采纳 / 导入行）；若判可疑会让
      整站回落本地种子 ⇒ 一律恒走诚实空态。 */
   'items',
-  'itemImports'
+  'itemImports',
+  /* **出版社（publisher）（本单读面接线）**：`xiai_publishers` 是**新建集合**（可能尚未建 /
+     尚未播种）⇒ 集合未建立时云端恒 0 行（本机镜像可能已有管理员写入的行）；若判可疑会让
+     **整站**回落本地种子 ⇒ 与 `persons` / `items` 同尺**恒走诚实空态**。
+     读不到（查询抛错）时另有**逐集合降级**（`hydrate()`：仅该集合置空集 ＋
+     `publishers_unavailable` 诊断量），两道都不拖垮整轮。 */
+  'publishers'
 ])
 
 /**
@@ -1329,6 +1349,47 @@ export function normalizeItemImportRow(doc, options = {}) {
   }
 }
 
+/**
+ * **出版社规范行**（`xiai_publishers` → 本机 `publishers` 行形状；xiai.spec §3.107.2 冻结表）。
+ *
+ * 归一（**照 `normalizePersonRow` 同形态**：只做空值 / 数组 / 整数归一，**不做业务值改写**）：
+ *   · `_id` / `code` / `created_by` / 时间戳 ⇒ 文本（NULL ⇒ `''`）；`_id = code` 恒等
+ *     （`^PB[0-9]{9}$`）**不在本层改写、不补编**；
+ *   · `name` / `name_cht` / `isbn_prefix` / `isbn_group` / `region` / `note` / `org_type` ⇒ 文本
+ *     （NULL ⇒ `''`，与本文件头注「NULL → 文本字段 `''`」同尺）；`name_cht` 的「缺则 ＝ `name`」
+ *     是**读侧派生**（单点在 `services/publishers.js::publisherLabel`），本层**不代填**；
+ *   · `aliases` ⇒ 字符串数组（缺键 / 非数组 ⇒ `[]`）；`isbn_publisher_codes` ⇒ **对象数组**
+ *     （缺键 / 非数组 ⇒ `[]`；元素只留**真对象**、其余键**逐字保留**，值域门在服务层）；
+ *   · `founded_year` ⇒ 整数或 `null`（「不详」＝ `null`，**不设特值**）。
+ * **不产出任何派生键**（`display_name` / `isbn_full` 一律不在本层产出，§3.107.2 冻结）。
+ */
+export function normalizePublisherRow(doc, options = {}) {
+  const row = withoutArchive(doc || {}, options.keepProvenance === true)
+  const code = text(firstOf(row.code, row._id))
+  const codes = Array.isArray(row.isbn_publisher_codes)
+    ? row.isbn_publisher_codes.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : []
+  const aliases = Array.isArray(row.aliases) ? row.aliases.map((item) => text(item)).filter((item) => item !== '') : []
+  return {
+    ...row,
+    _id: text(firstOf(row._id, row.code)),
+    code,
+    name: text(row.name),
+    name_cht: text(row.name_cht),
+    isbn_prefix: text(row.isbn_prefix),
+    isbn_group: text(row.isbn_group),
+    isbn_publisher_codes: codes,
+    aliases,
+    region: text(row.region),
+    founded_year: intOrNull(row.founded_year),
+    note: text(row.note),
+    created_at: text(row.created_at),
+    created_by: text(row.created_by),
+    updated_at: text(firstOf(row.updated_at, row.created_at)),
+    org_type: text(row.org_type)
+  }
+}
+
 const NORMALIZERS = Object.freeze({
   seals: normalizeSealRow,
   faces: normalizeFaceRow,
@@ -1340,7 +1401,8 @@ const NORMALIZERS = Object.freeze({
   personImports: normalizePersonImportRow,
   sealImports: normalizeSealImportRow,
   items: normalizeItemRow,
-  itemImports: normalizeItemImportRow
+  itemImports: normalizeItemImportRow,
+  publishers: normalizePublisherRow
 })
 
 /* ---------------------------------------------------------------------------
@@ -1775,7 +1837,11 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     timeoutMs: budget,
     attempt,
     timeoutStage: '',
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0, publishers: 0 },
+    /* **新一轮起跑即清零逐集合降级读数**（与 `timeoutStage` 同生命周期：上一轮的
+       `unavailable` / `diagnostics` 不得冒充本轮读数）。 */
+    unavailable: [],
+    diagnostics: {},
     fetchedAt: ''
   })
   let sdk = null
@@ -1819,6 +1885,11 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
   /* **空集诊断容器（§3c）**：逐集合判定 → 诚实空态 / 可疑空集分别登记。 */
   const emptyVerified = []
   const emptySuspects = []
+  /* **逐集合降级容器（本单）**：`unavailable` ＝ 本轮查询抛错 / 集合不存在而被**置空集**的集合键；
+     `diagnostics` ＝ 同一事实的**诊断量**（键形如 `publishers_unavailable`、值 `1`）。
+     两者随 `ready` / 失败状态一并上报，新一轮 `pending` 清零（见 `setStatus` 的各处 patch）。 */
+  const unavailable = []
+  const diagnostics = {}
   /* **失败诊断（本单补）**：记下「正在读哪个集合」⇒ 查询抛错时 `fail()` 的
      `console.warn` 能点名是哪一族集合读不到（超时则由 `CloudTimeoutError.stage` 承载）。 */
   let currentCollection = ''
@@ -1826,11 +1897,42 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     for (const [key, collectionName] of Object.entries(CLOUD_COLLECTIONS)) {
       currentCollection = collectionName
       if (hydrationDiag) hydrationDiag.current = `${collectionName}@0`
-      const detailed = await fetchAllRowsDetailed(db, collectionName, {
-        deadline,
-        /* **进度回调（纯诊断）**：每页写一次「已完成页数 / 已取行数 / 下一游标」。 */
-        onPage: (progress) => noteHydrationProgress(collectionName, progress)
-      })
+      let detailed
+      try {
+        detailed = await fetchAllRowsDetailed(db, collectionName, {
+          deadline,
+          /* **进度回调（纯诊断）**：每页写一次「已完成页数 / 已取行数 / 下一游标」。 */
+          onPage: (progress) => noteHydrationProgress(collectionName, progress)
+        })
+      } catch (err) {
+        /* **超时照旧上抛**：`CloudTimeoutError` 是**总预算**状态机（要走 TIMEOUT / 自动重试），
+           不是「某个集合读不到」—— 降级只接手**非超时**的查询失败。 */
+        if (err instanceof CloudTimeoutError) throw err
+        /* **逐集合降级（本单）**：集合不存在 / 查询真抛错 ⇒ **只**把该集合置空集并登记诊断量
+           ⇒ ① **不中断**后续集合的分页读取（`continue` 而非 `return` / `break`）；
+              ② **不把整轮回落本机**（本轮照旧可以 `ready`，其余集合的行照常交出）；
+              ③ 读不到 ≠ 读回 0 行 ⇒ **不进 §3c 空集裁定**（那条判据只对「真读回 0 行」有效，
+                 否则会把「查询抛错」误报成「雲端 0 列」）。
+           `collection` / `key` 只进 `console.warn` 与诊断读数，**不改任何 reason 字面值**。 */
+        unavailable.push(key)
+        diagnostics[`${key}_unavailable`] = 1
+        raw[key] = []
+        paging[key] = { pages: 0, duplicatesRemoved: 0, ordered: false, uniqueIds: 0 }
+        try {
+          console.warn(
+            '[xiai:cloudbase] 集合逐集合降级（仅该集合置空集，其余集合照常水合）',
+            JSON.stringify({
+              key,
+              collection: collectionName,
+              reason: 'QUERY_FAILED',
+              message: (err && err.message) || '未知原因'
+            })
+          )
+        } catch {
+          /* 诊断通道绝不影响水合状态机（与 `warnHydrationFailure` 同尺）。 */
+        }
+        continue
+      }
       raw[key] = detailed.rows
       /* 分页读数**如实上报**（页数 / 去重网命中数 / 是否真带稳定次序 / 唯一 `_id` 数）。 */
       paging[key] = {
@@ -1852,7 +1954,9 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
     if (err instanceof CloudTimeoutError) throw err
     /* `collection` ＝ 纯诊断键（只进 `console.warn`，不进状态）：点名**哪个集合**读失败。 */
     return fail(gen, 'QUERY_FAILED', `雲端資料讀取失敗（${(err && err.message) || '未知原因'}），已回落到本機示範資料`, {
-      collection: currentCollection
+      collection: currentCollection,
+      unavailable,
+      diagnostics
     })
   }
   /* **可疑空集 ⇒ 回落（§3c）**：与 `QUERY_FAILED` **同一条失败状态机**（`fail()` ⇒ `failed` ⇒
@@ -1865,7 +1969,7 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
       `雲端資料可疑為空（${emptySuspects
         .map((item) => `${item.collection} 雲端 ${item.cloud} 列 / 本機 ${item.local} 列`)
         .join('、')}），已回落到本機示範資料`,
-      { emptySuspect: emptySuspects, emptyVerified }
+      { emptySuspect: emptySuspects, emptyVerified, unavailable, diagnostics }
     )
   }
   if (gen !== generation) return statusRef.value
@@ -1900,6 +2004,10 @@ async function hydrate(gen, deadline, budget, attempt = 1) {
        可疑空集（已回落）此时恒为空集（有可疑即已 `failed`）。 */
     emptyVerified,
     emptySuspect: [],
+    /* **逐集合降级如实登记（本单）**：被降级的集合（如 `publishers`）已置空集并登记诊断量
+       （`diagnostics.publishers_unavailable`）—— 整轮**照旧 `ready`**（不回落本机）。 */
+    unavailable,
+    diagnostics,
     fetchedAt: snapshot.fetchedAt
   })
   return statusRef.value
@@ -1987,7 +2095,9 @@ function scheduleHydrationRetry(budget, err) {
     timeoutStage: err.stage,
     retryBudgetMs: CLOUD_HYDRATE_RETRY_BUDGET_MS,
     attempt: 2,
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0, publishers: 0 },
+    unavailable: [],
+    diagnostics: {},
     fetchedAt: ''
   })
   return new Promise((resolve) => {
@@ -2050,11 +2160,13 @@ export function resetCloudBaseSource() {
     reason: 'NOT_CONFIGURED',
     message: '未配置 CloudBase 数据源，使用本地实现',
     envId: '',
-    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0 },
+    counts: { seals: 0, faces: 0, images: 0, correctionsPublic: 0, correctionSummaries: 0, publishers: 0 },
     attempt: 0,
     timeoutStage: '',
     emptyVerified: [],
     emptySuspect: [],
+    unavailable: [],
+    diagnostics: {},
     fetchedAt: ''
   })
   /* 待重試窗口被作廢 ⇒ 它的 promise 接到「已重置」的結論上（不懸空）。 */

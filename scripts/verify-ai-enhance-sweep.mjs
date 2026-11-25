@@ -954,8 +954,8 @@ resetWorld()
   const indexSource = readFileSync(path.join(FN_DIR, 'index.js'), 'utf8')
   const sweepOps = Object.keys(ops.ADMIN_OPS).filter((name) => name.includes('sweep'))
   const frozenReasons = ['FORBIDDEN', 'INVALID_VALUE', 'INVALID_FIELD', 'MISSING_REQUIRED', 'STORAGE_UNAVAILABLE', 'ALREADY_ENDORSED', 'DUPLICATE_VALUE', 'INSUFFICIENT_POINTS', 'KEY_INVALID', 'CONFIG_MISSING', 'LIMIT_DAY', 'LIMIT_MINUTE', 'UPSTREAM_ERROR']
-  check('H6', '③ 零新增对外面：`ADMIN_OPS` 仍 **52** 项且**零 sweep op**；`REASONS` 仍 **13** 值逐字冻结；`AI_ENHANCE_READOUT_KEYS` 仍 **8** 项；`index.js` 两个 AI op 名各仍恰 1 处（未重复注册）', {
-    adminOps: 52,
+  check('H6', '③ 零新增对外面：`ADMIN_OPS` 仍 **53** 项且**零 sweep op**；`REASONS` 仍 **13** 值逐字冻结；`AI_ENHANCE_READOUT_KEYS` 仍 **8** 项；`index.js` 两个 AI op 名各仍恰 1 处（未重复注册）', {
+    adminOps: 53,
     sweepOps: [],
     reasons: 13,
     reasonList: frozenReasons.slice(),

@@ -273,7 +273,19 @@ export const STORAGE_KEYS = {
    * （只经采纳路径写；不开放任何直写入口，含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
    * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
    */
-  itemImports: 'item-imports'
+  itemImports: 'item-imports',
+  /**
+   * **用途：出版社（publisher）規範行的本機鏡像**（xiai.spec §3.107｜v1.133 入册；
+   * 写方 ＝ `services/publishers.js::upsertPublisher`（**仅管理员**；新行 `_id = code`
+   * 由号段账本发，**不在客户端自造**），读方 ＝ `db.js::listPublisherRows` /
+   * `publishers.publisherById` / `publishers.lookupByIsbn`）。真实键名 `xiai:v1:publishers`。
+   * 行 ＝ **14 業務鍵 ＋ `_id`**（逐字 §3.107.2 冻结表）：`{code, name, name_cht, isbn_prefix,
+   * isbn_group, isbn_publisher_codes[{code,status,note?}], aliases[], region, founded_year,
+   * note, created_at, created_by, updated_at, org_type}`；**`_id = code` 恒等**、
+   * `_id = ^PB[0-9]{9}$`；`_shadow` 只在影子库 `feicui_publishers` 側，**不进本键**。
+   * 与既有键**逐字无交集**（既有键一字不动、不改名、不删）。
+   */
+  publishers: 'publishers'
 }
 
 /* ============================================================================

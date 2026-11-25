@@ -102,6 +102,17 @@ const routes = [
     component: () => import('../views/BookIndexView.vue'),
     meta: { title: '印譜匯觀' }
   },
+  /* **本單新增一條**：`/publishers`（【出版社匯典】；`meta.title` 逐字 `出版社匯典`）—— 与 `/books`
+     **同一形态**（xiai.spec §3.107 出版社实体的管理页）：**页面本体做管理员门**（非管理员 / 未登录
+     ⇒ 页内显示无权限提示且**零出版社数据请求**，不得先取后藏），故**不设 `requiresAuth`**
+     （未登录也要能落到「请先登录」提示，而不是被守门静默改写路径）；侧栏入口亦仅管理员渲染
+     （`AppSidebar.vue`，沿 `isAdmin` 同一取法）。**不是 `/admin` 类路由**（仓规禁）。 */
+  {
+    path: '/publishers',
+    name: 'publishers',
+    component: () => import('../views/PublisherIndexView.vue'),
+    meta: { title: '出版社匯典' }
+  },
   /* **本单改造（斐萃令牌）**：`/connect` ＝ 管理员签发 HMAC 令牌页（`api/feicui/v1/*` 转发面用它确权）。
      **本單（我的 API）**：同頁增設「我的 API」用戶區（AI 金鑰 / 餘額 / 用量，已登錄用戶）
      ＋ 管理員【上游配置】卡片（頁內條件渲染；鈎子值 `edit-ai-upstream`）—— **路由條目與路徑一字未動**。
