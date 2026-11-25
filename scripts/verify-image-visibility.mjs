@@ -34,6 +34,17 @@
  *     能写进；白名单**只**多这一个键（静态 9 键〔含 `marked`，2026-11-17 准入裁定 8 → 9〕＋
  *     未登记键仍 `INVALID_FIELD`）。
  *   D 分享投影（2）：投影里零 `hidden` 行；游客与登录非管理员集合一致、管理员不同。
+ *   E 整枚印章圖（6，**2026-11-25 新增**）：AACQE 同形 —— `hidden` 原图 ＋ 可见（**未标记**）
+ *     AI 产物 ⇒ 非管理员**零原图**、管理员**全取且原图仍 `hidden`**；整枚章图集合（服务层单点
+ *     `wholeSealImagesOf`）与**详情页同一条链**（真 `getSealById` → `listSeals` →
+ *     `seal.wholeSealImages`）游客皆 `[]` / 管理员恰原图一行；AI 产物补 `marked:true`
+ *     （审核 /【取】后终态）⇒ 游客拿 AI 产物、**仍无原图**。
+ *
+ * **本单改动被测逻辑一处（2026-11-25）**：`filterImageRowsForViewer` ④ 的「组内**有无**
+ * `visible`」由只在 `admitted`（已标记行）上取，改为在**全量 `list`（准入前）**上取；提升
+ * **候选**与排序仍只在 `admitted` 内取（② 的先后契约一字未改）。真因：准入门先把「已存在但
+ * 未标记」的精修 / AI 产物裁掉 ⇒ 组看起来「一张 `visible` 都没有」⇒ 把已归档的 `hidden` 原图
+ * 提升回上屏（AACQE 匿名详情页「整枚印章圖」区，2026-11-25 线上实据）。E 段即该改动的回归断言。
  *
  * **本套的适配（2026-11-17，**不改被测逻辑**）**：读面自准入裁定起会**先按 `marked` 裁掉未标记
  * 行**再按 `visibility` 过滤 ⇒ B 段基线不能再取 `listImageRows()`（非管理员视图恒 0 行），
@@ -569,6 +580,157 @@ check(
     adminItemCount: adminProjection.item_count
   }
 )
+
+/* ============================================================================
+   E 整枚印章圖（**AACQE 同形**｜2026-11-25 线上实据）：hidden 原图 ＋ 可见（未标记）AI 产物
+   ----------------------------------------------------------------------------
+   造数逐字取自 `xiai.plus` 的 `xiai_images` / `xiai_faces` **只读实读**（`stamp_id = 'AACQE'`）：
+     · `img-fa4911db3bcf704b` 原图：`kind FACE` / `seq 1` / `visibility:'hidden'` / `marked:true`
+       （`storage_key` 为 `.tiff` 原图）；
+     · `img-ba6e034e` AI 产物：`kind FACE` / `seq 2` / `source:'ai_enhance'` / `displayOnly:true`
+       **无 `visibility` 键**（⇒ 归一 `visible`）、**无 `marked` 键**（⇒ 准入门裁掉）；
+     · 印面 `fc-AACQE-f1.face_image_id = 'img-ba6e034e'` ⇒ 原图**未被任何面引用** ⇒ 落进
+       「整枚印章圖」区（服务层单点 `wholeSealImagesOf`）—— 正是线上 DOM 三处命中的那条路径。
+   判据：非管理员**零原图**（组内另有可见行 ⇒ 不触发提升）、管理员**全取且原图逐字 `hidden`**；
+   整枚章图集合游客 `[]` / 管理员恰 `[img-fa4911db3bcf704b]`；AI 产物补 `marked:true`
+   （审核 /【取】后的终态）⇒ 游客拿到 AI 产物、**仍无原图**。
+   ============================================================================ */
+section('E', '整枚印章圖（AACQE 同形）：hidden 原图不上非管理员屏、管理员全取')
+
+const AACQE_ROWS = [
+  {
+    id: 'img-fa4911db3bcf704b',
+    stamp_id: 'AACQE',
+    kind: 'FACE',
+    seq: 1,
+    storage: 'server',
+    visibility: 'hidden',
+    marked: true
+  },
+  {
+    id: 'img-ba6e034e',
+    stamp_id: 'AACQE',
+    sealId: 'AACQE',
+    kind: 'FACE',
+    seq: 2,
+    storage: 'server',
+    source: 'ai_enhance',
+    displayOnly: true
+  }
+]
+/* 印面引用（`face_image_id` 指向 AI 产物 ⇒ 原图是「未被面引用」的整枚章图）。 */
+const AACQE_FACES = [{ id: 'fc-AACQE-f1', face_image_id: 'img-ba6e034e', edge_image_ids: [] }]
+const AACQE_ORIGINAL_ID = 'img-fa4911db3bcf704b'
+const AACQE_AI_ID = 'img-ba6e034e'
+const aacqeRowsOf = (rows) => rows.filter((row) => textOf(row.stamp_id) === 'AACQE')
+
+/* 造数：只追加这两行（种子行一字不动；写盘即递增代数 ⇒ 读缓存按既有判据自然失效）。 */
+writeKey(STORAGE_KEYS.images, (readKey(STORAGE_KEYS.images) || []).concat(AACQE_ROWS))
+
+/* E1 纯函数层（不依赖种子 / 读缓存）：两行原样喂读面单点。 */
+const e1Guest = filterImageRowsForViewer(AACQE_ROWS, { isAdmin: false })
+const e1Admin = filterImageRowsForViewer(AACQE_ROWS, { isAdmin: true })
+check(
+  'E1',
+  '读面单点（纯函数）：游客 0 行（原图**不被提升**）、管理员 2 行且原图 `visibility` 逐字 `hidden`',
+  { guest: 0, admin: 2, adminOriginalVisibility: 'hidden' },
+  {
+    guest: e1Guest.length,
+    admin: e1Admin.length,
+    adminOriginalVisibility: textOf((e1Admin.find((row) => row.id === AACQE_ORIGINAL_ID) || {}).visibility)
+  }
+)
+
+/* E2 / E3 走真实 `listImageRows()`（含 `readCollection` 准入门 ＋ 内存补位 ＋ `withSliceMeta`）。 */
+session.setUser(null)
+const eGuestRows = db.listImageRows()
+const eGuestIds = idsOf(eGuestRows)
+check(
+  'E2',
+  '游客（匿名）：AACQE 组**零行交出** —— hidden 原图不上屏、未标记 AI 产物也不上屏',
+  { hasOriginal: false, hasAi: false, groupCount: 0 },
+  {
+    hasOriginal: eGuestIds.includes(AACQE_ORIGINAL_ID),
+    hasAi: eGuestIds.includes(AACQE_AI_ID),
+    groupCount: aacqeRowsOf(eGuestRows).length
+  }
+)
+
+session.setUser({ id: 'u-admin-e', role: 'admin' })
+const eAdminRows = db.listImageRows()
+const eAdminIds = idsOf(eAdminRows)
+check(
+  'E3',
+  '管理员：AACQE 两行**全取**、原图仍逐字 `hidden`（不为隐藏原图而把管理员也藏了）',
+  { hasOriginal: true, hasAi: true, originalVisibility: 'hidden' },
+  {
+    hasOriginal: eAdminIds.includes(AACQE_ORIGINAL_ID),
+    hasAi: eAdminIds.includes(AACQE_AI_ID),
+    originalVisibility: textOf((eAdminRows.find((row) => row.id === AACQE_ORIGINAL_ID) || {}).visibility)
+  }
+)
+
+/* E4 整枚章图路径（＝ 详情页 `seal.wholeSealImages` 的同一条服务层单点）。 */
+const sealsModule = await importSrc('src/services/seals.js')
+const { wholeSealImagesOf } = sealsModule
+const eGuestWhole = wholeSealImagesOf(AACQE_FACES, aacqeRowsOf(eGuestRows)).map((row) => row.id)
+const eAdminWhole = wholeSealImagesOf(AACQE_FACES, aacqeRowsOf(eAdminRows)).map((row) => row.id)
+check(
+  'E4',
+  '整枚印章圖集合：游客 `[]`（`v-if` 整块不渲染、DOM 零命中）／ 管理员恰原图一行（AI 产物被面引用不入列）',
+  { guest: [], admin: [AACQE_ORIGINAL_ID] },
+  { guest: eGuestWhole, admin: eAdminWhole }
+)
+
+/* E5 服务层端到端（＝ 详情页 `seal = seals.getSealById(id)` 的**同一条链**）：真造一枚印 ＋ 一个
+   面行（`face_image_id` 指向 AI 产物），读 `seal.wholeSealImages` —— 这正是 `SealDetailView`
+   `v-if="wholeSealImages.length"` / `v-for` 消费的那个集合。**判在 `marked` 复位之前**（＝线上
+   现盘形态：AI 产物尚未标记）。造数只追加两行、不改任何既有行。 */
+const allSeals = readKey(STORAGE_KEYS.seals) || []
+const allFaces = readKey(STORAGE_KEYS.faces) || []
+const baseSealRow = allSeals[0] || {}
+const baseFaceRow = allFaces[0] || {}
+writeKey(STORAGE_KEYS.seals, allSeals.concat([{ ...baseSealRow, id: 'AACQE', stamp_id: 'AACQE', seal_name: '爲五斗米折腰' }]))
+writeKey(
+  STORAGE_KEYS.faces,
+  allFaces.concat([
+    {
+      ...baseFaceRow,
+      id: 'fc-AACQE-f1',
+      sealId: 'AACQE',
+      stamp_id: 'AACQE',
+      face_image_id: AACQE_AI_ID,
+      edge_image_ids: [],
+      is_primary: true
+    }
+  ])
+)
+const wholeIdsFor = (roleUser) => {
+  session.setUser(roleUser)
+  const seal = sealsModule.getSealById('AACQE')
+  if (!seal || !Array.isArray(seal.wholeSealImages)) return null
+  return seal.wholeSealImages.map((row) => row.id)
+}
+const e5GuestWhole = wholeIdsFor(null)
+const e5AdminWhole = wholeIdsFor({ id: 'u-admin-e2', role: 'admin' })
+check(
+  'E5',
+  '详情页链（真 `getSealById` → `listSeals` → `wholeSealImages`）：游客 `[]`（区块整块不渲染、DOM 零命中）／ 管理员恰原图一行',
+  { guest: [], admin: [AACQE_ORIGINAL_ID] },
+  { guest: e5GuestWhole, admin: e5AdminWhole }
+)
+
+/* E6 终态：AI 产物补 `marked:true`（审核 /【取】后）⇒ 游客拿到 AI 产物、**仍无原图**。 */
+patchImages([AACQE_AI_ID], { marked: true })
+session.setUser(null)
+const eMarkedIds = idsOf(db.listImageRows())
+check(
+  'E6',
+  'AI 产物 `marked:true` 后：游客**拿到 AI 产物、仍无 hidden 原图**（归档不因准入变化被撤销）',
+  { hasAi: true, hasOriginal: false },
+  { hasAi: eMarkedIds.includes(AACQE_AI_ID), hasOriginal: eMarkedIds.includes(AACQE_ORIGINAL_ID) }
+)
+session.setUser(null)
 
 /* ---------------------------------------------------------------- 收尾 */
 session.setUser(null)

@@ -730,6 +730,9 @@ export function normalizeImageRow(doc, options = {}) {
  *     （先原图、后精修）⇒ 第一次写时「还没有精修件」恒真 ⇒ 拒绝会让正确流程第一步就走不通；
  *   · 读面提升只在「该 `(stamp_id, kind)` 组**一张 `visible` 都没有**」时才把**序号最小的那张**
  *     当 `visible` 交出（确定性，不随机挑）⇒ 面永远有图可显示，且**不会**把已正确的组改动。
+ *     **取数范围（本单 2026-11-25 校正）**：「有没有 `visible`」在**全量行（准入前）**上判 ——
+ *     `marked`（准入）与 `visibility`（展示形态）是两道门、**不互相代判**；**提升候选**仍只在
+ *     已标记行内取。详见 `filterImageRowsForViewer` ④。
  * ============================================================================
  */
 
@@ -831,14 +834,24 @@ function promotedOrderOf(a, b) {
  *      （缺键旧行按 `false` 处理 ⇒ 不交出）；**哨兵行 `storage === 'bundled'` 恒放行**
  *      （UI 兜底不得消失）；
  *   ③ 非管理员 ⇒ 再去掉 `hidden` 行（`visibility` 语义不变）；
- *   ④ **不变量**：某 `(stamp_id, kind)` 组**一张 `visible` 都没有** ⇒ 把该组**序号最小的那张**
- *      `hidden` 行**当 `visible` 交出**（交出的是**副本**，`visibility` 改写为 `'visible'` ——
- *      投影 / 界面拿到的行与其语义一致；原行对象不就地改写）；
+ *   ④ **不变量（单一判据）**：某 `(stamp_id, kind)` 组**一张 `visible` 都没有** ⇒ 把该组
+ *      **序号最小的那张**（**候选只在 ② 留下的行里取**）`hidden` 行**当 `visible` 交出**
+ *      （交出的是**副本**，`visibility` 改写为 `'visible'` —— 投影 / 界面拿到的行与其语义一致；
+ *      原行对象不就地改写）。
+ *      「组内**有无** `visible`」这一半在**全量 `list`（准入前）**上取，**不是**只在 `admitted`
+ *      上取 —— `marked` 是**准入**（这行能不能交出）、`visibility` 是**展示形态**（这行是否已
+ *      归档），两道门**不互相代判**：否则一张**已存在但尚未标记**的精修 / AI 产物会被准入门先
+ *      裁掉、让组看起来「一张 `visible` 都没有」，于是把**已归档（`hidden`）的原图重新提升上屏**
+ *      （线上实据 2026-11-25：AACQE 匿名详情页「整枚印章圖」区复现 `img-fa4911db3bcf704b`）。
+ *      规范口径本就是「**没有精修件**时原图必须 `visible`」（§3.98.5 ①）⇒ 组里**存在**精修 /
+ *      AI 产物（`visibility` 归一为 `visible`）即不提升，**与它是否已准入无关**：管理员的归档
+ *      决定不因另一张图尚在待审而被读面撤销。
  *   ⑤ 其余行身份不变（`visible` 行、缺键旧行**逐字原样**透传）。
  *
- * ⚠️ ② 与 ④ 的先后是契约的一部分：**先按准入裁掉未标记行**，再在**留下的行**里做
- * 「组内无 visible ⇒ 提升」—— 否则一张未标记的 `hidden` 行会被提升成「面有图可显示」，
- * 等于绕过准入门。
+ * ⚠️ ② 与 ④ 的先后仍是契约的一部分：**先按准入裁掉未标记行**，再在**留下的行**里挑提升
+ * 「候选」—— 否则一张未标记的 `hidden` 行会被提升成「面有图可显示」，等于绕过准入门。
+ * 本单变的只有 ④ 的**「组内有无 `visible`」取数范围**（`admitted` → `list`）；提升**候选**、
+ * **排序**（`promotedOrderOf`）与「一张组只提升一张」照旧只在 `admitted` 内取。
  * @param {Array<object>} rows 影像行
  * @param {{isAdmin?:boolean}} [options] 身份（缺省按非管理员）
  * @returns {Array<object>} 可交给界面 / 水合结果的行
@@ -848,21 +861,31 @@ export function filterImageRowsForViewer(rows, options = {}) {
   if (options.isAdmin === true) return list
   /* ② 准入门：未标记 ＝ 对 xiai「暂无影像」；哨兵行（bundled）豁免。 */
   const admitted = list.filter((row) => isMarkedImageRow(row))
+  /* ④ 前半（**组内有无 `visible`**）：在**全量 `list`（准入前）**上取一次组键集合。
+     为什么不在 `admitted` 上判：`marked` 裁掉的是「这行能不能交出」，不是「这行存不存在 /
+     是否已归档」；在 `admitted` 上判会让「已存在但未标记的精修 / AI 产物」被当成「组里没有
+     可见行」⇒ 把已归档的 `hidden` 原图提升回上屏（AACQE 线上实据，2026-11-25）。 */
+  const groupHasVisible = new Set()
+  list.forEach((row) => {
+    if (isHiddenImageRow(row)) return
+    const key = imageGroupKeyOf(row)
+    if (key !== '') groupHasVisible.add(key)
+  })
+  /* ④ 后半（**提升候选**）：仍只在 `admitted` 里取已 `hidden` 的行（② 的先后契约不变）；
+     该组已有任一 `visible` 行（不论准入）⇒ 整组不提升。 */
   const groups = new Map()
   admitted.forEach((row, index) => {
+    if (!isHiddenImageRow(row)) return
     const key = imageGroupKeyOf(row)
-    if (key === '') return
-    if (!groups.has(key)) groups.set(key, { hasVisible: false, hidden: [] })
-    const bucket = groups.get(key)
-    if (isHiddenImageRow(row)) bucket.hidden.push(index)
-    else bucket.hasVisible = true
+    if (key === '' || groupHasVisible.has(key)) return
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(index)
   })
   const promoted = new Set()
-  groups.forEach((bucket) => {
-    if (bucket.hasVisible || bucket.hidden.length === 0) return
-    const candidates = bucket.hidden.map((index) => admitted[index])
-    const ordered = candidates.slice().sort(promotedOrderOf)
-    promoted.add(admitted.indexOf(ordered[0]))
+  groups.forEach((indices) => {
+    /* 按 `promotedOrderOf` 排**下标**（与原「排行对象再 indexOf」同序；同序稳定、确定性）。 */
+    const ordered = indices.slice().sort((a, b) => promotedOrderOf(admitted[a], admitted[b]))
+    promoted.add(ordered[0])
   })
   const out = []
   admitted.forEach((row, index) => {
