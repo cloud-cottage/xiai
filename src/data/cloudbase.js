@@ -745,6 +745,9 @@ export const IMAGE_VISIBILITY_VALUES = Object.freeze([IMAGE_VISIBILITY.VISIBLE, 
 /** 缺键 / 表外取值时的**缺省语义**（`visible`；旧行不得消失）。 */
 export const IMAGE_VISIBILITY_DEFAULT = IMAGE_VISIBILITY.VISIBLE
 
+/** AI 修復产物的 `source` 字面（与云函数 `lib/aiEnhanceDiscard.js::AI_ENHANCE_SOURCE` 逐字同值）。 */
+export const IMAGE_SOURCE_AI_ENHANCE = 'ai_enhance'
+
 /**
  * 行上的可见性（缺键 / 空值 / 表外取值 ⇒ `'visible'`）。
  * @param {object} row 影像行（云行或本机行）
@@ -758,6 +761,21 @@ export function imageVisibilityOf(row) {
 /** 是否 `hidden`（**逐字**才真；`imageVisibilityOf` 已把表外值折叠成 `visible`）。 */
 export function isHiddenImageRow(row) {
   return imageVisibilityOf(row) === IMAGE_VISIBILITY.HIDDEN
+}
+
+/**
+ * 是否「**`hidden` 的 AI 产物**」（`source` 逐字 `'ai_enhance'` 且 `visibility` 逐字 `'hidden'`）。
+ *
+ * **AC-869（2026-11-25）**：这类行**永不作为读面提升候选** —— 「可见性提升分支不得交出
+ * `hidden` 的 AI 产物」。**只挡候选集**：已 `visible` 的 AI 产物照旧原样透传（正对照）；
+ * 非 AI 来源的 `hidden` 行提升行为不变（仍只受 `filterImageRowsForViewer` ④ 之二的存在性
+ * 判据约束）。`visibility` 缺键 / 表外值仍按 `imageVisibilityOf` 归一为 `visible` ⇒ 不算
+ * （「含缺键按 `visible`」的口径一字未改）。
+ * @param {object} row 影像行（云行或本机行）
+ * @returns {boolean}
+ */
+export function isHiddenAiEnhanceRow(row) {
+  return text(row && row.source) === IMAGE_SOURCE_AI_ENHANCE && isHiddenImageRow(row)
 }
 
 /**
@@ -846,12 +864,20 @@ function promotedOrderOf(a, b) {
  *      规范口径本就是「**没有精修件**时原图必须 `visible`」（§3.98.5 ①）⇒ 组里**存在**精修 /
  *      AI 产物（`visibility` 归一为 `visible`）即不提升，**与它是否已准入无关**：管理员的归档
  *      决定不因另一张图尚在待审而被读面撤销。
+ *      **④ 之三（AC-869，2026-11-25）**：**提升候选**再排除 `source === 'ai_enhance'` 且
+ *      `visibility === 'hidden'` 的行（判据单点 `isHiddenAiEnhanceRow`）—— **`hidden` 的 AI
+ *      产物永不作为提升候选交出**（「可见性提升分支不得交出 `hidden` 的 AI 产物」）。
+ *      只收**候选集**这一处：已 `visible` 的 AI 产物不受影响（原样透传）、非 AI 来源的
+ *      `hidden` 行提升行为不变（仍只受 ④ 之二的存在性判据约束）；**不改 `marked` 准入门、
+ *      不改回包形状、不在视图 / 组件层另写过滤**（单点仍在本函数）。
  *   ⑤ 其余行身份不变（`visible` 行、缺键旧行**逐字原样**透传）。
  *
  * ⚠️ ② 与 ④ 的先后仍是契约的一部分：**先按准入裁掉未标记行**，再在**留下的行**里挑提升
  * 「候选」—— 否则一张未标记的 `hidden` 行会被提升成「面有图可显示」，等于绕过准入门。
  * 本单变的只有 ④ 的**「组内有无 `visible`」取数范围**（`admitted` → `list`）；提升**候选**、
  * **排序**（`promotedOrderOf`）与「一张组只提升一张」照旧只在 `admitted` 内取。
+ * **AC-869 追加（2026-11-25）**：候选集内再多一道排除 —— `hidden` 的 AI 产物（
+ * `isHiddenAiEnhanceRow`）**永不入候选**；其余候选判据、排序与「一张组只提升一张」一字未改。
  * @param {Array<object>} rows 影像行
  * @param {{isAdmin?:boolean}} [options] 身份（缺省按非管理员）
  * @returns {Array<object>} 可交给界面 / 水合结果的行
@@ -872,10 +898,14 @@ export function filterImageRowsForViewer(rows, options = {}) {
     if (key !== '') groupHasVisible.add(key)
   })
   /* ④ 后半（**提升候选**）：仍只在 `admitted` 里取已 `hidden` 的行（② 的先后契约不变）；
-     该组已有任一 `visible` 行（不论准入）⇒ 整组不提升。 */
+     该组已有任一 `visible` 行（不论准入）⇒ 整组不提升；
+     **AC-869（2026-11-25）**：`source === 'ai_enhance'` 且逐字 `hidden` 的 AI 产物
+     **永不作为提升候选**（`isHiddenAiEnhanceRow`）—— `hidden` 的 AI 产物不得被读面提升成可见；
+     只挡候选集：已 `visible` 的 AI 产物、非 AI 来源的 `hidden` 行一概不受此行影响。 */
   const groups = new Map()
   admitted.forEach((row, index) => {
     if (!isHiddenImageRow(row)) return
+    if (isHiddenAiEnhanceRow(row)) return
     const key = imageGroupKeyOf(row)
     if (key === '' || groupHasVisible.has(key)) return
     if (!groups.has(key)) groups.set(key, [])

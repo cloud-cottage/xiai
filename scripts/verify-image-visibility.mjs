@@ -2,7 +2,8 @@
 /**
  * 玺爱 · **影像可见性（`xiai_images.visibility`）** 离线自检套
  * ============================================================================
- * 被测实现（上一单已落盘，本单只补测试、不改逻辑）：
+ * 被测实现（上一单已落盘；**AC-869 单另改 `filterImageRowsForViewer` 提升候选一处**，
+ * 见下「本单改动」）：
  *   · `cloudfunctions/xiai-user-token/lib/ops.js`
  *       —— 白名单 `FACE_IMAGE_REGISTER_ALLOWED_KEYS`（7 → 8，只加 `visibility`）＋
  *          值域门 `imageVisibilityOf`（封闭二值、非法值 `INVALID_VALUE` ＋ 零写入）＋
@@ -39,12 +40,24 @@
  *     `wholeSealImagesOf`）与**详情页同一条链**（真 `getSealById` → `listSeals` →
  *     `seal.wholeSealImages`）游客皆 `[]` / 管理员恰原图一行；AI 产物补 `marked:true`
  *     （审核 /【取】后终态）⇒ 游客拿 AI 产物、**仍无原图**。
+ *     **＋ AC-869 五条（E7〜E11，2026-11-25 新增）**：`hidden` 的 AI 产物（`source:'ai_enhance'`）
+ *     **永不被提升成可见** —— ①独组 ⇒ 非管理员 0 行；②同组另有可见非 AI 行 ⇒ 只拿后者
+ *     （严格等值）；③已 `visible` 的 AI 产物照旧可拿（正对照）；④管理员全取（含 `hidden`
+ *     的 AI 产物）；⑤同组 `hidden` AI（`seq` 更小）＋ `hidden` 非 AI 原图 ⇒ 提升只能落到原图
+ *     （**非 AI 来源的 `hidden` 行提升行为不变**，此条在反证下同样必红）。
  *
  * **本单改动被测逻辑一处（2026-11-25）**：`filterImageRowsForViewer` ④ 的「组内**有无**
  * `visible`」由只在 `admitted`（已标记行）上取，改为在**全量 `list`（准入前）**上取；提升
  * **候选**与排序仍只在 `admitted` 内取（② 的先后契约一字未改）。真因：准入门先把「已存在但
  * 未标记」的精修 / AI 产物裁掉 ⇒ 组看起来「一张 `visible` 都没有」⇒ 把已归档的 `hidden` 原图
  * 提升回上屏（AACQE 匿名详情页「整枚印章圖」区，2026-11-25 线上实据）。E 段即该改动的回归断言。
+ *
+ * **AC-869 改动被测逻辑一处（2026-11-25）**：`filterImageRowsForViewer` ④ 的**提升候选集**
+ * 上再加一道排除 —— `source === 'ai_enhance'` 且 `visibility === 'hidden'`（判据
+ * `cloudbase.js::isHiddenAiEnhanceRow`；`visibility` 缺键 / 表外值仍归一 `visible` ⇒ 不算）
+ * 的行**永不作为提升候选**交出，即「`hidden` 的 AI 产物不得被读面提升成可见」。
+ * **只收候选集**：`marked` 准入门、回包形状、视图 / 组件层一概未动；已 `visible` 的 AI 产物
+ * 与非 AI 来源的 `hidden` 行提升行为不变。E7〜E11 即该排除的离线断言（含可判负的反证位）。
  *
  * **本套的适配（2026-11-17，**不改被测逻辑**）**：读面自准入裁定起会**先按 `marked` 裁掉未标记
  * 行**再按 `visibility` 过滤 ⇒ B 段基线不能再取 `listImageRows()`（非管理员视图恒 0 行），
@@ -731,6 +744,91 @@ check(
   { hasAi: eMarkedIds.includes(AACQE_AI_ID), hasOriginal: eMarkedIds.includes(AACQE_ORIGINAL_ID) }
 )
 session.setUser(null)
+
+/* ============================================================================
+   AC-869 E7〜E11（2026-11-25）：**可见性提升分支不得交出 `hidden` 的 AI 产物**
+   ----------------------------------------------------------------------------
+   造数（**纯追加**、既有行一字不动）：`source:'ai_enhance'` ＋ `visibility:'hidden'` ＋
+   `marked:true` ＝ 「已入库、已标记、仍归档」的 AI 产物形态 —— `marked:true` 让该行**过准入门**
+   ⇒ 唯一能拦住它的只剩本单新加的**候选集排除**（反证位就在这里）：
+     · 组 `AIH-1`：组内**唯一**行 ＝ `hidden` 的 AI 产物（同组无其它可见行）；
+     · 组 `AIH-2`：`hidden` 的 AI 产物 ＋ 同组一张**可见的非 AI 行**（都已标记）；
+     · 组 `AIH-3`：**已 `visible`** 的 AI 产物（正对照：不因 `source` 被误伤）；
+     · 组 `AIH-4`：`hidden` 的 AI 产物（`seq` 更小）＋ `hidden` 的非 AI 原图（组内无 `visible`）
+       ⇒ 提升只能落到原图（**非 AI 来源的 `hidden` 行提升行为不变**）。
+   判据全走真实读面链（真 `writeKey` 追加 → `db.listImageRows()` → 单点
+   `filterImageRowsForViewer`），id 集**严格等值**比对、零放宽。
+   ============================================================================ */
+const AC869_ROWS = [
+  /* 组 AIH-1：独组的 hidden AI 产物。 */
+  { id: 'img-aih1-only', stamp_id: 'AIH-1', kind: 'FACE', seq: 1, storage: 'server', source: 'ai_enhance', visibility: 'hidden', marked: true },
+  /* 组 AIH-2：hidden AI 产物 ＋ 可见非 AI 行。 */
+  { id: 'img-aih2-ai', stamp_id: 'AIH-2', kind: 'FACE', seq: 1, storage: 'server', source: 'ai_enhance', visibility: 'hidden', marked: true },
+  { id: 'img-aih2-plain', stamp_id: 'AIH-2', kind: 'FACE', seq: 2, storage: 'server', source: '', visibility: 'visible', marked: true },
+  /* 组 AIH-3：已 visible 的 AI 产物（正对照）。 */
+  { id: 'img-aih3-visible', stamp_id: 'AIH-3', kind: 'FACE', seq: 1, storage: 'server', source: 'ai_enhance', visibility: 'visible', marked: true },
+  /* 组 AIH-4：hidden AI 产物（seq 更小）＋ hidden 非 AI 原图。 */
+  { id: 'img-aih4-ai', stamp_id: 'AIH-4', kind: 'FACE', seq: 1, storage: 'server', source: 'ai_enhance', visibility: 'hidden', marked: true },
+  { id: 'img-aih4-orig', stamp_id: 'AIH-4', kind: 'FACE', seq: 2, storage: 'server', source: '', visibility: 'hidden', marked: true }
+]
+const AC869_IDS = AC869_ROWS.map((row) => row.id).sort()
+const AC869_HIDDEN_AI_ID = 'img-aih1-only'
+const aihGroupIds = (rows, stamp) => idsOf(rows.filter((row) => textOf(row.stamp_id) === stamp))
+
+writeKey(STORAGE_KEYS.images, (readKey(STORAGE_KEYS.images) || []).concat(AC869_ROWS))
+
+/* 读面：先游客（非管理员）后管理员；造数只追加，写盘即递增代数 ⇒ 读缓存按既有判据自然失效。 */
+session.setUser(null)
+const ac869Guest = db.listImageRows()
+const aih1Ids = aihGroupIds(ac869Guest, 'AIH-1')
+const aih2Ids = aihGroupIds(ac869Guest, 'AIH-2')
+const aih3Ids = aihGroupIds(ac869Guest, 'AIH-3')
+const aih4Ids = aihGroupIds(ac869Guest, 'AIH-4')
+session.setUser({ id: 'u-admin-ac869', role: 'admin' })
+const ac869Admin = db.listImageRows()
+const aihAdminIds = idsOf(ac869Admin.filter((row) => AC869_IDS.includes(textOf(row.id))))
+session.setUser(null)
+
+check(
+  'E7',
+  'AC-869 ①：`hidden` 的 AI 产物独组（同组无其它可见行）⇒ 非管理员**不得拿到该 AI 产物**（0 行，落占位态）',
+  { ids: [], hasAi: false },
+  { ids: aih1Ids, hasAi: aih1Ids.includes(AC869_HIDDEN_AI_ID) }
+)
+
+check(
+  'E8',
+  'AC-869 ②：`hidden` 的 AI 产物 ＋ 同组一张可见的非 AI 行 ⇒ 非管理员**只拿到后者**、拿不到前者（严格等值）',
+  { ids: ['img-aih2-plain'] },
+  { ids: aih2Ids }
+)
+
+check(
+  'E9',
+  'AC-869 ③（正对照）：**已 `visible` 的 AI 产物照旧可拿**（`source` 不被本排除误伤）',
+  { ids: ['img-aih3-visible'] },
+  { ids: aih3Ids }
+)
+
+check(
+  'E10',
+  'AC-869 ④：**管理员全取**（六行全在，含 `hidden` 的 AI 产物且其 `visibility` 逐字 `hidden`）',
+  { ids: AC869_IDS, hiddenAiVisibility: 'hidden' },
+  {
+    ids: aihAdminIds,
+    hiddenAiVisibility: textOf((rowById(ac869Admin, AC869_HIDDEN_AI_ID) || {}).visibility)
+  }
+)
+
+check(
+  'E11',
+  'AC-869 ⑤（非 AI 来源的 `hidden` 行提升行为不变）：同组 `hidden` AI（seq 1）＋ `hidden` 非 AI 原图（seq 2）⇒ 非管理员拿到被提升的**原图**、拿不到 AI 产物',
+  { ids: ['img-aih4-orig'], promotedVisibility: 'visible' },
+  {
+    ids: aih4Ids,
+    promotedVisibility: textOf((rowById(ac869Guest, 'img-aih4-orig') || {}).visibility)
+  }
+)
 
 /* ---------------------------------------------------------------- 收尾 */
 session.setUser(null)
