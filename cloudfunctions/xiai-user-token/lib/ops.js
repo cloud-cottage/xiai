@@ -5632,9 +5632,10 @@ function imageRowVisibilityOf(row) {
 }
 
 /**
- * **【取】的「同批抬可见」写步**（**唯一**判据；`updateFaceAttributes` 换图单点调用）。
+ * **【取】的「同批抬可见」写步**（**非换图路**的判据单点；`updateFaceAttributes` 调用）。
  *
- * 口径（Kevin 2026-11-17）：AI 修復產物入库即 `hidden`；**被选定为显示（【取】）之后**
+ * 口径（Kevin 2026-11-17；**2026-11-25 起仅用于非换图路** —— 换图 A → B 走 ⑧ 段的三写步契约，
+ * 那条路上本函数不再调用）：AI 修復產物入库即 `hidden`；**被选定为显示（【取】）之后**
  * 才转 `visible`。判据逐条：
  *   ① 行缺席 / 非物件 ⇒ `null`（无行可判 ⇒ **零写**，调用方按既有「影像行不存在」拒）；
  *   ② `source` 非 `ai_enhance`（原图 / 精修件 / 修正图 / 导入图 …）⇒ `null`
@@ -11010,7 +11011,10 @@ const ADMIN_OPS = Object.freeze({
    *      为自由文本，只受**长度门**约束；
    *   ⑥ **长度门按 500 字对齐**（`MAX_TEXT_LENGTH`；本地无对应物 ⇒ 超限 ⇒ `INVALID_VALUE`）；
    *   ⑦ 落盘 ＝ `persist` 的 `kind:'update'`（`expectAtLeast:1`；**写入体只含 patch 内的键 ＋
-   *      `updated_at`**，不重写其它字段、不碰 `_id`）；⑧ 成功**恰 2 键** `{ok:true, row}`
+   *      `updated_at`**，不重写其它字段、不碰 `_id`）；**换图三写步（Kevin 2026-11-25 拍板 A）**：
+   *      `face_image_id` 由非空旧值 A 换到非空新值 B（B ≠ A）⇒ 同批**恰三条、顺序即契约**
+   *      「① 面行指向 → ② 新图 B `visible`＋`marked`（by/at 服务端取）→ ③ 旧图 A `hidden`」，
+   *      其余情形零新增写步（详见 ⑧ 段头注）；⑧ 成功**恰 2 键** `{ok:true, row}`
    *      （`row` ＝ 更新后服务端行）、失败**恰 3 键**；`reason` **零新增**。
    * @param {object} payload 载荷（封闭两键 `face_id` / `patch`）
    * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
@@ -11095,9 +11099,10 @@ const ADMIN_OPS = Object.freeze({
        域表单点 ＝ `VALUE_DOMAINS`（与 `src/data/db.js` 四道值域门同表同值；其余 3 个自由文本
        字段无域表 ⇒ 只受长度门约束）。**影像指向 2 键**不过域表/长度门，改为引用存在性校验。 */
     const clean = {}
-    /* **本单（AI 修復產物可见性｜Kevin 2026-11-17）**：`face_image_id` 指向的**那一行影像行**
-       （存在性校验时顺手留下 —— 同一把读，零额外查询）。⑧ 据此判「是不是没被选过的 AI 候选图」，
-       并在**同一批写步**里把它抬成 `visible`（判据单点 `aiCandidateVisibilityStepOf`）。 */
+    /* **本单（AI 修復產物可见性｜Kevin 2026-11-17）＋【取】同面归档（2026-11-25）**：
+       `face_image_id` 指向的**那一行影像行**（存在性校验时顺手留下 —— 同一把读，零额外查询）。
+       ⑧ 据此判「是否换图（A → B）」：换图 ⇒ 三写步的第 ② 步用它抬 `visible` ＋ 补 `marked`；
+       非换图 ⇒ 走既有 `aiCandidateVisibilityStepOf`（只有隐藏 AI 候选图才补一条抬可见）。 */
     let targetImageRow = null
     for (const key of patchKeys) {
       const raw = patchRaw[key]
@@ -11176,13 +11181,19 @@ const ADMIN_OPS = Object.freeze({
       return deny(REASONS.INVALID_VALUE, `未找到該印面（face_id：${faceId}）；本次零寫入。`)
     }
     /* ⑧ 落盘（`kind:'update'` ＋ `expectAtLeast:1`；只写 patch 键 ＋ `updated_at`）。
-       **本单（AI 修復產物可见性）**：若本次把 `face_image_id` 指向了一张**没被选过的 AI 候选图**
-       （`source:'ai_enhance'` 且不是 `visible`），就把「抬可见」那一步拼进**同一批写步**。
-       **写序（先后即契约）**：① 面行指向 → ② 影像行 `visibility:'visible'`。
-       为什么是这个次序：反过来的话，一旦第 2 步失败就会出现「候选图已对普通用户可见、却还没有
-       任何印面指向它」＝ **未取先露**（口径级违规）；而本序失败只落成「面行已指、图仍隐藏」
-       ＝ 管理员侧一眼可见的空白，重试同一次【取】即自愈（第 1 步同值、第 2 步补齐），
-       **永不出现半成品泄漏**。已是 `visible` / 非 AI 来源 ⇒ 写步只有 1 条（零额外写）。 */
+       **本单（【取】同面归档｜Kevin 2026-11-25 拍板 A）**：`face_image_id` 由**非空旧值 A** 换到
+       **非空新值 B**（B ≠ A）⇒ **写步固定三条、顺序即契约**：
+         ① 面行指向（既有）→ ② 新图 B：`visibility:'visible'` ＋ `marked:true`
+             （`marked_by` / `marked_at` **只从服务端取** ＝ `identity.uid` / 本次落盘时刻，不由载荷递入；
+               已是 `visible` / 已是 `marked` ⇒ 对应键**不重写**）
+         → ③ 旧图 A：`visibility:'hidden'`（仅当 A 非空且 ≠ B；行本就 `hidden` ⇒ 零重写）。
+       其它情形（B 空 / B 与 A 同值 / 旧值为空）⇒ **不新增任何写步**（保持既有行为，判据仍走
+       `aiCandidateVisibilityStepOf`）。**只归档本面引用过的旧图 A** —— 整枚章图、别面影像、
+       其它影像一律不碰（第 ③ 步的 match 只落在 A 那一行）。
+       为什么是这个次序：反过来的话，一旦第 2 / 3 步失败就会出现「新图已对普通用户可见、却还没有
+       任何印面指向它」＝ **未取先露**（口径级违规）；而本序失败只落成「面行已指、新图未抬 / 原图
+       未归档」＝ 管理员侧一眼可见的空白，**永不出现半成品泄漏**。已是 `visible` / `marked` /
+       非换图 ⇒ 写步不额外增加（零重复写）。 */
     const seconds = Number.isFinite(Number(context && context.nowSeconds))
       ? Math.floor(Number(context.nowSeconds))
       : Math.floor(Date.now() / 1000)
@@ -11190,20 +11201,75 @@ const ADMIN_OPS = Object.freeze({
     const doc = Object.assign({}, clean, { updated_at: at })
     const match = text(faceRow._id) ? { _id: text(faceRow._id) } : { [probeField]: faceId }
     const writes = [{ kind: 'update', collection: COLLECTIONS.faces, match, doc, expectAtLeast: 1 }]
-    const visibilityStep = aiCandidateVisibilityStepOf(targetImageRow)
-    if (visibilityStep) writes.push(visibilityStep)
+    /* **换图判定（单点）**：B ＝ 本次 patch 里的 `face_image_id`（缺该键 ⇒ 空串）、A ＝ 面行现值。
+       三者任一不满足（B 空 / A 空 / B ＝ A）⇒ 不换图 ⇒ 下方 `else` 保持既有行为。 */
+    const nextImageId = Object.prototype.hasOwnProperty.call(clean, 'face_image_id') ? text(clean.face_image_id) : ''
+    const prevImageId = text(faceRow.face_image_id)
+    if (nextImageId !== '' && prevImageId !== '' && nextImageId !== prevImageId) {
+      /* ② 新图 B：只补**缺**的键（已 `visible` / 已 `marked` ⇒ 对应键不重写 ⇒ 幂等零重复写）。 */
+      if (targetImageRow && typeof targetImageRow === 'object') {
+        const promoteDoc = {}
+        if (imageRowVisibilityOf(targetImageRow) !== IMAGE_VISIBILITY_VISIBLE) {
+          promoteDoc.visibility = IMAGE_VISIBILITY_VISIBLE
+        }
+        if (!markedStateOfImageRow(targetImageRow).marked) {
+          promoteDoc.marked = true
+          promoteDoc.marked_by = text(identity && identity.uid)
+          promoteDoc.marked_at = at
+        }
+        const targetDocId = text(targetImageRow._id)
+        const targetRowId = text(targetImageRow.id)
+        const targetMatch = targetDocId !== '' ? { _id: targetDocId } : targetRowId !== '' ? { id: targetRowId } : null
+        if (targetMatch && Object.keys(promoteDoc).length > 0) {
+          writes.push({ kind: 'update', collection: COLLECTIONS.images, match: targetMatch, doc: promoteDoc, expectAtLeast: 1 })
+        }
+      }
+      /* ③ 旧图 A 归档（**写前先读**：行已 `hidden` ⇒ 零重写；读抛错 ⇒ 尚未落盘任何写步 ⇒ 如实
+         「本次零寫入」地拒，不把真存储故障吞成「无行」）。 */
+      let prevImageRow = null
+      try {
+        prevImageRow = await readImageRowOf(prevImageId)
+      } catch (error) {
+        return deny(
+          REASONS.STORAGE_UNAVAILABLE,
+          `舊圖（${prevImageId}）校驗讀取失敗；本次零寫入。（診斷：${(error && error.message) || 'unknown'}）`
+        )
+      }
+      if (prevImageRow && imageRowVisibilityOf(prevImageRow) === IMAGE_VISIBILITY_VISIBLE) {
+        const prevDocId = text(prevImageRow._id)
+        const prevRowId = text(prevImageRow.id)
+        const prevMatch = prevDocId !== '' ? { _id: prevDocId } : prevRowId !== '' ? { id: prevRowId } : null
+        if (prevMatch) {
+          writes.push({
+            kind: 'update',
+            collection: COLLECTIONS.images,
+            match: prevMatch,
+            doc: { visibility: IMAGE_VISIBILITY_HIDDEN },
+            expectAtLeast: 1
+          })
+        }
+      }
+    } else {
+      /* 非换图（B 空 / B ＝ A / 旧值为空）⇒ **不新增写步**：保持既有行为（判据单点
+         `aiCandidateVisibilityStepOf`：只有「指向的隐藏 AI 候选图」才补一条抬可见）。 */
+      const visibilityStep = aiCandidateVisibilityStepOf(targetImageRow)
+      if (visibilityStep) writes.push(visibilityStep)
+    }
     try {
       await persist({ writes })
     } catch (error) {
-      /* **半成品如实登记**：本 op 的写步至多 2 步、按确定序执行，`persist` 在抛出的错误上挂
-         `completedSteps` / `totalSteps`。第 1 步就没成 ⇒ 一个字没写；第 1 步成了第 2 步没成 ⇒
-         面行已指、候选图仍隐藏（**不谎报「本次零寫入」**，也不谎报成功）。 */
+      /* **半成品如实登记**：本 op 的写步至多 3 步、按确定序执行，`persist` 在抛出的错误上挂
+         `completedSteps` / `totalSteps` / `failedStep`。第 1 步就没成 ⇒ 一个字没写；第 1 步成了、
+         其后某步没成 ⇒ 已写部分**如实存在**（**不谎报「本次零寫入」**，也不谎报成功），
+         失败步序号一并如实回包。 */
       const completed = Number(error && error.completedSteps)
       const changed = Number.isFinite(completed) && completed > 0
+      const failedStep = Number.isFinite(Number(error && error.failedStep)) ? Number(error.failedStep) : 0
+      const totalSteps = Number.isFinite(Number(error && error.totalSteps)) ? Number(error.totalSteps) : writes.length
       return deny(
         REASONS.STORAGE_UNAVAILABLE,
         changed
-          ? `印面指向已更新，但候選圖可見性未更新（重試同一次操作即可補齊；本次未回包成功）。（診斷：${
+          ? `印面指向已更新，但同批影像寫步未全部完成（第 ${failedStep} / ${totalSteps} 步失敗；本次未回包成功、非零寫入）。（診斷：${
               (error && error.message) || 'unknown'
             }）`
           : `印面屬性落盤失敗；本次零寫入、影像行可見性未改動。（診斷：${(error && error.message) || 'unknown'}）`

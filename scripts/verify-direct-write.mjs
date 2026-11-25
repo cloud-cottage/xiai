@@ -5,7 +5,7 @@
  * **本地、离线、零网络、零云端**：注入式内存假 DB，跑的是
  * `cloudfunctions/xiai-user-token/lib/ops.js` 的**真实函数体**（与 `index.js` 同一注册面）。
  *
- * 跑什么（六段；每条可机械判负）：
+ * 跑什么（七段；每条可机械判负）：
  *   A. **新建**：单面印 ⇒ `sid` 5 位 / `fid` 8 位 / `seal_no` / `face_no`；plan 顺序
  *      （影像登记行 → 印章行 → 面行）；**面行落 `image_sha256`、印章行不落**；
  *      影像登记行字段面 ＋ 读面派生展示键；多面印（FACE＋EDGE）`faces[]` 两条且 `fid` 不同；
@@ -20,6 +20,11 @@
  *   F. **面与纪律**：`ADMIN_OPS` 恰 14 项且**未混入 `OPS`**；`reason` **零新增字面值**；
  *      `index.js` **未为新 op 开特判**（⇒ 回包走通用 `row` 通道、未改全局回包白名单）；
  *      `config.js::ENV_NAMES` **只登记名字**；占位图门**未被放宽**。
+ *   G. **【取】同面归档（2026-11-25 Kevin 拍板 A）**：`updateFaceAttributes` 换图（`face_image_id`
+ *      A → B，A / B 皆非空且不等）⇒ 写步**恰 3 条、顺序即契约**「① 面行指向 → ② 新图 B
+ *      `visibility:'visible'` ＋ `marked:true`（`marked_by` / `marked_at` 只从服务端取）→ ③ 旧图 A
+ *      `visibility:'hidden'`」；B 与 A 同值 / B 空 ⇒ **恰 1 条**（零额外写）；第 3 步失败 ⇒
+ *      如实回包（**不谎报零写入**）＋ 半分态读数 ＋ 重试幂等 ＋ 回退后同一次【取】补齐归档。
  *
  * 纪律：不打印任何密钥 / 令牌；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
@@ -522,6 +527,103 @@ check('F8', '`config.js` **不写值**（无 11 位手机号字面值）', [], (
 check('F9', 'env 读数纯函数：空 env ⇒ 空 phone ＋ 空表（fail-closed 前提）', { phone: '', sources: [] }, ops.directWriteEnvOf({}))
 check('F10', 'env 读数纯函数：逗号表归一（去空白、滤空项、手机号归一）', { phone: '13900000001', sources: ['a', 'b'] }, ops.directWriteEnvOf({ XIAI_DIRECT_WRITE_PHONE: ' 139-0000-0001 ', XIAI_DIRECT_WRITE_SOURCES: ' a , ,b ' }))
 check('F11', '`reason` **零新增字面值**（本套件出现的拒绝 reason 全在 `config.REASONS` 冻结表内）', true, [...seenReasons].every((r) => Object.keys(config.REASONS).indexOf(r) !== -1))
+
+/* ===========================================================================
+   G 段（本单新增 · 【取】同面归档）：`updateFaceAttributes` 换图三写步
+   —— ① 面行指向 → ② 新图 `visible`＋`marked`（by/at 服务端取）→ ③ 旧图 `hidden`
+   写序与写体全部走**记账包装 provider**（`writeLog`）逐条读回，不靠目测。
+   =========================================================================== */
+console.log(JSON.stringify({ section: 'G', title: '【取】同面归档：换图三写步 ＋ 幂等零额外写 ＋ 半分态如实' }))
+{
+  const SWAP_FACE_ID = 'fc-swap-g'
+  const IMG_A = 'img-g-original'
+  const IMG_B = 'img-g-ai'
+  const IMG_SEAL = 'img-g-wholeseal'
+  const seedSwap = () => [
+    { __collection: 'xiai_faces', _id: SWAP_FACE_ID, id: SWAP_FACE_ID, seal_name: '換圖印', face_image_id: IMG_A },
+    /* 旧图 A：普通原图、已 `visible` ＋ 已 `marked`（归档只该动 `visibility`）。 */
+    { __collection: 'xiai_images', _id: IMG_A, id: IMG_A, source: 'original', storage: 'server', visibility: 'visible', marked: true, marked_by: 'u-legacy', marked_at: '2026-01-01T00:00:00.000Z' },
+    /* 新图 B：AI 修復产物，入库即 `hidden` ＋ 未 `marked`（本单要补的两笔）。 */
+    { __collection: 'xiai_images', _id: IMG_B, id: IMG_B, source: 'ai_enhance', storage: 'server', visibility: 'hidden', marked: false },
+    /* 整枚章图（**非本面引用**）：归档绝不能碰到它。 */
+    { __collection: 'xiai_images', _id: IMG_SEAL, id: IMG_SEAL, source: 'original', storage: 'server', visibility: 'visible', marked: true, marked_by: 'u-legacy', marked_at: '2026-01-01T00:00:00.000Z' }
+  ]
+  const writeLog = []
+  /* 记账包装：只包 `where().update()`（本 op 全部写步都是它），读路径原样透传。 */
+  const loggingProvider = (real, options) => () => ({
+    collection(name) {
+      const collection = real.collection(name)
+      return Object.assign({}, collection, {
+        where(match) {
+          const api = collection.where(match)
+          return Object.assign({}, api, {
+            async update(doc) {
+              if (options && options.failOn && options.failOn(name, match)) {
+                throw Object.assign(new Error('synthetic: update refused'), { code: 500 })
+              }
+              const result = await api.update(doc)
+              writeLog.push({ collection: name, match: match, doc: doc })
+              return result
+            }
+          })
+        }
+      })
+    }
+  })
+  const steps = () => writeLog.map((w) => `${w.collection}:${(w.match && (w.match._id || w.match.id)) || ''}`)
+  const imageRow = (store, id) => store.rows('xiai_images').find((row) => row.id === id) || {}
+  const faceRowOf = (store, id) => store.rows('xiai_faces').find((row) => row.id === id) || {}
+
+  /* ---------------- 场景①：取 AI 候选（B 未 visible / 未 marked；A 存在且 visible） -------- */
+  const swapStore = createStore(seedSwap())
+  ops.setOpsDbProvider(loggingProvider(swapStore.provider()))
+  const swapTake = (patch) => ops.ADMIN_OPS.updateFaceAttributes({ face_id: SWAP_FACE_ID, patch }, ADMIN_IDENTITY, CONTEXT)
+  const first = await swapTake({ face_image_id: IMG_B })
+  check('G1', '场景① 取 AI 候选 ⇒ ok:true（成功恰 2 键 {ok,row}）', { ok: true, keys: ['ok', 'row'] }, { ok: first.ok, keys: Object.keys(first).sort() })
+  check('G2', '场景① 写步**恰 3 条且顺序即契约**：① 面行指向 → ② 新图 B → ③ 旧图 A', [`xiai_faces:${SWAP_FACE_ID}`, `xiai_images:${IMG_B}`, `xiai_images:${IMG_A}`], steps())
+  check('G3', '场景① 第 ② 步写体恰 4 键 `marked / marked_by / marked_at / visibility`（不碰其它字段）', ['marked', 'marked_at', 'marked_by', 'visibility'], Object.keys(writeLog[1].doc).sort())
+  check('G4', '场景① 第 ③ 步写体**恰 1 键** `visibility`＝`hidden`（只归档旧图、不碰 marked）', { visibility: 'hidden' }, writeLog[2].doc)
+  check('G5', '场景① 回读 B ＝ `visible` ＋ `marked:true`', { visibility: 'visible', marked: true }, { visibility: imageRow(swapStore, IMG_B).visibility, marked: imageRow(swapStore, IMG_B).marked })
+  check('G6', '场景① B 的 `marked_by` / `marked_at` **只从服务端取**（`identity.uid` ＋ `context.nowSeconds`；载荷只递 `face_image_id`）', { by: ADMIN_IDENTITY.uid, at: new Date(NOW * 1000).toISOString() }, { by: imageRow(swapStore, IMG_B).marked_by, at: imageRow(swapStore, IMG_B).marked_at })
+  check('G7', '场景① 回读 A ＝ `hidden`（同面原图自动归档）且 `marked` 三键逐字未动', { visibility: 'hidden', marked: true, by: 'u-legacy', at: '2026-01-01T00:00:00.000Z' }, { visibility: imageRow(swapStore, IMG_A).visibility, marked: imageRow(swapStore, IMG_A).marked, by: imageRow(swapStore, IMG_A).marked_by, at: imageRow(swapStore, IMG_A).marked_at })
+  check('G8', '场景① 面行指向已落 B', IMG_B, faceRowOf(swapStore, SWAP_FACE_ID).face_image_id)
+  check('G9', '场景① **不归档非本面引用的影像**（整枚章图仍 `visible` ＋ 零写）', { visibility: 'visible', touched: false }, { visibility: imageRow(swapStore, IMG_SEAL).visibility, touched: writeLog.some((w) => w.match && (w.match._id === IMG_SEAL || w.match.id === IMG_SEAL)) })
+
+  /* ---------------- 场景②：B 与 A 同值（重放同一次【取】）⇒ 恰 1 条写步（零额外写） ------- */
+  writeLog.length = 0
+  const replay = await swapTake({ face_image_id: IMG_B })
+  check('G10', '场景② B 与 A 同值 ⇒ ok:true ＋ **恰 1 条写步**（零额外写：不重抬 visible、不重写 marked）', { ok: true, steps: [`xiai_faces:${SWAP_FACE_ID}`] }, { ok: replay.ok, steps: steps() })
+
+  /* ---------------- 场景③：B 为空（只改其它属性）⇒ 恰 1 条写步 -------------------------- */
+  writeLog.length = 0
+  const otherOnly = await swapTake({ seal_name: '只改名不換圖' })
+  check('G11', '场景③ 不带 `face_image_id`（只改其它属性）⇒ ok:true ＋ **恰 1 条写步**', { ok: true, steps: [`xiai_faces:${SWAP_FACE_ID}`] }, { ok: otherOnly.ok, steps: steps() })
+  check('G12', '场景③ 影像行零改动（B / A / 章图三行 visibility 全不动）', { b: 'visible', a: 'hidden', seal: 'visible' }, { b: imageRow(swapStore, IMG_B).visibility, a: imageRow(swapStore, IMG_A).visibility, seal: imageRow(swapStore, IMG_SEAL).visibility })
+
+  /* ---------------- 场景④：第 3 步失败 ⇒ 如实回包 ＋ 半分态 ＋ 重试幂等 ＋ 回退后补齐 ---- */
+  writeLog.length = 0
+  const failStore = createStore(seedSwap())
+  ops.setOpsDbProvider(loggingProvider(failStore.provider(), { failOn: (name, match) => name === 'xiai_images' && !!match && (match._id === IMG_A || match.id === IMG_A) }))
+  const broken = await swapTake({ face_image_id: IMG_B })
+  check('G13', '场景④ 第 3 步失败 ⇒ 结构化拒绝（`STORAGE_UNAVAILABLE`、恰 3 键、reason 在冻结表内）', { ok: false, reason: 'STORAGE_UNAVAILABLE', keys: 3, inTable: true }, { ok: broken.ok, reason: denyReason(broken), keys: Object.keys(broken).length, inTable: Object.keys(config.REASONS).indexOf('STORAGE_UNAVAILABLE') !== -1 })
+  check('G14', '场景④ 回包**如实**：不谎报「本次零寫入」，且点名第 3 / 3 步失败（`非零寫入`）', { zeroWriteClaim: false, failedStep: true }, { zeroWriteClaim: String(broken.message).indexOf('本次零寫入') !== -1, failedStep: String(broken.message).indexOf('第 3 / 3 步失敗') !== -1 && String(broken.message).indexOf('非零寫入') !== -1 })
+  check('G15', '场景④ 半分态如实：面行已指 B、B 已 `visible`＋`marked`、**A 仍 `visible`**（写账恰 2 条、第 3 步未执行）', { face: IMG_B, b: 'visible/true', a: 'visible', writes: 2 }, { face: faceRowOf(failStore, SWAP_FACE_ID).face_image_id, b: `${imageRow(failStore, IMG_B).visibility}/${imageRow(failStore, IMG_B).marked}`, a: imageRow(failStore, IMG_A).visibility, writes: writeLog.length })
+  /* 重试（注入解除）：面行已指 B ⇒ 换图信号消失 ⇒ 恰 1 条写步、B 零重写（幂等，不把已 visible 的再写一遍）。 */
+  writeLog.length = 0
+  ops.setOpsDbProvider(loggingProvider(failStore.provider()))
+  const retry = await swapTake({ face_image_id: IMG_B })
+  check('G16', '场景④ 重试同一次【取】⇒ ok:true ＋ **恰 1 条写步**（面行同值；B 已 visible/marked ⇒ 零重写 ⇒ 幂等）', { ok: true, steps: [`xiai_faces:${SWAP_FACE_ID}`] }, { ok: retry.ok, steps: steps() })
+  /* 自愈闭环：把半分态的面行**指回取前值 A**（＝撤销本次指向）后重跑同一次【取】⇒ 归档补齐。 */
+  writeLog.length = 0
+  await failStore.provider().collection('xiai_faces').where({ _id: SWAP_FACE_ID }).update({ face_image_id: IMG_A })
+  writeLog.length = 0
+  const heal = await swapTake({ face_image_id: IMG_B })
+  check('G17', '场景④ 回退半分态指向后重跑同一次【取】⇒ ok:true ＋ 写步**恰 2 条**（面行 ＋ 旧图 A 归档；B 已 visible/marked **零重写**）', { ok: true, steps: [`xiai_faces:${SWAP_FACE_ID}`, `xiai_images:${IMG_A}`] }, { ok: heal.ok, steps: steps() })
+  check('G18', '场景④ 归档终态补齐：A ＝ `hidden`、B ＝ `visible`＋`marked:true`、章图仍 `visible`', { a: 'hidden', b: 'visible/true', seal: 'visible' }, { a: imageRow(failStore, IMG_A).visibility, b: `${imageRow(failStore, IMG_B).visibility}/${imageRow(failStore, IMG_B).marked}`, seal: imageRow(failStore, IMG_SEAL).visibility })
+
+  ops.setOpsDbProvider(store.provider) /* 恢复主库注入（本段自建库，不污染后续读数）。 */
+  note('G19', 'G 段写序读数（场景① 三条 ＋ 场景④ 半分态两条）', steps())
+}
 
 /* ===========================================================================
    收尾

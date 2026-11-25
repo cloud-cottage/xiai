@@ -31,6 +31,11 @@
  * ⑩ **「读不存在的文档会抛错」收尾（本单）**：管理员侧 `readCorrectionRow` 的 doc() 兜底在
  *    `doc().get()` 抛「不存在」类（code 404）⇒ 回 `null`（不抛）；抛**非不存在类**（code 500）
  *    ⇒ 照旧上抛（不吞真存储故障）—— 走本脚本既有的 `adminOps.setOpsDbProvider` 注入缝。
+ * ⑪ **【取】同面归档（2026-11-25 Kevin 拍板 A）**：`updateFaceAttributes` 换图（`face_image_id`
+ *    A → B）走**真实入口**（登录令牌 → `fn.main` → op）⇒ 写步**恰 3 条、顺序即契约**
+ *    「① 面行指向 → ② 新图 B `visible`＋`marked`（`marked_by` / `marked_at` 只从服务端取）→
+ *    ③ 旧图 A `hidden`」；`marked` 三键由载荷递入 ⇒ `INVALID_FIELD` ＋ 零写入；
+ *    重放同一次【取】/ 不带 `face_image_id` ⇒ **恰 1 条写步**（零额外写）。
  *
  * 纪律：不打印任何密钥 / 验证码 / 令牌原文（只给长度与指纹）；不碰任何服务；断言失败 ⇒ 退出码非 0。
  * 环境变量缺省用**合成值**（非真实凭据；可用 env 覆盖）：XIAI_ADMIN_PHONE / XIAI_ADMIN_TOKEN_SECRET。
@@ -734,6 +739,78 @@ check('J7', '真实入口（fn.main）预演 ⇒ ok:true ＋ 零写入', true, v
   adminOps.setOpsDbProvider(null) /* 恢复未注入态（本脚本对 adminOps 本就零直注）。 */
   check('K1', '管理员侧 readCorrectionRow：where 已空、doc().get() 抛不存在类（code 404）⇒ 回 null（不抛；「不存在」不再变 500）', null, missingRow)
   check('K2', '管理员侧 readCorrectionRow：doc().get() 抛非不存在类（code 500）⇒ 照旧上抛（不吞真存储故障）', 500, caught === null ? null : caught.code)
+}
+
+/* ===========================================================================
+   L 段（本单新增 · 【取】同面归档）：`updateFaceAttributes` 换图三写步 ——
+   走**真实入口**（登录令牌 → `fn.main` → `ADMIN_OPS.updateFaceAttributes`），
+   写序 / 写体经**记账包装 provider**（`writeLog`）逐条读回。
+   =========================================================================== */
+console.log(JSON.stringify({ section: 'L', title: '【取】同面归档：换图三写步（真实入口 fn.main）' }))
+{
+  const FACE_SWAP = 'fc-l-swap'
+  const IMG_A = 'img-l-original'
+  const IMG_B = 'img-l-ai'
+  const seedSwap = [
+    { __collection: 'xiai_faces', _id: FACE_SWAP, id: FACE_SWAP, seal_name: '換圖印', face_image_id: IMG_A },
+    /* 旧图 A：原图、已 `visible` ＋ 已 `marked`。 */
+    { __collection: 'xiai_images', _id: IMG_A, id: IMG_A, source: 'original', storage: 'server', visibility: 'visible', marked: true, marked_by: 'u-legacy', marked_at: '2026-01-01T00:00:00.000Z' },
+    /* 新图 B：AI 修復产物，入库即 `hidden` ＋ 未 `marked`。 */
+    { __collection: 'xiai_images', _id: IMG_B, id: IMG_B, source: 'ai_enhance', storage: 'server', visibility: 'hidden', marked: false }
+  ]
+  const writeLog = []
+  const realProvider = store.provider
+  ops.setOpsDbProvider(() => ({
+    collection(name) {
+      const collection = realProvider().collection(name)
+      return Object.assign({}, collection, {
+        where(match) {
+          const api = collection.where(match)
+          return Object.assign({}, api, {
+            async update(doc) {
+              const result = await api.update(doc)
+              writeLog.push({ collection: name, match: match, doc: doc })
+              return result
+            }
+          })
+        }
+      })
+    }
+  }))
+  store.load(seedSwap)
+  const take = (patch) => fn.main({ action: 'verify', token: tokenFor(PHONE), op: 'updateFaceAttributes', payload: { face_id: FACE_SWAP, patch } })
+  const steps = () => writeLog.map((w) => `${w.collection}:${(w.match && (w.match._id || w.match.id)) || ''}`)
+  const img = (id) => store.collections.xiai_images.get(id) || {}
+  const face = () => store.collections.xiai_faces.get(FACE_SWAP) || {}
+
+  /* L1〜L4：换图 ⇒ 恰 3 写步、顺序即契约、写体键面、服务端派生的准入三键。 */
+  const first = await take({ face_image_id: IMG_B })
+  check('L1', '真实入口取 AI 候选 ⇒ ok:true ＋ 权威回包带 `row`（`row.face_image_id` ＝ B）', { ok: true, rowFace: IMG_B }, { ok: first.ok, rowFace: first.row && first.row.face_image_id })
+  check('L2', '写步**恰 3 条且顺序即契约**：① 面行指向 → ② 新图 B → ③ 旧图 A', [`xiai_faces:${FACE_SWAP}`, `xiai_images:${IMG_B}`, `xiai_images:${IMG_A}`], steps())
+  check('L3', '写体键面：第 ② 步恰 4 键 `marked/marked_at/marked_by/visibility`、第 ③ 步恰 1 键 `visibility`＝`hidden`', { step2: ['marked', 'marked_at', 'marked_by', 'visibility'], step3: ['visibility'] }, { step2: Object.keys(writeLog[1].doc).sort(), step3: Object.keys(writeLog[2].doc).sort() })
+  check('L4', 'B 的 `marked_by` / `marked_at` **只从服务端取**（`identity.uid` ＋ `context.nowSeconds`）', { by: uidOfPhone(PHONE), marked: true, visibility: 'visible' }, { by: img(IMG_B).marked_by, marked: img(IMG_B).marked, visibility: img(IMG_B).visibility })
+  check('L5', '旧图 A 同面归档 ＝ `hidden`（`marked` 三键未动）', { visibility: 'hidden', marked: true, by: 'u-legacy' }, { visibility: img(IMG_A).visibility, marked: img(IMG_A).marked, by: img(IMG_A).marked_by })
+  check('L6', '面行指向已落 B', IMG_B, face().face_image_id)
+
+  /* L7：`marked` 三键由载荷递入 ⇒ `INVALID_FIELD` ＋ 零写入（载荷封闭键面未被本单放宽）。 */
+  writeLog.length = 0
+  const smuggled = await take({ face_image_id: IMG_B, marked: true })
+  check('L7', '载荷递 `marked` ⇒ `INVALID_FIELD`（恰 3 键）＋ **零写入**', { ok: false, reason: 'INVALID_FIELD', keys: 3, writes: 0 }, { ok: smuggled.ok, reason: smuggled.reason, keys: Object.keys(smuggled).length, writes: writeLog.length })
+
+  /* L8：重放同一次【取】（B 与面行同值）⇒ 恰 1 条写步（零额外写、不把已 visible 的再写一遍）。 */
+  writeLog.length = 0
+  const replay = await take({ face_image_id: IMG_B })
+  check('L8', '重放同一次【取】（B 与面行同值）⇒ ok:true ＋ **恰 1 条写步**（零额外写）', { ok: true, steps: [`xiai_faces:${FACE_SWAP}`] }, { ok: replay.ok, steps: steps() })
+
+  /* L9：不带 `face_image_id`（只改其它属性）⇒ 恰 1 条写步、影像行零改动。 */
+  writeLog.length = 0
+  const otherOnly = await take({ seal_name: '只改名不換圖' })
+  check('L9', '不带 `face_image_id`（只改其它属性）⇒ ok:true ＋ **恰 1 条写步**', { ok: true, steps: [`xiai_faces:${FACE_SWAP}`] }, { ok: otherOnly.ok, steps: steps() })
+  check('L10', '影像行零改动（A 仍 `hidden`、B 仍 `visible`＋`marked`）', { a: 'hidden', b: 'visible/true' }, { a: img(IMG_A).visibility, b: `${img(IMG_B).visibility}/${img(IMG_B).marked}` })
+
+  /* 收尾：恢复本脚本对 `ops` 的既有注入 ＋ 种子（汇总读数口径不变：写账回 0）。 */
+  ops.setOpsDbProvider(store.provider)
+  store.load(CLOUD_SEED)
 }
 
 /* ===========================================================================
