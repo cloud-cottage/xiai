@@ -4,6 +4,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'v
 import { useRoute, useRouter } from 'vue-router'
 import FilterBar from '../components/FilterBar.vue'
 import SealCard from '../components/SealCard.vue'
+/* **【單獨列出影像】的影像瀑布流**（裁定件 ③）：只在 `view=img` 分支渲染，与卡片网格互斥。 */
+import SealImageMasonry from '../components/SealImageMasonry.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import UploadSealDialog from '../components/UploadSealDialog.vue'
@@ -29,6 +31,23 @@ const style = computed(() => (typeof route.query.style === 'string' ? route.quer
 /* **大類**（第 4 维度，与前三者并列）：`seal_class` 是**印面级**键（无回落）。 */
 const sealClass = computed(() => (typeof route.query.sealClass === 'string' ? route.query.sealClass : ''))
 const keyword = computed(() => (typeof route.query.q === 'string' ? route.query.q.trim() : ''))
+
+/* ============================================================================
+   **【單獨列出影像】開關與影像模式（裁定件 ②）**
+   ----------------------------------------------------------------------------
+   · 開關**只在 URL 帶非空關鍵詞 `q` 時渲染**（無關鍵詞 ⇒ 無開關、也無影像模式 ——
+     默認維持「一印章一卡片」）；
+   · 狀態由 URL 參數承載：`view=img` ⇒ 影像模式；可分享、可後退；
+     打開 `router.replace` **保留既有 query 只加 `view=img`**，關閉時**刪掉 `view`**；
+   · 切換 ⇒ 列表**重置到第一页**（與四維篩選 / 關鍵詞變化同一個 watch 分支），
+     且**不清空關鍵詞與四維篩選**（`applyQuery` 也保留 `view`，見下）。
+   ============================================================================ */
+const imageModeOn = computed(() => typeof route.query.view === 'string' && route.query.view === 'img')
+/* 影像模式的總開關：`view=img` **且**帶關鍵詞 —— 關鍵詞一旦清空即回到卡片模式，
+   不會留下「URL 說是影像模式、卻沒有出口」的死路（開關本來就只在有關鍵詞時渲染）。 */
+const imageView = computed(() => imageModeOn.value && keyword.value !== '')
+/** 開關渲染判據（裁定件 ②：僅在帶非空關鍵詞時出現）。 */
+const showImageToggle = computed(() => keyword.value !== '')
 
 /* 任何一次写入后 +1，使下面的派生读数立即重算（服务层读的是已落盘数据）；
    列表侧同样依赖它 ⇒ 上傳 / 清除本機資料後自動**重置到首頁**重拉。 */
@@ -142,11 +161,119 @@ async function loadMore() {
   }
 }
 
-/* 篩選 / 關鍵詞變化、寫入後 ⇒ 重置到首頁（`q` 與四維篩選**同權**：游標清空、列表清空、
-   重拉第 1 頁 —— 關鍵詞由服務端全庫檢索，**不在前端二次過濾**）。 */
+/* ============================================================================
+   **影像模式（`view=img`）的分頁狀態（裁定件 ④：每頁 60 張；與卡片狀態**分立**）
+   ----------------------------------------------------------------------------
+   · 與卡片模式**互斥**：同一時刻只渲染一種（模板 `v-if / v-else-if` 分支）；
+   · `imageTotal` ＝ 服務端 `total` ＝ **命中印章數（枚）**，**不是**影像張數 ——
+     上屏一律把「命中 N 枚印章」與「已載入 M 張影像」分開寫，禁止拿 total 冒充張數；
+   · 雲端讀不到（`ok:false`）⇒ **不回落本機示範資料**（本機無影像真源）：固定降級原文
+     ＋「重新讀取」入口（`imageError`），**不靜默、不上屏 0 張冒充成功**。
+   ============================================================================ */
+const IMAGE_PAGE_SIZE = sealCards.SEAL_IMAGE_PAGE_SIZE
+/** 累積的影像行（13 鍵行；按 `image_id` 去重後上屏）。 */
+const imageRows = ref([])
+const imageCursor = ref('')
+const imageHasMore = ref(false)
+/** **命中印章數**（枚；服務端 `total` 的語義 —— 不是影像張數）。 */
+const imageTotal = ref(0)
+const imageLoading = ref(false)
+const imageMoreBusy = ref(false)
+/** 影像模式固定降級原文（⑤）；非空 ⇒ 上屏錯誤提示 ＋「重新讀取」。 */
+const imageError = ref('')
+/** 影像請求代次：只認最後一代的回包（丟掉過期結果）。 */
+let imageRequestGen = 0
+
+/** 固定降級原文（與服務層同一句真源，不在視圖另造第二份）。 */
+const IMAGE_UNAVAILABLE = sealCards.SEAL_IMAGE_UNAVAILABLE_MESSAGE
+
+/** 按 `image_id` 去重（游標重疊 / 亂序時不漏不重，v-for 的 key 也不會撞）。 */
+function dedupeImageRows(rows) {
+  const seen = new Set()
+  const fresh = []
+  for (const row of rows) {
+    const id = row && typeof row.image_id === 'string' ? row.image_id : ''
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    fresh.push(row)
+  }
+  return fresh
+}
+
+/** 影像模式首頁：清空游標與累積行，只拉第 1 頁（60 張）。 */
+async function loadImageFirstPage() {
+  const gen = ++imageRequestGen
+  imageLoading.value = true
+  imageMoreBusy.value = false
+  imageError.value = ''
+  imageRows.value = []
+  imageCursor.value = ''
+  imageHasMore.value = false
+  imageTotal.value = 0
+  const out = await sealCards.listSealImagePage({ ...filterArgs(), cursor: '', limit: IMAGE_PAGE_SIZE })
+  if (gen !== imageRequestGen) return
+  imageLoading.value = false
+  if (!out.ok) {
+    imageError.value = out.message || IMAGE_UNAVAILABLE
+    return
+  }
+  imageRows.value = dedupeImageRows(out.rows)
+  imageCursor.value = out.next_cursor
+  imageHasMore.value = out.has_more && out.next_cursor !== ''
+  if (out.total > 0) {
+    imageTotal.value = out.total
+    /* `total` ＝ 命中印章數（枚）—— 與卡片模式同一把尺，喂給頁頭篩選條的「共 N 枚」。 */
+    totalCount.value = out.total
+  }
+}
+
+/** 影像模式續拉（滾到底 / 「載入更多」同一執行點；並發去重、過期回包丟棄）。 */
+async function loadImageMore() {
+  if (!imageView.value || !imageHasMore.value || !imageCursor.value) return
+  if (imageMoreBusy.value || imageLoading.value) return
+  const gen = imageRequestGen
+  const cursor = imageCursor.value
+  imageMoreBusy.value = true
+  imageError.value = ''
+  const out = await sealCards.listSealImagePage({ ...filterArgs(), cursor, limit: IMAGE_PAGE_SIZE })
+  if (gen !== imageRequestGen) return
+  imageMoreBusy.value = false
+  if (!out.ok) {
+    imageError.value = out.message || IMAGE_UNAVAILABLE
+    return
+  }
+  imageRows.value = dedupeImageRows(imageRows.value.concat(out.rows))
+  imageCursor.value = out.next_cursor
+  imageHasMore.value = out.has_more && out.next_cursor !== ''
+  if (out.total > 0) {
+    imageTotal.value = out.total
+    totalCount.value = out.total
+  }
+}
+
+/** 影像模式「重新讀取」（⑤：只重讀影像；**不**靜默、**不**回落本機示範資料）。 */
+function retryImageMode() {
+  void loadImageFirstPage()
+}
+
+/** 開關開 / 關（裁定件 ②）：`router.replace` 保留既有 query，只加 / 刪 `view=img`。 */
+function toggleImageView() {
+  const query = Object.assign({}, route.query)
+  if (imageView.value) delete query.view
+  else query.view = 'img'
+  const nav = router.replace({ name: 'square', query })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+}
+
+/* 篩選 / 關鍵詞變化、寫入後、**影像開關切換** ⇒ 重置到首頁（`q` 與四維篩選**同權**：
+   游標清空、列表清空、重拉第 1 頁 —— 關鍵詞由服務端全庫檢索，**不在前端二次過濾**）。
+   影像模式（裁定件 ②）：`imageView` 入依賴面 ⇒ 開 / 關開關即**重置到第一页**，
+   切換只換列表形態、**不清空關鍵詞與四維篩選**。
+   **落點**：本 watch 建在影像狀態（`IMAGE_PAGE_SIZE` / `imageRows` …）**之後** ——
+   `immediate:true` 首拍同步執行時不得踩 TDZ。 */
 watch(
-  () => [dynasty.value, content.value, style.value, sealClass.value, keyword.value, dataVersion.value],
-  () => { void loadFirstPage() },
+  () => [dynasty.value, content.value, style.value, sealClass.value, keyword.value, imageView.value, dataVersion.value],
+  () => { if (imageView.value) void loadImageFirstPage(); else void loadFirstPage() },
   { immediate: true }
 )
 
@@ -161,7 +288,7 @@ const statsItems = computed(() => {
   const s = stats.value
   if (!s) return []
   const fmt = (n) => Number(n).toLocaleString('en-US')
-  return [`【璽印 ${fmt(s.seals)} 枚】`, `【印面 ${fmt(s.faces)} 個】`, `【圖像 ${fmt(s.images)} 張】`]
+  return [`【璽印 ${fmt(s.seals)} 枚】`, `【印面 ${fmt(s.faces)} 個】`, `【影像 ${fmt(s.images)} 張】`]
 })
 
 /**
@@ -188,7 +315,10 @@ onMounted(() => {
   if (typeof IntersectionObserver !== 'function') return
   sentinelObserver = new IntersectionObserver(
     (entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) void loadMore()
+      /* 兩種模式共用同一個哨兵（模板上任一時刻只渲染一個）：影像模式續拉影像，其餘續拉卡片。 */
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      if (imageView.value) void loadImageMore()
+      else void loadMore()
     },
     { rootMargin: '400px 0px' }
   )
@@ -362,6 +492,9 @@ function applyQuery(patch) {
   if (nextContent) query.content = nextContent
   if (nextStyle) query.style = nextStyle
   if (nextSealClass) query.sealClass = nextSealClass
+  /* **影像模式不因改篩選而掉線**（裁定件 ②：狀態由 URL 承載）：`view=img` 原樣帶過去 —
+     改篩選 / 清篩選**不**等於關閉開關（關閉只由開關自己做）。 */
+  if (imageView.value) query.view = 'img'
   router.replace({ name: 'square', query })
 }
 
@@ -582,14 +715,41 @@ async function confirmClearLocal() {
          本頁只按 `route.query.code` 精確查、查無即空態，不回落關鍵詞 `q`、不模糊匹配。 -->
 
     <!-- **關鍵詞已下推服務端全庫檢索**（請求第 7 鍵 `q`）：「共 N 枚」一律取服務端 `total`，
-         不再上屏「只覆已載入頁」的降級計數與其配套提示（規範 §3.81.7 / `AC-723`）。 -->
-    <p v-if="keyword" class="square__keyword" data-square-keyword>
+         不再上屏「只覆已載入頁」的降級計數與其配套提示（規範 §3.81.7 / `AC-723`）。
+         **影像模式（裁定件 ④）**：`total` ＝ **命中印章數（枚）**、已載入數 ＝ **影像張數** ——
+         兩者分開寫，**禁止**把 `total` 當影像張數上屏。 -->
+    <p v-if="keyword && !imageView" class="square__keyword" data-square-keyword>
       當前檢索「{{ keyword }}」：共 {{ totalCount }} 枚
     </p>
+    <p
+      v-else-if="keyword && imageView && !imageError && imageTotal > 0"
+      class="square__keyword"
+      data-square-keyword
+    >
+      當前檢索「{{ keyword }}」：命中 {{ imageTotal }} 枚印章 · 已載入 {{ imageRows.length }} 張影像
+    </p>
 
-    <!-- **O-1**：雲讀失敗已回落本機示範資料 ⇒ 顯式提示 ＋ 重試入口（不靜默；字形同全站）。 -->
+    <!-- **【單獨列出影像】開關（裁定件 ②）**：僅在帶非空關鍵詞 `q` 時渲染；狀態由 `?view=img`
+         承載（可分享、可後退）。button ＋ `aria-pressed` 表達開 / 關狀態，鉤子
+         `data-square-view-toggle`。開啟 ⇒ `router.replace` 保留既有 query 只加 `view=img`；
+         關閉 ⇒ 刪掉 `view`；切換時列表重置到第一页（不清空關鍵詞與四維篩選）。 -->
+    <div v-if="showImageToggle" class="square__view-toggle">
+      <button
+        class="btn btn--ghost square__view-toggle-btn"
+        :class="{ 'square__view-toggle-btn--on': imageView }"
+        type="button"
+        data-square-view-toggle
+        :aria-pressed="imageView ? 'true' : 'false'"
+        @click="toggleImageView"
+      >
+        【單獨列出影像】
+      </button>
+    </div>
+
+    <!-- **O-1**：雲讀失敗已回落本機示範資料 ⇒ 顯式提示 ＋ 重試入口（不靜默；字形同全站）。
+         **影像模式不渲染本塊**（⑤：影像模式沒有本機降級，別把「本機示範資料」說到影像頭上）。 -->
     <div
-      v-if="demoFallback"
+      v-if="demoFallback && !imageView"
       class="notice square__notice"
       data-source-fallback="square"
       :data-fallback-detail="fallbackDetail || null"
@@ -598,8 +758,16 @@ async function confirmClearLocal() {
       <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
     </div>
 
-    <!-- 讀取失敗（本機也沒有資料可兜底）⇒ **如實上屏原話 ＋ 重試**（不冒充「沒有符合條件的印章」）。 -->
-    <div v-if="pageError" class="notice square__notice" data-square-error>
+    <!-- 影像模式讀取失敗（裁定件 ⑤）：**固定降級原文** ＋「重新讀取」入口 ——
+         不靜默、不回落本機示範資料、不上屏「0 張」冒充成功。 -->
+    <div v-if="imageView && imageError" class="notice square__notice" data-image-error>
+      <span>{{ imageError }}</span>
+      <button class="btn btn--ghost" type="button" data-image-retry @click="retryImageMode">重新讀取</button>
+    </div>
+
+    <!-- 讀取失敗（本機也沒有資料可兜底）⇒ **如實上屏原話 ＋ 重試**（不冒充「沒有符合條件的印章」）。
+         影像模式不渲染本塊（上面的 `data-image-error` 已承接，兩種模式互斥）。 -->
+    <div v-if="pageError && !imageView" class="notice square__notice" data-square-error>
       <span>{{ pageError }}</span>
       <button class="btn btn--ghost" type="button" @click="retryDataSource">重新讀取</button>
     </div>
@@ -614,6 +782,25 @@ async function confirmClearLocal() {
       title="查無此印"
       :desc="codeMissDesc"
     />
+
+    <!-- **影像模式（裁定件 ③）**：與卡片網格**互斥** —— 同一時刻只渲染一種（本分支接在
+         `codeMiss` 之後、卡片網格之前）。圖未到 ⇒ 載入態；有錯誤 ⇒ 上面的固定降級提示已承接，
+         這裡**不渲染**「沒有符合條件的影像」這類終態（那是在斷言一件還沒讀到的事）。 -->
+    <template v-else-if="imageView">
+      <SealImageMasonry v-if="imageRows.length" :rows="imageRows" />
+      <PlaceholderPanel
+        v-else-if="imageLoading"
+        glyph="候"
+        title="正在讀取影像資料"
+        desc="影像瀑布流載入中，就緒後會自動顯示；載入過慢時可按「重新讀取」再試一次。"
+      />
+      <PlaceholderPanel
+        v-else-if="!imageError"
+        glyph="覓"
+        title="沒有符合條件的影像"
+        desc="可調整朝代、印面內容、印面風格或大類，或清空檢索詞後再試。"
+      />
+    </template>
 
     <div v-else-if="cards.length" class="square__grid">
       <SealCard
@@ -641,9 +828,10 @@ async function confirmClearLocal() {
     />
 
     <!-- **分頁尾巴**：哨兵元素 ＝ 滾到底自動續拉的觀測點；「載入更多」按鈕走同一執行點
-         （不支援 `IntersectionObserver` 時仍可用）。游標空 ⇒ 如實報「已全部載入」。 -->
+         （不支援 `IntersectionObserver` 時仍可用）。游標空 ⇒ 如實報「已全部載入」。
+         **卡片模式**（`!imageView`）：量詞「枚」＝ 印章；與影像尾巴互斥。 -->
     <div
-      v-if="!codeMiss && cards.length"
+      v-if="!codeMiss && !imageView && cards.length"
       ref="sentinel"
       class="square__more"
       data-square-pager
@@ -661,6 +849,30 @@ async function confirmClearLocal() {
         @click="loadMore"
       >
         {{ moreBusy ? '載入中…' : '載入更多' }}
+      </button>
+      <span v-else>已全部載入</span>
+    </div>
+
+    <!-- **影像模式分頁尾巴（裁定件 ④）**：量詞「張」＝ 影像；`total`（命中印章數，枚）
+         **不**在這裡冒充影像張數 —— 命中數寫在上面的檢索行裡，這裡只報已載入張數。
+         同一個哨兵（`ref="sentinel"`）：兩種模式任一時刻只渲染一個。 -->
+    <div
+      v-if="!codeMiss && imageView && imageRows.length"
+      ref="sentinel"
+      class="square__more"
+      data-image-pager
+      :data-image-has-more="imageHasMore ? '1' : '0'"
+    >
+      <span data-image-loaded>已載入 {{ imageRows.length }} 張</span>
+      <button
+        v-if="imageHasMore"
+        class="btn btn--ghost"
+        type="button"
+        data-image-more
+        :disabled="imageMoreBusy"
+        @click="loadImageMore"
+      >
+        {{ imageMoreBusy ? '載入中…' : '載入更多' }}
       </button>
       <span v-else>已全部載入</span>
     </div>
@@ -713,7 +925,7 @@ async function confirmClearLocal() {
   gap: var(--s-4);
 }
 
-/* 頁頭庫存三計數（【璽印 N 枚】【印面 N 個】【圖像 N 張】）：與說明文字同寬、弱化一級。 */
+/* 頁頭庫存三計數（【璽印 N 枚】【印面 N 個】【影像 N 張】）：與說明文字同寬、弱化一級。 */
 .square__stats {
   display: flex;
   flex-wrap: wrap;
@@ -735,6 +947,20 @@ async function confirmClearLocal() {
   margin: var(--s-4) 0;
   color: var(--c-text-muted);
   font-size: var(--t-sm);
+}
+
+/* 【單獨列出影像】開關：與檢索行同一行節奏；開啟態用金色描邊表達（狀態另由 `aria-pressed` 承載）。 */
+.square__view-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-3);
+}
+
+.square__view-toggle-btn--on {
+  color: var(--slot-gold-text);
+  border-color: var(--slot-gold-line);
+  background: var(--slot-gold-bg);
 }
 
 .square__grid {

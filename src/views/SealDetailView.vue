@@ -227,6 +227,59 @@ const sealLoading = computed(() => !seal.value && dataSource.value.pending)
 const sealUnavailable = computed(() => !seal.value && dataSource.value.failed)
 
 /* ============================================================================
+   **影像錨點（`?face=`｜裁定件 ③：廣場影像瀑布流點入 ⇒ 直達該印面）**
+   ----------------------------------------------------------------------------
+   · 只認 `^[A-Za-z0-9_-]{1,64}$`：**非法值 ⇒ 不取節點、不滾動、不報錯**；
+   · 只在**數據就緒**（`seal` 非空 ⇒ 面塊已在本次渲染裡）之後 `nextTick` 才取節點；
+   · `document.querySelector('[data-face-id="…"]')` **查不到節點 ⇒ 不滾動**（不報錯）；
+   · 本鉤子是**新增的獨立 `watch`**：不新增路由、不改任何既有鉤子的取值面。
+   ============================================================================ */
+const FACE_ANCHOR_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
+/** 已滾過的錨點鍵（`stamp_id|face`）：同一次導航只滾一次（依賴抖動不重滾）。 */
+let faceAnchorScrolledKey = ''
+
+async function scrollToFaceAnchor() {
+  const faceId = typeof route.query.face === 'string' ? route.query.face : ''
+  /* 非法值 / 缺值 ⇒ 直接返回（零副作用）。 */
+  if (!faceId || !FACE_ANCHOR_PATTERN.test(faceId)) return
+  /* 數據未就緒 ⇒ 不滾（等下一次依賴變化再試；不在這裡「猜」節點）。 */
+  if (!seal.value) return
+  const key = `${String(route.params.id || '')}|${faceId}`
+  if (faceAnchorScrolledKey === key) return
+  await nextTick()
+  /* 渲染期間又導航走了 ⇒ 這次作廢（不滾到別的頁的節點上）。 */
+  if (faceAnchorScrolledKey === key) return
+  const stillHere = typeof route.query.face === 'string' ? route.query.face : ''
+  if (stillHere !== faceId) return
+  let node = null
+  try {
+    node = document.querySelector(`[data-face-id="${faceId}"]`)
+  } catch (err) {
+    node = null /* 選擇器異常 ⇒ 查不到，靜默。 */
+  }
+  if (!node) return /* 查不到節點 ⇒ 不滾動、不報錯。 */
+  faceAnchorScrolledKey = key
+  try {
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  } catch (err) {
+    /* 滾動失敗（舊環境 / 手動滾動鎖定）⇒ 靜默，不動既有任何狀態。 */
+  }
+}
+
+watch(
+  /* 依賴面：路由 id ＋ `face` 值 ＋ **數據就緒**（`seal` 有無）＋ 面數 ——
+     硬導航首屏 `seal` 為空 ⇒ 先不滾；水合落定後本效應重跑一次再滾。 */
+  () => [
+    String(route.params.id || ''),
+    typeof route.query.face === 'string' ? route.query.face : '',
+    seal.value ? '1' : '0',
+    faces.value.length
+  ],
+  () => { void scrollToFaceAnchor() },
+  { immediate: true }
+)
+
+/* ============================================================================
    **瀏覽量計數（裁定件 §6 / §7｜本單）**
    ----------------------------------------------------------------------------
    · 觸發點：印章**真實解析成功**（`seal` 非空且帶 `stamp_id`）後**一次** —— 熱導航 / 水合落定

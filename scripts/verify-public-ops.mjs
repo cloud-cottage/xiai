@@ -6,7 +6,7 @@
  * `cloudfunctions/xiai-user-token/index.js` 的**真实入口**（`main`）与
  * `lib/sealCards.js` / `lib/authorMatch.js` 的**真实函数体**。
  *
- * 断言面（九组；每条可机械判负）：
+ * 断言面（十组；每条可机械判负）：
  *   P0. **七张冻结常量逐字**（唯一真源，直接引用被测件导出、不重抄）：
  *       `LIST_SEAL_CARDS_ALLOWED_KEYS`(7：`limit,cursor,dynasty,seal_type,face_style,category,q`) /
  *       `LIST_SEAL_CARDS_SUCCESS_KEYS`(5：
@@ -14,8 +14,9 @@
  *       `SUGGEST_AUTHORS_ALLOWED_KEYS`(3：face_id,name,limit) /
  *       `SUGGEST_AUTHORS_SUCCESS_KEYS`(4：ok,query,normalized,candidates) /
  *       `AUTHOR_CANDIDATE_KEYS`(7) / `MATCHED_FIELDS`(5：name,alias,courtesy,art,contains)。
- *   P1. `PUBLIC_OPS` **恰 6 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
- *       `getPersonCard` / `catalogStats` / `listSealCovers`，皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
+ *   P1. `PUBLIC_OPS` **恰 7 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
+ *       `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`（v1.130 新增：
+ *       搜索结果页影像瀑布流，恒零写），皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
  *   P2. **两 op 载荷封闭**：未知键 / **身份类键**（`user_id` / `phone`）⇒ `INVALID_FIELD`
  *       ＋ 恰 3 键拒绝 ＋ 零读（判定早于任何读）。
  *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 16 键**。
@@ -32,6 +33,12 @@
  *       `rows.length===48`、`has_more===true`（`rows` 按命中集分页，与 `total` 同尺）；
  *       `next_cursor` **形态为 `off:<n>` 偏移量**（v1.110 起语义变更：＝ `off:` ＋（`offset` ＋
  *       `rows.length`）＝ 本页**已发卡片数**的累进位次，**不再是**「本页末枚 `stamp_id`」）。
+ *   P10. **影像读面 `listSealImages`**（v1.130 新增：搜索结果页影像瀑布流，恒零写）：
+ *       载荷门（未知键 ⇒ `INVALID_FIELD`；`q` trim 后 41 字 / `limit` 97 ⇒ `INVALID_VALUE`，
+ *       三发皆**零读零写**）；成功回包**恰 5 键**且**键序固定**（`ok,rows,next_cursor,has_more,total`）；
+ *       `rows` 每元素**恰 13 键**且**键序固定**；`hidden` 影像与非 `server`（bundled 占位行）
+ *       **整条不出**；游标**三页走完不重不漏**且每页 ≤ `limit`；DB 不可用 ⇒ 回**恰 5 键降级包**
+ *       且**不抛异常**；本节全程**零写入**。
  *
  * 纪律：不打印任何密钥 / 令牌；不碰任何服务；断言失败 ⇒ 退出码非 0。
  *
@@ -346,17 +353,17 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 16 / 3 / 4 / 7 / 5
 }
 
 /* ===========================================================================
-   P1：`PUBLIC_OPS` 恰 6 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
+   P1：`PUBLIC_OPS` 恰 7 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
    =========================================================================== */
-section('P1', 'PUBLIC_OPS 恰 6（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers）；表外 op ⇒ FORBIDDEN')
+section('P1', 'PUBLIC_OPS 恰 7（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers / listSealImages〔v1.130〕）；表外 op ⇒ FORBIDDEN')
 {
   const keys = Object.keys(sealCards.PUBLIC_OPS)
   const readsBefore = store.stats.reads
   const denied = await publicCall('repairPrimaryFace', {})
-  check('P1', '`PUBLIC_OPS` **恰 6 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers`，皆函数）', {
-    count: 6,
-    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'suggestAuthors'],
-    types: ['function', 'function', 'function', 'function', 'function', 'function']
+  check('P1', '`PUBLIC_OPS` **恰 7 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`（v1.130 新增：搜索结果页影像瀑布流，恒零写），皆函数）', {
+    count: 7,
+    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function', 'function', 'function', 'function']
   }, {
     count: keys.length,
     keys: sorted(keys),
@@ -768,6 +775,302 @@ await withInjectedStore(p9Store, async () => {
     nextCursor: reply.next_cursor,
     writes: p9Store.stats.writes.length - writesBefore
   })
+})
+
+/* ===========================================================================
+   P10：影像读面 `listSealImages`（v1.130 新增：搜索结果页影像瀑布流；`PUBLIC_OPS` 第 7 成员）
+   ---------------------------------------------------------------------------
+   全离线：本节自带注入式假 DB（`p10Store`）—— 4 枚命中印章（各 1 枚 FACE 主面）
+   ＋ 11 行影像（9 行可见 `server` ＋ 1 行 `visibility:"hidden"` ＋ 1 行 `storage:"bundled"`）。
+   十条判据一律**严格等值**（键数 / 键序 / id 全集 / 游标原文 / 计数逐字；不写「至少 / 非空」）。
+   =========================================================================== */
+const p10Sha = (sealNo, imageNo) => `${sealNo}${imageNo}`.repeat(32)
+const p10CoverKey = (sha) => `xiai/images/${sha.slice(0, 2)}/${sha}.png`
+const P10_SEALS = ['SI000000001', 'SI000000002', 'SI000000003', 'SI000000004']
+const P10_HIDDEN_ID = 'img-si4-1'
+const P10_BUNDLED_ID = 'img-si4-2'
+const P10_VISIBLE_IDS = []
+const p10Seed = []
+P10_SEALS.forEach((stamp, index) => {
+  const sealNo = index + 1
+  p10Seed.push({
+    __collection: 'xiai_seals',
+    _id: stamp,
+    stamp_id: stamp,
+    seal_name: `影瀑印${sealNo}`,
+    dynasty: '汉',
+    category: '吉语印',
+    face_count: 1
+  })
+  p10Seed.push({
+    __collection: 'xiai_faces',
+    _id: `fc-si${sealNo}`,
+    id: `fc-si${sealNo}`,
+    sealId: stamp,
+    kind: 'FACE',
+    face_no: 1,
+    is_primary: true,
+    face_image_id: `img-si${sealNo}-1`,
+    image_sha256: p10Sha(sealNo, 1),
+    image_mime: 'image/png'
+  })
+  if (sealNo <= 3) {
+    for (let k = 1; k <= 3; k += 1) {
+      const imageId = `img-si${sealNo}-${k}`
+      P10_VISIBLE_IDS.push(imageId)
+      p10Seed.push({
+        __collection: 'xiai_images',
+        _id: imageId,
+        id: imageId,
+        stamp_id: stamp,
+        storage: 'server',
+        visibility: 'visible',
+        sha256: p10Sha(sealNo, k),
+        mime: 'image/png',
+        width: 640,
+        height: 480
+      })
+    }
+  }
+})
+/* 第 4 章两行：一行 `hidden`（读面闸门）、一行 `bundled` 占位（桶里没有对象）——
+   两行都必须**整条不出**，但印章本身仍计 `total`（命中印章数与影像可见性无关）。 */
+p10Seed.push({
+  __collection: 'xiai_images',
+  _id: P10_HIDDEN_ID,
+  id: P10_HIDDEN_ID,
+  stamp_id: 'SI000000004',
+  storage: 'server',
+  visibility: 'hidden',
+  sha256: p10Sha(4, 1),
+  mime: 'image/png',
+  width: 640,
+  height: 480
+})
+p10Seed.push({
+  __collection: 'xiai_images',
+  _id: P10_BUNDLED_ID,
+  id: P10_BUNDLED_ID,
+  stamp_id: 'SI000000004',
+  storage: 'bundled',
+  visibility: 'visible',
+  sha256: p10Sha(4, 2),
+  mime: 'image/png',
+  width: 640,
+  height: 480
+})
+const p10Store = createStore(p10Seed)
+section('P10', '影像读面 listSealImages（v1.130）：载荷门零读 / 回包恰 5 键且键序固定 / 行恰 13 键且键序固定 / hidden 与 bundled 整条不出 / 三页不重不漏 / DB 不可用降级 / 全程零写')
+await withInjectedStore(p10Store, async () => {
+  const P10_REPLY_KEYS = 'has_more,next_cursor,ok,rows,total'
+  const P10_REPLY_ORDER = 'ok,rows,next_cursor,has_more,total'
+  const P10_ROW_ORDER = 'image_id,stamp_id,seal_name,dynasty,category,face_id,face_kind,width,height,image_sha256,image_mime,thumb_key,display_key'
+
+  /* P10a / P10b / P10c：载荷门三发（判定早于任何读 ⇒ 每发皆零读零写）。 */
+  const p10Gates = [
+    ['P10a', '载荷含**未知键** `bogus`', { limit: 10, bogus: 1 }, 'INVALID_FIELD'],
+    ['P10b', '`q` **trim 后 41 字**（越 40 字上界，不静默截断）', { limit: 10, q: 'x'.repeat(41) }, 'INVALID_VALUE'],
+    ['P10c', '`limit: 97`（上界 96 之外，不静默夹取）', { limit: 97 }, 'INVALID_VALUE']
+  ]
+  for (const [id, label, payload, reason] of p10Gates) {
+    const readsBefore = p10Store.stats.reads
+    const writesBefore = p10Store.stats.writes.length
+    const reply = await publicCall('listSealImages', payload)
+    check(id, `\`listSealImages\` ${label} ⇒ \`${reason}\` ＋ 恰 3 键 ＋ **零读** ＋ **零写**`, {
+      ok: false,
+      reason,
+      keys: 'message,ok,reason',
+      reads: 0,
+      writes: 0
+    }, {
+      ok: reply.ok,
+      reason: reply.reason,
+      keys: shapeOf(reply),
+      reads: p10Store.stats.reads - readsBefore,
+      writes: p10Store.stats.writes.length - writesBefore
+    })
+  }
+
+  /* P10d：成功回包 ＝ 恰 5 键且**键序固定**；`total` ＝ 命中印章数（4，含只藏不可见影像的第 4 章）。 */
+  const full = await publicCall('listSealImages', { limit: 96 })
+  const fullRows = Array.isArray(full.rows) ? full.rows : []
+  check('P10d', '成功回包**恰 5 键**且**键序固定**（`ok,rows,next_cursor,has_more,total`，与冻结常量 `LIST_SEAL_IMAGES_SUCCESS_KEYS` 同序）＋ `total` ＝ **命中印章数 4**（面维度筛选不参与、影像可见性不参与）＋ `rows` 恰 9 枚 ＋ 已到底（`has_more:false` / `next_cursor:\"\"`）＋ 零写', {
+    keys: P10_REPLY_KEYS,
+    keyOrder: P10_REPLY_ORDER,
+    frozenOrder: P10_REPLY_ORDER,
+    ok: true,
+    total: 4,
+    rowCount: 9,
+    hasMore: false,
+    nextCursor: '',
+    writes: 0
+  }, {
+    keys: shapeOf(full),
+    keyOrder: Object.keys(full).join(','),
+    frozenOrder: sealCards.LIST_SEAL_IMAGES_SUCCESS_KEYS.join(','),
+    ok: full.ok,
+    total: full.total,
+    rowCount: fullRows.length,
+    hasMore: full.has_more,
+    nextCursor: full.next_cursor,
+    writes: p10Store.stats.writes.length
+  })
+
+  /* P10e：`rows` 每元素 ＝ 恰 13 键且**键序固定**（＝ `LIST_SEAL_IMAGES_ROW_KEYS` 冻结序）。 */
+  const p10RowOrders = [...new Set(fullRows.map((row) => Object.keys(row).join(',')))]
+  const p10First = fullRows[0] || {}
+  check('P10e', '`rows` 每元素**恰 13 键**且**键序固定**（＝ 冻结常量 `LIST_SEAL_IMAGES_ROW_KEYS` 同序；两种键序 / 多一种键序即判红）＋ 首行派生逐字（面引用 / 尺寸 / 摘要 / 内容寻址 cover 键）＋ 零写', {
+    rowKeyCounts: [13],
+    rowOrders: [P10_ROW_ORDER],
+    frozenOrder: P10_ROW_ORDER,
+    first: {
+      image_id: 'img-si1-1',
+      stamp_id: 'SI000000001',
+      seal_name: '影瀑印1',
+      dynasty: '汉',
+      category: '吉语印',
+      face_id: 'fc-si1',
+      face_kind: 'FACE',
+      width: 640,
+      height: 480,
+      image_sha256: p10Sha(1, 1),
+      image_mime: 'image/png',
+      thumb_key: p10CoverKey(p10Sha(1, 1)),
+      display_key: p10CoverKey(p10Sha(1, 1))
+    },
+    writes: 0
+  }, {
+    rowKeyCounts: [...new Set(fullRows.map((row) => Object.keys(row).length))],
+    rowOrders: p10RowOrders,
+    frozenOrder: sealCards.LIST_SEAL_IMAGES_ROW_KEYS.join(','),
+    first: {
+      image_id: p10First.image_id,
+      stamp_id: p10First.stamp_id,
+      seal_name: p10First.seal_name,
+      dynasty: p10First.dynasty,
+      category: p10First.category,
+      face_id: p10First.face_id,
+      face_kind: p10First.face_kind,
+      width: p10First.width,
+      height: p10First.height,
+      image_sha256: p10First.image_sha256,
+      image_mime: p10First.image_mime,
+      thumb_key: p10First.thumb_key,
+      display_key: p10First.display_key
+    },
+    writes: p10Store.stats.writes.length
+  })
+
+  /* P10f / P10g：两条过滤线各一行（**种子里确有该行** ＋ 回包里确无该行 —— 一正一负防假绿）。 */
+  const p10FullIds = fullRows.map((row) => row.image_id)
+  const p10SeededHidden = p10Store
+    .rows('xiai_images')
+    .filter((row) => row.visibility === 'hidden')
+    .map((row) => row.id)
+  check('P10f', '`visibility:\"hidden\"` 影像**整条不出**（不置空、不降级）：种子里确有该行（防假绿）＋ 9 枚回包行里确无该行 ＋ 该章仍计 `total`（4）', {
+    seededHidden: [P10_HIDDEN_ID],
+    inRows: false,
+    total: 4
+  }, {
+    seededHidden: p10SeededHidden,
+    inRows: p10FullIds.indexOf(P10_HIDDEN_ID) !== -1,
+    total: full.total
+  })
+  const p10SeededBundled = p10Store
+    .rows('xiai_images')
+    .filter((row) => String(row.storage).trim().toLowerCase() !== 'server')
+    .map((row) => row.id)
+  check('P10g', '非 `server`（`storage:\"bundled\"` 占位行）**整条不出**（桶里没有该对象 ⇒ 不冒充可展示影像）；`rows` 全集**逐字等于** 9 枚可见影像 id（顺序亦同）', {
+    seededBundled: [P10_BUNDLED_ID],
+    inRows: false,
+    visibleIds: P10_VISIBLE_IDS
+  }, {
+    seededBundled: p10SeededBundled,
+    inRows: p10FullIds.indexOf(P10_BUNDLED_ID) !== -1,
+    visibleIds: p10FullIds
+  })
+
+  /* P10h：游标三页走完（`limit:3`）—— 不重不漏、每页 ≤ limit、游标原文逐字。 */
+  const p10CursorOf = (sealId, imageId) =>
+    Buffer.from(JSON.stringify({ seal_id: sealId, image_id: imageId }), 'utf8').toString('base64')
+  const p10Pages = []
+  let p10Cursor = ''
+  for (let pageIndex = 0; pageIndex < 3; pageIndex += 1) {
+    const reply = await publicCall('listSealImages', { limit: 3, cursor: p10Cursor })
+    p10Pages.push({ reply, rows: Array.isArray(reply.rows) ? reply.rows : [] })
+    p10Cursor = reply.next_cursor
+  }
+  const p10IdsOf = (page) => page.rows.map((row) => row.image_id)
+  const p10AllIds = p10Pages.flatMap(p10IdsOf)
+  const p10UniqueIds = [...new Set(p10AllIds)]
+  const p10Intersects = []
+  for (let i = 0; i < p10Pages.length; i += 1) {
+    for (let j = i + 1; j < p10Pages.length; j += 1) {
+      const left = new Set(p10IdsOf(p10Pages[i]))
+      p10IdsOf(p10Pages[j]).forEach((id) => {
+        if (left.has(id)) p10Intersects.push(id)
+      })
+    }
+  }
+  check('P10h', '游标三页（`limit:3`）走完 **不重不漏**（三页 id 并集逐字 ＝ 9 枚可见影像、两两交集空）＋ **每页 ≤ limit**（三页各恰 3）＋ `has_more` 依次 `true/true/false` ＋ 末页 `next_cursor:\"\"` ＋ 游标原文 ＝ `base64(JSON{seal_id,image_id})` 逐字 ＋ `total` 三页恒 4 ＋ 零写', {
+    pageSizes: [3, 3, 3],
+    withinLimit: true,
+    unionCount: 9,
+    union: P10_VISIBLE_IDS,
+    intersects: [],
+    hasMore: [true, true, false],
+    cursors: [p10CursorOf('SI000000001', 'img-si1-3'), p10CursorOf('SI000000002', 'img-si2-3'), ''],
+    totals: [4, 4, 4],
+    writes: 0
+  }, {
+    pageSizes: p10Pages.map((page) => page.rows.length),
+    withinLimit: p10Pages.every((page) => page.rows.length <= 3),
+    unionCount: p10UniqueIds.length,
+    union: p10UniqueIds,
+    intersects: p10Intersects,
+    hasMore: p10Pages.map((page) => page.reply.has_more),
+    cursors: p10Pages.map((page) => page.reply.next_cursor),
+    totals: p10Pages.map((page) => page.reply.total),
+    writes: p10Store.stats.writes.length
+  })
+
+  /* P10i：DB 不可用（provider 当场抛错）⇒ 恰 5 键降级包、不抛异常、不加 `message` 键。 */
+  let p10Degraded = null
+  let p10Threw = false
+  ops.setOpsDbProvider(() => {
+    throw new Error('DB unavailable：离线降级探针')
+  })
+  try {
+    p10Degraded = await publicCall('listSealImages', { limit: 5 })
+  } catch (error) {
+    p10Threw = true
+  } finally {
+    ops.setOpsDbProvider(p10Store.provider)
+  }
+  check('P10i', 'DB 不可用（provider 当场抛错）⇒ 回**恰 5 键降级包** `{ok:false,rows:[],next_cursor:\"\",has_more:false,total:0}` ＋ **键序固定** ＋ **不抛异常** ＋ 不加 `message` 键 ＋ 零写', {
+    keys: P10_REPLY_KEYS,
+    keyOrder: P10_REPLY_ORDER,
+    ok: false,
+    rowCount: 0,
+    nextCursor: '',
+    hasMore: false,
+    total: 0,
+    threw: false,
+    writes: 0
+  }, {
+    keys: p10Degraded ? shapeOf(p10Degraded) : null,
+    keyOrder: p10Degraded ? Object.keys(p10Degraded).join(',') : null,
+    ok: p10Degraded && p10Degraded.ok,
+    rowCount: p10Degraded && Array.isArray(p10Degraded.rows) ? p10Degraded.rows.length : -1,
+    nextCursor: p10Degraded ? p10Degraded.next_cursor : null,
+    hasMore: p10Degraded ? p10Degraded.has_more : null,
+    total: p10Degraded ? p10Degraded.total : null,
+    threw: p10Threw,
+    writes: p10Store.stats.writes.length
+  })
+
+  /* P10j：本节全程零写入（P10a〜P10i 八发调用合共一字不写）。 */
+  check('P10j', '本节 P10a〜P10i **八发调用全程零写入**（假 DB 写账恒 0；`listSealImages` 恒零写）', 0, p10Store.stats.writes.length)
 })
 
 /* ===========================================================================

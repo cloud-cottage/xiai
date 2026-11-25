@@ -70,7 +70,37 @@ export const SEAL_CARDS_ACTION = 'public'
 export const SEAL_CARDS_OP = 'listSealCards'
 
 /* ---------------------------------------------------------------------------
- * 0. 庫存總量（頁頭「【璽印 N 枚】【印面 N 個】【圖像 N 張】」的唯一來源）
+ * 0.6 影像模式（【單獨列出影像】｜裁定件 ②〜⑤ 的服務層契約）
+ * ------------------------------------------------------------------------- */
+
+/** 影像模式每頁張數（裁定件 ④：每頁 60 張；**不是**印章枚數）。 */
+export const SEAL_IMAGE_PAGE_SIZE = 60
+
+/** 影像行**恰 13 鍵**（順序即契約順序；取證可逐字比對）。 */
+export const SEAL_IMAGE_ROW_KEYS = Object.freeze([
+  'image_id',
+  'stamp_id',
+  'seal_name',
+  'dynasty',
+  'category',
+  'face_id',
+  'face_kind',
+  'width',
+  'height',
+  'image_sha256',
+  'image_mime',
+  'thumb_key',
+  'display_key'
+])
+
+/**
+ * 影像模式的**固定降級原文**（裁定件 ⑤：雲端讀不到 ⇒ 不回落本機示範資料 —— 本機沒有影像真源；
+ * 不靜默、不上屏「0 張」冒充成功；視圖把這句原樣上屏 ＋ 「重新讀取」入口）。
+ */
+export const SEAL_IMAGE_UNAVAILABLE_MESSAGE = '影像模式暫時無法讀取，請稍後再試。'
+
+/* ---------------------------------------------------------------------------
+ * 0. 庫存總量（頁頭「【璽印 N 枚】【印面 N 個】【影像 N 張】」的唯一來源）
  * ------------------------------------------------------------------------- */
 
 /** 公開只讀 op：庫存三計數（雲函數 `PUBLIC_OPS.catalogStats`）。 */
@@ -430,6 +460,133 @@ function demoFallbackOf(input, reason, message) {
     ok: false,
     reason: textOf(reason) || 'STORAGE_UNAVAILABLE',
     message: textOf(message) || '雲端藏品資料暫時未能讀取，請稍後再試。'
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 4.5 影像模式分頁讀入口（`listSealImages`｜【單獨列出影像】的唯一服務面）
+ * ---------------------------------------------------------------------------
+ * 【契約（凍結，本層只消費）】請求 payload **恰 7 鍵** `limit, cursor, dynasty, seal_type,
+ *   face_style, category, q`（四個篩選鍵**沿用** `SQUARE_FILTER_PARAMS` 這一份翻譯表，
+ *   不手寫第二份）；回包歸一為 `{ ok, rows, next_cursor, has_more, total, message }`，
+ *   `rows` 元素恰 `SEAL_IMAGE_ROW_KEYS` 13 鍵。
+ * 【語義】`total` ＝ **命中印章數**（枚），**不是影像張數** —— 視圖必須把兩者分開上屏，
+ *   禁止拿 `total` 冒充「已載入 N 張」。
+ * 【降級（裁定件 ⑤）】雲端未配置 / 傳輸失敗 / 形狀不可辨識 ⇒ **不回落本機示範資料**
+ *   （本機沒有影像真源）：`{ok:false, rows:[], total:0}` ＋ **固定降級原文**
+ *   `SEAL_IMAGE_UNAVAILABLE_MESSAGE`（不靜默、不上屏 0 冒充成功）。
+ * ------------------------------------------------------------------------- */
+
+/** 影像模式的 `limit` 夹取（缺 / 非法 ⇒ 60；上限沿用 `SQUARE_PAGE_MAX_LIMIT`）。 */
+function sealImageLimitOf(limit) {
+  const n = Number(limit)
+  if (!Number.isFinite(n) || n <= 0) return SEAL_IMAGE_PAGE_SIZE
+  return Math.min(Math.floor(n), SQUARE_PAGE_MAX_LIMIT)
+}
+
+/**
+ * 影像請求 payload（**恰 7 鍵、鍵序與卡片請求逐字同形**；篩選鍵翻譯只經 `SQUARE_FILTER_PARAMS`）。
+ * @param {{dynasty?:string, content?:string, style?:string, sealClass?:string, q?:string,
+ *          cursor?:string, limit?:number}} input
+ * @returns {{limit:number, cursor:string, dynasty:string, seal_type:string,
+ *            face_style:string, category:string, q:string}}
+ */
+export function sealImagesRequestOf(input = {}) {
+  const source = input || {}
+  return {
+    limit: sealImageLimitOf(source.limit),
+    cursor: textOf(source.cursor).trim(),
+    [SQUARE_FILTER_PARAMS.dynasty]: textOf(source.dynasty).trim(),
+    [SQUARE_FILTER_PARAMS.content]: textOf(source.content).trim(),
+    [SQUARE_FILTER_PARAMS.style]: textOf(source.style).trim(),
+    [SQUARE_FILTER_PARAMS.sealClass]: textOf(source.sealClass).trim(),
+    [SQUARE_FILTER_PARAMS.q]: textOf(source.q).trim()
+  }
+}
+
+/**
+ * 把一行雲端影像回包收窄成**恰 13 鍵**（型別歸一；不新增、不改名、不補編造值）。
+ * `face_id` 只作**文本歸一**（詳情頁 `?face=` 的錨點值由詳情頁自己做形態門，本層不判）。
+ * @returns {object|null} 無 `image_id` / 無 `stamp_id`（點不進詳情頁）⇒ `null`（丟棄不上屏）
+ */
+export function normalizeSealImageRow(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const row = {
+    image_id: textOf(raw.image_id).trim(),
+    stamp_id: textOf(raw.stamp_id).trim(),
+    seal_name: textOf(raw.seal_name),
+    dynasty: textOf(raw.dynasty),
+    category: textOf(raw.category),
+    face_id: textOf(raw.face_id).trim(),
+    face_kind: textOf(raw.face_kind),
+    width: intOf(raw.width),
+    height: intOf(raw.height),
+    image_sha256: textOf(raw.image_sha256),
+    image_mime: textOf(raw.image_mime),
+    thumb_key: textOf(raw.thumb_key).trim(),
+    display_key: textOf(raw.display_key).trim()
+  }
+  if (!row.image_id || !row.stamp_id) return null
+  return row
+}
+
+/** 固定降級回包（⑤：`rows` 空陣列、`total` 0、`message` 固定原文 —— 調用方原樣上屏）。 */
+function sealImageUnavailableOf() {
+  return {
+    ok: false,
+    rows: [],
+    next_cursor: '',
+    has_more: false,
+    total: 0,
+    message: SEAL_IMAGE_UNAVAILABLE_MESSAGE
+  }
+}
+
+/**
+ * 取一頁**影像**（`{action:'public', op:'listSealImages'}`；**視圖唯一消費點**）。
+ *
+ * 讀序（機械可判、兩支互斥，**沒有本機降級**）：
+ *   ① 未配置雲端 / 傳輸失敗（`reply.ok === false` 或拋錯）／`result.ok === false` ／
+ *      回包形狀不可辨識（認不出 `rows` 陣列）⇒ `sealImageUnavailableOf()`（固定降級原文）；
+ *   ② 可辨識 ⇒ `{ok:true, rows(13 鍵收窄), next_cursor, has_more, total, message:''}`。
+ *
+ * @param {{dynasty?:string, content?:string, style?:string, sealClass?:string, q?:string,
+ *          cursor?:string, limit?:number}} input
+ * @returns {Promise<{ok:true, rows:object[], next_cursor:string, has_more:boolean,
+ *            total:number, message:string}
+ *          |{ok:false, rows:[], next_cursor:'', has_more:false, total:number, message:string}>}
+ */
+export async function listSealImagePage(input = {}) {
+  const request = sealImagesRequestOf(input)
+  if (!cloudBaseConfigured()) return sealImageUnavailableOf()
+  let reply = null
+  try {
+    reply = await callCloudFunction(SEAL_CARDS_FUNCTION_NAME, {
+      action: SEAL_CARDS_ACTION,
+      op: 'listSealImages',
+      payload: request
+    })
+  } catch (err) {
+    return sealImageUnavailableOf()
+  }
+  if (!reply || reply.ok === false) return sealImageUnavailableOf()
+  const result = reply.result || {}
+  if (result.ok === false) return sealImageUnavailableOf()
+  const readouts = sealCardsReadoutsOf(result)
+  if (!readouts) return sealImageUnavailableOf()
+  const rows = readouts.rows.map(normalizeSealImageRow).filter(Boolean)
+  const nextCursor = textOf(readouts.next_cursor).trim()
+  /* `has_more` 以服務端為準；沒給 ⇒ 有游標才樂觀為 true（游標缺 ⇒ 不能續拉）。 */
+  const hasMore = typeof readouts.has_more === 'boolean' ? readouts.has_more : nextCursor !== ''
+  const totalRaw = Number(readouts.total)
+  const total = Number.isFinite(totalRaw) && totalRaw >= 0 ? Math.floor(totalRaw) : 0
+  return {
+    ok: true,
+    rows,
+    next_cursor: hasMore ? nextCursor : '',
+    has_more: hasMore && nextCursor !== '',
+    total,
+    message: ''
   }
 }
 

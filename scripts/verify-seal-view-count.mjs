@@ -21,8 +21,8 @@
  *       `command.inc(1)`（原子哨兵）；未知键 ⇒ `INVALID_FIELD`；非字符串 / `trim` 后空 / 65 字
  *       ⇒ `INVALID_VALUE`；印章不存在 ⇒ `INVALID_VALUE` ＋ 回包**恰 3 键**；
  *       `PUBLIC_WRITE_OPS` **恰 1 成员**；表外 op 走 `public-write` ⇒ `FORBIDDEN` ＋ 零读写。
- *   V5. **双表分离**（`AC-734`）：`PUBLIC_OPS` 仍**恰 6 成员**且**其 op 零写入**（四个读 op 各打一发，
- *       `stats.writes` 一字不增）；两表交集为空、`bumpSealView` 不在 `PUBLIC_OPS` 内。
+ *   V5. **双表分离**（`AC-734`）：`PUBLIC_OPS` **恰 7 成员**且**其 op 零写入**（**按 `Object.keys`
+ *       全量各打一发**，不写死数字，`stats.writes` 一字不增）；两表交集为空、`bumpSealView` 不在 `PUBLIC_OPS` 内。
  *   V6. **回填 `repairSealViewCount`**（`AC-736`）：`dry_run` 不写；真写后 `view_count` 回读为 `0`
  *       且 `written` ＝ `eligible`；**同参重放 `written === 0`（幂等）**；回包**恒恰 5 键**；
  *       非管理员 ⇒ 拒 ＋ 零读写。
@@ -601,9 +601,9 @@ section('V4', 'bumpSealView：合法 ⇒ view_count ＋1（回读；写面是 co
 }
 
 /* ===========================================================================
-   V5：双表分离 —— PUBLIC_OPS 仍恰 6 成员且恒零写
+   V5：双表分离 —— PUBLIC_OPS 恰 7 成员且恒零写（读面按 Object.keys 全量打）
    =========================================================================== */
-section('V5', '双表分离：PUBLIC_OPS 仍恰 6 成员、四 op 各打一发零写入；与 PUBLIC_WRITE_OPS 交集为空')
+section('V5', '双表分离：PUBLIC_OPS 恰 7 成员、**全部**公开读 op 各打一发零写入；与 PUBLIC_WRITE_OPS 交集为空')
 {
   const seeds = [
     { stamp_id: 'SV000000020', view_count: 2, created_at: '2026-01-01T00:00:00.000Z' },
@@ -616,9 +616,9 @@ section('V5', '双表分离：PUBLIC_OPS 仍恰 6 成员、四 op 各打一发�
   ])
   await withStore(v5Store, async () => {
     const readKeys = Object.keys(sealCards.PUBLIC_OPS)
-    check('V5a', '`PUBLIC_OPS` **仍恰 6 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers`）', {
-      count: 6,
-      keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'suggestAuthors']
+    check('V5a', '`PUBLIC_OPS` **恰 7 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`〔v1.130 新增：搜索结果页影像瀑布流，恒零写〕）', {
+      count: 7,
+      keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'suggestAuthors']
     }, {
       count: readKeys.length,
       keys: sorted(readKeys)
@@ -633,19 +633,36 @@ section('V5', '双表分离：PUBLIC_OPS 仍恰 6 成员、四 op 各打一发�
       listInWrite: Object.prototype.hasOwnProperty.call(sealCards.PUBLIC_WRITE_OPS, 'listSealCards')
     })
     const writesBefore = v5Store.stats.writes.length
-    const calls = [
-      await publicCall('listSealCards', { limit: 5 }),
-      await publicCall('suggestAuthors', { name: '王' }),
-      await publicCall('listPersonCards', { include_biehao: false }),
-      await publicCall('getPersonCard', { person_id: '000000789' })
-    ]
-    check('V5c', '四个公开读 op **各打一发、回包形态合规**（`ok:true` 且无 `reason`；逐 op 键面由既有套件断言）', [
+    /* **按 `Object.keys(PUBLIC_OPS)` 全量打**（不写死数字）：每个公开读 op 一发合规载荷；
+       载荷表缺键 ⇒ 落 `NO_PAYLOAD` 占位（不真调）⇒ 必判红 —— 新增 op 未登记载荷当场被抓，
+       而不是悄悄少打一发。逐 op 的键面仍由各自套件断言，此处只判「形态合规 ＋ 恒零写」。 */
+    const READ_PAYLOADS = {
+      listSealCards: { limit: 5 },
+      suggestAuthors: { name: '王' },
+      listPersonCards: { include_biehao: false },
+      getPersonCard: { person_id: '000000789' },
+      catalogStats: {},
+      listSealCovers: { stamp_ids: ['SV000000020'] },
+      listSealImages: { limit: 5 }
+    }
+    const calls = []
+    for (const key of sorted(readKeys)) {
+      if (!Object.prototype.hasOwnProperty.call(READ_PAYLOADS, key)) {
+        calls.push({ ok: false, reason: 'NO_PAYLOAD' })
+        continue
+      }
+      calls.push(await publicCall(key, READ_PAYLOADS[key]))
+    }
+    check('V5c', '`PUBLIC_OPS` **全部公开读 op**（**按 `Object.keys` 全量打**，不写死数字）**各打一发、回包形态合规**（`ok:true` 且无 `reason`；载荷表缺键 ⇒ `NO_PAYLOAD` 占位必判红；逐 op 键面由既有套件断言）', [
+      { ok: true, reason: '' },
+      { ok: true, reason: '' },
+      { ok: true, reason: '' },
       { ok: true, reason: '' },
       { ok: true, reason: '' },
       { ok: true, reason: '' },
       { ok: true, reason: '' }
     ], calls.map((reply) => ({ ok: reply.ok, reason: reply.reason || '' })))
-    check('V5d', '四个公开读 op 合共 **零写入**（`PUBLIC_OPS` 恒零写，一字不动）', 0, v5Store.stats.writes.length - writesBefore)
+    check('V5d', '`PUBLIC_OPS` **全部公开读 op**（按 `Object.keys` 全量打）合共 **零写入**（`PUBLIC_OPS` 恒零写，一字不动）', 0, v5Store.stats.writes.length - writesBefore)
   })
 }
 

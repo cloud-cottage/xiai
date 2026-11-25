@@ -83,6 +83,18 @@
  *      `written` ＝ **整窗读回**确认已落的章数、`next_cursor` ＝ **本窗口最后一条被扫描行的 `_id`**
  *      （不是最后一条被写的；窗口扫空 ⇒ 空串）。**零新集合、不产 `plan`、`reason` 零新增**。
  *
+ *   ⑥ 公开读 op：`listSealImages`（**匿名可调**，`PUBLIC_OPS` 第 7 成员；`6 → 7`，恒零写）
+ *      —— 搜索结果页影像瀑布流的数据源。载荷封闭**恰 7 键**、与 ① **同名同义**
+ *      （复用同一张 `LIST_SEAL_CARDS_ALLOWED_KEYS` 键面门与同一组 `limit` / 四维 / `q`
+ *      判定，**拒绝语义不写第二套**；只差 `limit` 缺省 60、上界 96）。回包**恰 5 键**
+ *      `{ok, rows, next_cursor, has_more, total}` —— **降级轮回同一张表**：DB 不可用 /
+ *      未配置 ⇒ `{ok:false, rows:[], next_cursor:, has_more:false, total:0}`
+ *      （**不抛异常、不加 `message` 键**）；`rows` 元素**恰 13 键**
+ *      （`LIST_SEAL_IMAGES_ROW_KEYS`）；`total` ＝ **命中印章数**（复用 ① 的 `countRows`
+ *      同一把尺，**不是影像总张数**）。过滤（整条不出）＝ `hidden` ＋ 非 `server`
+ *      占位行 ＋ 印章侧 `face_count >= 1`；分页 ＝ 印章 `_id` 升序开窗逐章展开可见影像、
+ *      不透明游标 base64(JSON `{seal_id, image_id}`)（解不开 / 缺字段 ⇒ `INVALID_VALUE`
+ *      ＋ **零读**）。
  * 性能口径（**本模块的硬约束**）：
  *   · **零全表扫描做分页** —— 分页一律交给 DB（`cursor` ＋ 升序 ＋ `limit`），服务端只在内存里
  *     处理「一页 ＋ 一个缓冲窗口」；
@@ -963,8 +975,70 @@ function payloadShapeDenial(payload, allowedKeys) {
 }
 
 /**
+ * `limit` 字段门（**两个公开读 op 共用**：`listSealCards` ＋ 本单 `listSealImages`）。
+ * 判定、`reason` 与文案模板**只此一处** ⇒ 不为新 op 另写一套拒绝语义；缺省值与上界由
+ * 调用方给（两 op 只差这两个数：卡片 48 / 60、影像 60 / 96）。
+ * @param {object} input 已过键面门的载荷
+ * @param {number} defaultLimit 缺省页宽
+ * @param {number} maxLimit 页宽上界（越界 / 非整数 ⇒ `INVALID_VALUE`，零读）
+ * @returns {{denial:object|null, value:number}}
+ */
+function limitFieldOf(input, defaultLimit, maxLimit) {
+  if (!Object.prototype.hasOwnProperty.call(input, 'limit')) return { denial: null, value: defaultLimit }
+  const raw = input.limit
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > maxLimit) {
+    return {
+      denial: deny(REASONS.INVALID_VALUE, `\`limit\` 必須是 1〜${maxLimit} 的整數；本次零讀取。`),
+      value: defaultLimit
+    }
+  }
+  return { denial: null, value: raw }
+}
+
+/**
+ * 四维筛选字段门（**两个公开读 op 共用**）：空串＝不限；非字符串 ⇒ `INVALID_VALUE`（零读）。
+ * @returns {{denial:object|null, filters:{dynasty:string, seal_type:string, face_style:string, category:string}}}
+ */
+function filterFieldsOf(input) {
+  const filters = { dynasty: '', seal_type: '', face_style: '', category: '' }
+  for (const key of Object.keys(filters)) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) continue
+    if (typeof input[key] !== 'string') {
+      return { denial: deny(REASONS.INVALID_VALUE, `\`${key}\` 必須是字符串（空串＝不限）；本次零讀取。`), filters }
+    }
+    filters[key] = input[key].trim()
+  }
+  return { denial: null, filters }
+}
+
+/**
+ * 关键词 `q` 字段门（**两个公开读 op 共用**）：缺省 ＝ 空串 ＝ 不检索；非字符串 ⇒
+ * `INVALID_VALUE`；trim 后长度 > `LIST_SEAL_CARDS_MAX_QUERY_LENGTH` ⇒ `INVALID_VALUE`
+ * （**不静默截断、不静默夹取**）；全部判定仍早于任何读。
+ * @returns {{denial:object|null, q:string}}
+ */
+function queryFieldOf(input) {
+  if (!Object.prototype.hasOwnProperty.call(input, 'q')) return { denial: null, q: '' }
+  if (typeof input.q !== 'string') {
+    return { denial: deny(REASONS.INVALID_VALUE, '`q` 必須是關鍵詞字符串（空串＝不檢索）；本次零讀取。'), q: '' }
+  }
+  const q = input.q.trim()
+  if (q.length > LIST_SEAL_CARDS_MAX_QUERY_LENGTH) {
+    return {
+      denial: deny(
+        REASONS.INVALID_VALUE,
+        `\`q\` trim 後長度不得超過 ${LIST_SEAL_CARDS_MAX_QUERY_LENGTH} 字（當前 ${q.length} 字）；本次零讀取。`
+      ),
+      q: ''
+    }
+  }
+  return { denial: null, q }
+}
+
+/**
  * `listSealCards` 载荷解析（缺省值见契约；**任一不合 ⇒ 结构化拒绝 ＋ 零读**）。
- * 判定序：键面（未知 / 身份类 ⇒ `INVALID_FIELD`）→ `limit` → `cursor` → 四筛选键 → `q`。
+ * 判定序：键面（未知 / 身份类 ⇒ `INVALID_FIELD`）→ `limit` → `cursor` → 四筛选键 → `q`
+ * （`limit` / 四筛选键 / `q` 三段判定**与 `listSealImages` 共用同一组单点函数**）。
  * @param {object} [payload] 载荷
  * @returns {{ok:true, value:{limit:number, cursor:string, offset:number, dynasty:string, seal_type:string, face_style:string, category:string, q:string}}|{ok:false, reason:string, message:string}}
  */
@@ -972,14 +1046,8 @@ function parseListSealCardsPayload(payload) {
   const shapeDenial = payloadShapeDenial(payload, LIST_SEAL_CARDS_ALLOWED_KEYS)
   if (shapeDenial) return shapeDenial
   const input = payload && typeof payload === 'object' ? payload : {}
-  let limit = LIST_SEAL_CARDS_DEFAULT_LIMIT
-  if (Object.prototype.hasOwnProperty.call(input, 'limit')) {
-    const raw = input.limit
-    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > LIST_SEAL_CARDS_MAX_LIMIT) {
-      return deny(REASONS.INVALID_VALUE, `\`limit\` 必須是 1〜${LIST_SEAL_CARDS_MAX_LIMIT} 的整數；本次零讀取。`)
-    }
-    limit = raw
-  }
+  const limitField = limitFieldOf(input, LIST_SEAL_CARDS_DEFAULT_LIMIT, LIST_SEAL_CARDS_MAX_LIMIT)
+  if (limitField.denial) return limitField.denial
   let cursor = ''
   let offset = 0
   if (Object.prototype.hasOwnProperty.call(input, 'cursor')) {
@@ -1002,43 +1070,23 @@ function parseListSealCardsPayload(payload) {
       offset = Number(cursor.slice(LIST_SEAL_CARDS_CURSOR_PREFIX.length))
     }
   }
-  const filters = { dynasty: '', seal_type: '', face_style: '', category: '' }
-  for (const key of Object.keys(filters)) {
-    if (!Object.prototype.hasOwnProperty.call(input, key)) continue
-    if (typeof input[key] !== 'string') {
-      return deny(REASONS.INVALID_VALUE, `\`${key}\` 必須是字符串（空串＝不限）；本次零讀取。`)
-    }
-    filters[key] = input[key].trim()
-  }
-  /* `q` 关键词（**缺省 ＝ 空串 ＝ 不检索**）：非字符串 ⇒ `INVALID_VALUE`；trim 后长度
-     > `LIST_SEAL_CARDS_MAX_QUERY_LENGTH` ⇒ `INVALID_VALUE`（**不静默截断、不静默夹取**）。
-     全部判定仍早于任何读。 */
-  let q = ''
-  if (Object.prototype.hasOwnProperty.call(input, 'q')) {
-    if (typeof input.q !== 'string') {
-      return deny(REASONS.INVALID_VALUE, '`q` 必須是關鍵詞字符串（空串＝不檢索）；本次零讀取。')
-    }
-    q = input.q.trim()
-    if (q.length > LIST_SEAL_CARDS_MAX_QUERY_LENGTH) {
-      return deny(
-        REASONS.INVALID_VALUE,
-        `\`q\` trim 後長度不得超過 ${LIST_SEAL_CARDS_MAX_QUERY_LENGTH} 字（當前 ${q.length} 字）；本次零讀取。`
-      )
-    }
-  }
+  const filterField = filterFieldsOf(input)
+  if (filterField.denial) return filterField.denial
+  const queryField = queryFieldOf(input)
+  if (queryField.denial) return queryField.denial
   return {
     ok: true,
     value: {
-      limit,
+      limit: limitField.value,
       cursor,
       /* **偏移窗口起点**（`cursor` 的数值形态）：`listSealCards` 只用它做 `skip`，
          与 `cursor` 同源（形态已过 `off:<n>` 门）⇒ 单点解析、零二次换算。 */
       offset,
-      dynasty: filters.dynasty,
-      seal_type: filters.seal_type,
-      face_style: filters.face_style,
-      category: filters.category,
-      q
+      dynasty: filterField.filters.dynasty,
+      seal_type: filterField.filters.seal_type,
+      face_style: filterField.filters.face_style,
+      category: filterField.filters.category,
+      q: queryField.q
     }
   }
 }
@@ -2861,13 +2909,435 @@ async function listSealCovers(payload) {
   return runListSealCovers(payload)
 }
 
+/* ---------------------------------------------------------------------------
+ * 公开读 op：`listSealImages`（搜索结果页影像瀑布流；`PUBLIC_OPS` 第 7 成员）
+ * ---------------------------------------------------------------------------
+ * 载荷封闭**恰 7 键**、**与 `listSealCards` 同名同义** —— 键面门直接复用同一张
+ * `LIST_SEAL_CARDS_ALLOWED_KEYS`（**不另立第二张**），`limit` / 四维筛选 / `q` 三段判定走
+ * 同一组单点函数（`limitFieldOf` / `filterFieldsOf` / `queryFieldOf`）⇒ **拒绝语义不写第二套**；
+ * 两 op 只差 `limit` 缺省 **60**、上界 **96**（卡片是 48 / 60）。
+ *
+ * 回包**恰 5 键** `{ok, rows, next_cursor, has_more, total}`（顺序即上列；
+ * **降级轮回同一张表**、**不加 `message` 键**）；`rows` 元素**恰 13 键**
+ * （`LIST_SEAL_IMAGES_ROW_KEYS`，顺序冻结）。
+ *   · `total` ＝ **命中印章数**（复用 `countRows` 同一把尺：四维 ＋ `q` ＋
+ *     `face_count >= 1`；面维度筛选仍只管 `rows` / `has_more`）—— **不是影像总张数**；
+ *   · `thumb_key` / `display_key` 复用唯一派生处 `coverKeysOf`、`width` / `height` 复用
+ *     `dimensionOf`（未知 ⇒ `null`，不假装 0）；`face_id` / `face_kind` 由**引用该影像的面行**
+ *     给（FACE / EDGE），**不被任何面引用的整枚章图两键皆空串**。
+ *
+ * 过滤（**整条不出**，不置空、不降级）：`visibility === 'hidden'`（读面闸门单点
+ * `ops.imageRowVisibilityOf`）；`storage !== 'server'`（bundled 占位行 ⇒ 桶里没有这个对象）；
+ * 印章侧 `face_count >= 1`（`faceCountMatchOf`，与卡片模式**同一处、同一尺**）。
+ * **恒零写、匿名可调**（落 `PUBLIC_OPS`）。
+ *
+ * 分页（**不透明游标**；解不开 / 缺字段 ⇒ `INVALID_VALUE` **且零读**）：
+ *   · 游标 ＝ base64(JSON `{seal_id, image_id}`)：`seal_id` ＝ 上一枚印章的 `_id`；
+ *     `image_id` **非空** ⇒ 从**该章**续取、只发**严格大于**该影像的后续影像；
+ *     `image_id` **空串** ⇒ 该章已出完，从 `seal_id` **之后**的下一章起；
+ *   · 单页 ＝ 印章按 `_id` 升序**开窗一次读若干枚命中印章** → 逐章展开其**可见**影像，
+ *     凑满 `limit` 张即停；末章没出完 ⇒ 游标记该章 id ＋ 最后一张影像 id；
+ *     窗口印章全部出完而命中集还有章 ⇒ 游标记窗口末章 id ＋ 影像位空串；
+ *   · `has_more` ＝ 本轮之后仍有**剩余影像**（候选 > `limit`）**或剩余命中印章**
+ *     （窗口未见底）—— 不靠客户端推算，也**绝不谎报「已到底」**。
+ *
+ * **失败面**：DB 不可用 / 未配置 ⇒ 回**恰 5 键**
+ * `{ok:false, rows:[], next_cursor:'', has_more:false, total:0}`
+ * （**不抛异常、不加 `message` 键**）⇒ 前端据此上屏固定降级提示。
+ * ------------------------------------------------------------------------ */
+
+/** `listSealImages` 载荷 `limit` 缺省值 / 上界（键面与四维 / `q` 与 `listSealCards` 共用）。 */
+const LIST_SEAL_IMAGES_DEFAULT_LIMIT = 60
+const LIST_SEAL_IMAGES_MAX_LIMIT = 96
+
+/** 成功回包与降级回包**共用**的 5 键表（顺序即回包顺序）。 */
+const LIST_SEAL_IMAGES_SUCCESS_KEYS=Object.freeze([
+  'ok',
+  'rows',
+  'next_cursor',
+  'has_more',
+  'total'
+])
+
+/** 影像行 DTO 封闭键面（**恰 13 键**，顺序即回包顺序）。 */
+const LIST_SEAL_IMAGES_ROW_KEYS=Object.freeze([
+  'image_id',
+  'stamp_id',
+  'seal_name',
+  'dynasty',
+  'category',
+  'face_id',
+  'face_kind',
+  'width',
+  'height',
+  'image_sha256',
+  'image_mime',
+  'thumb_key',
+  'display_key'
+])
+
+/** `cursor` 非空时的长度上界（合法游标 ≈ 100 字符；越界 ⇒ `INVALID_VALUE`，零读）。 */
+const LIST_SEAL_IMAGES_MAX_CURSOR_LENGTH = 512
+
+/** 单页印章窗口（`_id` 升序一次读若干枚命中印章；**上限固定**，绝不循环到全表）。 */
+const LIST_SEAL_IMAGES_SEAL_WINDOW_MAX = 120
+/** 窗口补读轮数（窗口内影像不足时再读一轮；与 `CARD_SEAL_WINDOW_ROUNDS` 同法）。 */
+const LIST_SEAL_IMAGES_SEAL_WINDOW_ROUNDS = 2
+
+/**
+ * 影像行读取键面 ＝ 既有 `CARD_IMAGE_PROJECTION_KEYS` ＋ 本 op 多读的归属键 `stamp_id`
+ * （**不建第二套投影**：摘要 / 容器 / 像素 / `storage` / `storage_key` / `visibility`
+ * 逐字沿用卡片那一张，只补「按章取图」必需的归属键）。
+ */
+const LIST_SEAL_IMAGES_IMAGE_KEYS=Object.freeze([...CARD_IMAGE_PROJECTION_KEYS, 'stamp_id'])
+
+/**
+ * 影像行 ⇒ 行键（`id` → `_id`；与 `sortedWindowOf` 的取键序**同尺**）。
+ */
+function imageKeyOf(row) {
+  if (!row || typeof row !== 'object') return ''
+  return text(row.id) || text(row._id)
+}
+
+/**
+ * 单章影像窗口（**唯一按章取图的读点**）：`stamp_id` 等值 ＋ `id` 升序 ＋ `after` 游标。
+ *   · 主路（`db.command` 在场）交 DB：`where({stamp_id, id > after}) → orderBy('id','asc')
+ *     → limit`（生产侧先排序后截断）；
+ *   · 退路（注入式假体无 `command`）：`readOrderedWindow` 的退路**不判 match** ⇒ 本函数
+ *     自己收口（有界读回 → 按 `stamp_id` 过滤 → 同一 `sortedWindowOf` 同尺切窗），
+ *     **不改变语义**（与本文件别处「退路读不判 match ⇒ 再判一次」同一纪律）。
+ * 返回前按 `LIST_SEAL_IMAGES_IMAGE_KEYS` 收窄（P2-9：`bytes` / 容器事实字段不进内存）。
+ * @param {object} db DB 句柄
+ * @param {string} sealKey 该章业务键（`stamp_id`）
+ * @param {string} after 起点（**严格大于**；空串＝该章第一张）
+ * @param {number} limit 本章还要几张（含 `has_more` 的 lookahead 位）
+ */
+async function readSealImageWindow(db, sealKey, after, limit) {
+  const ops = opsOf()
+  const want = Math.max(1, Math.floor(Number(limit) || 1))
+  let rows
+  if (commandOf(db)) {
+    rows = await readOrderedWindow(db, ops.COLLECTIONS.images, {
+      match: { stamp_id: sealKey },
+      idField: 'id',
+      after,
+      limit: want
+    })
+  } else {
+    const all = await readAllBounded(db, ops.COLLECTIONS.images, CARD_FALLBACK_SCAN_CAP)
+    rows = sortedWindowOf(
+      all.filter((doc) => doc && text(doc.stamp_id) === sealKey),
+      'id',
+      after,
+      want,
+      null
+    )
+  }
+  /* 逐行复判 `stamp_id`（主路已在 DB 侧判过，重复判零成本、零语义差）。 */
+  return projectRowsOf(
+    rows.filter((doc) => doc && text(doc.stamp_id) === sealKey),
+    LIST_SEAL_IMAGES_IMAGE_KEYS
+  )
+}
+
+/**
+ * 游标编码（**不透明字符串** ＝ base64(JSON `{seal_id, image_id}`)）。
+ * `seal_id` ＝ 已出到的印章 `_id`；`image_id` ＝ 该章已出到的最后一张影像 id
+ * （**空串 ＝ 该章已出完**，下一章起）。
+ * @param {string} sealId 印章 `_id`
+ * @param {string} imageId 影像行 id（可空串）
+ * @returns {string}
+ */
+function encodeSealImagesCursor(sealId, imageId) {
+  const json = JSON.stringify({ seal_id: sealId, image_id: imageId })
+  return Buffer.from(json, 'utf8').toString('base64')
+}
+
+/**
+ * 游标解码（**解不开 / 缺字段 ⇒ `null`** ⇒ 调用方 `INVALID_VALUE` ＋ **零读**）。
+ * 形态门（全部早于任何读）：字符串、trim 后非空且长度 ≤ `LIST_SEAL_IMAGES_MAX_CURSOR_LENGTH`；
+ * 解出 JSON **物件**；`seal_id` / `image_id` **两键都在**且皆为字符串；`seal_id` trim 后非空
+ * （`image_id` **允许空串** ＝ 该章已出完）。**不猜、不补缺省**。
+ * @param {string} raw 游标原文
+ * @returns {{sealId:string, imageId:string}|null}
+ */
+function decodeSealImagesCursor(raw) {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed.length > LIST_SEAL_IMAGES_MAX_CURSOR_LENGTH) return null
+  let data = null
+  try {
+    data = JSON.parse(Buffer.from(trimmed, 'base64').toString('utf8'))
+  } catch (error) {
+    return null /* 解不开 ⇒ 不猜。 */
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  if (!Object.prototype.hasOwnProperty.call(data, 'seal_id')) return null
+  if (!Object.prototype.hasOwnProperty.call(data, 'image_id')) return null
+  if (typeof data.seal_id !== 'string' || typeof data.image_id !== 'string') return null
+  const sealId = data.seal_id.trim()
+  if (sealId === '') return null
+  return { sealId, imageId: data.image_id.trim() }
+}
+
+/**
+ * `listSealImages` 载荷解析（**键面门 / `limit` / 四维 / `q` 全部复用 `listSealCards`
+ * 的单点函数** ⇒ 拒绝语义不写第二套；只多一段 `cursor` 形态门）。
+ * 判定序：键面（未知 / 身份类 ⇒ `INVALID_FIELD`）→ `limit` → `cursor` → 四筛选键 → `q`
+ * —— **任一不合 ⇒ 结构化拒绝 ＋ 零读**（全部判定早于任何读）。
+ * @param {object} [payload] 封闭 7 键
+ * @returns {{ok:true, value:{limit:number, cursor:{sealId:string,imageId:string}|null, dynasty:string, seal_type:string, face_style:string, category:string, q:string}}|{ok:false, reason:string, message:string}}
+ */
+function parseListSealImagesPayload(payload) {
+  const shapeDenial = payloadShapeDenial(payload, LIST_SEAL_CARDS_ALLOWED_KEYS)
+  if (shapeDenial) return shapeDenial
+  const input = payload && typeof payload === 'object' ? payload : {}
+  const limitField = limitFieldOf(input, LIST_SEAL_IMAGES_DEFAULT_LIMIT, LIST_SEAL_IMAGES_MAX_LIMIT)
+  if (limitField.denial) return limitField.denial
+  let cursor = null
+  if (Object.prototype.hasOwnProperty.call(input, 'cursor')) {
+    if (typeof input.cursor !== 'string') {
+      return deny(REASONS.INVALID_VALUE, '`cursor` 必須是字符串（空串＝首頁）；本次零讀取。')
+    }
+    const rawCursor = input.cursor.trim()
+    if (rawCursor !== '') {
+      cursor = decodeSealImagesCursor(rawCursor)
+      if (!cursor) {
+        return deny(REASONS.INVALID_VALUE, '`cursor` 形態不合法（解不開或缺欄位）；請刷新頁面後重試；本次零讀取。')
+      }
+    }
+  }
+  const filterField = filterFieldsOf(input)
+  if (filterField.denial) return filterField.denial
+  const queryField = queryFieldOf(input)
+  if (queryField.denial) return queryField.denial
+  return {
+    ok: true,
+    value: {
+      limit: limitField.value,
+      cursor,
+      dynasty: filterField.filters.dynasty,
+      seal_type: filterField.filters.seal_type,
+      face_style: filterField.filters.face_style,
+      category: filterField.filters.category,
+      q: queryField.q
+    }
+  }
+}
+
+/** 降级回包（**恰 5 键**；每次新建 ⇒ 不共享可变数组；**不加 `message` 键**）。 */
+function degradedSealImagesReply() {
+  return { ok: false, rows: [], next_cursor: '', has_more: false, total: 0 }
+}
+
+/**
+ * **公开只读 op `listSealImages`（匿名可调｜零写入）** —— 搜索结果页影像瀑布流的数据源。
+ *
+ * 载荷封闭**恰 7 键**、与 `listSealCards` 同名同义（复用同一张键面门与同一组字段判定）：
+ * `limit` 缺省 60 / 上界 96；四维筛选与 `q` 语义一字不改。
+ * 回包**恰 5 键** `{ok, rows, next_cursor, has_more, total}`；`rows` 元素**恰 13 键**
+ * （`LIST_SEAL_IMAGES_ROW_KEYS`）；`total` ＝ **命中印章数**（`countRows` 同一把尺）。
+ *
+ * 过滤（**整条不出**）：`hidden`（`ops.imageRowVisibilityOf` 单点）／ 非 `server` 占位行 /
+ * 印章侧 `face_count >= 1`。`thumb_key` / `display_key` 走唯一派生处 `coverKeysOf`、
+ * `width` / `height` 走 `dimensionOf`（未知 ⇒ `null`）。
+ *
+ * 分页：印章按 `_id` 升序开窗 → 逐章展开可见影像 → 凑满 `limit` 即停（**多取 1 张做
+ * `has_more` 判据**）；游标不透明（`encodeSealImagesCursor`）。
+ * **失败面**：DB 不可用 / 未配置 ⇒ 固定 5 键降级回包，**不抛异常**。
+ * @param {object} [payload] 封闭 7 键
+ * @returns {Promise<object>} 恰 5 键成功 / 降级回包；载荷不合 ⇒ 恰 3 键结构化拒绝
+ */
+async function listSealImages(payload) {
+  /* ① 载荷门（**全部判定早于任何读**）。 */
+  const parsed = parseListSealImagesPayload(payload)
+  if (!parsed.ok) return parsed
+  const input = parsed.value
+  /* ② 读面（DB 不可用 / 未配置 ⇒ 降级回包，**不抛异常**）。 */
+  try {
+    const ops = opsOf()
+    const db = dbOf()
+    /* 印章侧 where（**与 `listSealCards` 同一套单点**：四维 ＋ `q` ＋ `face_count >= 1`）。 */
+    const sealMatch = {}
+    if (input.dynasty !== '') sealMatch.dynasty = input.dynasty
+    if (input.category !== '') sealMatch.category = input.category
+    Object.assign(sealMatch, keywordMatchOf(db, input.q))
+    Object.assign(sealMatch, faceCountMatchOf(db))
+    /* 面维度筛选（按**主印面**过滤整章；与卡片模式同判）。 */
+    const faceMatch = {}
+    if (input.seal_type !== '') faceMatch.seal_type = input.seal_type
+    if (input.face_style !== '') faceMatch.face_style = input.face_style
+    /* `total` 与「窗口 → 面 → 影像」这条因果链无依赖 ⇒ 页面起点并行发出（与卡片同法）。 */
+    const totalPending = countRows(db, ops.COLLECTIONS.seals, sealMatch).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    )
+    const cursor = input.cursor
+    const windowSize = Math.min(LIST_SEAL_IMAGES_SEAL_WINDOW_MAX, Math.max(input.limit, 32))
+    /* 续读起点：`image_id` 非空 ⇒ 该章**本身**要进窗口（窗口 `after` 只能严格大于 ⇒
+       单独点读一章并入本窗首）；`image_id` 空串 ⇒ 从 `seal_id` **之后**起。 */
+    let afterSeal = cursor ? cursor.sealId : ''
+    let resumeSealRow = null
+    if (cursor && cursor.imageId !== '') {
+      const resumeRows = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
+        match: sealMatch,
+        idField: '_id',
+        idIn: [cursor.sealId],
+        limit: 1
+      })
+      resumeSealRow =
+        resumeRows.length > 0 && rowMatchesQuery(resumeRows[0], sealMatch) ? resumeRows[0] : null
+    }
+    /* ③ 逐章展开：候选按「章 `_id` 升序 → 章内影像 `id` 升序」累积，多取 1 张做判据。 */
+    const candidates = []
+    let windowLastSealId = afterSeal
+    let sealExhausted = false
+    let rounds = 0
+    let done = false
+    while (!done && rounds < LIST_SEAL_IMAGES_SEAL_WINDOW_ROUNDS) {
+      rounds += 1
+      const batch = []
+      let rawCount = 0
+      if (resumeSealRow) {
+        batch.push(resumeSealRow)
+        rawCount += 1
+        resumeSealRow = null
+      }
+      const want = windowSize - batch.length
+      if (want > 0) {
+        const more = await readOrderedWindow(db, ops.COLLECTIONS.seals, {
+          match: sealMatch,
+          idField: '_id',
+          after: afterSeal,
+          limit: want
+        })
+        rawCount += more.length
+        /* 窗口游标以**原始读回的末行**推进（退路不判 match 时也绝不回头重读）。 */
+        if (more.length > 0) afterSeal = text(more[more.length - 1]._id) || afterSeal
+        for (const row of more) if (rowMatchesQuery(row, sealMatch)) batch.push(row)
+      }
+      if (rawCount === 0) {
+        sealExhausted = true
+        break
+      }
+      windowLastSealId = afterSeal
+      if (rawCount < windowSize) sealExhausted = true
+      if (batch.length === 0) continue
+      const sealKeys = batch.map(sealKeyOf).filter((key) => key !== '')
+      const faceRows =
+        sealKeys.length > 0
+          ? await readOrderedWindow(db, ops.COLLECTIONS.faces, {
+              match: {},
+              idField: 'sealId',
+              idIn: sealKeys,
+              limit: Math.max(sealKeys.length * 6, 60)
+            })
+          : []
+      const facesBySeal = new Map()
+      for (const doc of faceRows) {
+        const sealId = faceSealKeyOf(doc)
+        if (sealId === '') continue
+        if (!facesBySeal.has(sealId)) facesBySeal.set(sealId, [])
+        facesBySeal.get(sealId).push(doc)
+      }
+      for (const sealRow of batch) {
+        const sealKey = sealKeyOf(sealRow)
+        if (sealKey === '') continue
+        const faces = facesBySeal.get(sealKey) || []
+        if (!primaryMatches(faces, faceMatch)) continue
+        const isResumeSeal = cursor !== null && cursor.imageId !== '' && text(sealRow._id) === cursor.sealId
+        let imageAfter = isResumeSeal ? cursor.imageId : ''
+        /* 该章「影像 → 引用它的面行」表（**逐章建**；面键升序取首 ⇒ 确定性、可重放）。 */
+        const faceByImage = new Map()
+        const orderedFaces = faces.slice().sort((a, b) => {
+          const left = faceRowKeyOf(a)
+          const right = faceRowKeyOf(b)
+          return left < right ? -1 : left > right ? 1 : 0
+        })
+        for (const face of orderedFaces) {
+          const ref = text(face && face.face_image_id)
+          if (ref !== '' && !faceByImage.has(ref)) faceByImage.set(ref, face)
+        }
+        /* 本章读到「该章出完」或「候选已过 `limit`」才换下一章 —— 绝不半途换章
+           （半途换章会漏掉本章余下的影像）。每轮都严格推进 `imageAfter` ⇒ 必然终止。 */
+        while (!done) {
+          const wantImages = Math.max(1, input.limit + 1 - candidates.length)
+          const imageRows = await readSealImageWindow(db, sealKey, imageAfter, wantImages)
+          if (imageRows.length === 0) break
+          for (const image of imageRows) {
+            /* 读面闸门：`hidden` **整条不出**（不置空、不降级）。 */
+            if (ops.imageRowVisibilityOf(image) === ops.IMAGE_VISIBILITY_HIDDEN) continue
+            /* 非 `server`（bundled 占位行等）：桶里没有这个对象 ⇒ **整条不出**。 */
+            if (text(image.storage).trim().toLowerCase() !== CARD_IMAGE_SERVER_STORAGE) continue
+            candidates.push({ image, face: faceByImage.get(imageKeyOf(image)) || null, sealRow, sealKey })
+            if (candidates.length > input.limit) {
+              done = true
+              break
+            }
+          }
+          if (done) break
+          if (imageRows.length < wantImages) break /* 本章原始影像已出完。 */
+          const lastKey = imageKeyOf(imageRows[imageRows.length - 1])
+          if (lastKey === '' || lastKey === imageAfter) break /* 无推进 ⇒ 不空转。 */
+          imageAfter = lastKey
+        }
+        if (done) break
+      }
+    }
+    /* ④ 回包（**恰 5 键**；`rows` 元素恰 13 键）。 */
+    const pageRows = candidates.slice(0, input.limit).map((entry) => {
+      const image = entry.image
+      const face = entry.face
+      const sha256 = text(image.sha256) || text(face && face.image_sha256)
+      const cover = coverKeysOf(image, face, sha256)
+      return {
+        image_id: imageKeyOf(image),
+        stamp_id: entry.sealKey,
+        seal_name: text(entry.sealRow.seal_name) || text(entry.sealRow.name),
+        dynasty: text(entry.sealRow.dynasty),
+        category: text(entry.sealRow.category),
+        face_id: face ? text(face.id) || text(face._id) : '',
+        face_kind: face ? text(face.kind) : '',
+        width: dimensionOf(image.width),
+        height: dimensionOf(image.height),
+        image_sha256: sha256,
+        image_mime: text(image.mime) || text(face && face.image_mime),
+        thumb_key: cover.thumbKey,
+        display_key: cover.displayKey
+      }
+    })
+    /* `has_more` ＝ 剩余影像（候选 > `limit`）**或**剩余命中印章（窗口未见底）。 */
+    const hasMore = candidates.length > input.limit ? true : !sealExhausted
+    let nextCursor = ''
+    if (candidates.length > input.limit) {
+      /* 末章没出完 ⇒ 游标记该章 `_id` ＋ 最后一张**已发**影像 id（从它之后续）。 */
+      const last = candidates[input.limit - 1]
+      nextCursor = encodeSealImagesCursor(text(last.sealRow._id), imageKeyOf(last.image))
+    } else if (!sealExhausted && windowLastSealId !== '') {
+      /* 窗口印章全部出完而命中集还有章 ⇒ 游标标记窗口末章 `_id` ＋影像位空串。 */
+      nextCursor = encodeSealImagesCursor(windowLastSealId, '')
+    }
+    const totalReply = await totalPending
+    if (!totalReply.ok) throw totalReply.error
+    return { ok: true, rows: pageRows, next_cursor: nextCursor, has_more: hasMore, total: totalReply.value }
+  } catch (error) {
+    /* 失败面：**固定 5 键降级**（不抛异常、不加 `message` 键、零写入）。 */
+    log.warn('sealImages.degraded', {
+      message: '影像瀑布流讀面失敗 ⇒ 回固定降級回包（恰 5 键、不加 message 鍵、零寫入）',
+      errorMessage: text(error && error.message)
+    })
+    return degradedSealImagesReply()
+  }
+}
+
 /**
  * **匿名可调的公开 op 表**（`index.js` 在令牌校验**之前**按这张表分流；
  * 表外的一切 op 仍必须验 token）。**只读**：这里的 op 一律零写。
- * **恰 6 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
+ * **恰 7 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
  * ＋ `listPersonCards` / `getPersonCard`（人物读面改吃 CARD 主库；`2 → 4`）
  * ＋ `catalogStats`（首页页头三计数；`4 → 5`）
- * ＋ `listSealCovers`（卡片矩陣：印章封面 `thumb_key` 批量派生；`5 → 6`，恒零写）。
+ * ＋ `listSealCovers`（卡片矩陣：印章封面 `thumb_key` 批量派生；`5 → 6`，恒零写）
+ * ＋ `listSealImages`（搜索结果页影像瀑布流；`6 → 7`，恒零写）。
  */
 const PUBLIC_OPS = Object.freeze({
   listSealCards,
@@ -2875,14 +3345,15 @@ const PUBLIC_OPS = Object.freeze({
   listPersonCards,
   getPersonCard,
   catalogStats,
-  listSealCovers
+  listSealCovers,
+  listSealImages
 })
 
 /**
  * **匿名可调的公开写 op 表**（`index.js` 在令牌 / 会话 / 配置判定**之前**按 `action:'public-write'`
  * 分流；与上面 `PUBLIC_OPS` **两张表分开可判负**）。**恰 1 成员**：`bumpSealView`
  * （印章浏览量 +1；裁定 §6）。表外 op ⇒ `FORBIDDEN` ＋ 零读零写。
- * `PUBLIC_OPS` **现恰 6 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
+ * `PUBLIC_OPS` **现恰 7 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
  */
 const PUBLIC_WRITE_OPS = Object.freeze({
   bumpSealView
@@ -2901,6 +3372,16 @@ module.exports = {
      `thumb_key` 的唯一派生單點（`lib/books.js` 亦取它，**同源不建第二套**）。 */
   listSealCovers,
   thumbKeyOfDigest,
+  /* 影像瀑布流（本单 `PUBLIC_OPS` 6 → 7）：op 本体 ＋ 冻结键面（回包 5 键 / 影像行 13 键）
+     ＋ `limit` 上下界 ＋ 不透明游标编解码（离线自检直接断言）。 */
+  listSealImages,
+  LIST_SEAL_IMAGES_SUCCESS_KEYS,
+  LIST_SEAL_IMAGES_ROW_KEYS,
+  LIST_SEAL_IMAGES_DEFAULT_LIMIT,
+  LIST_SEAL_IMAGES_MAX_LIMIT,
+  LIST_SEAL_IMAGES_MAX_CURSOR_LENGTH,
+  encodeSealImagesCursor,
+  decodeSealImagesCursor,
   /* 人物读面（本单 `PUBLIC_OPS` 2 → 4）：op 本体 ＋ 冻结键面 ＋ 降级标记。 */
   listPersonCards,
   getPersonCard,

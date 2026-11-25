@@ -2,29 +2,34 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
   "installCommand": "npm install",
-  "buildCommand": "npm run build -- --outDir dist/xiai",
+  "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
     "api/ai/v1/images/*.js": {
       "maxDuration": 60
     }
   },
-  "rewrites": [
-    {
-      "source": "/assets/:path*",
-      "destination": "/xiai/assets/:path*"
-    },
-    {
-      "source": "/",
-      "destination": "/xiai/index.html"
-    },
+  "redirects": [
     {
       "source": "/xiai/:path*",
-      "destination": "/xiai/index.html"
+      "destination": "/:path*",
+      "permanent": true
     },
     {
-      "source": "/((?!assets/|yinyuan/|xiai/|api/).*)",
-      "destination": "/xiai/index.html"
+      "source": "/xiai/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/xiai",
+      "destination": "/",
+      "permanent": true
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/((?!assets/|yinyuan/|api/).*)",
+      "destination": "/index.html"
     }
   ]
 }
