@@ -21,7 +21,7 @@
  *   · 上屏文案一律繁體（`s2t(x) === x`）。
  */
 import { computed, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { persons, seals } from '../services/index.js'
 import { loadPersonDetail, isBasicInfoOnlyCard } from '../services/personCards.js'
 import { biehaoLinesOf } from '../services/personSearch.js'
@@ -32,6 +32,8 @@ import AdminBadge from '../components/AdminBadge.vue'
 import { useEscToClose } from '../utils/useEscToClose.js'
 
 const route = useRoute()
+/* 路由替換（`tmp-` 暂存编号解析成功时 `replace` 而非 `push` —— 不留一条坏历史）。 */
+const router = useRouter()
 
 function textOf(value) {
   return value === null || value === undefined ? '' : String(value).trim()
@@ -80,6 +82,12 @@ let detailToken = 0
  */
 const editOverlay = ref(null)
 
+/* --------------------------- `tmp-` 暂存编号解析态（本单） ---------------------------
+   `resolving` ＝ 解析中的短状态（「正在對照雲端編號…」）；`tempUnresolved` ＝ 解析不到时
+   页内的诚实提示（不回跳、不报错、零编辑入口）。正式编号两者恒为 `false`。 */
+const resolving = ref(false)
+const tempUnresolved = ref(false)
+
 async function fetchDetail() {
   const code = wantedCode.value
   const token = (detailToken += 1)
@@ -101,8 +109,28 @@ async function fetchDetail() {
 
 watch(
   wantedCode,
-  () => {
+  async () => {
     editOverlay.value = null
+    tempUnresolved.value = false
+    const code = wantedCode.value
+    /* **`tmp-` 暂存编号先解析正式编号**（服务层单点 `persons.resolveTempPersonCode`，
+       走既有读取面、零新网络请求）：命中 ⇒ `router.replace` 到正式 `code`（路由变化会
+       重新进本 watch，届时才读详情）；解析不到 ⇒ **不回跳、不报错**，页内诚实提示。
+       正式 `PR…` 编号 ⇒ 本分支不进，`fetchDetail` 与改前逐字一致。 */
+    if (persons.isTempPersonCode(code)) {
+      resolving.value = true
+      try {
+        const result = await persons.resolveTempPersonCode(code, { router })
+        if (result.redirected) return
+        tempUnresolved.value = true
+      } catch {
+        tempUnresolved.value = true
+      } finally {
+        resolving.value = false
+      }
+      return
+    }
+    resolving.value = false
     fetchDetail()
   },
   { immediate: true }
@@ -181,8 +209,11 @@ const emptyBody = computed(() => {
 /* ============================================================================
    管理員 · 補充 / 編輯印人信息（本單）
    ----------------------------------------------------------------------------
-   · **入口渲染門**單點 ＝ `services/persons.canEditPersonInfo()`（＝管理員）；
-     非管理員 / 遊客 ⇒ **零渲染、零 DOM 命中**（不用 CSS 隱藏 / `disabled` 冒充）。
+   · **入口渲染門**單點 ＝ `services/persons.canEditPersonInfo(undefined, wantedCode)`
+     （＝管理員 **且非 `tmp-` 暫存編號**；後者判定單點 `persons.isTempPersonCode`）；
+     非管理員 / 遊客 / 本機暫存行 ⇒ **零渲染、零 DOM 命中**（不用 CSS 隱藏 / `disabled`
+     冒充）—— 暫存行在雲端沒有這行，彈一個必然失敗的按鈕只會把用戶帶進
+     「未找到該印人」的死路。
    · **表單四組**；當前值預填；**只送出使用者改動過的欄** ⇒ 服務端「未傳 ＝ 不改」天然成立
      （讀面沒有的欄，如 `name_cht`，不會被空值誤清）。
    · **留空 ＝ 清除該欄**（逐欄標注）；數值欄一行一項（服務端去重保序、去空項）。
@@ -192,8 +223,8 @@ const emptyBody = computed(() => {
    · 彈窗內兩鈕**不帶**管理員虛線樣式（虛線只屬入口）。
    ============================================================================ */
 
-/** 入口渲染門（單點；非管理員 / 遊客 ⇒ `false` ⇒ 模板零渲染）。 */
-const canEditPerson = computed(() => persons.canEditPersonInfo())
+/** 入口渲染門（單點；非管理員 / 遊客 / `tmp-` 暫存編號 ⇒ `false` ⇒ 模板零渲染）。 */
+const canEditPerson = computed(() => persons.canEditPersonInfo(undefined, wantedCode.value))
 
 /** 可編輯字段面（＝服務端封閉鍵面的 13 個可寫字段；轉發真源 `services/persons.js`）。 */
 const EDIT_FIELDS = persons.PERSON_EDITABLE_FIELDS
@@ -327,8 +358,9 @@ useEscToClose({ isActive: () => editOpen.value, onCancel: closeEdit, isBusy: () 
             <dd data-person-code>{{ person.code }}</dd>
           </div>
         </dl>
-        <!-- 管理員入口（本單）：渲染門單點 `persons.canEditPersonInfo()` ⇒
-             非管理員 / 遊客 ⇒ `v-if` 恆假 ⇒ **零渲染、零 DOM 命中**（不用隱藏 / `disabled` 冒充）。 -->
+        <!-- 管理員入口（本單）：渲染門單點 `persons.canEditPersonInfo(undefined, wantedCode)`
+             ⇒ 非管理員 / 遊客 / `tmp-` 暫存編號 ⇒ `v-if` 恆假 ⇒ **零渲染、零 DOM 命中**
+             （不用隱藏 / `disabled` 冒充）。 -->
         <button
           v-if="canEditPerson"
           class="btn btn--ghost btn--admin"
@@ -515,10 +547,23 @@ useEscToClose({ isActive: () => editOpen.value, onCancel: closeEdit, isBusy: () 
       </div>
     </template>
 
-    <!-- 未命中 / 載入 / 失敗：可讀空態（不白屏），回到名錄。 -->
+    <!-- 未命中 / 載入 / 失敗：可讀空態（不白屏），回到名錄。
+         **`tmp-` 暫存編號先分兩支**（本單）：解析中短狀態 / 解析不到的誠實提示 ——
+         不把「還沒對照完」或「本機暫存行」說成「查無此印人」，也不給編輯入口。 -->
     <section v-else class="panel person__panel">
       <div class="panel__body person__body">
-        <div class="person__empty" :data-person-missing="missing ? '1' : '0'">
+        <!-- 解析中（短狀態）：就緒後自動 `replace` 到正式編號，無需手動刷新。 -->
+        <div v-if="resolving" class="person__empty" data-person-temp-resolving>
+          <p class="person__empty-title">正在對照雲端編號…</p>
+          <p class="person__empty-body">正在把本機暫存行對照雲端正式印人編號，就緒後會自動跳轉，無需手動刷新。</p>
+        </div>
+        <!-- 解析不到：**誠實提示**（不回跳、不報錯、零編輯入口；不編造正式編號）。 -->
+        <div v-else-if="tempUnresolved" class="person__empty" data-person-temp-row>
+          <p class="person__empty-title">本機暫存行尚未取得正式印人編號，暫不可編輯。</p>
+          <p class="person__empty-body">此編號是本機鏡像的暫存行，雲端尚無對應的正式印人；可返回名錄重新查找。</p>
+          <RouterLink class="btn btn--ghost person__empty-link" :to="{ name: 'persons' }">返回印家名錄</RouterLink>
+        </div>
+        <div v-else class="person__empty" :data-person-missing="missing ? '1' : '0'">
           <p class="person__empty-title">{{ emptyTitle }}</p>
           <p class="person__empty-body">{{ emptyBody }}</p>
           <RouterLink class="btn btn--ghost person__empty-link" :to="{ name: 'persons' }">返回印家名錄</RouterLink>

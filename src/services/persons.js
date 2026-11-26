@@ -213,6 +213,99 @@ export function isCardPersonId(value) {
   return CARD_PERSON_ID_PATTERN.test(String(value === null || value === undefined ? '' : value).trim())
 }
 
+/* ============================================================================
+   **详情页读取 / 导航面（本单）**：`tmp-` 暂存编号 ⇒ 正式编号解析
+   ----------------------------------------------------------------------------
+   病根（线上实据）：详情页 `wantedCode` 直接取路由 `code` ⇒ 用户从本机镜像的暂存行
+   链接进来 ⇒ URL 停在 `/persons/tmp-000002`（云端 `xiai_persons` 没有这行）⇒ 页面照常
+   渲染、还给出管理员编辑入口 ⇒ 一保存就撞服务端 `updatePerson` 的存在性门
+   （「未找到該印人（person_id）：tmp-000002；本次零寫入。」—— 那是**正确的拒绝**，
+   服务端一字不改）。口径（三条）：
+     ① `tmp-` 编号 ⇒ **先走既有读取面** `listPersons()`（云模式 ＝ 云端快照 ∪ 本机同
+        `_id` 覆盖；**零新网络请求**）找同行：`proposal_id` 完全相等**优先**，次之
+        `card_id` 完全相等 ⇒ 命中正式 `code` ⇒ `router.replace`（**替换而非 push**，
+        不留一条指向 `tmp-` 的坏历史）；
+     ② 解析不到 ⇒ **不回跳、不报错**，详情页给诚实提示（`data-person-temp-row`），
+        且渲染门关掉（编辑入口零渲染）；
+     ③ 正式 `PR…` 编号 ⇒ **一个字不改**（不触发任何解析、不读行集）。
+   ============================================================================ */
+
+/** 归一为去空白字符串（`null` / `undefined` ⇒ `''`）。 */
+function textValue(value) {
+  return value === null || value === undefined ? '' : String(value).trim()
+}
+
+/** 行上的印人编号（`code` 优先，退 `id`，再退 `_id` —— 与详情页 `codeOf` 同口径）。 */
+function personRowCode(row) {
+  if (!row || typeof row !== 'object') return ''
+  return textValue(row.code) || textValue(row.id) || textValue(row._id)
+}
+
+/**
+ * **`tmp-` 暂存编号判定**（本单；前缀单点 ＝ 既有 `TEMP_PERSON_ID_PREFIX`，
+ * **不新造第二套前缀字面**）：本机镜像的暂存行编号不是正式印人编号，
+ * 不得作为 `person_id` 送出、不得据此渲染编辑入口。
+ * @param {string|null|undefined} code
+ * @returns {boolean}
+ */
+export function isTempPersonCode(code) {
+  return textValue(code).indexOf(TEMP_PERSON_ID_PREFIX) === 0
+}
+
+/**
+ * 解析 `tmp-` 暂存编号对应的**正式印人编号**（纯函数、假数据可测、**零网络**）。
+ *
+ * 优先级（**机械可判**）：① 源行 `proposal_id` 完全相等 ⇒ 取该行编号；
+ * ② 源行无 `proposal_id`（或 ① 未命中）⇒ `card_id` 完全相等；③ 皆未命中 ⇒ `null`。
+ * **不编造**：源行不在行集里 / 只命中 `tmp-` 行 / 两键皆空或皆不中 ⇒ 一律 `null`；
+ * 正式编号入参 ⇒ **不解析**（直接 `null`，连行集都不读）。
+ * @param {string} tempCode 路由上的编号
+ * @param {Array<object>} [rows] 行集（缺省 ⇒ 既有读取面 `listPersons()`）
+ * @returns {string|null} 正式编号；解析不到 ⇒ `null`
+ */
+export function resolveFormalPersonCode(tempCode, rows) {
+  const code = textValue(tempCode)
+  if (!isTempPersonCode(code)) return null
+  const list = Array.isArray(rows) ? rows : listPersons()
+  const source = list.find((row) => personRowCode(row) === code)
+  if (!source) return null
+  const proposalId = textValue(source.proposal_id)
+  const cardId = textValue(source.card_id)
+  /* 候选 ＝ **非临时、非自身**的行（解析目标恒为正式编号，绝不跳回另一个 `tmp-`）。 */
+  const candidates = list.filter((row) => {
+    const hit = personRowCode(row)
+    return hit !== '' && hit !== code && !isTempPersonCode(hit)
+  })
+  if (proposalId) {
+    const hit = candidates.find((row) => textValue(row.proposal_id) === proposalId)
+    if (hit) return personRowCode(hit)
+  }
+  if (cardId) {
+    const hit = candidates.find((row) => textValue(row.card_id) === cardId)
+    if (hit) return personRowCode(hit)
+  }
+  return null
+}
+
+/**
+ * **详情页 `tmp-` 编号解析 ＋ `router.replace`**（`router` **注入** ⇒ 离线自检可断言
+ * 调用次数与参数；解析失败 ⇒ `replace` **0 次**，不回跳、不报错）。
+ * 解析成功 ⇒ `replace({ name:'personDetail', params:{ code: 正式编号 } })` 恰 1 次。
+ * @param {string} tempCode 路由上的编号
+ * @param {{router?:{replace:Function}, rows?:Array<object>}} [options]
+ * @returns {Promise<{temp:boolean, code:string, formal:string|null, redirected:boolean}>}
+ */
+export async function resolveTempPersonCode(tempCode, options = {}) {
+  const code = textValue(tempCode)
+  if (!isTempPersonCode(code)) return { temp: false, code, formal: null, redirected: false }
+  const formal = resolveFormalPersonCode(code, options && options.rows)
+  if (!formal) return { temp: true, code, formal: null, redirected: false }
+  const router = options && options.router
+  if (!router || typeof router.replace !== 'function') return { temp: true, code, formal, redirected: false }
+  await router.replace({ name: 'personDetail', params: { code: formal } })
+  return { temp: true, code, formal, redirected: true }
+}
+
 /**
  * **防重键（§3）**：`(target_person_id, 姓名, 生卒, cbdb_id)` 的确定性拼接。
  * 「姓名」取 `family_name + given_name`（与显示名派生同源，但**不落第二份显示名** —— 本键只是
@@ -1336,8 +1429,9 @@ export { emptyPersonImportPayload }
    **印人信息補充 / 編輯（本单）**：`canEditPersonInfo` ＋ `updatePersonInfo`
    ----------------------------------------------------------------------------
    硬口径（逐条）：
-     · **渲染门单点** `canEditPersonInfo(actor)`：＝管理员（`services/admin.js::isAdminSession`
-       这一处判定）；页面**不得**自写任何角色字面、**不得**再判一次 `role`。
+     · **渲染门单点** `canEditPersonInfo(actor, personCode)`：＝管理员（`services/admin.js::isAdminSession`
+       这一处判定）**且编号非 `tmp-` 暂存号**（判定单点 `isTempPersonCode`）；页面**不得**自写任何
+       角色字面、**不得**再判一次 `role`、**不得**自写第二套 `tmp-` 前缀字面。
      · **写面单点** `updatePersonInfo(fields)`：经 `admin.js::adminWriteGate`（＝ `xiai-admin-token`
        通道的**唯一出口**）——**不自建第二条通道**、不直调云函数、不碰数据层裸写。
      · **失败恒不抛**：任何异常都收成 `{ok:false, reason, message}`（`reason` ∈ 既有冻结表）；
@@ -1368,15 +1462,20 @@ export const PERSON_EDITABLE_FIELDS = Object.freeze([
 
 /**
  * 当前（或指定）账号是否可补充 / 编辑印人信息 —— 详情页据此决定**是否渲染入口**
- * （非管理员 / 游客 ⇒ 零渲染、零 DOM 命中）。
+ * （非管理员 / 游客 / `tmp-` 暂存编号 ⇒ 零渲染、零 DOM 命中）。
  *
  * **单点**：管理员判定唯一取 `services/admin.js::isAdminSession()`（本地会话 `role`）；
  * 显式传 `actor` 时按同一口径核对其 `role`（与 `canReviewPersonProposals` 同形）。
+ * **`tmp-` 暂存编号恒不可编辑**（判定单点 `isTempPersonCode`，前缀仍取既有
+ * `TEMP_PERSON_ID_PREFIX`）：那行只活在本机镜像、云端 `xiai_persons` 没有它 ⇒ 保存
+ * 必然撞服务端存在性门 ⇒ 本机上不许弹一个必然失败的按钮。
  * **它只是渲染门**：真正的授权判据在服务端（令牌验签 ＋ 白名单 ＋ 值域门）。
  * @param {{role?:string}|null} [actor] 缺省取当前登录用户
+ * @param {string} [personCode] 详情页路由上的印人编号（缺省 ⇒ 不按编号收窄，旧调用逐字不变）
  * @returns {boolean}
  */
-export function canEditPersonInfo(actor) {
+export function canEditPersonInfo(actor, personCode) {
+  if (isTempPersonCode(personCode)) return false
   if (actor === undefined || actor === null) return isAdminSession()
   return actor !== null && actor !== undefined && actor.role === 'admin'
 }
