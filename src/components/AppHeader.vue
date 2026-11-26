@@ -55,6 +55,9 @@ const avatarGlyph = computed(() => {
   if (!u) return '客'
   return u.role === 'admin' ? '守' : '友'
 })
+/* **管理後台入口的可见性（单点）**：判定收在服务层，页头**不自写任何角色字面**；
+   无会话 ⇒ `false`（菜单该项零渲染、不占位）。 */
+const managementConsole = computed(() => services.admin.isManagementSession())
 
 /** 關鍵詞提交（普通態按回車）：維持原 `{ q }` 口徑。 */
 function submitKeyword(keyword) {
@@ -176,6 +179,8 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
             <button type="button" @click="go('points')">積分中心</button>
             <!-- **本单改造**：斐萃令牌（管理员签发；入口对已登录用户可见，页内与**服务端**双重判管理员）。 -->
             <button type="button" data-entry="connect-feicui" @click="go('connect-feicui')">斐萃令牌</button>
+            <!-- **本单新增**：管理後台入口 —— 文案逐字 `管理後台`；可见性＝管理层会话（判定收在服务层单点，页头不自判）。 -->
+            <button v-if="managementConsole" type="button" data-admin-console @click="go('admin')">管理後台</button>
             <button
               type="button"
               data-logout

@@ -55,6 +55,26 @@ export function isAdminSession() {
 }
 
 /**
+ * **管理层会话判定（只读单点｜本单新增）**：当前会话角色 ∈ {`admin`, 掌書記} ⇒ `true`。
+ *
+ * 用途**只有展示层两处**，且这两处**共用本函数**、不各自写角色字面（口径单点 ⇒ 不会两处漂移）：
+ *   · 页头二级菜单「管理後台」入口的可见性（`AppHeader.vue`）；
+ *   · `/admin`「管理後台」页的进入资格（`AdminView.vue`）。
+ *
+ * 硬口径（逐条）：
+ *   · **只读**：不读云端集合、不写任何键、不发任何请求；
+ *   · **不放宽任何写门**：本文件既有的 `isAdminSession()` 与全仓其余 `role === 'admin'`
+ *     判定**逐字未动** —— 本函数**不授予任何能力**，只回答「能不能看到管理後台入口」；
+ *   · 未登录（无会话）⇒ `false`。
+ * @param {{role?:string}|null} [user] 指定会话；缺省回落到当前登录态
+ * @returns {boolean}
+ */
+export function isManagementSession(user) {
+  const account = user === undefined ? currentUser() : user
+  return account !== null && (account.role === 'admin' || account.role === 'sub-admin')
+}
+
+/**
  * 管理员专属读入口：全部印章行。
  * 非管理员 ⇒ **结构化拒绝**（原「返回空集」形态已按 §10.8 v1.6 收口：空集 / `null` 不得冒充拒绝）。
  * @returns {{ok:true, rows:Array<object>}|{ok:false, reason:'FORBIDDEN', message:string}}
