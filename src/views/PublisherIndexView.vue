@@ -115,7 +115,7 @@ const feedbackReason = ref('')
  * （不猜、不改写服务端文案）。显示形态恒为「中文（REASON）」⇒ 既有码可查、文案可读。
  */
 const REASON_LABELS = Object.freeze({
-  FORBIDDEN: '權限不足（僅管理員可寫；或寫入憑證缺失）',
+  FORBIDDEN: `權限不足（僅${ADMIN_LABEL}可寫；或寫入憑證缺失）`,
   INVALID_VALUE: '值域不符（越界值／形態不合，已零寫入）',
   INVALID_FIELD: '載荷欄位不合法（含未知欄位／新建自帶 code）',
   LOGIN_REQUIRED: '請先登錄後再寫（寫入憑證缺失）',

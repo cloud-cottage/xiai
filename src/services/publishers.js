@@ -47,6 +47,7 @@ import { isAdmin } from '../data/session.js'
 import { listPublisherRows, savePublisherRows } from '../data/db.js'
 import { userWriteGate } from './userWrite.js'
 import { writeFaceMode, WRITE_FACE_MODES } from '../data/writeFaceMode.js'
+import { ADMIN_LABEL } from '../data/roleLabels.js'
 
 /** 本机镜像集合键（真实键名 `xiai:v1:publishers`；代际登记 ＝ `data/storage.js::STORAGE_KEYS`）。 */
 export const PUBLISHER_COLLECTION_KEY = 'publishers'
@@ -118,7 +119,7 @@ function accept(extra) {
 /** 管理员门（**判权单点 ＝ `session.js::isAdmin`**；不自造第二套 role 判定）。 */
 function adminDenial() {
   if (isAdmin.value) return null
-  return deny('FORBIDDEN', '僅管理員可以新增 / 修改出版社；本次零寫入。')
+  return deny('FORBIDDEN', `僅${ADMIN_LABEL}可以新增 / 修改出版社；本次零寫入。`)
 }
 
 function sameId(row, id) {
