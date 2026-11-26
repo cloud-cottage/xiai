@@ -30,7 +30,13 @@ export function displayApiBase() {
   /* 线上前缀 `/api/xiai`：同域根路径的 `/api/*` 归 liwu ⇒ 玺爱的 API 路由整族挂在
      `api/xiai`（网关 HTTP 访问服务路径，见 `cloudfunctions/xiai-web-api`）。
      dev 同前缀，由 `vite.config.js` 的 proxy `rewrite` 剥回 5191 的 `/api/*`。 */
-  const base = String(fromEnv || '').trim() || '/api/xiai'
+  /* **本单（影像服务上云）**：生产构建改用**云托管容器**的固定默认域名 ——
+     实测 Vercel 边缘反代同域路径有约 25% 的 502（ROUTER_EXTERNAL_TARGET_CONNECTION_ERROR），
+     而浏览器直连该域名（CORS 已放行 https://xiai.plus）稳定；dev 仍走 vite proxy 到本机 5191。 */
+  const PROD_CONTAINER_BASE = 'https://xiai-api-344046-5-1463728495.sh.run.tcloudbase.com/api'
+  const isProd =
+    typeof import.meta !== 'undefined' && import.meta.env ? Boolean(import.meta.env.PROD) : false
+  const base = String(fromEnv || '').trim() || (isProd ? PROD_CONTAINER_BASE : '') || '/api/xiai'
   return base.replace(/\/+$/, '')
 }
 
