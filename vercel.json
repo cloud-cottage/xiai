@@ -28,6 +28,10 @@
   ],
   "rewrites": [
     {
+      "source": "/api/xiai/:path*",
+      "destination": "https://xiai-api-344046-5-1463728495.sh.run.tcloudbase.com/api/:path*"
+    },
+    {
       "source": "/((?!assets/|yinyuan/|api/).*)",
       "destination": "/index.html"
     }
