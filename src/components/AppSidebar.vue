@@ -4,9 +4,9 @@ import { computed } from 'vue'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 
 /**
- * 侧边菜单 —— `璽印匯類` / `印風匯覽` / `印家匯徵` → **（管理员）`印譜匯觀`** → `我的雲盤`。
+ * 侧边菜单 —— `璽印匯類` / `印風匯覽` / `印家匯徵` → **（管理员）`印譜匯觀`** → `我的名刺` → `我的雲盤`。
  * 顺序**逐字**：`璽印匯類`（`square`）→ `印風匯覽`（`styles`）→ `印家匯徵`（`persons`）
- * → `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `譜` / `盤`。
+ * → `我的名刺`（`me`，**三态一律渲染**，本單新增）→ `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `譜` / `刺` / `盤`。
  *
  * 【印譜匯觀】（2026-11-14 裁定｜`docs/book-catalog-ruling-2026-11-14.md` §二）
  *   · 该条**仅管理员可见**：非管理员 / 未登录 ⇒ **整条不渲染**（`items` 里根本没有这一项
@@ -44,6 +44,9 @@ const items = computed(() => {
        **条件 push（不在上面的基础数组里）** ⇒ 基础四项的结构面一字不动。 */
     list.push({ key: 'publishers', to: { name: 'publishers' }, glyph: '梓', label: '梓行匯溯' })
   }
+  /* 【我的名刺】（本單｜`/me`）：**普通用户能力入口**（徽號是用户自己的东西，不是管理员
+     专属）⇒ 三态一律渲染，**不进上面的 `isAdmin` 块**；位置在 `my-drive` 之前。 */
+  list.push({ key: 'me', to: { name: 'me' }, glyph: '刺', label: '我的名刺' })
   list.push({ key: 'my-drive', to: { name: 'my-drive' }, glyph: '盤', label: '我的雲盤' })
   return list
 })

@@ -3,6 +3,9 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { currentUser, goldBalance, isLoggedIn } from '../data/session.js'
+/* **徽號上屏名的单点派生**（本單）：页头昵称一律经 `services.profile.displayNicknameOf(user)`
+   （回落链全仓唯一处），模板不写 `user.nickname`、也不自造第二套回落。 */
+import { services } from '../services/index.js'
 /* **退出登錄三態**（進行中 / 成功 / 失敗）與提示條：與登錄頁共用同一份壳与同一份文案。 */
 import { useLogout } from '../utils/useLogout.js'
 /* **頁頭單框雙態搜索**（交互重構單）：普通關鍵詞框 ＋ 識別編碼 OTP（首字符判型），
@@ -28,6 +31,18 @@ const logoUrl = `${import.meta.env.BASE_URL}assets/xiai-logo.svg`
 const user = computed(() => currentUser())
 const logged = isLoggedIn
 const gold = goldBalance
+/**
+ * **徽號上屏名的单点派生**：只在这里取一次，模板里不再调用、也不写第二套回落。
+ *
+ * 服务层 `displayNicknameOf()` 读的是**模块级缓存**（非响应式）⇒ 云端读数回来时本
+ * computed 不会自动重算，故用一个只读信号 `profileTick` 触发（**只触发重算，
+ * 不参与回落**）：登录后 / 保存后 `loadMyProfile()` 完成时 +1。
+ */
+const profileTick = ref(0)
+const displayName = computed(() => {
+  void profileTick.value
+  return services.profile.displayNicknameOf(user.value)
+})
 /* 退出的三态：`logoutView.label`（`退出登錄` / `正在退出…`）、`logoutView.disabled`、
    `logoutError`（`退出失敗：…`，就地显示在菜单里）。 */
 const {
@@ -92,7 +107,19 @@ function onDocClick(event) {
   if (userRef.value && !userRef.value.contains(event.target)) closeMenu()
 }
 
-onMounted(() => document.addEventListener('click', onDocClick))
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  /* **登录后补读一次云端徽号**（只一次；`AppHeader` 全站只挂载一次）：失败静默、
+     不阻塞渲染、不弹错误 —— 取不到只等于走第 2 / 3 级回落（`displayNicknameOf`）。 */
+  if (logged.value) {
+    services.profile
+      .loadMyProfile()
+      .then(() => {
+        profileTick.value += 1
+      })
+      .catch(() => {})
+  }
+})
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </script>
 
@@ -139,7 +166,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
         <div v-if="menuOpen" class="app-header__menu">
           <div class="app-header__menu-who">
-            <template v-if="logged">{{ user.nickname }}<RoleMark :role="user.role" /> · {{ user.phone }}</template>
+            <template v-if="logged">{{ displayName }}<RoleMark :role="user.role" /> · {{ user.phone }}</template>
             <template v-else>尚未登錄</template>
           </div>
           <button v-if="!logged" type="button" @click="go('login')">登錄 / 註冊</button>

@@ -66,6 +66,17 @@ const routes = [
     component: () => import('../views/PointsView.vue'),
     meta: { title: '積分中心', requiresAuth: true }
   },
+  /* **本單新增一條**：`/me`（【我的名刺】，title 逐字 `我的名刺`）—— 登录用户**自己的**
+     名刺页（徽號行内改名 / 手機號打码 / 註冊時間 / 金 / 登出）：**不是管理员页**
+     （零 `.btn--admin`、零权限判定），侧栏入口**普通用户也可见**（`AppSidebar.vue`，
+     放在 `my-drive` 之前）。**不设 `requiresAuth`**：未登录也可直达，页内只给
+     「請先登錄」引导 ＋ 去 `/login` 的链接（不重定向、不报错、零 profile 请求）。 */
+  {
+    path: '/me',
+    name: 'me',
+    component: () => import('../views/MeView.vue'),
+    meta: { title: '我的名刺' }
+  },
   {
     path: '/login',
     name: 'login',
