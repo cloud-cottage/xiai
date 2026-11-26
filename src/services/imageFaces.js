@@ -21,12 +21,14 @@
  *   其餘容器（**存量舊 8 色索引 PNG 等**）**一律不走 api** —— 調用方按 `passThroughMimeOf`
  *   自行走**瀏覽器原生解碼 / 本機字節**路徑（存量面不得回歸）。
  *
- * 端基址**唯一一處定義點**仍為 `displayImage.js::displayApiBase`（本文件只引用，不另立）。
- * 失敗一律**結構化**（`{ok:false, reason, message}`；`reason` 取值屬 §3.12.10(c) 凍結表），
+ * 端基址**唯一一處定義點**仍為 `displayImage.js::displayApiCandidates`（本文件只引用，不另立）；
+ * 真正發請求走**回退單點** `displayImage.js::displayFetch`（按候選順序逐檔嘗試、每檔 4s 短超時、
+ * 首個成功即返回、全失败如实交回最后一档的 `{reason, message}`、記住上次成功檔）。
+ * 失败一律**結構化**（`{ok:false, reason, message}`；`reason` 取值屬 §3.12.10(c) 凍結表），
  * **零偽數據、零回落**（不得以空文件 / 假容器冒充成功）。
  */
 
-import { displayApiBase } from './displayImage.js'
+import { displayFetch } from './displayImage.js'
 import { loadStoredImage, primaryFaceOf, imageSourceOf } from './seals.js'
 import { normalizeDigest, reasonOfReply } from './imageAuthority.js'
 import { sniffBytesMime } from '../utils/image.js'
@@ -121,17 +123,21 @@ export async function fetchOriginalBytes(input = {}) {
   if (digest) params.push(`sha256=${encodeURIComponent(digest)}`)
   if (input.kind) params.push(`kind=${encodeURIComponent(input.kind)}`)
   const query = params.length ? `?${params.join('&')}` : ''
-  let reply = null
-  try {
-    reply = await fetch(`${displayApiBase()}/image/download${query}`, {
+  /* **候选基址回退单点**：按候选顺序尝试，首个 2xx 即返回；全失败 ⇒ 最后一档的失败原样交回。 */
+  const attempt = await displayFetch(
+    `/image/download${query}`,
+    {
       method: 'POST',
       headers: digest ? undefined : { 'Content-Type': 'application/octet-stream' },
       body: digest ? undefined : body
-    })
-  } catch {
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: SERVICE_DOWN_MESSAGE }
-  }
-  if (!reply || !reply.ok) return { ok: false, reason: await reasonOfReply(reply), message: NOT_IMAGE_MESSAGE }
+    },
+    {
+      networkFailure: { reason: 'STORAGE_UNAVAILABLE', message: SERVICE_DOWN_MESSAGE },
+      failureOfReply: async (reply) => ({ reason: await reasonOfReply(reply), message: NOT_IMAGE_MESSAGE })
+    }
+  )
+  if (!attempt.ok) return { ok: false, reason: attempt.reason, message: attempt.message }
+  const reply = attempt.reply
   const out = new Uint8Array(await reply.arrayBuffer())
   /** **判據三件**（規範 §3.26.4）：`sha256` ＋ 字節長度 ＋ 魔數（按字節，不採信自稱值）。 */
   const mime = mimeOfBytes(out)
@@ -168,17 +174,21 @@ export async function fetchThumbBytes(input = {}) {
   const params = [`width=${encodeURIComponent(longEdge)}`]
   if (input.kind) params.push(`kind=${encodeURIComponent(input.kind)}`)
   if (digest) params.push(`sha256=${encodeURIComponent(digest)}`)
-  let reply = null
-  try {
-    reply = await fetch(`${displayApiBase()}/image/thumb?${params.join('&')}`, {
+  /* **候选基址回退单点**：按候选顺序尝试，首个 2xx 即返回；全失败 ⇒ 最后一档的失败原样交回。 */
+  const attempt = await displayFetch(
+    `/image/thumb?${params.join('&')}`,
+    {
       method: 'POST',
       headers: digest ? undefined : { 'Content-Type': 'application/octet-stream' },
       body: digest ? undefined : body
-    })
-  } catch {
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: SERVICE_DOWN_MESSAGE }
-  }
-  if (!reply || !reply.ok) return { ok: false, reason: await reasonOfReply(reply), message: NOT_IMAGE_MESSAGE }
+    },
+    {
+      networkFailure: { reason: 'STORAGE_UNAVAILABLE', message: SERVICE_DOWN_MESSAGE },
+      failureOfReply: async (reply) => ({ reason: await reasonOfReply(reply), message: NOT_IMAGE_MESSAGE })
+    }
+  )
+  if (!attempt.ok) return { ok: false, reason: attempt.reason, message: attempt.message }
+  const reply = attempt.reply
   const out = new Uint8Array(await reply.arrayBuffer())
   const mime = mimeOfBytes(out)
   const edge = Number(reply.headers.get('X-Xiai-Thumb-Long-Edge'))
@@ -287,17 +297,21 @@ export async function fetchSlices(input = {}) {
   const params = [`assetId=${encodeURIComponent(assetId)}`]
   if (input.kind) params.push(`kind=${encodeURIComponent(input.kind)}`)
   if (digest) params.push(`sha256=${encodeURIComponent(digest)}`)
-  let reply = null
-  try {
-    reply = await fetch(`${displayApiBase()}/image/slices?${params.join('&')}`, {
+  /* **候选基址回退单点**：按候选顺序尝试，首个 2xx 即返回；全失败 ⇒ 最后一档的失败原样交回。 */
+  const attempt = await displayFetch(
+    `/image/slices?${params.join('&')}`,
+    {
       method: 'POST',
       headers: digest ? undefined : { 'Content-Type': 'application/octet-stream' },
       body: digest ? undefined : body
-    })
-  } catch {
-    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: SERVICE_DOWN_MESSAGE }
-  }
-  if (!reply || !reply.ok) return { ok: false, reason: await reasonOfReply(reply), message: NOT_IMAGE_MESSAGE }
+    },
+    {
+      networkFailure: { reason: 'STORAGE_UNAVAILABLE', message: SERVICE_DOWN_MESSAGE },
+      failureOfReply: async (reply) => ({ reason: await reasonOfReply(reply), message: NOT_IMAGE_MESSAGE })
+    }
+  )
+  if (!attempt.ok) return { ok: false, reason: attempt.reason, message: attempt.message }
+  const reply = attempt.reply
   const ctype = String(reply.headers.get('Content-Type') || '')
   const boundary = /boundary=([^;]+)/i.exec(ctype)
   if (!boundary) return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: NOT_IMAGE_MESSAGE }
