@@ -260,13 +260,17 @@ export function isTempPersonCode(code) {
  * **不编造**：源行不在行集里 / 只命中 `tmp-` 行 / 两键皆空或皆不中 ⇒ 一律 `null`；
  * 正式编号入参 ⇒ **不解析**（直接 `null`，连行集都不读）。
  * @param {string} tempCode 路由上的编号
- * @param {Array<object>} [rows] 行集（缺省 ⇒ 既有读取面 `listPersons()`）
+ * @param {Array<object>} [rows] 行集（缺省 ⇒ 全量行集 `listAllPersonRows()`，**未走去重**）
  * @returns {string|null} 正式编号；解析不到 ⇒ `null`
  */
 export function resolveFormalPersonCode(tempCode, rows) {
   const code = textValue(tempCode)
   if (!isTempPersonCode(code)) return null
-  const list = Array.isArray(rows) ? rows : listPersons()
+  /* **缺省行集 ＝ 全量（未去重）行集**：名録读面 `listPersons()` 已滤掉被正式行遮蔽的
+     `tmp-` 行（本单去重），但深链 `/persons/tmp-…` 仍须看见暂存行本身 —— 否则解析不到
+     源行 ⇒ 上一单的 `router.replace` 会失效。解析**逻辑**（proposal 优先 / card 次之 /
+     皆无 ⇒ `null`）一字未改。 */
+  const list = Array.isArray(rows) ? rows : listAllPersonRows()
   const source = list.find((row) => personRowCode(row) === code)
   if (!source) return null
   const proposalId = textValue(source.proposal_id)
@@ -364,11 +368,80 @@ function rowWithCardAttributes(row) {
   return merged
 }
 
-/** 取正式印人行（本地 thin 行 ＋ CARD 属性覆盖；显示名请经 `personName`）。 */
-export function listPersons() {
+/* ============================================================================
+   **名録去重（本单）**：被正式行遮蔽的 `tmp-` 暂存行不再单列一条
+   ----------------------------------------------------------------------------病根（线上实据）：本机镜像里同一位印人同时存在**云端正式行**（`PR000000571`，
+   `card_id` `100000574`、`proposal_id` `pp-mwh3srta-2uidjx`）与**前端暂存行**
+   （`tmp-000002`，同键同人）⇒ 名録 `/persons` 把两行各列一条，搜「刘垚」命中 **2 条**、
+   点进去却是同一位。
+   口径（三条，不得破）：
+     ① 遮蔽判定**单点** `isShadowedTempRow`：只对 `tmp-` 行生效；`proposal_id` **完全相等**
+        优先，次之 `card_id` **完全相等** ⇒ 被遮蔽；两键皆空 / 只与另一条 `tmp-` 行相同 /
+        云端确无对应正式行 ⇒ **不遮蔽（保留）**；
+     ② **正式行之间不去重**（即使 `card_id` 相同）；**未成对的 `tmp-` 行必须保留**（那是
+        尚未采纳的草稿，删了用户就找不到了）；
+     ③ 只收窄**名録读面** `listPersons()` ⇒ 搜索命中数与「收錄 N 位」计数**同源**去重、
+        顺序不变（`filter` 保序）；详情页 `tmp-` 深链解析读**全量行集** `listAllPersonRows()`
+        （逻辑一字未改），`personReferenceDenial` / 写面 / 服务端**零触碰**。
+   ============================================================================ */
+
+/**
+ * **`tmp-` 暂存行遮蔽判定**（去重单点；纯函数、假行集可测、**零网络**）。
+ *
+ * 与详情页解析 `resolveFormalPersonCode` **同一优先级**：① `proposal_id` 非空且与某条
+ * **非 `tmp-` 行**完全相等 ⇒ 遮蔽；否则 ② `card_id` 非空且与某条非 `tmp-` 行完全相等 ⇒
+ * 遮蔽；否则 ③ **不遮蔽**（两键皆空 / 只与另一条 `tmp-` 行相同 / 无正式行 ⇒ 保留）。
+ * **恒不遮蔽**两种入参：非 `tmp-` 行（正式行之间不去重）、`null` / 非对象。
+ * @param {object} tmpRow 本机印人行
+ * @param {Array<object>} formalRows 正式行集（**已排除 `tmp-` 行**；本函数内再挡一层）
+ * @returns {boolean}
+ */
+export function isShadowedTempRow(tmpRow, formalRows) {
+  if (!tmpRow || typeof tmpRow !== 'object') return false
+  if (!isTempPersonCode(personRowCode(tmpRow))) return false
+  const list = Array.isArray(formalRows) ? formalRows : []
+  /* **双保险**：即便调用方误传混集，`tmp-` 行也绝不充当遮蔽源（暂存行之间不去重）。 */
+  const formal = list.filter((row) => row && !isTempPersonCode(personRowCode(row)))
+  const proposalId = textValue(tmpRow.proposal_id)
+  if (proposalId && formal.some((row) => textValue(row.proposal_id) === proposalId)) return true
+  const cardId = textValue(tmpRow.card_id)
+  if (cardId && formal.some((row) => textValue(row.card_id) === cardId)) return true
+  return false
+}
+
+/**
+ * **名録去重**（`listPersons()` 的唯一步骤；纯函数、假行集可测、**零网络**）：
+ * 先算正式行集（非 `tmp-`），再滤掉被遮蔽的暂存行 —— **顺序不变**（`filter` 保序）、
+ * **未成对的 `tmp-` 行保留**。
+ * @param {Array<object>} rows 行集（含 `tmp-` 暂存行）
+ * @returns {Array<object>}
+ */
+export function dedupeShadowedTempRows(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const formalRows = list.filter((row) => row && !isTempPersonCode(personRowCode(row)))
+  return list.filter((row) => !isShadowedTempRow(row, formalRows))
+}
+
+/**
+ * **全量行集**（本地 thin 行 ＋ CARD 属性合并；**未走去重**）。
+ * 仅供 `listPersons()` 与详情页 `tmp-` 深链解析取数 —— 名録 / 搜索 / 计数一律走
+ * `listPersons()`（去重后的名録面）。
+ * @returns {Array<object>}
+ */
+function listAllPersonRows() {
   const rows = listPersonRows()
   if (!Array.isArray(rows)) return []
   return rows.map((row) => rowWithCardAttributes(row))
+}
+
+/**
+ * 取正式印人行（本地 thin 行 ＋ CARD 属性覆盖；显示名请经 `personName`）。
+ *
+ * **名録去重（本单）**：被正式行遮蔽的 `tmp-` 暂存行在此滤掉 ⇒ `/persons` 的
+ * 「收錄 N 位」计数、搜索命中数、朝代筛选三者同源去重；**顺序与改前逐字一致**。
+ */
+export function listPersons() {
+  return dedupeShadowedTempRows(listAllPersonRows())
 }
 
 /**
