@@ -1220,6 +1220,20 @@ const feicuiDeviceTokenReadouts = pickFeicuiDeviceTokenReadouts(op, opResult)
 if (feicuiDeviceTokenReadouts) {
   for (const key of Object.keys(feicuiDeviceTokenReadouts)) response[key] = feicuiDeviceTokenReadouts[key]
 }
+/* **用戶徽號（暱稱）讀數面（additive 透传｜**按 op 收窄**｜本單 `getProfile` / `updateNickname`）**：
+   `profile` **僅當 `op` ∈ 這兩個新 op 且 `opResult` 確有該鍵時**才逐字疊進回包（值 ＝ `null`
+   ＝尚未建行，或**恰 4 鍵** `{nickname, version, created_at, updated_at}`；鍵面真源 ＝
+   `lib/ops.js::PROFILE_VIEW_KEYS`）；**其餘任何 op 一律不透傳 `profile`**（即使 `opResult`
+   意外帶同名鍵亦不外泄）⇒ 既有回包逐字不變（序列化後亦不新增鍵）；失敗回包（`ok:false`）
+   走上面的早退分支、恒 3 鍵、零讀數鍵；**`plan` 是內部落盤計劃（內部面）⇒ 絕不外傳**；
+   本組 op **不產 `row`**（既有 `row` 字段一字不改、值為 undefined ⇒ 序列化後不出現）。
+   既有字段一律不刪、不改。 */
+if (op === 'getProfile' || op === 'updateNickname') {
+  const PROFILE_READOUT_KEYS = ['profile']
+  for (const key of PROFILE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
 return response
 }
 

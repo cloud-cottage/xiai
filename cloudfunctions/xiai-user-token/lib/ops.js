@@ -234,6 +234,15 @@ const COLLECTIONS = Object.freeze({
      **不注册为 op**：`index.js` 成功回包只透传 `row` ⇒ 号必须随 `row` 回，且只由号段账本
      `kind=publisher` 消费）。 */
   publishers: 'xiai_publishers',
+  /* **用戶徽號（暱稱）行（本單｜方案 B）**：`xiai_user_profiles` —— `_id` ＝ 用戶 `uid`
+     （`data/uid.js::uidOf` 的 `u-` ＋ 16 位，与既有 `users` 行 `id` 同源 ⇒ **不新建第二套用户主键**）；
+     行面封闭恰 6 键（`_id` / `uid` / `nickname` / `version` / `created_at` / `updated_at`）、
+     **不落手机号**（手机号只在登录态 / `users` 行）。**只在此登记**（集合名只活在本文件）、
+     **不进客户端云读面**（不入 `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`
+     ⇒ 客户端零直读、不参与水合）；ACL ＝ **PRIVATE**（新建集合默认值，正是我们要的：客户端永远
+     不直读）⇒ 全部经云函数两 op（`getProfile` / `updateNickname`，**走既有用户令牌门**）；
+     唯一写点 ＝ `OPS.updateNickname` 的 upsert 落盘计划（`persist` 仍是唯一落库点）。 */
+  userProfiles: 'xiai_user_profiles',
   /* **CARD 主庫憑據（本單）**：`xiai_server_secrets`（`xiai_` 前綴；**服務端專屬私有**）——
      本文件只**讀**其中 `card_api` 文檔的 `key` 字段（CARD API 密鑰明文，本單新建該集合，
      客戶端權限 ＝ 全部不可讀不可寫）。**不進**客戶端雲讀面（不入 `CLOUD_COLLECTIONS` /
@@ -440,7 +449,14 @@ const OPTIONAL_READ_COLLECTIONS = Object.freeze([
    「集合不存在 ≡ 零行」在本集合上是**真语义**（还没有任何出版社行）⇒ 进可选读面白名单；
    **非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧上抛**（判定单点
    `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）。 */
-  COLLECTIONS.publishers
+  COLLECTIONS.publishers,
+  /* **用戶徽號行（本單）**：`xiai_user_profiles` 是**新建集合**（可能尚未被任何写入创建）⇒
+   首次 `getProfile` 的「有没有行」预查不能因「集合不存在」整笔失败（`persist` 的 `set` 分支
+   另有建集自愈）。「集合不存在 ≡ 零行」在本集合上是**真语义**（还没有徽号行 ⇒ 回
+   `profile: null`）⇒ 进可选读面白名单；**非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧
+   上抛**（判定单点 `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）；
+   **判权 / 写面不在此降级**（`updateNickname` 的写走 `persist`，不走 `readRows` 的降级路）。 */
+  COLLECTIONS.userProfiles
 ])
 
 /**
@@ -3786,6 +3802,99 @@ async function runIssueFeicuiDeviceToken(payload, identity, context) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   **用戶徽號（暱稱）云端化（本單｜方案 B）**：新集合 `xiai_user_profiles` ＋ 两个用户令牌 op
+   （`getProfile` / `updateNickname`；均走既有 `action:'verify'` 用户令牌门 —— **零新鉴权通道**）。
+   硬口径（逐条）：
+     · **uid 只从令牌 / 会话派生**（`identity.uid`）：载荷带 `uid` / `userId` / `user_id` / `phone`
+       一律不在封闭键面内 ⇒ `INVALID_FIELD` ＋ 零写入 ⇒ **任何情况下只能读写令牌对应那一行**；
+     · 行面封闭恰 6 键 `PROFILE_ROW_KEYS`（`_id` ＝ `uid`；**不落手机号**）；对客户端只回恰 4 键
+       投影 `PROFILE_VIEW_KEYS`（`_id` / `uid` 不下发 —— 信封里已有 `identity.uid`）；
+     · 徽号值域：`String(nickname).trim()` 后 **2〜12 个字符**（按 `Array.from()` 码点计，**不是**
+       `.length`）；**trim 之前**先拒 C0 控制字符（`0x00`〜`0x1F`，含换行 / 回车 / 制表 —— 尾部
+       换行同样不得落库）；不得全空白 / 空串；不得含 `<` `>` 与 `javascript:`（上屏安全）；
+       越界一律既有 `INVALID_VALUE`（**零新增 reason**）、缺键既有 `MISSING_REQUIRED`；
+     · 写面：读既有行 ⇒ `version` 自增（无行 ⇒ 1）、`updated_at` 取服务端时间、`created_at` 首写
+       定值 ⇒ 回 `plan`（`kind:'set'` upsert、`id` ＝ `uid`）；落盘仍只在 `index.js::persist`
+       （**唯一写点不变**）；本 op **不产 `row`**（回包只有 `profile` 读数面）。
+   --------------------------------------------------------------------------- */
+
+/** `getProfile` 载荷封闭键面（**零允许键**；身份一律服务端从令牌派生）。 */
+const PROFILE_VIEW_ALLOWED_KEYS = Object.freeze([])
+
+/** `updateNickname` 载荷封闭恰一键（身份类键不在面内 ⇒ `INVALID_FIELD` ＋ 零写入）。 */
+const PROFILE_NICKNAME_ALLOWED_KEYS = Object.freeze(['nickname'])
+
+/** 徽号长度下限（`Array.from()` 码点计；**不是** `.length`）。 */
+const NICKNAME_MIN_LENGTH = 2
+
+/** 徽号长度上限（同上）。 */
+const NICKNAME_MAX_LENGTH = 12
+
+/** C0 控制字符（换行 `0x0A` / 回车 `0x0D` / 制表 `0x09` … 一律在内；**trim 前判**）。 */
+const NICKNAME_CONTROL_PATTERN = /[\u0000-\u001F]/
+
+/** 上屏安全禁串（`<` `>` 与 `javascript:`；后者大小写不敏感）。 */
+const NICKNAME_FORBIDDEN_SUBSTRINGS = Object.freeze(['<', '>'])
+const NICKNAME_FORBIDDEN_LOWER = 'javascript:'
+
+/** `xiai_user_profiles` **行面封闭 6 键**（离线自检逐键断言；**不落手机号**）。 */
+const PROFILE_ROW_KEYS = Object.freeze(['_id', 'uid', 'nickname', 'version', 'created_at', 'updated_at'])
+
+/** **回包投影恰 4 键**（`_id` / `uid` 不下发）。 */
+const PROFILE_VIEW_KEYS = Object.freeze(['nickname', 'version', 'created_at', 'updated_at'])
+
+/**
+ * **徽号行 → 回包投影**（纯函数；恒**恰 4 键** `PROFILE_VIEW_KEYS`，键序与表一致）。
+ * 行缺失字段时按零值回（不新增键、不回 `undefined` 假装在场）。
+ * @param {object|null} row 云端行
+ * @returns {{nickname:string, version:number, created_at:string, updated_at:string}}
+ */
+function profileViewOf(row) {
+  const source = row && typeof row === 'object' ? row : {}
+  const version = Number(source.version)
+  return {
+    nickname: typeof source.nickname === 'string' ? source.nickname : '',
+    version: Number.isFinite(version) ? version : 0,
+    created_at: text(source.created_at),
+    updated_at: text(source.updated_at)
+  }
+}
+
+/**
+ * **徽号值域门**（纯函数；**全部判定在任何读 / 写之前**）。逐条（不放宽）：
+ *   ① 键缺席 ⇒ 既有 `MISSING_REQUIRED`；② 非字符串 ⇒ `INVALID_VALUE`（`String()` 强转会把
+ *   `null` / 对象变成可上屏的假值）；③ **trim 之前**含 C0 控制字符（含换行 / 回车 / 制表）⇒
+ *   `INVALID_VALUE`；④ `trim()` 后全空白 / 空串 ⇒ `INVALID_VALUE`；⑤ `Array.from()` 码点长度
+ *   不在 2〜12 ⇒ `INVALID_VALUE`（**不夹取**）；⑥ 含 `<` `>` ⇒ `INVALID_VALUE`；⑦ 小写后含
+ *   `javascript:` ⇒ `INVALID_VALUE`。**零新增 `reason` 字面值**。
+ * @param {*} raw 载荷里的 `nickname` 原值
+ * @returns {{ok:true, nickname:string}|{ok:false, reason:string, message:string}}
+ */
+function nicknameValueDenial(raw) {
+  if (raw === undefined) return deny(REASONS.MISSING_REQUIRED, '缺少必要的暱稱（nickname）；本次零寫入。')
+  if (typeof raw !== 'string') return deny(REASONS.INVALID_VALUE, '暱稱（徽號）必須是文字；本次零寫入。')
+  if (NICKNAME_CONTROL_PATTERN.test(raw)) {
+    return deny(REASONS.INVALID_VALUE, '暱稱不得含換行 / 回車 / 制表或其它控制字元；本次零寫入。')
+  }
+  const nickname = raw.trim()
+  if (nickname === '') return deny(REASONS.INVALID_VALUE, '暱稱不得為空或全空白；本次零寫入。')
+  const length = Array.from(nickname).length
+  if (length < NICKNAME_MIN_LENGTH || length > NICKNAME_MAX_LENGTH) {
+    return deny(
+      REASONS.INVALID_VALUE,
+      `暱稱長度須為 ${NICKNAME_MIN_LENGTH}〜${NICKNAME_MAX_LENGTH} 個字符（按字符計，非字節）；本次零寫入。`
+    )
+  }
+  if (NICKNAME_FORBIDDEN_SUBSTRINGS.some((item) => nickname.indexOf(item) !== -1)) {
+    return deny(REASONS.INVALID_VALUE, '暱稱不得含 < 或 >；本次零寫入。')
+  }
+  if (nickname.toLowerCase().indexOf(NICKNAME_FORBIDDEN_LOWER) !== -1) {
+    return deny(REASONS.INVALID_VALUE, '暱稱不得含 javascript:；本次零寫入。')
+  }
+  return { ok: true, nickname }
+}
+
 const OPS = Object.freeze({
   /**
    * **普通用戶【勘誤】影像（本單新增 op｜`submitImageCorrection`｜`OPS` 登录面｜§3.77）**：
@@ -5167,6 +5276,74 @@ const OPS = Object.freeze({
    */
   async issueFeicuiDeviceToken(payload, identity, context) {
     return runIssueFeicuiDeviceToken(payload, identity, context)
+  },
+
+  /**
+   * **本人徽號讀面（本單新增 op｜`getProfile`｜零写入）**：回 `{ok:true, profile}` ——
+   * `profile` ＝ `null`（**尚未建行 / 集合未建**）或**恰 4 键**
+   * `{nickname, version, created_at, updated_at}`（`PROFILE_VIEW_KEYS`；`_id` / `uid` 不下发）。
+   * 顺序（**全部判定在任何读之前**）：① 载荷形态 ＋ 封闭零键（`PROFILE_VIEW_ALLOWED_KEYS`；
+   * 任何键（含身份类键）⇒ `INVALID_FIELD` ＋ 零读取）→ ② 身份**只取自已验签令牌 / 平台会话**
+   * （缺 ⇒ `FORBIDDEN`；**载荷自称一律无效**）→ ③ 只读本人行（等值 `uid` ＋ `limit:1`；
+   * 「集合不存在」按可选读面白名单降级为零行 ⇒ `profile: null`；真存储故障 ⇒ 抛错 ⇒
+   * `index.js` 转 `STORAGE_UNAVAILABLE`，**绝不伪装 `FORBIDDEN`**）。本 op **不产 `plan`**
+   * ⇒ `index.js` 落盘分支不触发（**零写入**）。
+   * @param {object} payload 载荷（**零允许键**）
+   * @param {{uid:string, phone?:string, role?:string}} identity 服务端派生身份
+   * @returns {Promise<{ok:true, profile:object|null}|{ok:false, reason:string, message:string}>}
+   */
+  async getProfile(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, PROFILE_VIEW_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    const rows = await readRows(COLLECTIONS.userProfiles, { uid: identity.uid }, { limit: 1 })
+    return { ok: true, profile: rows.length > 0 ? profileViewOf(rows[0]) : null }
+  },
+
+  /**
+   * **改徽號（本單新增 op｜`updateNickname`｜upsert）**：回 `{ok:true, profile}`（恰 4 键投影）。
+   * 顺序（**全部判定在任何写之前**；落盘只在 `index.js::persist`）：
+   *   ① 载荷形态 ＋ 封闭恰一键 `nickname`（`PROFILE_NICKNAME_ALLOWED_KEYS`）—— **`uid` / `phone`
+   *      等身份类键不在面内 ⇒ `INVALID_FIELD` ＋ 零写入**（绝不据载荷写他人行）；
+   *   ② 身份**只取自已验签令牌 / 平台会话**（缺 ⇒ `FORBIDDEN`）；
+   *   ③ 值域门 `nicknameValueDenial`（2〜12 码点 / 零 C0 控制字符 / 非空白 / 无 `<` `>` /
+   *      无 `javascript:`；越界 ⇒ 既有 `INVALID_VALUE`、缺键 ⇒ `MISSING_REQUIRED`，**零新增 reason**）；
+   *   ④ 读本人行（等值 `uid`）⇒ 行不存在 ⇒ 建行（`version = 1`、`created_at` ＝ 本次服务端时间）；
+   *      存在 ⇒ `version + 1`、`created_at` 原值保留、`updated_at` ＝ 本次服务端时间；
+   *   ⑤ 产 `plan`（`kind:'set'`、`id` ＝ `uid` ⇒ **确定性 `_id` ＝ 令牌 uid 的 upsert**，
+   *      重放不建第二行）。回包**只带 `profile` 读数面**（不产 `row`；`plan` 绝不外传）。
+   * @param {object} payload 载荷（恰一键 `nickname`）
+   * @param {{uid:string, phone?:string, role?:string}} identity 服务端派生身份
+   * @returns {Promise<{ok:true, profile:object, plan:object}|{ok:false, reason:string, message:string}>}
+   */
+  async updateNickname(payload, identity) {
+    const payloadDenial = pointsPayloadDenial(payload, PROFILE_NICKNAME_ALLOWED_KEYS)
+    if (payloadDenial) return payloadDenial
+    if (!identity || !text(identity.uid)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的用戶身份；本次零寫入。')
+    }
+    const checked = nicknameValueDenial(payload.nickname)
+    if (!checked.ok) return checked
+    /* 身份唯一来源＝服务端派生 uid（载荷里的身份类键已在 ① 被拒）。 */
+    const uid = text(identity.uid)
+    const rows = await readRows(COLLECTIONS.userProfiles, { uid }, { limit: 1 })
+    const existing = rows.length > 0 ? rows[0] : null
+    const at = new Date().toISOString()
+    const previous = existing ? Number(existing.version) : NaN
+    const row = {
+      uid,
+      nickname: checked.nickname,
+      version: Number.isFinite(previous) ? previous + 1 : 1,
+      created_at: existing ? text(existing.created_at) || at : at,
+      updated_at: at
+    }
+    return {
+      ok: true,
+      profile: profileViewOf(Object.assign({ _id: uid }, row)),
+      plan: { writes: [{ kind: 'set', collection: COLLECTIONS.userProfiles, id: uid, doc: row }] }
+    }
   }
 })
 
@@ -12646,5 +12823,16 @@ module.exports = {
   PUBLISHER_ORG_TYPES,
   PUBLISHER_ISBN_PREFIXES,
   PUBLISHER_ISBN_CODE_STATUS,
-  PUBLISHER_NAME_MAX
+  PUBLISHER_NAME_MAX,
+  /* **用戶徽號（暱稱）云端化（本單｜方案 B）**：新集合登记 ＋ 两个用户令牌 op 的封闭键面 ＋
+     行面 / 回包投影键面 ＋ 值域常量 ＋ 两个纯函数（值域门 / 行投影）—— 供离线自检
+     `scripts/verify-user-profile.mjs` 直接断言（实现单点均在本文件上文，零第二套）。 */
+  PROFILE_VIEW_ALLOWED_KEYS,
+  PROFILE_NICKNAME_ALLOWED_KEYS,
+  NICKNAME_MIN_LENGTH,
+  NICKNAME_MAX_LENGTH,
+  PROFILE_ROW_KEYS,
+  PROFILE_VIEW_KEYS,
+  nicknameValueDenial,
+  profileViewOf
 }
