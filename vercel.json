@@ -28,10 +28,6 @@
   ],
   "rewrites": [
     {
-      "source": "/api/xiai/:path*",
-      "destination": "http://111.229.107.48:8000/api/:path*"
-    },
-    {
       "source": "/((?!assets/|yinyuan/|api/).*)",
       "destination": "/index.html"
     }
