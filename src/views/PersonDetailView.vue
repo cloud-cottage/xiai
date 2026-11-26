@@ -23,7 +23,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { persons, seals } from '../services/index.js'
-import { loadPersonDetail } from '../services/personCards.js'
+import { loadPersonDetail, isBasicInfoOnlyCard } from '../services/personCards.js'
 import { biehaoLinesOf } from '../services/personSearch.js'
 
 const route = useRoute()
@@ -129,6 +129,9 @@ const person = computed(() => {
 const loading = computed(
   () => !person.value && (detailLoading.value || (!detail.value && source.value.pending))
 )
+/* 「僅基礎信息」提示：判定**单点**在 `services/personCards.js::isBasicInfoOnlyCard`
+   （名录页同一函数）；本页只喂**原始详情行**（10 键全空 ⇒ 只余姓名 / 朝代）。 */
+const basicInfoOnly = computed(() => (row.value ? isBasicInfoOnlyCard(row.value) : false))
 const unavailable = computed(() => {
   if (person.value || loading.value) return false
   const got = detail.value
@@ -182,6 +185,14 @@ const emptyBody = computed(() => {
           </div>
         </dl>
       </header>
+
+      <!-- 「僅基礎信息」提示（固定位置＝頁首之後、屬性區塊之前）：10 個詳情類字段全空 ⇒
+           整段渲染；判定單點 `services/personCards.js::isBasicInfoOnlyCard`（名錄頁同源）。 -->
+      <section v-if="basicInfoOnly" class="panel person__panel">
+        <div class="panel__body">
+          <p class="person__notice" data-person-basic-info>本卡片僅有基礎信息（姓名／朝代），尚未著錄傳略。</p>
+        </div>
+      </section>
 
       <section v-if="person.hasProfile" class="panel person__panel">
         <div class="panel__body person__body">
@@ -426,6 +437,19 @@ const emptyBody = computed(() => {
 
 .person__para:last-child {
   margin-bottom: 0;
+}
+
+/* ------------------------------ 僅基礎信息提示 ------------------------------
+   令牌一律取既有变量（`--c-line` / `--c-text-muted` / `--s-*` / `--t-*`），不新造颜色。 */
+.person__notice {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border: 1px dashed var(--c-line);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+  line-height: 1.9;
+  letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------ 空態 ------------------------------ */

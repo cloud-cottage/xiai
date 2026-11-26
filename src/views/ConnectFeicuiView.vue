@@ -24,6 +24,8 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { currentUser, isAdmin, isLoggedIn } from '../data/session.js'
 import { otpAuth, otpSessionAccessToken } from '../data/cloudbaseAuth.js'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+/* 管理员专属入口按钮的角标（唯一实现；配 `.btn--admin` 虚线轮廓）。 */
+import AdminBadge from '../components/AdminBadge.vue'
 import {
   FEICUI_DEVICE_TTL,
   FEICUI_FORWARD_PREFIX,
@@ -1117,10 +1119,24 @@ onUnmounted(stopCooldown)
         <div class="panel__head">
           <h2>斐萃桌面授權</h2>
           <div class="ai-head-actions">
-            <button class="btn btn--ghost" type="button" data-action="feicui-device-issue-session" :disabled="deviceBusy || deviceDelivered" @click="onIssueSessionToken">
+            <button
+              class="btn btn--ghost btn--admin"
+              type="button"
+              data-action="feicui-device-issue-session"
+              :disabled="deviceBusy || deviceDelivered"
+              @click="onIssueSessionToken"
+            >
+              <AdminBadge />
               {{ deviceBusy ? '簽發中…' : '為斐翠桌面簽發 168 小時會話' }}
             </button>
-            <button class="btn" type="button" data-action="feicui-device-issue" :disabled="deviceBusy" @click="onIssueDeviceToken">
+            <button
+              class="btn btn--ghost btn--admin"
+              type="button"
+              data-action="feicui-device-issue"
+              :disabled="deviceBusy"
+              @click="onIssueDeviceToken"
+            >
+              <AdminBadge />
               {{ deviceBusy ? '簽發中…' : deviceToken ? '重新簽發' : '簽發設備令牌' }}
             </button>
           </div>

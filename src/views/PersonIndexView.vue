@@ -31,6 +31,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { isLoggedIn } from '../data/session.js'
 import { persons, seals } from '../services/index.js'
 import PersonProposalDialog from '../components/PersonProposalDialog.vue'
+/* 「僅基礎信息」徽标：判定**单点**在 `personCards.isBasicInfoOnlyCard`（详情页同一函数）。 */
+import { isBasicInfoOnlyCard } from '../services/personCards.js'
 import {
   buildPersonIndex,
   searchPersons,
@@ -203,7 +205,9 @@ const cards = computed(() => {
       unknownDynasty: dynastyOf(row) === '',
       courtesy: courtesyOf(row),
       art: artOf(row),
-      zhaihao: zhaihaoOf(row)
+      zhaihao: zhaihaoOf(row),
+      /* 只读派生：不进排序 / 分组 / 搜索 / 计数（命中数与索引条逐字不变）。 */
+      basicInfoOnly: isBasicInfoOnlyCard(row)
     }
   })
 })
@@ -398,6 +402,12 @@ const emptyBody = computed(() => {
                     </template>
                   </span>
                   <span v-if="entry.card.life" class="roster__life">{{ entry.card.life }}</span>
+                  <!-- 僅基礎信息徽标（判定单点 `personCards.isBasicInfoOnlyCard`，与详情页同源）。 -->
+                  <span
+                    v-if="entry.card.basicInfoOnly"
+                    class="roster__badge"
+                    data-person-basic-info-badge
+                  >僅基礎信息</span>
                 </span>
                 <span class="roster__meta">
                   <span class="roster__dyn" :class="{ 'roster__dyn--na': entry.card.unknownDynasty }">{{ entry.card.dynasty }}</span>
@@ -731,6 +741,17 @@ const emptyBody = computed(() => {
   color: var(--c-text-muted);
   font-size: var(--t-xs);
   letter-spacing: 0.03em;
+}
+
+/* 僅基礎信息徽标：只取既有令牌（`--c-line` / `--c-text-muted` / `--r-xs` / `--t-xs`）。 */
+.roster__badge {
+  padding: 1px var(--s-2);
+  border: 1px dashed var(--c-line);
+  border-radius: var(--r-xs);
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 .roster__meta {

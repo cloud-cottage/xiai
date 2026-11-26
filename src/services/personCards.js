@@ -382,6 +382,49 @@ export function personAttributesOf(prIdOrRow) {
 }
 
 /* ---------------------------------------------------------------------------
+   3-bis. 「僅基礎信息」判定（**唯一单点**：详情页 / 名录页都调这里）
+   ------------------------------------------------------------------------- */
+
+/**
+ * **详情类字段键面**（＝「仅基础信息」判定的封闭清单；逐字来自本单口径）。
+ * 这 10 键**全空** ⇒ 该卡只余「姓名 ／ 朝代」（CARD 578 张里有 8 张无 `biography`、
+ * 7 张连字 / 號 / 別号 / 齋號 / 生卒 / 籍貫 / 标签键都没有 ⇒ 详情页只剩姓名＋朝代）。
+ * 键**缺失**与空值同义（索引行没有 `biography` / `native_place` / 生卒 ⇒ 视为空）。
+ */
+const BASIC_INFO_ONLY_DETAIL_KEYS = Object.freeze([
+  'courtesy_name',
+  'courtesy_alt_names',
+  'art_name',
+  'biehao_text',
+  'zhaihao',
+  'zhaihao_alts',
+  'biography',
+  'native_place',
+  'birth_year',
+  'death_year'
+])
+
+/** 空值口径：`null` / `undefined` / 空串（trim 后）/ 空数组 ⇒ 空；其余（含数字）⇒ 非空。 */
+function isEmptyDetailValue(value) {
+  if (value === null || value === undefined) return true
+  if (Array.isArray(value)) return value.length === 0
+  if (typeof value === 'string') return value.trim() === ''
+  return false
+}
+
+/**
+ * **「仅基础信息」卡判定（全站唯一单点）** —— 详情页提示与名录页徽标**都调本函数**，
+ * 不得在视图里各写一套（口径变更只改这里）。
+ *
+ * @param {object} row 印人行（CARD 详情全字段 / 名录合并行 / 索引行均可；缺键＝空）
+ * @returns {boolean} `true` ＝ 该卡详情类字段全空（只余姓名 / 朝代）；`null` / 非对象 ⇒ `false`
+ */
+export function isBasicInfoOnlyCard(row) {
+  if (!row || typeof row !== 'object') return false
+  return BASIC_INFO_ONLY_DETAIL_KEYS.every((key) => isEmptyDetailValue(row[key]))
+}
+
+/* ---------------------------------------------------------------------------
    4. 详情（单人全字段；60 s 缓存 ＋ 本地降级）
    ------------------------------------------------------------------------- */
 

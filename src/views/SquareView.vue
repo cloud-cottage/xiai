@@ -10,6 +10,8 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import UploadSealDialog from '../components/UploadSealDialog.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
+/* 管理员专属入口按钮的角标（唯一实现；配 `.btn--admin` 虚线轮廓）。 */
+import AdminBadge from '../components/AdminBadge.vue'
 /* **識別編碼精確查**（§5）：服務層單點（decode ⇒ 按 `no` 等值匹配；查無即「查無此印」）。
    編碼入口已上收**頁頭單框雙態搜索**（`HeaderSearch`）—— 本頁只按 `route.query.code` 精確查，
    不再另設獨立 OTP 控件（全站唯一入口，任何頁面可用、鏈接可分享）。 */
@@ -635,11 +637,12 @@ async function confirmClearLocal() {
       </div>
       <button
         v-if="canUploadSeal"
-        class="btn btn--primary"
+        class="btn btn--primary btn--admin"
         type="button"
         data-admin-action="upload-seal"
         @click="uploadOpen = true"
       >
+        <AdminBadge />
         上傳印章
       </button>
       <!-- 「清除本機資料」（管理员专属）：非管理员 / 游客 ⇒ **不渲染**（DOM 零命中；
@@ -647,11 +650,12 @@ async function confirmClearLocal() {
            （**不新增 `data-admin-action` 取值**，管理员钩子取值集合仍为规范冻结值）。 -->
       <button
         v-if="canClearLocal"
-        class="btn btn--ghost"
+        class="btn btn--ghost btn--admin"
         type="button"
         data-action="local-db-clear"
         @click="askClearLocal"
       >
+        <AdminBadge />
         清除本機資料
       </button>
     </div>
@@ -666,11 +670,12 @@ async function confirmClearLocal() {
       <span>本機有 {{ orphanCount }} 枚印章不在雲端（已不再顯示）。</span>
       <button
         v-if="canClearLocal"
-        class="btn btn--ghost"
+        class="btn btn--ghost btn--admin"
         type="button"
         data-action="local-db-clear"
         @click="askClearLocal"
       >
+        <AdminBadge />
         清除本機資料
       </button>
     </div>

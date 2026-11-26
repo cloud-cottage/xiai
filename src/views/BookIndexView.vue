@@ -35,6 +35,8 @@ import BookCard from '../components/BookCard.vue'
 import BookDetailDialog from '../components/BookDetailDialog.vue'
 import PersonPicker from '../components/PersonPicker.vue'
 import PersonProposalDialog from '../components/PersonProposalDialog.vue'
+/* 管理员专属入口按钮的角标（唯一实现；配 `.btn--admin` 虚线轮廓）。 */
+import AdminBadge from '../components/AdminBadge.vue'
 import { admin, persons, sealCards } from '../services/index.js'
 import { isLoggedIn } from '../data/session.js'
 import { toTraditionalText } from '../utils/traditional.js'
@@ -619,7 +621,13 @@ watch(
             <div class="books-filter__actions">
               <button class="btn btn--primary" type="submit" data-action="filter-books">查詢</button>
               <button class="btn btn--ghost" type="button" data-action="reset-books-filter" @click="resetFilters">重置</button>
-              <button class="btn btn--ghost" type="button" data-action="book-create-open" @click="focusCreateForm">
+              <button
+                class="btn btn--ghost btn--admin"
+                type="button"
+                data-action="book-create-open"
+                @click="focusCreateForm"
+              >
+                <AdminBadge />
                 新增印譜
               </button>
             </div>

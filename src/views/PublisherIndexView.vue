@@ -31,6 +31,8 @@ import { computed, ref } from 'vue'
 import { isLoggedIn } from '../data/session.js'
 import { ADMIN_LABEL } from '../data/roleLabels.js'
 import { admin, publishers } from '../services/index.js'
+/* 管理员专属入口按钮的角标（唯一实现；配 `.btn--admin` 虚线轮廓）。 */
+import AdminBadge from '../components/AdminBadge.vue'
 
 /* ------------------------------ 权限门（判权单点 ＝ isAdminSession） ------------------------------ */
 const canManage = computed(() => admin.isAdminSession())
@@ -314,7 +316,13 @@ async function save() {
               </select>
             </label>
             <div class="publishers-filter__actions">
-              <button class="btn btn--primary" type="button" data-publishers-create @click="openCreate">
+              <button
+                class="btn btn--primary btn--admin"
+                type="button"
+                data-publishers-create
+                @click="openCreate"
+              >
+                <AdminBadge />
                 新增出版社
               </button>
             </div>
@@ -373,11 +381,12 @@ async function save() {
                   <td>{{ row.founded_year === null || row.founded_year === undefined ? '—' : String(row.founded_year) }}</td>
                   <td>
                     <button
-                      class="btn btn--ghost"
+                      class="btn btn--ghost btn--admin"
                       type="button"
                       :data-publishers-edit="textOf(row._id || row.code)"
                       @click="openEdit(row)"
                     >
+                      <AdminBadge />
                       編輯
                     </button>
                   </td>

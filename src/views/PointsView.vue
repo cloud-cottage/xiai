@@ -23,6 +23,8 @@
  */
 import { computed, ref } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
+/* 管理员专属入口按钮的角标（唯一实现；配 `.btn--admin` 虚线轮廓）。 */
+import AdminBadge from '../components/AdminBadge.vue'
 import { admin, corrections, points, seals } from '../services/index.js'
 import { formatDateTime } from '../utils/format.js'
 /* 模态框 ESC ＝ 取消的全仓**单点**实现（本页「編輯邀請獎勵」弹窗注册一层）。 */
@@ -170,11 +172,12 @@ useEscToClose({
         <!-- 管理员专属入口（**普通用户 / 未登錄 ⇒ 不渲染**，DOM 零命中；非 CSS 隐藏、非 disabled）。 -->
         <button
           v-if="isAdmin"
-          class="btn btn--ghost"
+          class="btn btn--ghost btn--admin"
           type="button"
           data-admin-action="edit-invite-reward"
           @click="openEdit"
         >
+          <AdminBadge />
           編輯邀請獎勵
         </button>
       </div>
