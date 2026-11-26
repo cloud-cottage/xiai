@@ -4,8 +4,15 @@
  * 覆盖规范 v1.56 §10.55 `AC-501`〜`AC-506`（实现入库于 `266fad2`）。
  *
  * 判据清单（本套件自成一件「尺子」，每条皆可判负）：
- *   S1  `AC-501` 侧边栏**恰四项**且 `key/label/glyph` 序列**逐字**——
- *       **结构解析** `items` 数组（定位 `const items = computed(() => [ … ])` 后按大括号平衡切对象），
+ *   S1  `AC-501` 侧栏**五项定序**（菜单重构 `4f1958c` 后的现态口径）——
+ *       **结构解析** `computed(() => { const list = [ … ]; if (isAdmin.value) list.push(…);
+ *       list.push(…); return list })` 的函数体：基础数组与 push **分开统计**（静态 / 动态），
+ *       再按视角**模拟推演** items（零浏览器）：
+ *       · 基础三项 `square/styles/persons` **恒渲染**且 `key/label/glyph` 顺序固定逐字；
+ *       · `books` 只在 `if (isAdmin.value)` 门控内 push、位次 persons 之后 / my-drive 之前；
+ *       · `my-drive` 恒渲染（无门控 push）且为**最后一项**；
+ *       · 全仓侧栏零 `me`（我的名刺）/ `publishers`（梓行匯溯）项；
+ *       · 管理员视角 **5 项** / 普通用户视角 **4 项**；
  *       **不以全文关键词检索代偿**。
  *   S2  `AC-502` 三入口（`my-corrections` / `my-photos` / `points`）**不在**侧边栏 items，
  *       但其**三条路由**与**三个视图文件**仍在（**删入口 ≠ 删路由 / 删页面**）。
@@ -178,23 +185,164 @@ const VIEWS = {
 const sidebarSrc = readFileSync(SIDEBAR_PATH, 'utf8')
 const routerSrc = readFileSync(ROUTER_PATH, 'utf8')
 
-/* 侧边栏 items 的**结构解析**（表头/模板/注释一律不参与）。 */
-function analyzeSidebarSource(src) {
-  const arr = arrayLiteralAfter(src, 'const items')
-  if (!arr) return { error: 'items 数组未能结构定位', items: [] }
-  const items = topLevelObjects(arr).map((obj) => ({
-    key: strField(obj, 'key'),
-    to: (obj.match(/to\s*:\s*\{\s*name\s*:\s*'([^']*)'\s*\}/) || [])[1] || null,
-    glyph: strField(obj, 'glyph'),
-    label: strField(obj, 'label')
-  }))
-  return { error: null, items, arrayText: arr }
+/* 侧栏 items 的**结构解析**（表头/模板/注释一律不参与；先剥注释再解析）。
+   现态形态（菜单重构 `4f1958c`）——**基础数组 ＋ 条件 push ＋ 无条件 push**：
+     const items = computed(() => {
+       const list = [ …基础三项… ]        ← 静态：恒渲染
+       if (isAdmin.value) { list.push({ …books… }) }   ← 动态·门控
+       list.push({ …my-drive… })           ← 动态·无条件
+       return list
+     })
+   产出：`base`（基础数组）＋ `pushes`（按**源码位次**排序的 push 序列，
+   每条带 `cond`：`null` ＝ 无条件，否则为所在 `if` 的条件原文）。
+   `simulateItems(parsed, isAdmin)` 按视角推演渲染序列（零浏览器）。 */
+function matchBalanced(src, openIdx) {
+  const open = src[openIdx]
+  const close = { '{': '}', '(': ')', '[': ']' }[open]
+  if (!close) return -1
+  let depth = 0
+  let i = openIdx
+  while (i < src.length) {
+    const ch = src[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch
+      i += 1
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          i += 2
+          continue
+        }
+        if (src[i] === quote) break
+        i += 1
+      }
+      i += 1
+      continue
+    }
+    if (ch === open) depth += 1
+    else if (ch === close) {
+      depth -= 1
+      if (depth === 0) return i
+    }
+    i += 1
+  }
+  return -1
 }
 
-/** 负对照用：把 items 数组**文本**倒序重建（只在内存里改，不落盘）。 */
+const parseItem = (obj) => ({
+  key: strField(obj, 'key'),
+  to: (obj.match(/to\s*:\s*\{\s*name\s*:\s*'([^']*)'\s*\}/) || [])[1] || null,
+  glyph: strField(obj, 'glyph'),
+  label: strField(obj, 'label')
+})
+
+function analyzeSidebarSource(src) {
+  const fail = (error) => ({ error, base: [], pushes: [], gates: [], anomalies: [] })
+  const code = stripComments(src)
+  const at = code.indexOf('const items')
+  if (at === -1) return fail('未定位 `const items`')
+  const calc = code.indexOf('computed', at)
+  if (calc === -1) return fail('未定位 `computed`')
+  const arrow = code.indexOf('=>', calc)
+  if (arrow === -1) return fail('未定位 `computed` 箭头函数')
+  const bodyOpen = code.indexOf('{', arrow)
+  if (bodyOpen === -1) return fail('未定位 `computed` 函数体')
+  const bodyClose = matchBalanced(code, bodyOpen)
+  if (bodyClose === -1) return fail('`computed` 函数体括号不配对')
+  const body = code.slice(bodyOpen + 1, bodyClose)
+
+  /* 基础数组：`const <var> = [ … ]`（静态恒渲染项）。 */
+  const decl = body.match(/const\s+([A-Za-z_$][\w$]*)\s*=\s*\[/)
+  if (!decl) return fail('未定位基础数组 `const <var> = [`')
+  const arrVar = decl[1]
+  const arrOpen = body.indexOf('[', decl.index)
+  const arrClose = matchBalanced(body, arrOpen)
+  if (arrClose === -1) return fail('基础数组括号不配对')
+  const base = topLevelObjects(body.slice(arrOpen, arrClose + 1)).map(parseItem)
+
+  /* 门控区间：`if (<cond>) { … }` 与无花括号的 `if (<cond>) <stmt>;` 两种形态都吃。 */
+  const gates = []
+  const anomalies = []
+  const ifRe = /\bif\s*\(/g
+  let hit
+  while ((hit = ifRe.exec(body)) !== null) {
+    const parenOpen = hit.index + hit[0].length - 1
+    const parenClose = matchBalanced(body, parenOpen)
+    if (parenClose === -1) return fail('`if` 条件括号不配对')
+    const cond = body.slice(parenOpen + 1, parenClose).trim()
+    let j = parenClose + 1
+    while (j < body.length && /\s/.test(body[j])) j += 1
+    let end
+    if (body[j] === '{') {
+      const closeIdx = matchBalanced(body, j)
+      if (closeIdx === -1) return fail('`if` 块括号不配对')
+      end = closeIdx + 1
+    } else {
+      /* 无花括号单语句：到**深度 0** 的 `;`（语句内的 `(`/`{`/`[` 不截断）。 */
+      let depth = 0
+      let k = j
+      end = -1
+      for (; k < body.length; k += 1) {
+        const ch = body[k]
+        if (ch === '(' || ch === '{' || ch === '[') depth += 1
+        else if (ch === ')' || ch === '}' || ch === ']') depth -= 1
+        else if (ch === ';' && depth === 0) {
+          end = k + 1
+          break
+        }
+      }
+      if (end === -1) end = body.length
+    }
+    gates.push({ cond, start: hit.index, end })
+    ifRe.lastIndex = end
+  }
+
+  /* 全部 `<基础数组变量>.push(<对象字面量>)`，按源码位次；落在门控区间内 ⇒ 带条件。 */
+  const pushRe = new RegExp(`\\b${arrVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\.\\s*push\\s*\\(`, 'g')
+  const pushes = []
+  while ((hit = pushRe.exec(body)) !== null) {
+    const parenOpen = hit.index + hit[0].length - 1
+    const parenClose = matchBalanced(body, parenOpen)
+    if (parenClose === -1) return fail('`push` 实参括号不配对')
+    const arg = body.slice(parenOpen + 1, parenClose).trim()
+    if (!arg.startsWith('{')) {
+      anomalies.push(`push 实参非对象字面量：${arg.slice(0, 40)}`)
+      pushRe.lastIndex = parenClose + 1
+      continue
+    }
+    const objClose = matchBalanced(arg, 0)
+    const objText = objClose === -1 ? arg : arg.slice(0, objClose + 1)
+    const gate = gates.find((g) => hit.index >= g.start && hit.index < g.end) || null
+    pushes.push({ item: parseItem(objText), cond: gate ? gate.cond : null, at: hit.index })
+    pushRe.lastIndex = parenClose + 1
+  }
+  pushes.sort((a, b) => a.at - b.at)
+
+  /* 门控白名单：本套件口径只认 `isAdmin.value`（其余条件 ⇒ 判据翻红，不静默放过）。 */
+  const unknownGates = [...new Set(pushes.map((p) => p.cond).filter((c) => c !== null && c !== 'isAdmin.value'))]
+  return { error: null, base, pushes, gates, anomalies, unknownGates }
+}
+
+/** 按视角推演渲染序列：基础数组恒在前；push 按**源码位次**追加（门控 `isAdmin.value` 仅管理员视角）。 */
+function simulateItems(parsed, isAdmin) {
+  const out = [...parsed.base]
+  for (const p of parsed.pushes) {
+    if (p.cond === null) out.push(p.item)
+    else if (isAdmin && p.cond === 'isAdmin.value') out.push(p.item)
+  }
+  return out
+}
+
+/** 负对照用：把基础数组**文本**倒序重建（只在内存里改，不落盘）。 */
 function mutateItemsReversed(src) {
-  const arr = arrayLiteralAfter(src, 'const items')
-  if (!arr) return src
+  const code = stripComments(src)
+  const at = code.indexOf('const items')
+  if (at === -1) return src
+  const decl = code.match(/const\s+([A-Za-z_$][\w$]*)\s*=\s*\[/)
+  const arrOpen = decl ? code.indexOf('[', decl.index) : -1
+  if (arrOpen === -1) return src
+  const arrClose = matchBalanced(code, arrOpen)
+  if (arrClose === -1) return src
+  const arr = code.slice(arrOpen, arrClose + 1)
   const rebuilt = `[${topLevelObjects(arr).reverse().join(', ')}]`
   return src.replace(arr, rebuilt)
 }
@@ -212,30 +360,93 @@ function analyzeRoutes(src) {
   }))
 }
 
-const EXPECTED_ITEMS = [
+/* 现态期望（菜单重构 `4f1958c` 后的侧栏五项定序）：
+   基础三项恒渲染 →（管理员）books → my-drive 恒最后。 */
+const BASE_ITEMS = [
   { key: 'square', label: '璽印匯類', glyph: '匯' },
   { key: 'styles', label: '印風匯覽', glyph: '風' },
-  { key: 'persons', label: '印家匯徵', glyph: '家' },
-  { key: 'my-drive', label: '我的雲盤', glyph: '盤' }
+  { key: 'persons', label: '印家匯徵', glyph: '家' }
 ]
+const BOOKS_ITEM = { key: 'books', label: '印譜匯觀', glyph: '譜' }
+const MY_DRIVE_ITEM = { key: 'my-drive', label: '我的雲盤', glyph: '盤' }
+const ADMIN_VIEW = [...BASE_ITEMS, BOOKS_ITEM, MY_DRIVE_ITEM] // 管理员视角 5 项
+const USER_VIEW = [...BASE_ITEMS, MY_DRIVE_ITEM] // 普通用户视角 4 项
 const triple = (item) => [item.key, item.label, item.glyph]
 
 const sidebar = analyzeSidebarSource(sidebarSrc)
-const items = sidebar.items
+const adminView = simulateItems(sidebar, true)
+const userView = simulateItems(sidebar, false)
+/* S2 的「侧栏 items」口径取**管理员视角（全集超集）**：任何入口只要可能上屏就必被 S2 扫到。 */
+const items = adminView
 const routes = analyzeRoutes(routerSrc)
 const routeByName = (name) => routes.find((r) => r.name === name) || null
 const routeByPath = (p) => routes.find((r) => r.path === p) || null
 
 /* ===========================================================================
-   S1（AC-501）侧边栏**恰四项** ＋ 顺序逐字
+   S1（AC-501）侧栏**五项定序**：基础三项恒渲染 ＋ books 门控位次 ＋ my-drive 恒最后
+   —— 全部按 `computed` 函数体结构解析后**模拟推演**（零浏览器）
    =========================================================================== */
-console.log(JSON.stringify({ section: 'S1', title: 'AC-501 侧边栏恰四项与顺序逐字（结构解析）' }))
+console.log(JSON.stringify({ section: 'S1', title: 'AC-501 侧栏五项定序（结构解析 + 视角模拟推演）' }))
 
-check('S1a', 'items 数组**结构定位成功**（`const items` 后的数组字面值）', null, sidebar.error)
-check('S1b', '侧边栏 items **恰四项**（数组长度）', 4, items.length)
-check('S1c', '四项 `key/label/glyph` 序列**逐字且顺序不颠倒**', EXPECTED_ITEMS.map(triple), items.map(triple))
-check('S1d', '四项 `to.name` 逐字绑定同名路由（入口 → 路由名一一对应）', EXPECTED_ITEMS.map((i) => i.key), items.map((i) => i.to))
-check('S1e', '四项 `key` 集合**恰**为预期四值（无多余 / 无缺失，顺序无关）', sorted(EXPECTED_ITEMS.map((i) => i.key)), sorted(items.map((i) => i.key)))
+check('S1a', '`computed(() => { … })` 函数体**结构定位成功**（基础数组 ＋ push 序列，无异常实参）', { error: null, anomalies: [], unknownGates: [] }, { error: sidebar.error, anomalies: sidebar.anomalies || [], unknownGates: sidebar.unknownGates || [] })
+
+check('S1b', '基础三项（square/styles/persons）**恒渲染**且 `key/label/glyph` 顺序固定逐字（两视角前缀一致）', { base: BASE_ITEMS.map(triple), adminPrefix: BASE_ITEMS.map(triple), userPrefix: BASE_ITEMS.map(triple) }, { base: sidebar.base.map(triple), adminPrefix: adminView.slice(0, 3).map(triple), userPrefix: userView.slice(0, 3).map(triple) })
+
+{
+  const gated = sidebar.pushes.filter((p) => p.cond !== null)
+  const booksPush = sidebar.pushes.find((p) => p.item.key === 'books') || null
+  const adminKeys = adminView.map((i) => i.key)
+  const userKeys = userView.map((i) => i.key)
+  check(
+    'S1c',
+    '`books` 只在 `if (isAdmin.value)` 门控内 push；位次 persons 之后、my-drive 之前；普通视角**零渲染**',
+    { gatedConds: ['isAdmin.value'], booksCond: 'isAdmin.value', afterPersons: true, beforeMyDrive: true, inUserView: false },
+    {
+      gatedConds: gated.map((p) => p.cond),
+      booksCond: booksPush ? booksPush.cond : '__missing__',
+      afterPersons: adminKeys.indexOf('books') > adminKeys.indexOf('persons') && adminKeys.indexOf('books') !== -1,
+      beforeMyDrive: adminKeys.indexOf('books') !== -1 && adminKeys.indexOf('books') < adminKeys.indexOf('my-drive'),
+      inUserView: userKeys.includes('books')
+    }
+  )
+
+  const myDrivePush = sidebar.pushes.find((p) => p.item.key === 'my-drive') || null
+  check(
+    'S1d',
+    '`my-drive` **恒渲染**（无条件 push，两视角均在）且为**最后一项**（两视角均然）',
+    { pushCond: null, inAdminView: true, inUserView: true, lastInAdmin: true, lastInUser: true },
+    {
+      pushCond: myDrivePush ? myDrivePush.cond : '__missing__',
+      inAdminView: adminKeys.includes('my-drive'),
+      inUserView: userKeys.includes('my-drive'),
+      lastInAdmin: adminKeys[adminKeys.length - 1] === 'my-drive',
+      lastInUser: userKeys[userKeys.length - 1] === 'my-drive'
+    }
+  )
+}
+
+/* S1e：全仓侧栏**零** `me`（我的名刺）/ `publishers`（梓行匯溯）项。
+   三层：① 解析面（基础数组 + 全部 push + 两视角推演）；② `AppSidebar.vue` 代码面
+   （去注释）零 `key:'me'|'publishers'` 与 `name:'me'|'publishers'`；③ 全仓 `src/**` 零
+   **侧栏项形状** `key: 'me'|'publishers'`（路由表合法的 `name: 'me'` 不在此形状内，不误伤）。 */
+{
+  const FORBIDDEN = ['me', 'publishers']
+  const sidebarCode = stripComments(sidebarSrc)
+  const itemShape = (k) => [`key: '${k}'`, `name: '${k}'`]
+  const parsedAll = [...sidebar.base, ...sidebar.pushes.map((p) => p.item), ...adminView, ...userView]
+  const parsedHits = FORBIDDEN.filter((k) => parsedAll.some((it) => it.key === k || it.to === k))
+  const codeHits = FORBIDDEN.filter((k) => itemShape(k).some((s) => sidebarCode.includes(s)))
+  const repoHits = []
+  for (const file of walkFiles(path.join(ROOT, 'src'))) {
+    const body = stripComments(readFileSync(file, 'utf8'))
+    for (const k of FORBIDDEN) {
+      if (body.includes(`key: '${k}'`)) repoHits.push(`${path.relative(ROOT, file)}: key '${k}'`)
+    }
+  }
+  check('S1e', '全仓侧栏零 `me` / `publishers` 项（解析面 + AppSidebar 代码面 + 全仓 src 侧栏项形状扫描）', { parsed: [], code: [], repo: [] }, { parsed: parsedHits, code: codeHits, repo: repoHits })
+}
+
+check('S1f', '**视角推演**（模拟 items，零浏览器）：管理员恰 **5 项** / 普通用户恰 **4 项**，`key/label/glyph` 序列逐字', { admin: ADMIN_VIEW.map(triple), user: USER_VIEW.map(triple) }, { admin: adminView.map(triple), user: userView.map(triple) })
 
 /* ===========================================================================
    S2（AC-502）三入口移出侧边栏，但路由与视图**不退役**
@@ -477,24 +688,25 @@ const mergeClass = (v) => (v.startsWith('correction-') ? 'correction-accept|reje
    =========================================================================== */
 console.log(JSON.stringify({ section: 'N1', title: '负对照：顺序判据必须会响' }))
 
-const expectedTriples = EXPECTED_ITEMS.map(triple)
-check('N1', '负对照：**顺序颠倒**后的序列喂给 S1 的顺序判据 ⇒ **必须判负**', false, sameSeq([...items].reverse().map(triple), expectedTriples))
+const expectedTriples = ADMIN_VIEW.map(triple)
+check('N1', '负对照：**顺序颠倒**后的序列喂给 S1 的顺序判据 ⇒ **必须判负**', false, sameSeq([...adminView].reverse().map(triple), expectedTriples))
 
 const mutatedSrc = mutateItemsReversed(sidebarSrc)
 const mutatedSidebar = analyzeSidebarSource(mutatedSrc)
+const mutatedAdminView = simulateItems(mutatedSidebar, true)
 check(
   'N1b',
-  '负对照：把 `AppSidebar.vue` 的 items 数组**文本倒序**后重解析 ⇒ 同一条判据翻红（解析器真读源码顺序）',
+  '负对照：把 `AppSidebar.vue` 的基础数组**文本倒序**后重解析 ⇒ 同一条判据翻红（解析器真读源码顺序）',
   false,
-  sameSeq(mutatedSidebar.items.map(triple), expectedTriples)
+  sameSeq(mutatedAdminView.map(triple), expectedTriples)
 )
 check(
   'N1c',
-  '正对照：原文重解析 ⇒ 同一条判据为真（同一把尺子：改前对 / 改后错）＋ 倒序文本确为四项倒序',
-  { originalTrue: true, mutatedIsReversed: true },
+  '正对照：原文重解析 ⇒ 同一条判据为真（同一把尺子：改前对 / 改后错）＋ 倒序文本确为基础三项倒序',
+  { originalTrue: true, mutatedBaseIsReversed: true },
   {
-    originalTrue: sameSeq(items.map(triple), expectedTriples),
-    mutatedIsReversed: sameSeq(mutatedSidebar.items.map((i) => i.key), [...items].reverse().map((i) => i.key))
+    originalTrue: sameSeq(adminView.map(triple), expectedTriples),
+    mutatedBaseIsReversed: sameSeq(mutatedSidebar.base.map((i) => i.key), [...sidebar.base].reverse().map((i) => i.key))
   }
 )
 
