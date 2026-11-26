@@ -8,6 +8,9 @@ import { useLogout } from '../utils/useLogout.js'
 /* **頁頭單框雙態搜索**（交互重構單）：普通關鍵詞框 ＋ 識別編碼 OTP（首字符判型），
    全站唯一搜索入口；`SquareView` 不再另設獨立 OTP 控件。 */
 import HeaderSearch from '../components/HeaderSearch.vue'
+/* **身份标记**（徽号那一行，昵称之后、手机号 `·` 之前）：`admin` / `sub-admin` 才渲染，
+   普通用户**零渲染**；只做展示，不参与任何判定。 */
+import RoleMark from '../components/RoleMark.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -136,7 +139,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
         <div v-if="menuOpen" class="app-header__menu">
           <div class="app-header__menu-who">
-            <template v-if="logged">{{ user.nickname }} · {{ user.phone }}</template>
+            <template v-if="logged">{{ user.nickname }}<RoleMark :role="user.role" /> · {{ user.phone }}</template>
             <template v-else>尚未登錄</template>
           </div>
           <button v-if="!logged" type="button" @click="go('login')">登錄 / 註冊</button>

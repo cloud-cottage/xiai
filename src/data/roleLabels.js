@@ -58,3 +58,22 @@ export function accountLabel(role) {
   const label = ROLE_LABEL[key] || ''
   return label ? `${label}賬號` : ACCOUNT_FALLBACK
 }
+
+/**
+ * **身份标记上屏文字（角色全称，零复制字面）**：
+ *   · `admin`     ⇒ 掌書記使
+ *   · `sub-admin` ⇒ 掌書記
+ *   · `user` / 空串 / `null` / `undefined` / 任何未知值 ⇒ **空串**（展示层据此**零渲染**：
+ *     不占位、不留空框）
+ *
+ * 为什么不用 `roleLabel()`：它对未知角色**回落原文**（`user` ⇒ `user`），会把普通用户
+ * 也画出来；本函数只做「命中即取字、未命中即空串」的单向投影。
+ * 字面**不在这里复制**：全部派生自 `ROLE_LABEL`（唯一真源 ⇒ 两串仍只在本文件出现一次）。
+ * 本函数**只做展示取字**：不参与任何判定、不读存储、不改角色值。
+ * @param {string|null|undefined} role 内部角色值
+ * @returns {string} 上屏文字；未知角色 / 空值 ⇒ `''`
+ */
+export function roleMarkText(role) {
+  const key = role == null ? '' : String(role)
+  return ROLE_LABEL[key] || ''
+}
