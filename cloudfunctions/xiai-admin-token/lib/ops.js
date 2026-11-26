@@ -116,6 +116,82 @@ const PERSON_IMPORT_STATUS = Object.freeze({
 /** 外部导入审核载荷允许键（**封闭键面**：批次 / 单行 / 决定 / 理由）。 */
 const PERSON_IMPORT_REVIEW_ALLOWED_KEYS = Object.freeze(['batch_id', 'import_id', 'decision', 'note'])
 
+/* ============================================================================
+   **印人信息補充 / 編輯（本單）**：管理员直写 `xiai_persons` 的**封闭键面** ＋ **值域门**
+   ----------------------------------------------------------------------------
+   硬口径（逐条）：
+     ① 载荷 **恰一身份键** `person_id` ＋ 13 个可写字段（下两表的并集）；**封闭** ——
+        任何不在键面内的键（含固定属性 / 溯源 / 身份类键）⇒ `INVALID_FIELD` ＋ 零写入，
+        文案**逐字指名**每一个越界键（不静默丢键）。
+     ② 值域门**全部在写之前**：单值字段 trim 后逐字段长度上限；数组字段项数上限 ＋
+        每项长度上限 ＋ **去重保序** ＋ **去空项**；一律禁 `<` / `>`（防注入）与
+        制表符／换行回车**以外**的控制字符（`biehao_text` / `biography` 额外允许换行回车）。
+     ③ **空串 / 空数组 ＝ 清除**（单值落 `null`、数组落 `[]`，与仓内现形一致）；
+        **未传该键 ＝ 不改**（二者严格区分）。
+     ④ 零新增 `reason`：一律沿用 `lib/config.js::REASONS` 的既有冻结字面值。
+   ============================================================================ */
+
+/** `updatePerson` 载荷的**唯一身份键**（恰一；缺 / 空 ⇒ `MISSING_REQUIRED`）。 */
+const PERSON_EDIT_ID_KEY = 'person_id'
+
+/** 可写**单值**字段 → 长度上限（trim 后逐字段判定）。 */
+const PERSON_EDIT_STRING_LIMITS = Object.freeze({
+  name: 40,
+  name_cht: 40,
+  dynasty: 20,
+  courtesy_name: 40,
+  art_name: 40,
+  zhaihao: 40,
+  native_place: 60,
+  biehao_text: 1000,
+  biography: 5000,
+  birth_year: 20,
+  death_year: 20
+})
+
+/** 可写**数组**字段 → 项数上限（传非数组 ⇒ `INVALID_VALUE`）。 */
+const PERSON_EDIT_ARRAY_LIMITS = Object.freeze({
+  courtesy_alt_names: 20,
+  zhaihao_alts: 20
+})
+
+/** 数组**每项**长度上限（trim 后）。 */
+const PERSON_EDIT_ARRAY_ITEM_LIMIT = 40
+
+/** 允许换行 / 回车的字段（**仅此两个**；其余单值字段一律单行）。 */
+const PERSON_EDIT_MULTILINE_KEYS = Object.freeze(['biehao_text', 'biography'])
+
+/** `updatePerson` 的**封闭键面**（身份键 ＋ 13 个可写字段）。 */
+const PERSON_EDIT_ALLOWED_KEYS = Object.freeze([
+  PERSON_EDIT_ID_KEY,
+  ...Object.keys(PERSON_EDIT_STRING_LIMITS),
+  ...Object.keys(PERSON_EDIT_ARRAY_LIMITS)
+])
+
+/** 回包 `row` 的**白名单字段面**（＝13 个可写字段；**零内部 / 溯源 / 身份键**）。 */
+const PERSON_EDIT_ROW_KEYS = Object.freeze([
+  ...Object.keys(PERSON_EDIT_STRING_LIMITS),
+  ...Object.keys(PERSON_EDIT_ARRAY_LIMITS)
+])
+
+/**
+ * `updatePerson` 的**明令禁写键**（防御性登记 ⇒ 拒绝文案可逐字指名）。
+ * 与 `IDENTITY_KEYS` 的区别：本表是**印人行的固定属性 / 溯源键**（`_id` / `code` / `card_id` …），
+ * `IDENTITY_KEYS` 是**身份类键**（`uid` / `phone` / `userId` …）；两者并集才构成「逐字指名」的判据。
+ */
+const PERSON_EDIT_FORBIDDEN_KEYS = Object.freeze([
+  '_id',
+  'id',
+  'code',
+  'card_id',
+  'created_by',
+  'created_at',
+  'proposal_id',
+  'name_source',
+  'source',
+  'source_id'
+])
+
 /* **印章批 3（v1.55｜§3.55 ＋ §4.1.17）**：印章外部批量導入審核通道（管理员写面）。
    与 `src/data/seed.js` / `src/services/seals.js` / `xiai-user-token/lib/ops.js` 的冻结面**逐字同值**。 */
 
@@ -532,6 +608,101 @@ async function readPersonRow(ref) {
   }
   if (rowsByDoc.length > 0) return rowsByDoc[0]
   return null
+}
+
+/* ---------------------------------------------------------------------------
+   **印人信息編輯（本單）**：读点 ＋ 值域门纯函数 ＋ 回包投影（**零写入**；写只经 `plan`）
+   --------------------------------------------------------------------------- */
+
+/**
+ * **印人信息編輯读点（只读）**：按 `id` / `code` / `card_id` / 文档 `_id` 逐次试，
+ * 命中即回 `{row, match}`（`match` ＝ 命中所用检索式；更新时复用同一检索式 ⇒ 幂等）。
+ * **只读**：不产生任何写入。读失败（网络 / 内部）⇒ **抛**（由 `index.js` 转
+ * `STORAGE_UNAVAILABLE`，绝不伪装 `FORBIDDEN`）。
+ * @param {string} personId 印人标识（`PR…` / `id` / `code` / CARD 九位号）
+ * @returns {Promise<{row:object, match:object}|null>}
+ */
+async function readPersonRowForEdit(personId) {
+  const id = text(personId)
+  if (!id) return null
+  const db = resolveDb()
+  const collection = db.collection(COLLECTIONS.persons)
+  const attempts = [{ id }, { code: id }, { card_id: id }]
+  for (const match of attempts) {
+    const rows = rowsOf(await collection.where(match).get())
+    if (rows.length > 0) return { row: rows[0], match }
+  }
+  /* doc() 兜底（与本文件其余读点同口径）：只吞「不存在」类，其余照旧上抛。 */
+  let rowsByDoc = []
+  try {
+    rowsByDoc = rowsOf(await collection.doc(id).get())
+  } catch (error) {
+    if (!isDocNotExistError(error)) throw error
+  }
+  if (rowsByDoc.length > 0) return { row: rowsByDoc[0], match: { _id: id } }
+  return null
+}
+
+/** 是否数组可写字段。 */
+function isPersonEditArrayKey(key) {
+  return Object.prototype.hasOwnProperty.call(PERSON_EDIT_ARRAY_LIMITS, key)
+}
+
+/**
+ * **控制字符门**：制表符一律放行；换行 / 回车**只**在多行字段放行；
+ * 其余 C0 控制字符与 DEL **一律拒绝**。
+ * @param {string} value 已 trim 的值
+ * @param {boolean} allowBreak 是否多行字段
+ * @returns {{index:number, code:number}|null} `null` ＝ 通过
+ */
+function personEditControlCharOf(value, allowBreak) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    const isControl = code < 0x20 || code === 0x7f
+    if (!isControl) continue
+    const char = value.charAt(index)
+    if (char === '\t') continue
+    if (allowBreak && (char === '\n' || char === '\r')) continue
+    return { index, code }
+  }
+  return null
+}
+
+/** 数组现值归一（逐项 trim、去空、**去重保序**）；非数组 ⇒ `[]`。 */
+function personEditArrayOf(value) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  for (const item of value) {
+    const entry = text(item)
+    if (entry !== '' && out.indexOf(entry) === -1) out.push(entry)
+  }
+  return out
+}
+
+/**
+ * 行内某字段的**规范现值**（比较与回包投影共用，**不另立第二套**）。
+ * 单值：`null` ⇔ 空；数组：归一后的数组。
+ */
+function personEditValueOf(row, key) {
+  const raw = row && typeof row === 'object' ? row[key] : undefined
+  if (isPersonEditArrayKey(key)) return personEditArrayOf(raw)
+  const value = text(raw)
+  return value === '' ? null : value
+}
+
+/**
+ * **回包 `row` 投影**（**封闭键面**：13 个白名单字段 ＋ `_id` ＋ `updated_at`）。
+ * 任何内部 / 溯源 / 身份键（`code` / `card_id` / `created_by` / `source` …）**一律不外传**。
+ */
+function projectPersonEditRow(row) {
+  const source = row && typeof row === 'object' ? row : {}
+  const out = {}
+  PERSON_EDIT_ROW_KEYS.forEach((key) => {
+    out[key] = personEditValueOf(source, key)
+  })
+  out._id = source._id === undefined ? null : source._id
+  out.updated_at = source.updated_at === undefined ? null : source.updated_at
+  return out
 }
 
 /**
@@ -1161,6 +1332,180 @@ const OPS = Object.freeze({
   },
 
   /**
+   * **補充 / 編輯印人信息（管理员直写 `xiai_persons`；本單）**。
+   * 判定顺序（**全部在写之前**，任一不过 ⇒ 结构化拒绝 ＋ 零写入）：
+   *   ① 载荷形态 ＋ **封闭键面**（恰一身份键 `person_id` ＋ 13 个可写字段；
+   *      键面外的键 —— 含固定属性 / 溯源 / 身份类键 —— ⇒ `INVALID_FIELD`，文案**逐字指名**）
+   *   → ② **值域门**（逐字段长度上限 / 数组形态 ＋ 项数 ＋ 去重保序去空 / 尖括号 / 控制字符；
+   *      **空串 · 空数组 ＝ 清除，未传 ＝ 不改**）
+   *   → ③ 服务端身份（`identityUsable`；载荷里的身份键已在①被拒）
+   *   → ④ 读行（只读）→ ⑤ 存在性门 → ⑥ 实质变化判定 → ⑦ 产出落盘计划（落库在 `persist()`）。
+   * **`created_at` / `created_by` 一字不动**；`updated_at` 取**服务端时钟**；
+   * **无实质变化 ⇒ `ok:true` ＋ `changed:[]` ＋ 无落盘计划**（不谎报写入）。
+   * 回包 `row` **只带白名单字段 ＋ `_id` ＋ `updated_at`**（`plan` 由 `index.js` 消费、**恒不外传**）。
+   * @param {object} payload 载荷（允许键见 `PERSON_EDIT_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string}} identity **服务端派生**的身份（唯一来源）
+   * @param {number} nowSeconds 服务端时钟（秒；本函数唯一时源）
+   * @returns {Promise<{ok:true, op:string, row:object, changed:string[], plan:object|null}
+   *          |{ok:false, reason:string, message:string}>}
+   */
+  async updatePerson(payload, identity, nowSeconds) {
+    /* ① 载荷形态 ＋ **封闭键面**。 */
+    if (payload === undefined || payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少必要的載荷（payload）；本次零寫入。')
+    }
+    const unknown = Object.keys(payload).filter((key) => PERSON_EDIT_ALLOWED_KEYS.indexOf(key) === -1)
+    if (unknown.length > 0) {
+      const forbidden = unknown.filter(
+        (key) => PERSON_EDIT_FORBIDDEN_KEYS.indexOf(key) !== -1 || IDENTITY_KEYS.indexOf(key) !== -1
+      )
+      const hint =
+        forbidden.length > 0
+          ? `其中${forbidden.join('、')}屬禁寫欄位（固定屬性 / 溯源 / 身份），由服務端記錄，一律不採信前端自稱`
+          : '如實報回，不靜默丟鍵'
+      return deny(REASONS.INVALID_FIELD, `載荷含未知或禁寫欄位：${unknown.join('、')}（${hint}）；本次零寫入。`)
+    }
+    const personId = text(payload[PERSON_EDIT_ID_KEY])
+    if (!personId) {
+      return deny(REASONS.MISSING_REQUIRED, '缺少印人標識（person_id）⇒ 拒絕編輯；本次零寫入。')
+    }
+    if (personId.length > MAX_ID_LENGTH) {
+      return deny(REASONS.INVALID_VALUE, `印人標識超出上限（${MAX_ID_LENGTH} 字）⇒ 拒絕編輯；本次零寫入。`)
+    }
+
+    /* ② **值域门**（逐字段；长度上限 / 尖括号 / 控制字符 / 数组形态 —— 全部在写之前）。 */
+    const patch = {}
+    const present = []
+    for (const key of Object.keys(PERSON_EDIT_STRING_LIMITS)) {
+      if (!Object.prototype.hasOwnProperty.call(payload, key)) continue
+      present.push(key)
+      const raw = payload[key]
+      /* `null` 与空串同义 ＝ **清除**（未传该键 ⇒ 不进本分支 ⇒ 不改）。 */
+      if (raw === null) {
+        patch[key] = null
+        continue
+      }
+      if (typeof raw !== 'string') {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 必須是文字（或 null ＝清除）；本次零寫入。`)
+      }
+      const value = raw.trim()
+      const limit = PERSON_EDIT_STRING_LIMITS[key]
+      if (value.length > limit) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `欄位 ${key} 不得超過 ${limit} 字（實測 ${value.length} 字）；本次零寫入。`
+        )
+      }
+      if (value.indexOf('<') !== -1 || value.indexOf('>') !== -1) {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 含不允許的尖括號（< 或 >）；本次零寫入。`)
+      }
+      const multiline = PERSON_EDIT_MULTILINE_KEYS.indexOf(key) !== -1
+      if (personEditControlCharOf(value, multiline)) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `欄位 ${key} 含不允許的控制字符（僅允許制表符${multiline ? '／換行／回車' : ''}）；本次零寫入。`
+        )
+      }
+      patch[key] = value === '' ? null : value
+    }
+    for (const key of Object.keys(PERSON_EDIT_ARRAY_LIMITS)) {
+      if (!Object.prototype.hasOwnProperty.call(payload, key)) continue
+      present.push(key)
+      const raw = payload[key]
+      /* `null` 与空数组同义 ＝ **清除**（落 `[]`）。 */
+      if (raw === null) {
+        patch[key] = []
+        continue
+      }
+      if (!Array.isArray(raw)) {
+        return deny(REASONS.INVALID_VALUE, `欄位 ${key} 必須是文字陣列（或 null ＝清除）；本次零寫入。`)
+      }
+      const limit = PERSON_EDIT_ARRAY_LIMITS[key]
+      if (raw.length > limit) {
+        return deny(
+          REASONS.INVALID_VALUE,
+          `欄位 ${key} 不得超過 ${limit} 項（實測 ${raw.length} 項）；本次零寫入。`
+        )
+      }
+      const items = []
+      for (const item of raw) {
+        if (typeof item !== 'string') {
+          return deny(REASONS.INVALID_VALUE, `欄位 ${key} 的每一項都必須是文字；本次零寫入。`)
+        }
+        const value = item.trim()
+        /* **去空项**（trim 后为空 ⇒ 丢弃）。 */
+        if (value === '') continue
+        if (value.length > PERSON_EDIT_ARRAY_ITEM_LIMIT) {
+          return deny(
+            REASONS.INVALID_VALUE,
+            `欄位 ${key} 的每一項不得超過 ${PERSON_EDIT_ARRAY_ITEM_LIMIT} 字（實測 ${value.length} 字）；本次零寫入。`
+          )
+        }
+        if (value.indexOf('<') !== -1 || value.indexOf('>') !== -1) {
+          return deny(REASONS.INVALID_VALUE, `欄位 ${key} 的每一項含不允許的尖括號（< 或 >）；本次零寫入。`)
+        }
+        if (personEditControlCharOf(value, false)) {
+          return deny(REASONS.INVALID_VALUE, `欄位 ${key} 的每一項含不允許的控制字符（僅允許制表符）；本次零寫入。`)
+        }
+        /* **去重保序**（首次出现者保留）。 */
+        if (items.indexOf(value) === -1) items.push(value)
+      }
+      patch[key] = items
+    }
+
+    /* ③ 服务端身份（令牌路 ＝ 已验签声明派生；会话路 ＝ 平台注入 uid ＋ `xiai_roles`）。 */
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的管理員身份；本次零寫入。')
+    }
+
+    /* ④ 读行（**只读、非写**；网络 / 内部异常由此抛出 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`）。 */
+    const found = await readPersonRowForEdit(personId)
+    if (!found) {
+      /* **reason 取舍（回件说明）**：`lib/config.js::REASONS` 是**恰 5 值**的冻结表、
+         **没有 `NOT_FOUND`** ⇒ 按本单口径落既有 `INVALID_VALUE`（前端 `personCards.js` /
+         `PersonDetailView.vue` 亦以 `INVALID_VALUE` 表「該印人不存在」），**零新增 reason**。 */
+      return deny(REASONS.INVALID_VALUE, `未找到該印人（person_id）：${personId}；本次零寫入。`)
+    }
+    const row = found.row
+
+    /* ⑤ **实质变化判定**（未传的键不参与；现值与新值规范同形 ⇒ 视为无变化）。 */
+    const changed = present.filter((key) => {
+      const current = personEditValueOf(row, key)
+      const next = patch[key]
+      if (isPersonEditArrayKey(key)) return JSON.stringify(current) !== JSON.stringify(next)
+      return (current === null ? '' : current) !== (next === null ? '' : next)
+    })
+    const at = new Date(Math.floor(Number(nowSeconds)) * 1000).toISOString()
+
+    /* ⑥-a **无实质变化** ⇒ `ok:true` ＋ `changed:[]` ＋ **无落盘计划**（零写入、不推 `updated_at`）。 */
+    if (changed.length === 0) {
+      return { ok: true, op: 'updatePerson', row: projectPersonEditRow(row), changed: [], plan: null }
+    }
+
+    /* ⑥-b 落盘计划（**唯一写点仍是 `persist()`**）：只写变动字段 ＋ 服务端时钟 `updated_at`；
+       `created_at` / `created_by` / `code` / `card_id` / `source` … **一字不动**。 */
+    const writeDoc = {}
+    changed.forEach((key) => {
+      writeDoc[key] = patch[key]
+    })
+    writeDoc.updated_at = at
+    const match = text(row && row._id) ? { _id: text(row._id) } : found.match
+    const outRow = Object.assign({}, projectPersonEditRow(row), writeDoc)
+    return {
+      ok: true,
+      op: 'updatePerson',
+      row: outRow,
+      changed,
+      plan: {
+        op: 'updatePerson',
+        writes: [
+          { collection: COLLECTIONS.persons, action: 'update', match, doc: writeDoc, expectAtLeast: 1 }
+        ]
+      }
+    }
+  },
+
+  /**
    * **審核印章外部導入行（採納 / 駁回；§3.55.4 / §3.55.5）**：① 載荷鍵面 → ② 批次 / 單行 / 决定值域 /
    * 理由长度 → ③ 審核人身份（服务端派生）→ ④ 讀導入行（批次或單行；只讀）→
    * **採納** ⇒ 對每條 `PENDING` 行按 `source` ＋ `source_seal_id` **冪等**整條落
@@ -1428,6 +1773,15 @@ module.exports = {
   /* 外部批量導入審核面（批 2 前置 §3.54.14 / §3.54.15；供离线自检直接断言）。 */
   PERSON_IMPORT_REVIEW_ALLOWED_KEYS,
   PERSON_IMPORT_STATUS,
+  /* **印人信息補充 / 編輯面（本單）**：封闭键面 / 值域上限 / 禁写键（供离线自检直接断言）。 */
+  PERSON_EDIT_ID_KEY,
+  PERSON_EDIT_ALLOWED_KEYS,
+  PERSON_EDIT_STRING_LIMITS,
+  PERSON_EDIT_ARRAY_LIMITS,
+  PERSON_EDIT_ARRAY_ITEM_LIMIT,
+  PERSON_EDIT_MULTILINE_KEYS,
+  PERSON_EDIT_ROW_KEYS,
+  PERSON_EDIT_FORBIDDEN_KEYS,
   /* 印章外部批量導入審核面（批 3 前置 §3.55.5 / §4.1.17；供离线自检直接断言）。 */
   SEAL_IMPORT_REVIEW_ALLOWED_KEYS,
   SEAL_IMPORT_STATUS,

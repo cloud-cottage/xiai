@@ -459,6 +459,9 @@ async function handleVerify(event, config, callContext) {
       identity_source: identity.identity_source
     }
   }
+  /* `updatePerson`（本單）：**變更鍵清單** additive 透传 —— 只含白名單字段名（鍵名列表），
+     服务端未回该键 ⇒ **缺席**（不编造 `[]`）。**`plan` 由本函数消费、恒不外传**。 */
+  if (Array.isArray(opResult.changed)) response.changed = opResult.changed
   return response
 }
 

@@ -677,8 +677,15 @@ export function ensureAdminWriteSession(phone) {
   return adminTokenChannel.ensureWriteSession({ phone })
 }
 
-export function adminGate(op, payload) {
-  return adminTokenChannel.gate(op, payload)
+/**
+ * 管理员写面门（`xiai-admin-token` 的 `action:'verify'`）。
+ * @param {string} op 写操作名（须在云函数 `OPS` 注册面内）
+ * @param {object} payload 载荷（**身份类键由服务端拒**）
+ * @param {{readoutKeys?:Array<string>, timeoutMs?:number}} [options] **additive 透传声明**
+ *   （与 `userGate` 同一机制：只按声明的键名把回包确有的键叠进出参；未声明 ⇒ 行为逐字不变）
+ */
+export function adminGate(op, payload, options) {
+  return adminTokenChannel.gate(op, payload, options)
 }
 
 /** 诊断读数（**不含密钥 / 不含令牌原文**）。 */

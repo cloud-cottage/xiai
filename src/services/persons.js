@@ -7,6 +7,11 @@
  * 硬口径（逐条）：
  *   · **正式印人只经采纳路径产生**（`reviewPersonProposal(..., 'ACCEPTED')` 的幂等生成）；
  *     **不开放任何直写入口**（含管理员直写 ⇒ `FORBIDDEN` ＋ 零写入）。
+ *     【**本单追加注**（只收窄读法、不改上句）】上句指**本机 / 数据层**的裸直写；
+ *     **印人信息補充 / 編輯**是**服务端权威**的管理员写面（op `updatePerson` 在
+ *     `xiai-admin-token` 的 `OPS`，载荷封闭键面 ＋ 值域门 ＋ 服务端身份门全在写之前），
+ *     客户端唯一入口是本文件的 `updatePersonInfo`（经 `admin.js::adminWriteGate`），
+ *     **本机仍无任何裸直写**（`personDirectWriteDenial` 逐字不变）。
  *   · **提交 ＝ 任何登录用户**；**采纳 / 驳回 ＝ 管理员**（`role === 'admin'`）。
  *   · 状态机三态**单向、终态不回退**（`PENDING` / `ACCEPTED` / `REJECTED`）。
  *   · **防重键**（§3）：同 `(target_person_id, 姓名, 生卒, cbdb_id)` **只允许一人提交**；
@@ -51,6 +56,10 @@ import { PERSON_PROPOSAL_STATUS, emptyPersonFields, PERSON_IMPORT_STATUS, PERSON
    一律经 `userWriteGate` —— 先保证有一枚可携带的令牌（必要时静默补签），再过云端门
    （`xiai-user-token` 的 `verify`）。**身份由服务端从令牌派生**，载荷里的身份类键由服务端拒。 */
 import { userWriteGate } from './userWrite.js'
+/* **管理员直写通道（本单）**：印人信息補充 / 編輯的 op `updatePerson` 注册在 `xiai-admin-token`
+   ⇒ 只能走 `admin.js` 的**管理员令牌写面门**（该通道在服务层的**唯一出口**）。
+   **不自建第二条通道**：本文件不直接 import `token.js` / 不直调云函数。 */
+import { adminWriteGate, isAdminSession } from './admin.js'
 /* **人物属性读面（CARD 主库）**：姓名 / 字 / 號 / 齋號 / 別署齋號 / 別號 / 朝代 / CBDB 的
    **主存储已是 CARD**，本地 `xiai_persons` 降为 fallback ⇒ 本服务的只读检索面一律先经此合并。 */
 import * as personCards from './personCards.js'
@@ -1322,3 +1331,108 @@ export function importSubmitterId(row) {
 
 /** 导入载荷默认面（转发真源 `seed.js::emptyPersonImportPayload`；供构造 / 自检复用）。 */
 export { emptyPersonImportPayload }
+
+/* ============================================================================
+   **印人信息補充 / 編輯（本单）**：`canEditPersonInfo` ＋ `updatePersonInfo`
+   ----------------------------------------------------------------------------
+   硬口径（逐条）：
+     · **渲染门单点** `canEditPersonInfo(actor)`：＝管理员（`services/admin.js::isAdminSession`
+       这一处判定）；页面**不得**自写任何角色字面、**不得**再判一次 `role`。
+     · **写面单点** `updatePersonInfo(fields)`：经 `admin.js::adminWriteGate`（＝ `xiai-admin-token`
+       通道的**唯一出口**）——**不自建第二条通道**、不直调云函数、不碰数据层裸写。
+     · **失败恒不抛**：任何异常都收成 `{ok:false, reason, message}`（`reason` ∈ 既有冻结表）；
+       **服务端原文一个字不改写**（上屏文案不另造第二套）。
+     · **未传该键 ＝ 不改、空串 / 空数组 ＝ 清除**（语义由服务端唯一裁定，本层只如实转发）。
+     · 零新增 `reason` 字面值。
+   ============================================================================ */
+
+/**
+ * **可编辑字段面（13 个）** —— 与服务端 `PERSON_EDIT_ALLOWED_KEYS`（除 `person_id`）**同值**；
+ * 客户端只按本表挑键转发（**未传的键根本不出现在载荷里** ⇒ 服务端「未传 ＝ 不改」）。
+ */
+export const PERSON_EDITABLE_FIELDS = Object.freeze([
+  'name',
+  'name_cht',
+  'dynasty',
+  'courtesy_name',
+  'courtesy_alt_names',
+  'art_name',
+  'zhaihao',
+  'zhaihao_alts',
+  'biehao_text',
+  'native_place',
+  'birth_year',
+  'death_year',
+  'biography'
+])
+
+/**
+ * 当前（或指定）账号是否可补充 / 编辑印人信息 —— 详情页据此决定**是否渲染入口**
+ * （非管理员 / 游客 ⇒ 零渲染、零 DOM 命中）。
+ *
+ * **单点**：管理员判定唯一取 `services/admin.js::isAdminSession()`（本地会话 `role`）；
+ * 显式传 `actor` 时按同一口径核对其 `role`（与 `canReviewPersonProposals` 同形）。
+ * **它只是渲染门**：真正的授权判据在服务端（令牌验签 ＋ 白名单 ＋ 值域门）。
+ * @param {{role?:string}|null} [actor] 缺省取当前登录用户
+ * @returns {boolean}
+ */
+export function canEditPersonInfo(actor) {
+  if (actor === undefined || actor === null) return isAdminSession()
+  return actor !== null && actor !== undefined && actor.role === 'admin'
+}
+
+/**
+ * **补充 / 编辑印人信息**（管理员；服务端权威落 `xiai_persons`）。
+ *
+ * 判定顺序（拒绝即**零写入**）：① 管理员渲染门 → ② 载荷构造（**只挑白名单键**；
+ * `person_id` 必填）→ ③ `admin.js::adminWriteGate('updatePerson', …)`
+ * （取证 → 过门；服务端依次跑**封闭键面 → 值域门 → 身份门 → 读行 → 存在性门 → 写入**）。
+ *
+ * @param {object} fields 载荷面：`person_id` ＋ 13 个可写字段（**未传的键 ＝ 不改**；
+ *   空串 / 空数组 ＝ 清除）
+ * @returns {Promise<{ok:true, row:object, changed:string[]}
+ *                  |{ok:false, reason:string, message:string}>} **恒不抛**
+ */
+export async function updatePersonInfo(fields) {
+  /* ① 管理员门（服务层与渲染门同源；服务端另有一道，双保险）。 */
+  if (!canEditPersonInfo()) {
+    return { ok: false, reason: 'FORBIDDEN', message: `僅${ADMIN_LABEL}可以編輯印人信息；本次零寫入。` }
+  }
+  const source = fields !== null && typeof fields === 'object' && !Array.isArray(fields) ? fields : {}
+  /* ② 载荷构造：只挑白名单键；`person_id` 必填；其余键**缺席即不改**。 */
+  const payload = {}
+  const rawId = Object.prototype.hasOwnProperty.call(source, 'person_id') ? source.person_id : null
+  payload.person_id = rawId === null || rawId === undefined ? '' : String(rawId).trim()
+  if (payload.person_id === '') {
+    return { ok: false, reason: 'MISSING_REQUIRED', message: '缺少印人標識（person_id）；本次零寫入。' }
+  }
+  for (const key of PERSON_EDITABLE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+    const value = source[key]
+    if (Array.isArray(value)) {
+      payload[key] = value.map((item) => (item === null || item === undefined ? '' : String(item)))
+      continue
+    }
+    payload[key] = value === undefined ? null : value === null ? null : String(value)
+  }
+  /* ③ 过门（**服务端原文透传**；本层不改写 `reason` / `message`、不造第二套文案）。 */
+  let gate = null
+  try {
+    gate = await adminWriteGate('updatePerson', payload, { readoutKeys: ['changed'] })
+  } catch {
+    gate = null
+  }
+  if (!gate || gate.ok !== true) {
+    return {
+      ok: false,
+      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      message: (gate && gate.message) || `${ADMIN_LABEL}寫入服務暫不可用；本次零寫入。`
+    }
+  }
+  const row = gate.row !== null && typeof gate.row === 'object' ? gate.row : null
+  if (row === null) {
+    /* 服务端放行却没回权威行 ⇒ **不当成功**（不编造行、不谎报写入）。 */
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端未回傳更新後的印人行；本次結果不予採信；本次零寫入。' }
+  }
+  return { ok: true, row, changed: Array.isArray(gate.changed) ? gate.changed : [] }
+}

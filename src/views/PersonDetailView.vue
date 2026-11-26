@@ -20,11 +20,16 @@
  *     首屏水合未落定時顯示載入態（不把「還沒讀到」說成「查無此印人」）。
  *   · 上屏文案一律繁體（`s2t(x) === x`）。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { persons, seals } from '../services/index.js'
 import { loadPersonDetail, isBasicInfoOnlyCard } from '../services/personCards.js'
 import { biehaoLinesOf } from '../services/personSearch.js'
+/* 管理員入口文案（身份詞**單點**取字 `data/roleLabels.js`；本頁零硬編碼身份詞）。 */
+import { ADMIN_LABEL } from '../data/roleLabels.js'
+import AdminBadge from '../components/AdminBadge.vue'
+/* 彈窗 ESC ＝ 取消（**全倉單點** `utils/useEscToClose.js`；本頁恰 1 扇自建彈窗 ⇒ 1 層）。 */
+import { useEscToClose } from '../utils/useEscToClose.js'
 
 const route = useRoute()
 
@@ -61,10 +66,19 @@ const wantedCode = computed(() => textOf(route.params && route.params.code))
 
 /* ------------------------------ 數據面（CARD 主庫） ------------------------------
    `loadPersonDetail` 認兩種編號（`PR…` / CARD 九位號），帶 60 s 緩存、失敗回退本地行；
-   本頁只做「取到 ⇒ 上屏、取不到 ⇒ 可讀空態」的形態分流，不自行拼第二套字段面。 */
+   本頁只做「取到 ⇒ 上屏、取不到 ⇒ 可讀空態」的形態分流，不自行拼第二套字段面。
+   **本單追加**：編輯成功後要把服務端權威行疊回本行（`editOverlay`），故重讀時**繞過緩存**。 */
 const detail = ref(null)
 const detailLoading = ref(false)
 let detailToken = 0
+
+/**
+ * **本次編輯的行疊加層**（`{code, fields}`）：只放服務端 `updatePerson` 回傳的**白名單字段**。
+ * 用途 —— 讀面主庫若不是本地鏡像（CARD 優先），編輯後的值也要**立刻可見**；
+ * 這不是第二套判定：值一律來自服務端權威回包，`isBasicInfoOnlyCard` 判定仍單點、一字未改。
+ * 換編號（`wantedCode` 變化）即清空。
+ */
+const editOverlay = ref(null)
 
 async function fetchDetail() {
   const code = wantedCode.value
@@ -74,14 +88,25 @@ async function fetchDetail() {
     detailLoading.value = false
     return
   }
+  const overlay = editOverlay.value && editOverlay.value.code === code ? editOverlay.value.fields : null
   detailLoading.value = true
-  const got = await loadPersonDetail(code)
+  const got = await loadPersonDetail(code, overlay ? { force: true } : {})
   if (token !== detailToken) return
+  if (overlay && got && got.ok === true && got.person) {
+    got.person = Object.assign({}, got.person, overlay)
+  }
   detail.value = got
   detailLoading.value = false
 }
 
-watch(wantedCode, fetchDetail, { immediate: true })
+watch(
+  wantedCode,
+  () => {
+    editOverlay.value = null
+    fetchDetail()
+  },
+  { immediate: true }
+)
 
 /** 命中行（未命中 ⇒ `null`）。 */
 const row = computed(() => (detail.value && detail.value.ok === true ? detail.value.person : null))
@@ -152,6 +177,124 @@ const emptyBody = computed(() => {
   if (unavailable.value) return '雲端資料暫時未能讀取，請稍後重新整理本頁。'
   return '此編號未在印家名錄中，或該印人尚未收錄；可返回名錄重新查找。'
 })
+
+/* ============================================================================
+   管理員 · 補充 / 編輯印人信息（本單）
+   ----------------------------------------------------------------------------
+   · **入口渲染門**單點 ＝ `services/persons.canEditPersonInfo()`（＝管理員）；
+     非管理員 / 遊客 ⇒ **零渲染、零 DOM 命中**（不用 CSS 隱藏 / `disabled` 冒充）。
+   · **表單四組**；當前值預填；**只送出使用者改動過的欄** ⇒ 服務端「未傳 ＝ 不改」天然成立
+     （讀面沒有的欄，如 `name_cht`，不會被空值誤清）。
+   · **留空 ＝ 清除該欄**（逐欄標注）；數值欄一行一項（服務端去重保序、去空項）。
+   · 保存：`busy` 禁雙擊 ⇒ 成功 ⇒ **就地一行反饋**（`已儲存 N 項變更`）＋ **行刷新**（權威行疊回
+     ＋ 強制重讀）＋ **關窗** ⇒「僅基礎信息」提示隨字段填上自動消失（判定仍單點
+     `isBasicInfoOnlyCard`，本頁**不另寫判定**）；失敗 ⇒ **服務端原文上屏**、窗不關。
+   · 彈窗內兩鈕**不帶**管理員虛線樣式（虛線只屬入口）。
+   ============================================================================ */
+
+/** 入口渲染門（單點；非管理員 / 遊客 ⇒ `false` ⇒ 模板零渲染）。 */
+const canEditPerson = computed(() => persons.canEditPersonInfo())
+
+/** 可編輯字段面（＝服務端封閉鍵面的 13 個可寫字段；轉發真源 `services/persons.js`）。 */
+const EDIT_FIELDS = persons.PERSON_EDITABLE_FIELDS
+
+const editOpen = ref(false)
+const editBusy = ref(false)
+/** 失敗文案（**服務端原文**，一字不改）。 */
+const editError = ref('')
+/** 成功反饋（頁面就地一行；關窗後仍可見）。 */
+const editFeedback = ref('')
+
+/** 表單值（鍵面 ＝ `EDIT_FIELDS`；一律字串，數組欄以換行分隔）。 */
+const editForm = reactive(EDIT_FIELDS.reduce((acc, key) => Object.assign(acc, { [key]: '' }), {}))
+/** 預填基線（**只送改動過的欄**的比對依據）。 */
+const editBaseline = ref({})
+
+/** 行 ⇒ 表單值（預填；數組欄以換行分隔，視圖同形取值 `valuesOf` / `firstOf` / `textOf`）。 */
+function prefillEditForm() {
+  const item = row.value
+  const next = {}
+  EDIT_FIELDS.forEach((key) => {
+    next[key] = ''
+  })
+  if (item) {
+    next.name = textOf(item.name)
+    next.name_cht = textOf(item.name_cht)
+    next.dynasty = textOf(item.dynasty)
+    next.courtesy_name = textOf(item.courtesy_name) || firstOf(item.courtesy_names)
+    next.courtesy_alt_names = valuesOf(item.courtesy_alt_names).join('\n')
+    next.art_name = textOf(item.art_name) || firstOf(item.art_names)
+    next.zhaihao = textOf(item.zhaihao)
+    next.zhaihao_alts = valuesOf(item.zhaihao_alts).join('\n')
+    next.biehao_text = textOf(item.biehao_text)
+    next.native_place = textOf(item.native_place)
+    next.birth_year = textOf(item.birth_year)
+    next.death_year = textOf(item.death_year)
+    next.biography = textOf(item.biography)
+  }
+  EDIT_FIELDS.forEach((key) => {
+    editForm[key] = next[key]
+  })
+  editBaseline.value = next
+}
+
+function openEdit() {
+  if (!canEditPerson.value) return
+  editError.value = ''
+  editFeedback.value = ''
+  prefillEditForm()
+  editOpen.value = true
+}
+
+/** 取消：關窗並丟棄未提交輸入（**零寫請求**）。 */
+function closeEdit() {
+  if (editBusy.value) return
+  editOpen.value = false
+  editError.value = ''
+}
+
+/** 服務端權威行 ⇒ 只取白名單字段（疊回本行用；其餘內部鍵一律不取）。 */
+function pickEditableRow(serverRow) {
+  const out = {}
+  if (!serverRow || typeof serverRow !== 'object') return out
+  EDIT_FIELDS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(serverRow, key)) out[key] = serverRow[key]
+  })
+  return out
+}
+
+async function saveEdit() {
+  if (editBusy.value) return
+  editError.value = ''
+  /* **只送改動過的欄**（未改動 ⇒ 鍵不入載荷 ⇒ 服務端「未傳 ＝ 不改」）。 */
+  const fields = { person_id: wantedCode.value }
+  const base = editBaseline.value
+  EDIT_FIELDS.forEach((key) => {
+    const value = String(editForm[key])
+    if (String(base[key] === undefined || base[key] === null ? '' : base[key]) === value) return
+    fields[key] = value
+  })
+  editBusy.value = true
+  try {
+    const result = await persons.updatePersonInfo(fields)
+    if (!result.ok) {
+      /* 失敗：**服務端原文上屏**，不造第二套文案；窗保持打開。 */
+      editError.value = result.message
+      return
+    }
+    const count = Array.isArray(result.changed) ? result.changed.length : 0
+    editFeedback.value = count > 0 ? `已儲存 ${count} 項變更` : '沒有需要保存的變更'
+    /* 行刷新：權威行疊回 ＋ 繞過 60 s 緩存重讀 ⇒「僅基礎信息」提示隨字段填上自動消失。 */
+    editOverlay.value = { code: wantedCode.value, fields: pickEditableRow(result.row) }
+    await fetchDetail()
+    editOpen.value = false
+  } finally {
+    editBusy.value = false
+  }
+}
+
+/* ESC ＝ 取消（全倉單點實現；提交中不生效、不向下穿透）。 */
+useEscToClose({ isActive: () => editOpen.value, onCancel: closeEdit, isBusy: () => editBusy.value })
 </script>
 
 <template>
@@ -184,7 +327,24 @@ const emptyBody = computed(() => {
             <dd data-person-code>{{ person.code }}</dd>
           </div>
         </dl>
+        <!-- 管理員入口（本單）：渲染門單點 `persons.canEditPersonInfo()` ⇒
+             非管理員 / 遊客 ⇒ `v-if` 恆假 ⇒ **零渲染、零 DOM 命中**（不用隱藏 / `disabled` 冒充）。 -->
+        <button
+          v-if="canEditPerson"
+          class="btn btn--ghost btn--admin"
+          type="button"
+          data-action="person-edit"
+          :title="`編輯印人信息（僅${ADMIN_LABEL}可見）`"
+          :aria-label="`編輯印人信息（僅${ADMIN_LABEL}可見）`"
+          @click="openEdit"
+        >
+          <AdminBadge />
+          編輯信息
+        </button>
       </header>
+
+      <!-- 編輯成功反饋（**就地一行**；關窗後仍可見）—— 文案由服務端回包的 `changed` 派生。 -->
+      <p v-if="editFeedback" class="notice person__edit-feedback" data-person-edit-feedback>{{ editFeedback }}</p>
 
       <!-- 「僅基礎信息」提示（固定位置＝頁首之後、屬性區塊之前）：10 個詳情類字段全空 ⇒
            整段渲染；判定單點 `services/personCards.js::isBasicInfoOnlyCard`（名錄頁同源）。 -->
@@ -251,6 +411,108 @@ const emptyBody = computed(() => {
           </div>
         </div>
       </section>
+
+      <!-- 補充 / 編輯對話框（本單）：**管理員才可能打開** —— 入口不渲染 ⇒ 本節點零命中。
+           內部兩鈕只用通用按鈕樣式（**不帶**管理員虛線輪廓）。 -->
+      <div
+        v-if="editOpen"
+        class="person-edit-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-label="編輯印人信息"
+        data-person-edit-dialog
+      >
+        <div class="person-edit-box">
+          <h3 class="person-edit-box__title">編輯印人信息</h3>
+          <p class="person-edit-box__lede">
+            留空 ＝ 清除該欄；**未改動的欄位不會送出**。數值欄（字 / 別字 / 齋號 / 別號）一行一項，系統自動去重、去空。
+          </p>
+
+          <fieldset class="person-edit-group" :disabled="editBusy">
+            <legend class="person-edit-group__legend">基本信息</legend>
+            <div class="field">
+              <label for="pe-name">姓名</label>
+              <input id="pe-name" v-model="editForm.name" type="text" data-person-edit-field="name" />
+            </div>
+            <div class="field">
+              <label for="pe-name-cht">姓名（繁體）</label>
+              <input id="pe-name-cht" v-model="editForm.name_cht" type="text" data-person-edit-field="name_cht" />
+            </div>
+            <div class="field">
+              <label for="pe-dynasty">朝代</label>
+              <input id="pe-dynasty" v-model="editForm.dynasty" type="text" data-person-edit-field="dynasty" />
+            </div>
+          </fieldset>
+
+          <fieldset class="person-edit-group" :disabled="editBusy">
+            <legend class="person-edit-group__legend">別名</legend>
+            <div class="field">
+              <label for="pe-courtesy">字</label>
+              <input id="pe-courtesy" v-model="editForm.courtesy_name" type="text" data-person-edit-field="courtesy_name" />
+            </div>
+            <div class="field">
+              <label for="pe-courtesy-alts">別字（一行一項）</label>
+              <textarea id="pe-courtesy-alts" v-model="editForm.courtesy_alt_names" rows="2" data-person-edit-field="courtesy_alt_names"></textarea>
+              <p class="field__hint">留空 ＝ 清除；同一行重複只保留首次。</p>
+            </div>
+            <div class="field">
+              <label for="pe-art">號</label>
+              <input id="pe-art" v-model="editForm.art_name" type="text" data-person-edit-field="art_name" />
+            </div>
+            <div class="field">
+              <label for="pe-zhaihao">齋號</label>
+              <input id="pe-zhaihao" v-model="editForm.zhaihao" type="text" data-person-edit-field="zhaihao" />
+            </div>
+            <div class="field">
+              <label for="pe-zhaihao-alts">別署齋號（一行一項）</label>
+              <textarea id="pe-zhaihao-alts" v-model="editForm.zhaihao_alts" rows="2" data-person-edit-field="zhaihao_alts"></textarea>
+              <p class="field__hint">留空 ＝ 清除；同一行重複只保留首次。</p>
+            </div>
+            <div class="field">
+              <label for="pe-biehao">別號（一行一項）</label>
+              <textarea id="pe-biehao" v-model="editForm.biehao_text" rows="3" data-person-edit-field="biehao_text"></textarea>
+              <p class="field__hint">留空 ＝ 清除；按行展示。</p>
+            </div>
+          </fieldset>
+
+          <fieldset class="person-edit-group" :disabled="editBusy">
+            <legend class="person-edit-group__legend">籍貫與生卒</legend>
+            <div class="field">
+              <label for="pe-native-place">籍貫</label>
+              <input id="pe-native-place" v-model="editForm.native_place" type="text" data-person-edit-field="native_place" />
+            </div>
+            <div class="field">
+              <label for="pe-birth-year">生年</label>
+              <input id="pe-birth-year" v-model="editForm.birth_year" type="text" data-person-edit-field="birth_year" />
+            </div>
+            <div class="field">
+              <label for="pe-death-year">卒年</label>
+              <input id="pe-death-year" v-model="editForm.death_year" type="text" data-person-edit-field="death_year" />
+            </div>
+          </fieldset>
+
+          <fieldset class="person-edit-group" :disabled="editBusy">
+            <legend class="person-edit-group__legend">傳略</legend>
+            <div class="field">
+              <label for="pe-biography">小傳</label>
+              <textarea id="pe-biography" v-model="editForm.biography" rows="6" data-person-edit-field="biography"></textarea>
+              <p class="field__hint">留空 ＝ 清除；允許換行。</p>
+            </div>
+          </fieldset>
+
+          <!-- 失敗：**服務端原文**上屏（不造第二套文案）。 -->
+          <p v-if="editError" class="person-edit-box__error" data-person-edit-error>{{ editError }}</p>
+
+          <div class="person-edit-box__foot">
+            <button class="btn btn--ghost" type="button" data-person-edit-cancel :disabled="editBusy" @click="closeEdit">
+              取消
+            </button>
+            <button class="btn btn--primary" type="button" data-person-edit-save :disabled="editBusy" @click="saveEdit">
+              {{ editBusy ? '儲存中…' : '儲存變更' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </template>
 
     <!-- 未命中 / 載入 / 失敗：可讀空態（不白屏），回到名錄。 -->
@@ -480,11 +742,114 @@ const emptyBody = computed(() => {
   text-decoration: none;
 }
 
+/* ------------------------------ 編輯對話框（管理員） ------------------------------
+   形態与既有模态**逐字同形**（`ConfirmDialog` / `AddSealFaceDialog` / `PersonProposalDialog`）：
+   固定遮罩 ＋ `inset: 0` ＋ `z-index: 40` ＋ grid 居中 ＋ `--c-overlay` 底；
+   框体只用既有表面 / 线 / 阴影令牌（`--c-surface` / `--c-line-strong` / `--r-lg` / `--shadow-2`）。
+   遮罩**不设**点击关闭 —— 与上述模态同形（关窗只经「取消」钮 ＋ Esc）；
+   Esc ＝ 取消走全仓单点 `utils/useEscToClose.js`（提交中不生效），本页恰 1 扇自建弹窗。
+   颜色零新增：错误行取既有 `--c-danger`，其余取 `--c-text*` / `--c-line*`。 */
+.person-edit-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--s-5);
+  overflow-y: auto;
+  background: var(--c-overlay);
+}
+
+.person-edit-box {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: var(--s-5);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+}
+
+.person-edit-box__title {
+  margin: 0 0 var(--s-2);
+  color: var(--c-text);
+  font-size: var(--t-lg);
+  letter-spacing: 0.08em;
+}
+
+.person-edit-box__lede {
+  margin: 0 0 var(--s-4);
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+  line-height: 1.9;
+}
+
+/* 失败行：**服务端原文**上屏（文案不在样式层造第二套）；色取既有危险令牌。 */
+.person-edit-box__error {
+  margin: var(--s-3) 0 0;
+  padding: var(--s-2) var(--s-3);
+  border-left: 2px solid var(--c-danger);
+  color: var(--c-danger);
+  font-size: var(--t-sm);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.person-edit-box__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+/* 四组字段集：只用既有线色分组（浏览器默认 fieldset 边框 / 内边距在此归零重建）。 */
+.person-edit-group {
+  min-width: 0;
+  margin: 0 0 var(--s-3);
+  padding: var(--s-3) var(--s-4) var(--s-1);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+}
+
+.person-edit-group:last-of-type {
+  margin-bottom: 0;
+}
+
+/* 组内末项不再留白（`.field` 自带 `margin-bottom: var(--s-4)`）。 */
+.person-edit-group .field:last-child {
+  margin-bottom: 0;
+}
+
+.person-edit-group__legend {
+  padding: 0 var(--s-2);
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
+  letter-spacing: 0.12em;
+}
+
+/* ------------------------------ 编辑就地反馈（页首之下） ------------------------------
+   本类只补边距：底色 / 边框 / 字号一律由既有 `.notice`（金底条）给出，不另立第二套配色。 */
+.person__edit-feedback {
+  margin: var(--s-3) 0 0;
+}
+
 /* ------------------------------ 窄屏（≤640px） ------------------------------ */
 @media (max-width: 640px) {
   .person__title {
     font-size: var(--t-2xl);
     letter-spacing: 0.14em;
+  }
+
+  .person-edit-mask {
+    padding: var(--s-3);
+    place-items: start center;
+  }
+
+  .person-edit-box {
+    max-height: 92vh;
+    padding: var(--s-4);
   }
 
   .person__body {
