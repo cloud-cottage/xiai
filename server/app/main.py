@@ -61,6 +61,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from PIL import Image
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.cors import CORSMiddleware
 
 from . import codec, slicer, store
 from .errors import (
@@ -92,6 +93,53 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
+)
+
+# ── CORS（跨源讀取面：前端 `VITE_XIAI_API_BASE` 指到本服務時的預檢與讀頭口徑）────────
+# 紀律：**絕不用 `*` 通配帶憑據** —— 生產域名逐個列明，本機 dev 用端口通配正則；
+# 方法 / 請求頭覆蓋既有 POST + JSON / binary（`application/octet-stream` / `multipart`）形態。
+CORS_ALLOWED_ORIGINS = (
+    "https://xiai.plus",
+    "https://www.xiai.plus",
+)
+CORS_LOCAL_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"   # dev：Vite dev server
+CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+CORS_ALLOW_HEADERS = ["Content-Type", "Authorization"]
+# ★ 跨源下回應頭不在 safelisted 內 ⇒ 必須顯式 expose，否則前端 `reply.headers.get('X-Xiai-…')`
+#   恆 `null`（本服務的取證頭全族在此列明；**新增 `X-Xiai-*` 回應頭須同步列入**）。
+CORS_EXPOSE_HEADERS = (
+    "Content-Disposition",
+    "X-Xiai-Asset-Id", "X-Xiai-Authority-Rel-Path", "X-Xiai-Authority-Root", "X-Xiai-Authority-Sha256",
+    "X-Xiai-Block-Lossless", "X-Xiai-Block-Mime", "X-Xiai-Blocks", "X-Xiai-Bridge",
+    "X-Xiai-Cols", "X-Xiai-Contract-Source", "X-Xiai-Cuts",
+    "X-Xiai-Display-Quality", "X-Xiai-Existed-Before",
+    "X-Xiai-Face", "X-Xiai-Full-Resolution",
+    "X-Xiai-Idempotent",
+    "X-Xiai-Kernel", "X-Xiai-Kind", "X-Xiai-Lossless",
+    "X-Xiai-Min-Role", "X-Xiai-Mtime-Ns-After", "X-Xiai-Mtime-Ns-Before",
+    "X-Xiai-Out-Bytes", "X-Xiai-Out-Height", "X-Xiai-Out-Mime", "X-Xiai-Out-Size", "X-Xiai-Out-Width",
+    "X-Xiai-Passthrough", "X-Xiai-Path", "X-Xiai-Plan-Cache",
+    "X-Xiai-Quality", "X-Xiai-Reencode-Rounds", "X-Xiai-Rows",
+    "X-Xiai-Slicing", "X-Xiai-Slicing-Bridge", "X-Xiai-Slicing-Kernel",
+    "X-Xiai-Slicing-Second-Implementation",
+    "X-Xiai-Source-Height", "X-Xiai-Source-Mime", "X-Xiai-Source-Ref",
+    "X-Xiai-Source-Sha256", "X-Xiai-Source-Size", "X-Xiai-Source-Width",
+    "X-Xiai-Stored-Bytes", "X-Xiai-Stored-Sha256",
+    "X-Xiai-Thumb-Long-Edge",
+    "X-Xiai-Tiff-Bits-Per-Sample", "X-Xiai-Tiff-Compression", "X-Xiai-Tiff-Pages",
+    "X-Xiai-Tiff-Photometric", "X-Xiai-Tiff-Pinned-Ok", "X-Xiai-Tiff-Rows-Per-Strip",
+    "X-Xiai-Tiff-Samples-Per-Pixel", "X-Xiai-Tiff-Strips",
+    "X-Xiai-Tile-Splicer", "X-Xiai-Transcode", "X-Xiai-Watermark", "X-Xiai-Whole-Image",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(CORS_ALLOWED_ORIGINS),
+    allow_origin_regex=CORS_LOCAL_ORIGIN_REGEX,
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_ALLOW_HEADERS,
+    allow_credentials=True,             # 明示白名單 + 帶憑據（**非 `*` 通配**）
+    expose_headers=list(CORS_EXPOSE_HEADERS),
+    max_age=600,
 )
 
 # ── 查詢參數白名單（字段面；未知鍵 ⇒ INVALID_FIELD，值不在集合內 ⇒ INVALID_VALUE）────
@@ -572,7 +620,8 @@ async def image_store(request: Request) -> Response:
         "X-Xiai-Idempotent": "true" if record["idempotent"] else "false",
         "X-Xiai-Existed-Before": "true" if record["existedBefore"] else "false",
         "X-Xiai-Mtime-Ns-Before": "" if record["mtimeNsBefore"] is None else str(record["mtimeNsBefore"]),
-        "X-Xiai-Mtime-Ns-After": str(record["mtimeNsAfter"]),
+        # `cos` 後端無本地 mtime（回 `None`）⇒ 表頭留空，不偽造數值；`local` 恆為整數（原樣）
+        "X-Xiai-Mtime-Ns-After": "" if record["mtimeNsAfter"] is None else str(record["mtimeNsAfter"]),
         "X-Xiai-Stored-Bytes": str(record["storedBytes"]),
         "X-Xiai-Out-Mime": codec.TIFF_MIME,
         "Cache-Control": "no-store",

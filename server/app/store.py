@@ -22,6 +22,14 @@
   ⑤ **寫入面唯一職責** —— 落盤 ＋ 按 digest 取回；**本模組不做切分 / 幾何 / 轉碼**（真源仍恰 1 處）；
   ⑥ 失敗一律取**凍結 reason 表**內的值（空 ⇒ `EMPTY_CONTENT`；超限 ⇒ `TOO_LARGE`；
      非 TIFF ⇒ `NOT_IMAGE`；digest 形態不符 ⇒ `INVALID_VALUE`；取不到 ⇒ `NOT_FOUND`）。
+
+**後端可插拔（2026-11-26 派單）** —— 接口三件套 `store_bytes` / `read_bytes` / `exists` 不變，
+實現兩個後端（選擇器 ＝ 環境變量 `XIAI_STORE_BACKEND`，缺省 `local`）：
+  · **`local`** —— 本檔既有行為**逐字不變**（本機 dev 與 ctrl 面板照舊；`run.sh` 語義不動）；
+  · **`cos`** —— 讀寫雲存儲桶（傳輸面 ＝ `app/cosstore.py`），**對象鍵與 local 同構**
+    （`<sha256[:2]>/<sha256>.tiff`、無前綴）；憑據只從 `COS_*` 讀；桶內無對象 ＝ `NOT_FOUND`（404 同形）。
+  · **`cos` 缺必需 env ⇒ 導入即失敗**（`StoreConfigError`，錯誤裡只列**缺失變量名**、
+    **永不回顯值**）—— **不允許靜默回落 `local`**（否則線上一寫就丟）。
 """
 
 from __future__ import annotations
@@ -52,6 +60,43 @@ HEX_DIGITS = "0123456789abcdef"
 TIFF_MAGICS = (b"II\x2a\x00", b"MM\x00\x2a")
 
 
+# ── 後端選擇（`XIAI_STORE_BACKEND`；缺省 `local`）───────────────────────────────
+BACKEND_ENV_VAR = "XIAI_STORE_BACKEND"
+BACKEND_LOCAL = "local"
+BACKEND_COS = "cos"
+BACKEND_VALUES = (BACKEND_LOCAL, BACKEND_COS)
+
+
+class StoreConfigError(RuntimeError):
+    """後端配置不全 / 取值非法 —— **啟動即失敗**，絕不靜默降級成 `local`。"""
+
+
+def _resolve_backend() -> str:
+    """解析後端名並做**啟動期校驗**（只回變量名，**不回顯任何值**）。"""
+    raw = (os.environ.get(BACKEND_ENV_VAR) or "").strip().lower()
+    name = raw or BACKEND_LOCAL
+    if name not in BACKEND_VALUES:
+        raise StoreConfigError(
+            f"{BACKEND_ENV_VAR} 只接受 {' / '.join(BACKEND_VALUES)}，收到：{name}"
+        )
+    if name == BACKEND_COS:
+        from . import cosstore                      # 惰性導入：local 後端零依賴 cos 面
+
+        missing = cosstore.missing_required_env()
+        if missing:
+            raise cosstore.config_error()
+    return name
+
+
+# 導入即校驗 ⇒ uvicorn 起不來、日誌裡直接是缺失變量名（**啟動即失敗**）
+BACKEND = _resolve_backend()
+
+
+def backend_name() -> str:
+    """當前后端名（`local` / `cos`）—— `/api/health` 讀數用。"""
+    return BACKEND
+
+
 def authority_root() -> Path:
     """權威庫根目錄：環境變量 `XIAI_AUTHORITY_ROOT` 在場時以它為準（測試隔離），否則用默認值。"""
     override = (os.environ.get(ENV_ROOT_VAR) or "").strip()
@@ -59,7 +104,12 @@ def authority_root() -> Path:
 
 
 def root_display() -> str:
-    """根目錄的**相對形態**讀數（**本模組不對外回報絕對路徑** —— 響應體不含絕對路徑）。"""
+    """根目錄的**相對形態**讀數（**本模組不對外回報絕對路徑** —— 響應體不含絕對路徑）。
+
+    `cos` 後端**沒有本地根目錄** ⇒ 回報字面 `cos`（不冒充 `data/originals`、不回報桶名）。
+    """
+    if BACKEND == BACKEND_COS:
+        return "cos"
     root = authority_root()
     try:
         return str(root.relative_to(REPO_ROOT))
@@ -104,8 +154,8 @@ def validate_payload(data: bytes) -> str:
 
 
 # ── 寫入（原子 ＋ 冪等）────────────────────────────────────────────────────────
-def store_bytes(data: bytes) -> dict:
-    """權威落盤：`<root>/<sha256[:2]>/<sha256>.tiff`；**同目錄臨時文件 ＋ 原子 rename**。
+def _local_store_bytes(data: bytes) -> dict:
+    """權威落盤（**`local` 後端原實現，逐字未改**）：`<root>/<sha256[:2]>/<sha256>.tiff`；**同目錄臨時文件 ＋ 原子 rename**。
 
     冪等：目標已存在、size 相同且內容 `sha256` 相同 ⇒ **不重寫**（`idempotent=True`，mtime 不變）。
     返回體**不含絕對路徑**（`relPath` 為相對形狀）。
@@ -151,8 +201,8 @@ def store_bytes(data: bytes) -> dict:
 
 
 # ── 讀取（byte-verbatim；讀路徑零回寫）─────────────────────────────────────────
-def read_bytes(digest: str) -> bytes:
-    """按 digest 取回權威庫原字節（**零轉碼、零回寫**）；取不到 ⇒ `NOT_FOUND`（404）。"""
+def _local_read_bytes(digest: str) -> bytes:
+    """按 digest 取回權威庫原字節（**`local` 後端原實現，逐字未改**；零轉碼、零回寫）；取不到 ⇒ `NOT_FOUND`（404）。"""
     normalized = normalize_digest(digest)
     target = path_for(normalized)
     if not target.is_file():
@@ -160,9 +210,75 @@ def read_bytes(digest: str) -> bytes:
     return target.read_bytes()
 
 
-def health_facts() -> dict:
-    """`/api/health` 的 `authority_storage` 讀數（**只回報相對形狀**，不回報絕對路徑）。"""
+# ── 後端分發（接口三件套 ＝ `store_bytes` / `read_bytes` / `exists`）──────────────
+def _cos_store_bytes(data: bytes) -> dict:
+    """`cos` 後端寫入：鍵形同構；冪等口徑**照抄 local**（size 相同才去核對 digest）。
+
+    桶內已有同 size 異內容（理論上不該發生的髒件）⇒ 以真內容覆寫（＝ local 的「自愈」口徑）。
+    `mtimeNs*` 對象存儲沒有本地 mtime ⇒ 回 `None`（`main.py` 侧表頭留空，不偽造數值）。
+    """
+    from . import cosstore
+
+    digest = validate_payload(data)              # 三步門：兩後端同門、同順序
+    key = rel_path_for(digest)                   # 鍵形與 local 逐字同構
+    size = cosstore.stat(key)                    # None ＝ 桶內無此件
+    existed = size is not None
+    idempotent = existed and size == len(data) and hashlib.sha256(cosstore.get(key)).hexdigest() == digest
+    if not idempotent:
+        cosstore.put(key, data)
     return {
+        "ok": True,
+        "sha256": digest,
+        "bytesLength": len(data),
+        "relPath": key,
+        "idempotent": idempotent,
+        "existedBefore": existed,
+        "storedBytes": len(data),
+        "mtimeNsBefore": None,
+        "mtimeNsAfter": None,
+    }
+
+
+def store_bytes(data: bytes) -> dict:
+    """權威寫入（內容尋址）——**兩後端同一套三步門**（空 → 超限 → 非 TIFF → digest）。
+
+    · `local` ＝ 上面 `_local_store_bytes`（原子 rename ＋ 冪等，**逐字未改**）；
+    · `cos` ＝ 對象 PUT（鍵形同構、冪等口徑同上）。
+    """
+    if BACKEND == BACKEND_COS:
+        return _cos_store_bytes(data)
+    return _local_store_bytes(data)
+
+
+def read_bytes(digest: str) -> bytes:
+    """按 digest 取回原字節（**零轉碼、零回寫**）；取不到 ⇒ `NOT_FOUND`（404 同形）。
+
+    兩後端同語義：`local` ＝ 本地文件；`cos` ＝ 桶內對象（無對象亦 `NOT_FOUND`，**不新增 reason**）。
+    """
+    if BACKEND == BACKEND_COS:
+        from . import cosstore
+
+        return cosstore.get(rel_path_for(normalize_digest(digest)))
+    return _local_read_bytes(digest)
+
+
+def exists(digest: str) -> bool:
+    """按 digest 探活（`True` ＝ 這件在權威庫裡；兩後端同語義）。"""
+    normalized = normalize_digest(digest)
+    if BACKEND == BACKEND_COS:
+        from . import cosstore
+
+        return cosstore.exists(rel_path_for(normalized))
+    return path_for(normalized).is_file()
+
+
+def health_facts() -> dict:
+    """`/api/health` 的 `authority_storage` 讀數（**只回報相對形狀**，不回報絕對路徑）。
+
+    `cos` 後端在**同一份形狀**上覆寫與雲存儲相關的讀數（`atomic_write` / `region` / `url_style` …）
+    並追加 `backend` —— **既有字段不刪、不改名**（本機 `local` 讀數只多一個 `backend`）。
+    """
+    facts = {
         "root_relative": root_display(),
         "path_shape": PATH_SHAPE,
         "content_addressed": True,
@@ -179,3 +295,13 @@ def health_facts() -> dict:
         "legacy_direct_upload_forms": "保留（既有直傳字節形態一字未破）",
         "existing_data_policy": "存量面不掃、不遷移、不刪任何件；同名同 digest 異內容 ⇒ 以真內容自愈（`os.replace` 覆寫該同名件）—— 非「不覆蓋存量」",
     }
+    facts["backend"] = BACKEND                     # `local` / `cos`（選擇器 ＝ `XIAI_STORE_BACKEND`）
+    if BACKEND == BACKEND_COS:
+        from . import cosstore
+
+        facts["env_override"] = f"{ENV_ROOT_VAR}（僅 local；cos 不落本地盤）"
+        facts["existing_data_policy"] = (
+            "存量面不掃、不遷移、不刪任何件；同鍵同 size 異 digest ⇒ 以真內容覆寫（自愈口徑同 local）"
+        )
+        facts.update(cosstore.health_facts())      # 覆寫 `atomic_write` ＋ 補 region / url_style …
+    return facts

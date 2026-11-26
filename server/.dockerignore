@@ -1,0 +1,58 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# xiai-api 構建上下文排除表（`server/.dockerignore`）
+#
+# ⚠ 用法：本文件由 `server/deploy-cloudrun.sh` 複製到**構建上下文根**後再生效
+#   （docker 只認上下文根的 `.dockerignore`；上下文 ＝ 倉庫根 `xiai/`）。
+#   rsync 裝配時也以本文件為 exclude 表（兩種語法同族：根錨定 `/x`、裸名任意層級）。
+#
+# ⚠ 根錨定紀律：`/data` 的斜杠不可省 —— 寫成 `data` 會連**內核依賴
+#   `src/data/{seed,assetmeta,uid}.js`** 一起剔除，鏡像裡 geom 薄橋直接起不來。
+# ═══════════════════════════════════════════════════════════════════════════
+
+# VCS / 本機狀態
+/.git
+/.gitignore
+/.DS_Store
+/.runtime
+/.vercel
+*.log
+.DS_Store
+
+# 環境文件（密鑰一律不進鏡像、不進構建上下文）
+.env
+.env.*
+*.env
+
+# 與鏡像無關的大目錄（實測：data 1.2 G / qa-recheck 744 M / docs 294 M /
+# node_modules 100 M / server/.venv 61 M）
+/data
+/qa-recheck
+/docs
+/node_modules
+/dist
+/mockups
+/scripts
+/tests
+/ops
+/cloudfunctions
+/functions
+/api
+/config
+/public
+/package-lock.json
+
+# 前端構建面（鏡像只跑 xiai-api，不做前端構建）
+/IDEA.md
+/README.md
+/cloudbaserc.json
+/vercel.json
+/vite.config.js
+/index.html
+
+# Python 虛擬環境與緩存（任意層級）
+/server/.venv
+__pycache__
+*.pyc
+
+# 打包腳本自己的產物（否則裝配會把 out 拷進自身）
+/deploy/cloudrun/out
