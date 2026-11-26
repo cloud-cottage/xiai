@@ -3263,11 +3263,14 @@ async function onImageBookChange(imageId, event) {
     <span v-if="clearFeedback">{{ clearFeedback }}</span>
     <button
       v-if="canClearLocal && orphanCount > 0"
-      class="btn btn--ghost"
+      class="btn btn--ghost btn--admin"
       type="button"
       data-action="local-db-clear"
+      :title="`清除本機資料（僅${ADMIN_LABEL}可見）`"
+      :aria-label="`清除本機資料（僅${ADMIN_LABEL}可見）`"
       @click="askClearLocal"
     >
+      <AdminBadge />
       清除本機資料
     </button>
   </div>

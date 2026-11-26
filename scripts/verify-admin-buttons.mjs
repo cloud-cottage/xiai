@@ -12,18 +12,23 @@
  *     剥除器**引号感知**（' " ` 与模板串内不剥），否则脚本里一个 `/*` 字面量会把整个文件尾巴吃掉
  *     —— 本套第一版就踩了这个坑（C1/C5 假红、B6 样本面归零）。
  *   · CSS 判据一律对**样式源码文本**解析成 `{selector, body}` 规则，不读 computed 样式、不开浏览器。
+ *   · 开标签解析**引号感知**：`<button … v-if="… > 0">` 里的 `>` 在引号内，不得当标签结束
+ *     （否则详情页孤兒行那枚 `btn--admin` 被截断 ⇒ `adminTagCount` 假红 10 vs 11——本套第三版即踩此坑）。
+ *   · 门控扫描**两页都扫**（详情页 ＋ 广场页）：只扫详情页会漏掉广场页的同门按钮（B8 钉住）。
  *
  * 判据分段：
  *   A 样式单点：`.btn--admin` 有 `position: relative` ＋ `border-style: dashed`；`:hover` 回 `solid`；
  *     角标组件绝对定位 ＋ `pointer-events: none` ＋ `aria-hidden` ＋ `currentColor`；两处均无
  *     `visibility` 声明、样式段无颜色字面量（只用令牌）。
  *   B 应用面：`btn--admin` 开标签数 ＝ `<AdminBadge` 数；每个都含「僅${ADMIN_LABEL}可見」；
- *     10 个管理员门控 `v-if` 后的 class 全带该类；`canClearLocal` / `canUpload`（普通权限）后不带；
+ *     11 个管理员门（**详情页 ＋ 广场页**，含 `canClearLocal`＝`role==='admin'` 管理员专属）
+ *     `v-if` 后的 class 全带该类；`canUpload`（唯一普通权限门）后不带；
+ *     同一能力门**跨页面同一 class 口径**（B8：一处合规一处漏网即红）；
  *     普通按钮（存入雲盤 / 下載高清原圖 / 勘誤）零误加；`[data-admin-action]` 全仓仍恰 12 值。
  *   C 作者选择器：`item.key === 'author'` 分支渲染 `PersonPicker` 且分支内零 `<input>`；
  *     全件零 `v-model="form.author"` 文本框；`authorPersons` 取 `persons.referablePersons()`；
  *     传 `persons.personName`；提交链未改（`field: item.key` / `value: form[item.key]`）。
- *   D 变异负对照（D1〜D5）：判据必须会响。
+ *   D 变异负对照（D1〜D7）：判据必须会响。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -33,6 +38,7 @@ const ROOT = path.resolve(HERE, '..')
 const BASE_CSS_REL = 'src/styles/base.css'
 const BADGE_REL = 'src/components/AdminBadge.vue'
 const VIEW_REL = 'src/views/SealDetailView.vue'
+const SQUARE_REL = 'src/views/SquareView.vue'
 
 /* ---------------------------------------------------------------- 断言骨架 */
 const results = []
@@ -184,16 +190,40 @@ function judgeBadge(badgeText) {
   }
 }
 
-/** 开标签 ＋ 其直系文本（用于按按钮文字取样本）。 */
+/** 开标签 ＋ 其直系文本（用于按按钮文字取样本）。
+ *  开标签结束符 `>` **引号感知**：属性值里的 `>`（如 `v-if="canClearLocal && orphanCount > 0"`）
+ *  不得被当成标签结束 —— 否则开标签被截断、其后的 `class="…btn--admin"` 落在标签体外 ⇒
+ *  `adminTagCount` 假红（本套第三版：10 vs `<AdminBadge` 11）。 */
 function btnTags(clean) {
   const tags = []
-  const re = /<(button|label)\b[^>]*>/gi
+  const re = /<(button|label)\b/gi
   let m
   while ((m = re.exec(clean))) {
-    const openEnd = m.index + m[0].length
+    // 引号感知地往后扫，找到**真正**结束该开标签的 `>`
+    let i = m.index + m[0].length
+    let quote = null
+    while (i < clean.length) {
+      const c = clean[i]
+      if (quote) {
+        if (c === '\\') {
+          i += 2
+          continue
+        }
+        if (c === quote) quote = null
+      } else if (c === '"' || c === "'" || c === '`') {
+        quote = c
+      } else if (c === '>') {
+        break
+      }
+      i += 1
+    }
+    if (i >= clean.length) break // 未闭合：不产出残缺标签
+    const raw = clean.slice(m.index, i + 1)
+    const openEnd = i + 1
     const closeAt = clean.indexOf('<', openEnd)
     const text = clean.slice(openEnd, closeAt < 0 ? openEnd + 60 : closeAt).trim()
-    tags.push({ raw: m[0], kind: m[1].toLowerCase(), text, index: m.index })
+    tags.push({ raw, kind: m[1].toLowerCase(), text, index: m.index })
+    re.lastIndex = openEnd
   }
   return tags
 }
@@ -208,22 +238,78 @@ const ADMIN_GATES = [
   'canAiEnhanceFace',
   'canSetBaseFaceOn',
   'canDeleteFaceImage',
-  'canDeleteWholeSealImage'
+  'canDeleteWholeSealImage',
+  /* `canClearLocal` 于本套第三版从 `NORMAL_GATES` 移入：`seals.canClearLocalData()` 是
+     **管理员专属**（`user.role === 'admin'`，src/services/seals.js:750-753；文件注 741-742 写明
+     与 `canDeleteSeal` / `canEditSealAttributes` 同一套口径）⇒ 它不是普通用户门，旧归类是假红。 */
+  'canClearLocal'
 ]
-const NORMAL_GATES = ['canClearLocal', 'canUpload']
+/* 普通用户权限门：只剩 `canUpload`（`seals.canUploadPhoto()` 非管理员专属）。 */
+const NORMAL_GATES = ['canUpload']
 
-function gateClasses(clean, gate) {
-  const out = []
-  const needle = `v-if="${gate}`
-  let from = 0
-  for (;;) {
-    const at = clean.indexOf(needle, from)
-    if (at < 0) break
-    const cls = clean.slice(at, at + 320).match(/class="([^"]*)"/)
-    out.push(cls ? cls[1] : null)
-    from = at + needle.length
+/* 门控扫描面：**两页都扫**。只扫详情页会漏掉广场页 SquareView 的同门按钮
+   （本次真缺陷面：广场页那两处一直合规，旧套件根本没看它）。 */
+function cleanPages(pages) {
+  const out = {}
+  for (const [page, text] of Object.entries(pages)) out[page] = stripComments(text)
+  return out
+}
+
+/** 某门在各页 `v-if="gate…"` 后紧跟的 class。
+ *  门名按**完整标识符**匹配（负向断言）：否则 `canUpload` 会前缀命中广场页的
+ *  `v-if="canUploadSeal"` —— 那是另一把尺子（管理员门，带 `btn--admin`），会把 B4 打成假红。 */
+function gateClassesByPage(pages, gate) {
+  const out = {}
+  for (const [page, clean] of Object.entries(pages)) {
+    const re = new RegExp(`v-if="${gate}(?![A-Za-z0-9_$])`, 'g')
+    const list = []
+    let m
+    while ((m = re.exec(clean))) {
+      const cls = clean.slice(m.index, m.index + 320).match(/class="([^"]*)"/)
+      list.push(cls ? cls[1] : null)
+    }
+    out[page] = list
   }
   return out
+}
+
+const flatGateHits = (pages, gate) => Object.values(gateClassesByPage(pages, gate)).flat()
+
+/** B3：管理员门的缺漏（零命中 ＝ 没扫到样本，同样算红，防「取不到就绿」）。 */
+function b3Missing(pages) {
+  return ADMIN_GATES.filter((g) => {
+    const list = flatGateHits(pages, g)
+    return list.length === 0 || list.some((c) => c === null || !/\bbtn--admin\b/.test(c))
+  })
+}
+
+/** B4：普通权限门泄漏（任一页带上 `btn--admin` 即红）。 */
+function b4Leaks(pages) {
+  return NORMAL_GATES.filter((g) => flatGateHits(pages, g).some((c) => c && /\bbtn--admin\b/.test(c)))
+}
+
+/** B8：同一能力门**跨页面同一 class 口径** —— 一处合规、一处漏网即红（旧套件的盲区）。 */
+const CROSS_PAGE_GATE = 'canClearLocal'
+const B8_EXPECTED = {
+  detailHits: 1,
+  squareHits: 2,
+  detailAllAdmin: true,
+  squareAllAdmin: true,
+  uniform: true
+}
+function b8Report(pages) {
+  const byPage = gateClassesByPage(pages, CROSS_PAGE_GATE)
+  const isAdmin = (c) => !!(c && /\bbtn--admin\b/.test(c))
+  const detail = byPage.detail || []
+  const square = byPage.square || []
+  const flags = [...detail, ...square].map(isAdmin)
+  return {
+    detailHits: detail.length,
+    squareHits: square.length,
+    detailAllAdmin: detail.length > 0 && detail.every(isAdmin),
+    squareAllAdmin: square.length > 0 && square.every(isAdmin),
+    uniform: flags.length > 0 && flags.every((f) => f === flags[0])
+  }
 }
 
 /** 全仓 `[data-admin-action]` 取值集合（递归 src/**）。 */
@@ -249,8 +335,6 @@ function judgeView(viewText) {
   const adminTags = tags.filter((t) => /\bbtn--admin\b/.test(t.raw))
   const normalTargets = ['存入雲盤', '下載高清原圖', '勘誤']
   const normalSamples = tags.filter((t) => normalTargets.includes(t.text))
-  const gateMap = {}
-  for (const g of [...ADMIN_GATES, ...NORMAL_GATES]) gateMap[g] = gateClasses(clean, g)
   /* 锚点必须取**模板分支**：脚本段里 `item.key === 'author'` 另有一处（`resolveAuthorDisplayName`），
      按裸字面量取会切到 script 段 ⇒ C1 假红（本套第二版即踩此坑）。 */
   const authorAt = clean.indexOf(`v-else-if="item.key === 'author'"`)
@@ -262,7 +346,6 @@ function judgeView(viewText) {
     adminTagsWithoutLabel: adminTags.filter((t) => !t.raw.includes('僅${ADMIN_LABEL}可見')).length,
     normalSampleCount: normalSamples.length,
     normalSampleAdminCount: normalSamples.filter((t) => /\bbtn--admin\b/.test(t.raw)).length,
-    gateMap,
     adminActionCount: adminActionValues().length,
     authorBranchUsesPicker: authorBranch.includes('<PersonPicker'),
     authorBranchInputCount: countOf(authorBranch, '<input'),
@@ -277,10 +360,13 @@ function judgeView(viewText) {
 const baseCss = read(BASE_CSS_REL)
 const badgeSrc = read(BADGE_REL)
 const viewSrc = read(VIEW_REL)
+const squareSrc = read(SQUARE_REL)
 
 const baseJudge = judgeBaseCss(baseCss)
 const badgeJudge = judgeBadge(badgeSrc)
 const viewJudge = judgeView(viewSrc)
+/* 门控扫描面：详情页 ＋ 广场页（两页都扫，见 `cleanPages`）。 */
+const pageClean = cleanPages({ detail: viewSrc, square: squareSrc })
 
 /* --------------------------------- A 样式单点 ---------------------------- */
 section('A', '样式单点：.btn--admin（虚线 ＋ hover 实线）与 AdminBadge（绝对定位 / 不吃点击 / 无颜色字面量）')
@@ -330,33 +416,33 @@ check('A7', 'AdminBadge 着色：用 `currentColor`（跟随按钮文字色）�
 check('A8', 'AdminBadge 零 `visibility` 声明（角标靠定位出界，不靠隐藏）', { hasVisibility: false }, { hasVisibility: badgeJudge.hasVisibility })
 
 /* --------------------------------- B 应用面 ------------------------------ */
-section('B', '应用面：管理员门控按钮成对带样式＋角标＋「僅${ADMIN_LABEL}可見」，普通按钮零误加，钩子面不变')
-check('B1', '`btn--admin` 开标签数 ＝ `<AdminBadge` 数（每个管理入口都配一枚锁标；不成对即红）且 ≥ 10', {
-  badgeCount: viewJudge.adminTagCount
+section('B', '应用面：管理员门控按钮成对带样式＋角标＋「僅${ADMIN_LABEL}可見」，普通按钮零误加，跨页同口径，钩子面不变')
+check('B1', '`btn--admin` 开标签数 ＝ `<AdminBadge` 数（每个管理入口都配一枚锁标；不成对即红）且成对数 ≥ 11', {
+  paired: viewJudge.adminTagCount === viewJudge.badgeCount,
+  atLeast11: viewJudge.adminTagCount >= 11
 }, {
-  badgeCount: viewJudge.badgeCount
+  paired: true,
+  atLeast11: true
 })
 check('B2', '每个带 `btn--admin` 的开标签都含「僅${ADMIN_LABEL}可見」（title / aria-label 至少一处：悬停与读屏都有落点）', {
   adminTagsWithoutLabel: 0
 }, { adminTagsWithoutLabel: viewJudge.adminTagsWithoutLabel })
-check('B3', '10 个管理员门控 `v-if` 后紧跟的 class 均含 `btn--admin`（逐个门点名，缺一即红）', {
+check('B3', '11 个管理员门（**详情页 ＋ 广场页**，含 `canClearLocal` 清除本機資料）`v-if` 后紧跟的 class 均含 `btn--admin`（逐个门点名；零命中 / 缺类即红）', {
   missing: []
+}, { missing: b3Missing(pageClean) })
+check('B4', '普通用户权限门 `canUpload`（实物照片上传）后**不得**带 `btn--admin`（两页都扫）；命中数钉死 ＝ 1，防「没取到样本」冒充全绿', {
+  leaked: [],
+  canUploadHits: 1
 }, {
-  missing: ADMIN_GATES.filter((g) => {
-    const list = viewJudge.gateMap[g] || []
-    return list.length === 0 || list.some((c) => c === null || !/\bbtn--admin\b/.test(c))
-  })
-})
-check('B4', '普通用户权限门（`canClearLocal` 清除本機資料 / `canUpload` 实物照片上传）后**不得**带 `btn--admin`', {
-  leaked: []
-}, {
-  leaked: NORMAL_GATES.filter((g) => (viewJudge.gateMap[g] || []).some((c) => c && /\bbtn--admin\b/.test(c)))
+  leaked: b4Leaks(pageClean),
+  canUploadHits: flatGateHits(pageClean, 'canUpload').length
 })
 check('B5', '普通按钮（存入雲盤 / 下載高清原圖 / 勘誤）开标签零 `btn--admin`（误加即红）', {
   normalSampleAdminCount: 0
 }, { normalSampleAdminCount: viewJudge.normalSampleAdminCount })
 check('B6', '样本面自证：普通按钮确实取到 ≥ 3 个开标签（防「没取到样本」冒充全绿）', { atLeast3: true }, { atLeast3: viewJudge.normalSampleCount >= 3 })
 check('B7', '`[data-admin-action]` 全仓取值集合仍恰 12（样式改动不得新增钩子取值）', { count: 12 }, { count: viewJudge.adminActionCount })
+check('B8', '跨页面同口径：同一能力门 `canClearLocal`（清除本機資料）在详情页 SealDetailView 与广场页 SquareView 的所有按钮必须**同一** class 口径且均带 `btn--admin`（一处合规一处漏网 ⇒ 红；两页命中数钉死 ⇒ 只扫一页必被发现）', B8_EXPECTED, b8Report(pageClean))
 
 /* --------------------------------- C 作者选择器 -------------------------- */
 section('C', '勘误作者：PersonPicker 单点（只选不填），行集 / 显示名复用服务层，提交链零改动')
@@ -399,6 +485,33 @@ const rawRules = cssRules(viewSrc)
 check('D5', '负对照 ⑤（扫描口径）：不剥注释直接切 CSS ⇒ 注释块被当选择器文本（本套第一版即因此假红 C1/C5）；钉住「先剥注释再判」', {
   contaminated: true
 }, { contaminated: rawRules.some((r) => r.selector.includes('仅管理员') || r.selector.includes('btn--admin') || r.selector.includes('/*')) })
+
+/* —— 本次真缺陷面的负对照：分类归错 ＋ 只扫一页，判据必须会响 —— */
+const d6 = cleanPages({
+  detail: viewSrc.replace(
+    'v-if="canClearLocal && orphanCount > 0"\n      class="btn btn--ghost btn--admin"',
+    'v-if="canClearLocal && orphanCount > 0"\n      class="btn btn--ghost"'
+  ),
+  square: squareSrc
+})
+check('D6', '负对照 ⑥：删掉详情页孤兒行「清除本機資料」的 `btn--admin`（广场页那两处仍合规）⇒ B3 与新判据 B8 必红（跨页一处合规一处漏网）', {
+  missing: ['canClearLocal'],
+  b8Pass: false
+}, {
+  missing: b3Missing(d6),
+  b8Pass: canon(B8_EXPECTED) === canon(b8Report(d6))
+})
+
+const d7 = cleanPages({
+  detail: viewSrc.replace(
+    'v-if="canUpload" class="btn btn--ghost detail__upload-btn"',
+    'v-if="canUpload" class="btn btn--ghost btn--admin detail__upload-btn"'
+  ),
+  square: squareSrc
+})
+check('D7', '负对照 ⑦：给 `canUpload` 普通权限门的按钮擅自加 `btn--admin` ⇒ B4 必红（判据不恒空、也不是一刀切：管理员门要带、普通门不许带）', {
+  leaked: ['canUpload']
+}, { leaked: b4Leaks(d7) })
 
 /* ---------------------------------------------------------------- 收尾 */
 const total = results.length
