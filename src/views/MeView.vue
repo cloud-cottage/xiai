@@ -16,7 +16,7 @@
  *        · 提交中 `busy` 禁双击；空 / 未修改**不提交**。
  *   ② 手機號 —— 打码（`166****1656` 形态）只读，**无修改入口**。
  *   ③ 註冊時間 —— 本机 `users` 行 `created_at`，按仓内既有形态 `utils/format.js::formatDateTime`。
- *   ④ 金 —— 当前余额（经 `services.points.getBalance()`）＋ 指向 `/points` 的链接。
+ *   ④ 金 —— 当前余额（经 `services.points.displayPoints()`，与页头 / 積分中心同一回落链）＋ 指向 `/points` 的链接。
  *   ⑤ 登出 —— **复用仓内既有单点** `utils/useLogout.js`（页头 `AppHeader.vue`、
  *      登录页 `LoginView.vue` 同一份壳：三态文案 / 防重复点 / toast 全在那边），
  *      本页**不重写**登出逻辑、不另造文案。
@@ -125,8 +125,12 @@ const phoneMasked = computed(() => {
 const createdAt = computed(() => formatDateTime(user.value ? user.value.created_at : ''))
 
 /* ------------------------------------------------------------------ ④ 金 */
-/** 当前余额（经门面 `services.points.getBalance()`，与积分中心同一取法）。 */
-const gold = computed(() => services.points.getBalance())
+/**
+ * 当前余额（**本單**：经门面 `services.points.displayPoints()`，与页头 / 積分中心
+ * **同一取法、同一回落链** —— 云端权威账本优先，取不到回落本机并带标注；
+ * 不再读本机账本的余额读数函数，避免出现第二套余额展示）。 */
+const goldView = computed(() => services.points.displayPoints())
+const gold = computed(() => goldView.value.points)
 
 /* ------------------------------------------------------------------ ⑤ 登出（复用单点） */
 /* 退出三态（进行中 / 成功 / 失败）：与页头 `AppHeader.vue`、登录页 `LoginView.vue`
@@ -248,7 +252,7 @@ onMounted(() => {
             </div>
             <div class="me-row">
               <dt>金</dt>
-              <dd data-me-gold>
+              <dd data-me-gold :title="goldView.note || null">
                 <b class="me-gold__num">{{ gold }}</b>
                 <span class="me-gold__unit">金</span>
                 <router-link class="me-gold__link" :to="{ name: 'points' }">積分中心</router-link>

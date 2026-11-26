@@ -3,7 +3,7 @@
 import { accountLabel } from '../data/roleLabels.js'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { auth } from '../services/index.js'
+import { auth, points } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 /* **服务端角色读面**：登录成功后向服务端确认「我是谁」（`sub-admin` 掌書記 是服务端授予的
    真实身份）；取不到 ⇒ 保持原值，**绝不**默认成管理员。 */
@@ -52,11 +52,15 @@ const {
 } = useLogout()
 
 /* 重新登入成功后不留「已退出登錄」的旧提示（否则与「歡迎回來」自相矛盾）。
-   同时向服务端确认角色（fire-and-forget：失败静默、**不默认任何角色**）。 */
+   同时向服务端确认角色（fire-and-forget：失败静默、**不默认任何角色**）。
+   **登录后补读一次云端权威余额**（本單；与角色那次同一时点、同形 fire-and-forget）：
+   失败静默、不阻塞、不弹窗 —— 取不到只等于 `points.displayPoints()` 走回落并带
+   「本機記錄（未取得雲端餘額）」标注。未登录（`next` 为空）⇒ 零请求。 */
 watch(user, (next) => {
   if (next) {
     logoutNotice.value = ''
     refreshMyRole()
+    points.loadCloudPoints().catch(() => {})
   }
 })
 

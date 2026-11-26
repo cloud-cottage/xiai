@@ -20,7 +20,10 @@ export const isLoggedIn = computed(() => state.user !== null)
 
 export const isAdmin = computed(() => state.user !== null && state.user.role === 'admin')
 
-export const goldBalance = computed(() => (state.user ? state.user.points : 0))
+/* **余额上屏不在这里**（本單）：「金」的展示读数单点是 `services/points.js::displayPoints()`
+   （云端权威账本优先 ⇒ 取不到回落本机并标注）。本文件**不再导出**任何余额 computed ——
+   留一个就等于给全仓开了第二条回落链；本机 `users` 行的 `points` 仍由服务层（登录态 /
+   下载计费）读写，本文件只管 `state.user` 本身。 */
 
 export function setUser(user) {
   state.user = user

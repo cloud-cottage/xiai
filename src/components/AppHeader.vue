@@ -2,7 +2,7 @@
 <script setup>
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { currentUser, goldBalance, isLoggedIn } from '../data/session.js'
+import { currentUser, isLoggedIn } from '../data/session.js'
 /* **徽號上屏名的单点派生**（本單）：页头昵称一律经 `services.profile.displayNicknameOf(user)`
    （回落链全仓唯一处），模板不写 `user.nickname`、也不自造第二套回落。 */
 import { services } from '../services/index.js'
@@ -36,7 +36,18 @@ const logoUrl = `${import.meta.env.BASE_URL}assets/xiai-logo.svg`
 
 const user = computed(() => currentUser())
 const logged = isLoggedIn
-const gold = goldBalance
+/**
+ * **金餘額上屏单点**（本單）：只经 `services.points.displayPoints()` —— 云端权威账本
+ * 读数可用 ⇒ 云端值；未取到（未登录 / 离线 / 回包失败）⇒ 回落本机 `users` 行 ＋
+ * `note` 标注。模板**不再**直读本机 `users` 行的余额字段，也不自造第二套回落。 */
+const goldView = computed(() => services.points.displayPoints())
+const gold = computed(() => goldView.value.points)
+/** 回落时的标注（`本機記錄（未取得雲端餘額）`）；云端值在下 ⇒ 空串 ⇒ 不带 title。 */
+const goldNote = computed(() => goldView.value.note)
+/* 无障碍名：回落时把标注**并进** `aria-label`（`title` 同句），云端值在下 ⇒ 恒 `積分中心`。 */
+const goldAriaLabel = computed(() =>
+  goldNote.value ? `積分中心 · ${goldNote.value}` : '積分中心'
+)
 /**
  * **徽號上屏名的单点派生**：只在这里取一次，模板里不再调用、也不写第二套回落。
  *
@@ -143,6 +154,10 @@ onMounted(() => {
         profileTick.value += 1
       })
       .catch(() => {})
+    /* **登录后补读一次云端权威余额**（只一次；与上面的 `loadMyProfile` 同形）：失败静默、
+       不阻塞渲染、不弹窗 —— 取不到只等于 `displayPoints()` 走回落并带「本機記錄」标注。
+       （真·登录动作那一次由 `LoginView` 的 `watch(user)` 触发，同一会话不重复发。） */
+    services.points.loadCloudPoints().catch(() => {})
   }
 })
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
@@ -194,12 +209,15 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
       </button>
 
       <!-- 金：原不可点 `span` 改为**可点**（同一圆角外观、同一 `{{ gold }}金` 文本与字号），
-           指向積分中心；`v-if="logged"` 保留。 -->
+           指向積分中心；`v-if="logged"` 保留。
+           **上屏读数单点（本單）**：`{{ gold }}` ＝ `services.points.displayPoints()`（云端权威
+           账本优先）；回落时 `title` / `aria-label` 注明「本機記錄（未取得雲端餘額）」。 -->
       <button
         v-if="logged"
         type="button"
         class="app-header__gold"
-        aria-label="積分中心"
+        :aria-label="goldAriaLabel"
+        :title="goldNote || null"
         data-header-gold
         @click="go('points')"
       >

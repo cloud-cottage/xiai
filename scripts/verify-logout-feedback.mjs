@@ -338,7 +338,10 @@ check(
   {
     sessionDefines: /export const isAdmin = computed\(\(\) => state\.user !== null && state\.user\.role === 'admin'\)/.test(SESSION),
     sidebarImports: SIDEBAR.includes("import { isAdmin, isLoggedIn } from '../data/session.js'"),
-    headerImports: HEADER.includes("import { currentUser, goldBalance, isLoggedIn } from '../data/session.js'")
+    /* **本單（金余额上屏统一到云端账本）**：`AppHeader` 不再从 `session.js` 取余额 computed
+       （`goldBalance` 已删 —— 余额展示单点移到 `services/points.js::displayPoints()`），
+       故这里只判它仍从 `session.js` 取 `currentUser` / `isLoggedIn`（登出态的两个真源）。 */
+    headerImports: HEADER.includes("import { currentUser, isLoggedIn } from '../data/session.js'")
   }
 )
 

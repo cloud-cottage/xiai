@@ -33,7 +33,10 @@ import { useEscToClose } from '../utils/useEscToClose.js'
 /** 任何一次写入（如改邀请奖励）后 +1，使派生读数立即重算。 */
 const dataVersion = ref(0)
 
-const balance = computed(() => points.getBalance())
+/* **余额上屏单点（本單）**：页首「當前餘額」只经 `points.displayPoints()` —— 云端权威账本
+   读数可用 ⇒ 云端值；未取到（未登录 / 离线 / 回包失败）⇒ 回落本机 `users` 行 ＋ 标注。
+   **列表 / 流水不动**：`listLedger()`（累計獲得 / 累計消耗 / 明细表）仍是本机流水账。 */
+const balanceView = computed(() => points.displayPoints())
 const rows = computed(() =>
   points
     .listLedger()
@@ -150,9 +153,13 @@ useEscToClose({
 
     <div class="balance-row">
       <div class="balance">
-        <span class="balance__num">{{ balance }}</span>
+        <span class="balance__num">{{ balanceView.points }}</span>
         <span class="balance__unit">金</span>
         <span class="balance__label">當前餘額</span>
+        <!-- 回落标注（本單）：云端读数未取到时，本机镜像值必须带着自己的身份上屏。 -->
+        <span v-if="balanceView.fallback" class="balance__note" data-balance-source="local">
+          {{ balanceView.note }}
+        </span>
       </div>
       <div class="balance">
         <span class="balance__num">{{ earned }}</span>
@@ -309,6 +316,13 @@ useEscToClose({
 }
 
 .balance__label {
+  flex: 1 0 100%;
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
+}
+
+/* 回落标注（本單）：与 `.balance__label` 同一列、同一字号字色（零新色值）。 */
+.balance__note {
   flex: 1 0 100%;
   color: var(--c-text-muted);
   font-size: var(--t-xs);

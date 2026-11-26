@@ -20,7 +20,13 @@ import {
   saveDownloadRows
 } from '../data/db.js'
 import { readInvites, writeInviteRows, readInviteRewardSetting, userRowsInviteDenial, writeUserRowsGuarded } from '../data/drive.js'
-import { currentUser, setUser } from '../data/session.js'
+/* **雲端權威賬本上屏（本單）**：`userGate` ＝ 仓内**既有用户令牌通道**（与 `services/profile.js`
+   同一条；本文件**不自建**第二条通道、不直调 `callCloudFunction`）；`isLoggedIn` 供
+   `loadCloudPoints()` 的未登录前置（未登录 ⇒ **不发请求**）。 */
+import { userGate } from './userToken.js'
+import { currentUser, isLoggedIn, setUser } from '../data/session.js'
+/* **共享响应式读数（本單）**：云端余额只此一份可变状态，只由 `loadCloudPoints()` 写入。 */
+import { reactive } from 'vue'
 
 export const GOLD_UNIT = '金'
 export const GOLD_INITIAL = 50
@@ -36,6 +42,13 @@ export const CORRECTION_REWARD = 10
  */
 export const INVITE_REWARD_DEFAULT = 10
 
+/**
+ * **本机账本读数**（下载计费用；**不是上屏派生**）。
+ *
+ * ⚠️ 余额**展示**一律走本文件末段的 `displayPoints()`（云端权威账本优先）——
+ * 本函数只服务 `quoteDownload()` / `chargeSealDownload()` 的**本机扣费面**
+ * （下载计费仍走本机 `users` 行，与云端账本并存；本单不改服务端计费）。
+ */
 export function getBalance() {
   const user = currentUser()
   return user ? user.points : 0
@@ -409,4 +422,116 @@ export function settleInviteReward(inviterId, inviteeId) {
     invitee: { id: invitee, amount: reward, balance: inviteeUpdated.points, ledger_id: inviteeLedger.id },
     message: `已向邀請人與被邀請人各發放 ${reward} 金。`
   }
+}
+
+/* ============================================================================
+   **「金」余额上屏单点（本單）：云端权威账本优先 ⇒ 取不到回落本机并标注**
+   ----------------------------------------------------------------------------
+   背景（Kevin 2026-11-26 实测根因）：页头 / 積分中心此前读的是**本机 `users` 行的
+   `points`**（本地镜像），而 AI 修復计费是**服务端在云端账本上裁决**的 ⇒ 界面看到
+   「170」、云端真值却是 0。本段把**余额上屏**统一到云端权威账本（只读 op
+   `getPointsBalance`，云函数已有、本单**零服务端改动**）：
+
+   ① **通道唯一**：`loadCloudPoints()` 只经 `userGate`（＝ `services/profile.js` 同一条
+      用户令牌通道），**不自建第二条通道**、不直调 `callCloudFunction`、零写入；
+   ② **失败不抛、不弹窗**：未登录 ⇒ 不发请求；传输失败 / 结构化拒绝 / 回包缺读数
+      一律 `{ok:false, reason, message}`（**不编造 0**），共享读数保持「未取到」；
+   ③ **回落唯一**：`displayPoints()` 是**全仓唯一的余额上屏派生**（云端可用 ⇒ 云端；
+      未取到 ⇒ 本机 `user.points` ＋ `note` 标注）；组件 / 视图**只读它**，不得各写一套；
+   ④ **本机账本照旧**：`getBalance()` / `quoteDownload()` / `chargeSealDownload()` 的
+      下载计费仍走本机 `users` 行（**与云端账本并存**，本单不改服务端计费 —— 见回件
+      「遗留不一致」）；本段对本机行**零写入**。
+   ============================================================================ */
+
+/** 服务端 op 名（须与云函数 `cloudfunctions/xiai-user-token/lib/ops.js::OPS` 注册面逐字一致；**零载荷键**）。 */
+export const POINTS_BALANCE_OP = 'getPointsBalance'
+
+/**
+ * 回包读数键面（经 `userGate` 第三参 `readoutKeys` 的 additive 通道原样上抛；
+ * 与云函数 `index.js` 的按 op 收窄透传真源同字面 —— 服务端未回 ⇒ 键缺席、**不编造**）。
+ */
+export const POINTS_BALANCE_READOUT_KEYS = Object.freeze(['points', 'updated_at'])
+
+/**
+ * **回落标注**（全仓唯一字面）：云端读数不可用、回落本机 `users` 行时上屏用。
+ * 页头经 `title` / `aria-label` 注明，積分中心页首余额就地注一句 —— 让「本机镜像值」
+ * 永远带着自己的身份上屏，不冒充云端真值。
+ */
+export const POINTS_FALLBACK_NOTE = '本機記錄（未取得雲端餘額）'
+
+/**
+ * **共享响应式读数（全仓唯一可变的云端余额状态）**：
+ *   · **只由 `loadCloudPoints()` 写入**（成功才置 `ok:true`；失败保持原值 ——
+ *     「未知」≠「没有」，失败不清上一次成功读数）；
+ *   · `uid` ＝ 取数当时的登录用户 id —— 换账号后旧读数因 uid 不匹配自动失效，
+ *     **不会把上一位的余额显示给下一位**；
+ *   · 组件 / 视图**不直接读它**，一律经 `displayPoints()`。
+ * @type {{ok:boolean, uid:string, points:number, updated_at:string}}
+ */
+export const cloudPoints = reactive({ ok: false, uid: '', points: 0, updated_at: '' })
+
+/**
+ * **读云端权威账本余额**（`getPointsBalance`；只读、零写入、零补记）。
+ *
+ * 未登录 ⇒ **不发请求**、回 `{ok:false}`；传输失败 / 服务端结构化拒绝 ⇒ `{ok:false}`
+ * （原样带服务端 `reason` / `message`）；回包缺 `points` 读数（如 dev / 离线形态门放行）
+ * ⇒ `{ok:false}`（**绝不把「没取到」写成 0**）。成功 ⇒ `{ok:true, points, updated_at}`
+ * 并更新共享读数 —— 三种失败**一律不抛、不弹窗**（与 `profile.js::loadMyProfile` 同形）。
+ * @returns {Promise<{ok:true, points:number, updated_at:string}
+ *                  |{ok:false, reason:string, message:string}>}
+ */
+export async function loadCloudPoints() {
+  if (!isLoggedIn.value) {
+    return { ok: false, reason: 'FORBIDDEN', message: '未登錄，無法讀取雲端餘額。' }
+  }
+  const user = currentUser()
+  let reply = null
+  try {
+    /* 载荷**封闭零键**（服务端 `POINTS_BALANCE_ALLOWED_KEYS === []`；身份只从令牌派生）。 */
+    reply = await userGate(POINTS_BALANCE_OP, {}, { readoutKeys: [...POINTS_BALANCE_READOUT_KEYS] })
+  } catch {
+    /* 传输层异常同样是「没取到」—— 不抛给页面、不动登录态、不清既有读数。 */
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端餘額暫不可用；本次未讀取。' }
+  }
+  if (!reply || reply.ok !== true) {
+    return {
+      ok: false,
+      reason: reply && typeof reply.reason === 'string' ? reply.reason : 'STORAGE_UNAVAILABLE',
+      message: reply && typeof reply.message === 'string' ? reply.message : '雲端餘額讀取失敗。'
+    }
+  }
+  const raw = reply.points
+  const points =
+    typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN
+  if (!Number.isFinite(points)) {
+    /* 回包没有 `points` 读数 ⇒ **不编造 0**：保持「未取到」⇒ 上屏走回落并带标注。 */
+    return { ok: false, reason: 'STORAGE_UNAVAILABLE', message: '雲端回包未附餘額讀數；本次按回落顯示。' }
+  }
+  cloudPoints.ok = true
+  cloudPoints.uid = user ? user.id : ''
+  cloudPoints.points = points
+  cloudPoints.updated_at = typeof reply.updated_at === 'string' ? reply.updated_at : ''
+  return { ok: true, points, updated_at: cloudPoints.updated_at }
+}
+
+/**
+ * **余额上屏的单点派生**（页头 / 積分中心 / 我的名刺**都调它**；同步、零网络、绝不抛错）：
+ *
+ *   ① 未登录 ⇒ `{points: 0, source: 'guest'}`（不请求、显 0、无标注）；
+ *   ② 云端读数可用（`loadCloudPoints()` 成功 **且** 属于当前登录用户）⇒ **云端值**；
+ *   ③ 未取到（未登录过 / 离线 / 回包失败 / 换了账号）⇒ 回落本机 `users` 行 `points`
+ *      ＋ `note` ＝ `POINTS_FALLBACK_NOTE`（`本機記錄（未取得雲端餘額）`）。
+ *
+ * **全仓只此一处回落链**：任何页面不得再读 `state.user.points` / `getBalance()` 做余额展示
+ * （`getBalance()` 只服务下载计费的本机账本面）。
+ * @returns {{points:number, source:'cloud'|'local'|'guest', fallback:boolean, note:string}}
+ */
+export function displayPoints() {
+  const user = currentUser()
+  if (!user) return { points: 0, source: 'guest', fallback: false, note: '' }
+  if (cloudPoints.ok && cloudPoints.uid === user.id) {
+    return { points: cloudPoints.points, source: 'cloud', fallback: false, note: '' }
+  }
+  const local = Number.isFinite(user.points) ? user.points : 0
+  return { points: local, source: 'local', fallback: true, note: POINTS_FALLBACK_NOTE }
 }
