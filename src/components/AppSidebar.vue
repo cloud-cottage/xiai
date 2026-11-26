@@ -4,23 +4,30 @@ import { computed } from 'vue'
 import { isAdmin, isLoggedIn } from '../data/session.js'
 
 /**
- * 侧边菜单 —— `璽印匯類` / `印風匯覽` / `印家匯徵` → **（管理员）`印譜匯觀`** → `我的名刺` → `我的雲盤`。
+ * 侧边菜单 —— `璽印匯類` / `印風匯覽` / `印家匯徵` → **（管理员）`印譜匯觀`** → `我的雲盤`。
  * 顺序**逐字**：`璽印匯類`（`square`）→ `印風匯覽`（`styles`）→ `印家匯徵`（`persons`）
- * → `我的名刺`（`me`，**三态一律渲染**，本單新增）→ `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `譜` / `刺` / `盤`。
+ * → `我的雲盤`（`my-drive`）。glyph 沿用**单字**约定（**不画 SVG**）：`匯` / `風` / `家` / `譜` / `盤`。
+ *
+ * 【本單（菜单重构）】侧栏**只剩上面五项**；`我的名刺`（`me`）与 `梓行匯溯`（`publishers`）
+ * 两条**已从侧栏移除**（本单逐字要求），入口改到页头：
+ *   · `我的名刺` ⇒ 页头头像菜单的 who 行（`AppHeader.vue` 的 `data-menu-who` → `go('me')`）；
+ *   · `梓行匯溯` ⇒ 页头新增圆形图标【掌書記引】的下拉（`AppHeader.vue` 的
+ *     `data-admin-guide` → `data-admin-guide-menu`，**仅 `isAdminSession()` 为真才渲染**）。
+ * 两条**路由与视图一律保留**（`/me`、`/publishers`）—— **删入口 ≠ 删路由 / 删页面**。
  *
  * 【印譜匯觀】（2026-11-14 裁定｜`docs/book-catalog-ruling-2026-11-14.md` §二）
  *   · 该条**仅管理员可见**：非管理员 / 未登录 ⇒ **整条不渲染**（`items` 里根本没有这一项
  *     ⇒ DOM 零命中；**不得** `disabled` / CSS 隐藏 / 空链接冒充）。判定取法与 AppHeader /
  *     SquareView 同一处（`data/session.js` 的 `isAdmin` 计算属性），不另造第三种取法。
- *   · 位置**在 `my-drive` 之前**（菜单第 4 项）。
+ *   · 位置**在 `my-drive` 之前**（管理员视角的菜单第 4 项，紧跟 `persons` 之后）。
  *
  * 【Slice M1 改版】侧边栏原有四项；删去原 `我的勘誤記錄` / `我的實物照片` / `積分中心`
  * **三个侧边栏条目**，但**三条路由**（`/my/corrections` / `/my/photos` / `/points`）
  * **与三个视图文件一律保留**——顶部弹出菜单（`AppHeader.vue` 的 `go('my-corrections')` /
  * `go('my-photos')` / `go('points')`）仍在用它们。**删入口 ≠ 删路由 / 删页面**。
  *
- * 除【印譜匯觀】与【梓行匯溯】（本單新增，**两条皆管理员专属**）外，管理员与普通用户看到
- * **同一套**菜单：管理员的差异主要体现在页面内的「管理员专属按钮」，不体现为独立入口。
+ * 除【印譜匯觀】（**管理员专属**，本侧栏唯一条件项）外，管理员与普通用户看到**同一套**菜单：
+ * 管理员的差异主要体现在页面内的「管理员专属按钮」，不体现为独立入口。
  * 该管理员入口的可见性**只**作用于它自己这一项。
  * 【我的雲盤】是**普通用户能力入口**（不是管理员按钮）⇒ **三态（未登錄 / 普通 / 管理员）
  * 一律渲染**；未登錄点击该项由路由守门重定向 `/login`（带 `redirect`），不静默失败。
@@ -31,22 +38,18 @@ import { isAdmin, isLoggedIn } from '../data/session.js'
 const logged = isLoggedIn
 
 const items = computed(() => {
+  /* 【本單最终项集】`璽印匯類` → `印風匯覽` → `印家匯徵` →（管理员）`印譜匯觀` → `我的雲盤`。
+     `我的名刺`（`me`）与 `梓行匯溯`（`publishers`）**已从侧栏移除**（入口见文件头注）。 */
   const list = [
     { key: 'square', to: { name: 'square' }, glyph: '匯', label: '璽印匯類' },
     { key: 'styles', to: { name: 'styles' }, glyph: '風', label: '印風匯覽' },
     { key: 'persons', to: { name: 'persons' }, glyph: '家', label: '印家匯徵' }
   ]
-  /* 【印譜匯觀】（管理员专属）：非管理员 / 未登录 ⇒ push 不执行 ⇒ 该项**零渲染**。 */
+  /* 【印譜匯觀】（管理员专属）：非管理员 / 未登录 ⇒ push 不执行 ⇒ 该项**零渲染**。
+     位置紧跟 `persons` 之后（本侧栏唯一条件项，**不改三态渲染、不挪位置**）。 */
   if (isAdmin.value) {
     list.push({ key: 'books', to: { name: 'books' }, glyph: '譜', label: '印譜匯觀' })
-    /* 【梓行匯溯】（本單｜xiai.spec §3.107）：同样**仅管理员可见**，判定取法仍是同一处
-       `data/session.js` 的 `isAdmin`（**不另造第二种取法**）；位置在 `books` 之后、`my-drive` 之前。
-       **条件 push（不在上面的基础数组里）** ⇒ 基础四项的结构面一字不动。 */
-    list.push({ key: 'publishers', to: { name: 'publishers' }, glyph: '梓', label: '梓行匯溯' })
   }
-  /* 【我的名刺】（本單｜`/me`）：**普通用户能力入口**（徽號是用户自己的东西，不是管理员
-     专属）⇒ 三态一律渲染，**不进上面的 `isAdmin` 块**；位置在 `my-drive` 之前。 */
-  list.push({ key: 'me', to: { name: 'me' }, glyph: '刺', label: '我的名刺' })
   list.push({ key: 'my-drive', to: { name: 'my-drive' }, glyph: '盤', label: '我的雲盤' })
   return list
 })

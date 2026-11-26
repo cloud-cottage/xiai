@@ -135,18 +135,6 @@ const routes = [
     component: () => import('../views/ConnectFeicuiView.vue'),
     meta: { title: '斐萃令牌' }
   },
-  /* **本單新增一條**：`/admin`（【管理後台】，`meta.title` 逐字 `管理後台`，**不挂 `requiresAuth`**）——
-     **纯静态导航卡片页**：四张卡分别跳既有管理页（`/publishers`、`/books`、`/connect`、`/points`），
-     卡片可见性走既有管理员门的服务层单点、进入资格走管理层会话的同一单点（见 `services/admin.js`）；
-     页内三态（游客登录引导 / 非管理层页内拒绝 / 管理层按门渲染，一张都不命中 ⇒ 诚实空态）
-     **一律不重定向**；本页**零数据请求、零写入**（不读云端集合、不调任何写 op）。
-     本頁自帶三態、不挂 requiresAuth（与 books / publishers / connect-feicui 同形）；游客 URL 不变、零卡片。 */
-  {
-    path: '/admin',
-    name: 'admin',
-    component: () => import('../views/AdminView.vue'),
-    meta: { title: '管理後台' }
-  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',

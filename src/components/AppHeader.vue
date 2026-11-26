@@ -14,6 +14,9 @@ import HeaderSearch from '../components/HeaderSearch.vue'
 /* **身份标记**（徽号那一行，昵称之后、手机号 `·` 之前）：`admin` / `sub-admin` 才渲染，
    普通用户**零渲染**；只做展示，不参与任何判定。 */
 import RoleMark from '../components/RoleMark.vue'
+/* **【掌書記引】上屏名的单点取字**（本單）：字面在 `data/roleLabels.js`（身份词单一真源），
+   页头**零字面复制** —— 模板一律插值 `ADMIN_GUIDE_LABEL`。 */
+import { ADMIN_GUIDE_LABEL } from '../data/roleLabels.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -21,7 +24,10 @@ const route = useRoute()
 /* 只在掛載時帶入一次當前關鍵詞（原行為同此；不與路由做後續雙向同步）。 */
 const initialQuery = typeof route.query.q === 'string' ? route.query.q : ''
 const menuOpen = ref(false)
+/* 【掌書記引】下拉态：**与头像菜单各自独立**（互不共用 ref），点开一个必关另一个。 */
+const guideOpen = ref(false)
 const userRef = ref(null)
+const guideRef = ref(null)
 
 /* 頁頭 logo 在 `public/assets/` 下（**不是** import 的資源）：模板裡寫死的絕對 src
    不會被 Vite 改寫（`@vitejs/plugin-vue` 的 `transformAssetUrls.includeAbsolute` 恒 false）
@@ -55,9 +61,10 @@ const avatarGlyph = computed(() => {
   if (!u) return '客'
   return u.role === 'admin' ? '守' : '友'
 })
-/* **管理後台入口的可见性（单点）**：判定收在服务层，页头**不自写任何角色字面**；
-   无会话 ⇒ `false`（菜单该项零渲染、不占位）。 */
-const managementConsole = computed(() => services.admin.isManagementSession())
+/* **【掌書記引】入口的可见性（单点）**：判定收在服务层 `services.admin.isAdminSession()`
+   （掌書記使＝`admin`），页头**不自写任何角色字面**；非掌書記使 / 无会话 ⇒ `false`
+   （该图标与下拉**零渲染、不占位**，与铃铛 / 金同一形态）。 */
+const adminGuide = computed(() => services.admin.isAdminSession())
 
 /** 關鍵詞提交（普通態按回車）：維持原 `{ q }` 口徑。 */
 function submitKeyword(keyword) {
@@ -82,14 +89,27 @@ function submitCode(code) {
 
 function toggleMenu() {
   menuOpen.value = !menuOpen.value
+  /* 两菜单**互斥**：点开头像菜单 ⇒ 同步关掉【掌書記引】下拉（各自独立、互不干扰）。 */
+  if (menuOpen.value) guideOpen.value = false
 }
 
 function closeMenu() {
   menuOpen.value = false
 }
 
+function toggleGuide() {
+  guideOpen.value = !guideOpen.value
+  if (guideOpen.value) menuOpen.value = false
+}
+
+function closeGuide() {
+  guideOpen.value = false
+}
+
 function go(name) {
+  /* 切路由 ⇒ 两个下拉一并关（与原头像菜单同款：导航即收）。 */
   closeMenu()
+  closeGuide()
   router.push({ name })
 }
 
@@ -100,14 +120,16 @@ function signOut() {
   return runLogout({
     onSignedOut: () => {
       closeMenu()
+      closeGuide()
       return router.push({ name: 'square' })
     }
   })
 }
 
 function onDocClick(event) {
-  if (!menuOpen.value) return
-  if (userRef.value && !userRef.value.contains(event.target)) closeMenu()
+  /* 两个下拉各自判「点在外面」：点头像菜单区域 ⇒ 只关自己，不碰【掌書記引】（反之亦然）。 */
+  if (menuOpen.value && userRef.value && !userRef.value.contains(event.target)) closeMenu()
+  if (guideOpen.value && guideRef.value && !guideRef.value.contains(event.target)) closeGuide()
 }
 
 onMounted(() => {
@@ -145,6 +167,25 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
     </div>
 
     <div class="app-header__actions">
+      <!-- 【掌書記引】（本單新增）：圆形 icon-btn（与铃铛同形制、单字 glyph `引`、不画 SVG）；
+           仅掌書記使（`services.admin.isAdminSession()`）渲染 ⇒ 非掌書記使 / 游客零占位。 -->
+      <div v-if="adminGuide" ref="guideRef" class="app-header__guide">
+        <button
+          class="app-header__icon-btn"
+          type="button"
+          :aria-label="ADMIN_GUIDE_LABEL"
+          :title="ADMIN_GUIDE_LABEL"
+          data-admin-guide
+          :aria-expanded="guideOpen"
+          @click="toggleGuide"
+        >引</button>
+        <!-- 下拉：复用页头既有菜单视觉类 `.app-header__menu`（同一套变量，不新建色值）；
+             **恰一项**「梓行匯溯」。 -->
+        <div v-if="guideOpen" class="app-header__menu" data-admin-guide-menu>
+          <button type="button" @click="go('publishers')">梓行匯溯</button>
+        </div>
+      </div>
+
       <button class="app-header__icon-btn" type="button" aria-label="消息通知" @click="go('points')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
           <path d="M6 9a6 6 0 1 1 12 0c0 4 1.5 5.5 1.5 5.5h-15S6 13 6 9Z" />
@@ -152,9 +193,18 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
         </svg>
       </button>
 
-      <span v-if="logged" class="app-header__gold">
+      <!-- 金：原不可点 `span` 改为**可点**（同一圆角外观、同一 `{{ gold }}金` 文本与字号），
+           指向積分中心；`v-if="logged"` 保留。 -->
+      <button
+        v-if="logged"
+        type="button"
+        class="app-header__gold"
+        aria-label="積分中心"
+        data-header-gold
+        @click="go('points')"
+      >
         <b>{{ gold }}</b><span>金</span>
-      </span>
+      </button>
 
       <div ref="userRef" class="app-header__user">
         <button
@@ -168,8 +218,12 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
         </button>
 
         <div v-if="menuOpen" class="app-header__menu">
+          <!-- who 行（本單改可点）：登录 ⇒ 指向【我的名刺】`/me`（原侧栏入口移至此处）；
+               未登錄 ⇒ 仍是不可点的静态「尚未登錄」行。 -->
           <div class="app-header__menu-who">
-            <template v-if="logged">{{ displayName }}<RoleMark :role="user.role" /> · {{ user.phone }}</template>
+            <button v-if="logged" type="button" data-menu-who @click="go('me')">
+              {{ displayName }}<RoleMark :role="user.role" /> · {{ user.phone }}
+            </button>
             <template v-else>尚未登錄</template>
           </div>
           <button v-if="!logged" type="button" @click="go('login')">登錄 / 註冊</button>
@@ -177,10 +231,6 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
             <button type="button" @click="go('my-corrections')">我的勘誤記錄</button>
             <button type="button" @click="go('my-photos')">我的實物照片</button>
             <button type="button" @click="go('points')">積分中心</button>
-            <!-- **本单改造**：斐萃令牌（管理员签发；入口对已登录用户可见，页内与**服务端**双重判管理员）。 -->
-            <button type="button" data-entry="connect-feicui" @click="go('connect-feicui')">斐萃令牌</button>
-            <!-- **本单新增**：管理後台入口 —— 文案逐字 `管理後台`；可见性＝管理层会话（判定收在服务层单点，页头不自判）。 -->
-            <button v-if="managementConsole" type="button" data-admin-console @click="go('admin')">管理後台</button>
             <button
               type="button"
               data-logout
@@ -216,6 +266,45 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
 .app-header__icon-btn {
   color: var(--slot-header-text);
+}
+
+/* 【掌書記引】容器：与 `.app-header__user` 同一手法（`position: relative` 作下拉的定位上下文），
+   不新建任何色值 —— 下拉本体走既有 `.app-header__menu`。 */
+.app-header__guide {
+  position: relative;
+}
+
+/* 单字 glyph `引`（不画 SVG）：沿页头图标按钮同一形制，只补字面排布。
+   选择器走容器类（`.app-header__guide`），不把 `data-*` 钩子写进样式表 —— 钩子只留给验收。 */
+.app-header__guide .app-header__icon-btn {
+  font-family: var(--font-serif);
+  font-size: var(--t-md);
+  line-height: 1;
+}
+
+/* 金：由不可点 `span` 改为可点 `button`（同一类、同一观感）—— 只补按钮缺的字体继承与指针，
+   外观（底色 / 描边 / 圆角 / 字号）全部沿 `base.css` 的 `.app-header__gold`，不改成描边按钮。 */
+.app-header__gold {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* who 行改可点（指向 `me`）：内层按钮沿用 `.app-header__menu-who` 原排版 —— 不叠菜单按钮的
+   padding / 底色（否则双层内距、行高被撑）；hover 只沿既有令牌换字色，零新色值。 */
+.app-header__menu .app-header__menu-who button {
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  text-align: inherit;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.app-header__menu .app-header__menu-who button:hover {
+  background: none;
+  color: var(--slot-sidebar-item-active-text);
 }
 
 /* 退出進行中：按鈕禁用但不「消失」（仍可讀「正在退出…」），指針不給可用暗示。 */

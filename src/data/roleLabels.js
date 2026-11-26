@@ -42,6 +42,15 @@ export const SUB_ADMIN_LABEL = ROLE_LABEL['sub-admin']
 export const ACCOUNT_FALLBACK = '普通用戶賬號'
 
 /**
+ * **【掌書記引】——页头圆形图标的上屏名**（本單新增；菜单名，**不是**角色身份、不参与任何判定）。
+ *
+ * 为什么收在这里：字面含 `掌書記` ⇒ 全仓「身份词单一真源」检索（`scripts/verify-role-labels.mjs`
+ * B3 ／ `scripts/verify-role-mark.mjs` C3）只放行本文件；页头一律**插值取字**、零字面复制。
+ * 取值逐字 `掌書記引`（本單指名）；繁体、不加【】（上屏不加装饰）。
+ */
+export const ADMIN_GUIDE_LABEL = '掌書記引'
+
+/**
  * **账号身份行文案（三值投影，单一实现点）**：
  *   · `admin`     ⇒ 掌書記使賬號
  *   · `sub-admin` ⇒ 掌書記賬號
