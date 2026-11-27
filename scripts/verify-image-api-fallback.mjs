@@ -31,16 +31,24 @@
  *   E  **静态纪律**：域名字面值只落在 `displayImage.js` 一处；`displayImage.js` 模块级可变状态
  *      恰 1 个（＝ 上次成功索引，**不缓存任何响应体**）；`imageFaces.js` 零直连 `fetch(`；
  *      `displayApiBase()` ＝ `displayApiCandidates()[0]`（旧调用点面逐字未变）。
+ *   G  **A 路回包 `storage_key` 透传（本单）**：`imageAuthority.js::storeViaAuthorityApi` 成功分支
+ *      透传 `payload.storage_key || payload.storageKey`（trim 后原样；回包缺键 / 空串 ⇒ 客户端仍
+ *      空串，**不补** `artifactObjectKeyOf`）、回包给 `mime` 则取（缺省仍 `STORAGE_MIME`），
+ *      成功回包 8 键形状一字不改；端到端 `seals.js::replaceFaceImage` ③a 在云形态下不再报
+ *      「缺少內容尋址讀數」（假 transport ＋ 假云函数通道）；变异负对照 ≥1（把透传改回空串 ⇒
+ *      透传用例 ＋ 端到端用例**必红**，源拷临时目录、仓内零写入）。
  *
- * 纪律：不打印任何密钥 / 令牌原文；断言失败 ⇒ 退出码非 0；本套件零写入、零网络。
+ * 纪律：不打印任何密钥 / 令牌原文；断言失败 ⇒ 退出码非 0；本套件零网络、零仓内写入
+ *（变异只落系统临时目录，跑完即删；数据层读写一律走内存 localStorage 假体）。
  */
 /* **测试环境保护哨兵（硬防线）**：本套件只跑离线假 transport，绝不碰真实 CARD / 云端 / 真网络。 */
 process.env.XIAI_NO_REAL_CARD = '1'
 
 import { register } from 'node:module'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
+import os from 'node:os'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
@@ -307,6 +315,210 @@ check('F4', '导出面未破（imageFaces）', true,
     .every((key) => key in faces))
 check('F5', 'env 覆盖点（VITE_XIAI_API_BASE）仍只在 displayImage.js 一处', ['src/services/displayImage.js'],
   filesWith('VITE_XIAI_API_BASE'))
+
+/* ========================================================================== */
+/* G. A 路回包 `storage_key` 透传（本单）＋ `seals.js` ③a 内容寻址自检端到端     */
+/* ==========================================================================
+  口径（与本单实现点逐条对应）：
+   · `imageAuthority.js::storeViaAuthorityApi` 成功分支**透传**回包 `storage_key`
+     （`payload.storage_key || payload.storageKey`，trim 后原样）；回包给 `mime` 则同取，
+     缺省仍 `STORAGE_MIME`；其余判定（sha256 / bytesLength 自检、reason 表、诊断面）一字不改；
+   · 本机 / 同源基址（本段用 dev env ⇒ `displayApiBase()` ＝ `/api/xiai`）服务端回**空串 /
+     缺键** ⇒ 客户端仍得空串，**不补** `artifactObjectKeyOf`（本机链路语义不变）；
+   · 端到端：`seals.js::replaceFaceImage` 云形态判定树 —— A 路回包带正确键 ⇒ **③a 不再报**
+     「缺少內容尋址讀數」，且流程真走到 ④（假云函数通道收到 `replaceFaceImage` op）。
+  变异负对照（≥1，必红）：把透传改回空串（**源拷到临时目录，仓内零写入**；锚点没打中 ⇒ 当场抛）
+  ⇒ A 路透传用例 ＋ 端到端用例同时红。
+  ========================================================================== */
+globalThis.__XIAI_TEST_ENV__ = {} /* dev / 同源基址（本段 A 路打 `/api/xiai/image/store`）。 */
+const authority = await load('src/services/imageAuthority.js')
+const imageUtils = await load('src/utils/image.js')
+const assetmeta = await load('src/data/assetmeta.js')
+const session = await load('src/data/session.js')
+const writeFace = await load('src/data/writeFaceMode.js')
+const db = await load('src/data/db.js')
+const storage = await load('src/data/storage.js')
+const cloudbaseFn = await load('src/data/cloudbaseFn.js')
+const userToken = await load('src/services/userToken.js')
+const seals = await load('src/services/seals.js')
+const sha256Hex = assetmeta.sha256Hex
+
+/* A 路假回包：`storage_key` / `mime` 按用例编排（`null` ＝ 回包**不带**该键）。 */
+const authorityReply = { storageKey: null, mime: null }
+const G_DIGEST = sha256Hex(webpBytes())
+const G_KEY = authority.artifactObjectKeyOf(G_DIGEST)
+handler = (url, init) => {
+  const body = (init && init.body) || new Uint8Array(0)
+  const payload = { ok: true, sha256: sha256Hex(body), bytesLength: body.length, relPath: '' }
+  if (authorityReply.storageKey !== null) payload.storage_key = authorityReply.storageKey
+  if (authorityReply.mime !== null) payload.mime = authorityReply.mime
+  return replyOf({ status: 200, json: payload, headers: { 'X-Xiai-Idempotent': 'false' } })
+}
+/** 跑一次 A 路写入口（每例独占一轮 ⇒ E 段轮次不变式仍成立）。 */
+const storeViaA = async (storageKey, mime) => {
+  authorityReply.storageKey = storageKey
+  authorityReply.mime = mime
+  beginRound()
+  const out = await authority.storeArtifactBytes(webpBytes())
+  endRound()
+  return out
+}
+
+/* G1：回包带 `storage_key` ⇒ 原样透传，且逐字＝内容寻址键（`artifactObjectKeyOf(摘要)`）。 */
+const g1 = await storeViaA(G_KEY, null)
+check('G1', '回包带 storage_key ⇒ 原样透传（不再硬编码空串）', G_KEY, g1.storageKey)
+check('G1b', '透传值逐字 ＝ artifactObjectKeyOf(回包摘要)', authority.artifactObjectKeyOf(g1.sha256), g1.storageKey)
+
+/* G2：回包缺键 / 空串（本机 · 同源 local 后端语义）⇒ 仍空串，且不被补键。 */
+const g2 = await storeViaA(null, null)
+check('G2', '回包不带 storage_key（本机 / 同源 local 后端缺键）⇒ 仍空串', '', g2.storageKey)
+check('G2b', '…且**不补**成 artifactObjectKeyOf（本机链路语义不变）', false, g2.storageKey === G_KEY)
+const g2c = await storeViaA('', null)
+check('G2c', '回包 storage_key 空串（local 后端回空串）⇒ 仍空串', '', g2c.storageKey)
+
+/* G3：回包带前后空白 ⇒ trim 后原样（不改写内容）。 */
+const g3 = await storeViaA(`  ${G_KEY}\n`, null)
+check('G3', '回包 storage_key 带前后空白 ⇒ trim 后原样', G_KEY, g3.storageKey)
+
+/* G4：回包给 `mime` 则同取；缺省仍是存儲容器 `STORAGE_MIME`。 */
+const g4 = await storeViaA(G_KEY, 'image/tiff')
+check('G4', '回包带 mime ⇒ 取回包值', 'image/tiff', g4.mime)
+const g4b = await storeViaA(G_KEY, null)
+check('G4b', '回包缺 mime ⇒ 仍是存儲容器 STORAGE_MIME', imageUtils.STORAGE_MIME, g4b.mime)
+
+/* G5：成功回包键面一字不改（既有 8 键）。 */
+check('G5', '成功回包键面仍恰 8 键（形状逐字不变）', 'bytesLength,idempotent,message,mime,ok,relPath,sha256,storageKey',
+  Object.keys(g4b).sort().join(','))
+
+/* ---------------- G6：端到端 —— `seals.js` ③a 在云形态下不再恒红 ---------------- */
+const E2E_FACE_ID = 'fc-g-e2e-f1'
+const E2E_SEAL_ID = 'GSEAL01'
+writeFace.setWriteFaceModeOverride('cloud')
+db.ensureSeed()
+storage.writeKey(storage.STORAGE_KEYS.faces, [
+  {
+    _id: E2E_FACE_ID,
+    id: E2E_FACE_ID,
+    sealId: E2E_SEAL_ID,
+    stamp_id: E2E_SEAL_ID,
+    kind: 'FACE',
+    face_no: 1,
+    is_primary: true,
+    face_image_id: 'img-g-e2e-0000000001',
+    seal_name: '自檢印章',
+    dynasty: '清',
+    seal_type: '吉語印',
+    face_style: '朱文',
+    author: '',
+    transcription: ''
+  }
+])
+session.setUser({ id: 'u-g-e2e-000000000001', phone: '13800000002', role: 'admin', nickname: '自檢管理員' })
+
+/* 假云函数通道：`issue` 现签一枚离线令牌（不打印、不落盘到仓）；`replaceFaceImage`
+   在 ④ 结构化拒绝 —— 只为证明流程**已越过 ③a / ③b**（不是为了伪造成功）。 */
+const e2eTransport = []
+cloudbaseFn.setCloudFunctionTransport(async (name, data) => {
+  e2eTransport.push({ name, data })
+  const now = Math.floor(Date.now() / 1000)
+  if (data && data.action === 'issue') {
+    return {
+      result: {
+        ok: true,
+        token: `offline-harness-${sha256Hex(Buffer.from('verify-image-api-fallback')).slice(0, 32)}`,
+        expiresAt: now + 900,
+        issuedAt: now,
+        serverNow: now,
+        ttlSeconds: 900,
+        ver: '1',
+        sub: 'u-g-e2e-000000000001',
+        uid: 'u-g-e2e-000000000001'
+      }
+    }
+  }
+  if (data && data.action === 'verify' && data.op === 'replaceFaceImage') {
+    return { result: { ok: false, reason: 'STORAGE_UNAVAILABLE', message: 'harness：假通道在 ④ 拒（证明已越过 ③a）。' } }
+  }
+  return { result: { ok: false, reason: 'FORBIDDEN', message: 'harness：未知 op（本假通道只认令牌签发与 replaceFaceImage）。' } }
+})
+await userToken.requestUserToken('13800000002', 'offline-harness-credential-not-a-real-token')
+authorityReply.storageKey = G_KEY /* A 路回包带**正确**内容寻址键（云端形态）。 */
+authorityReply.mime = null
+const e2eTransportMark = e2eTransport.length
+beginRound()
+const e2e = await seals.replaceFaceImage(E2E_FACE_ID, { bytes: webpBytes() })
+endRound()
+const e2eTransportSlice = e2eTransport.slice(e2eTransportMark)
+check('G6', '端到端③a：A 路回包带正确 storage_key ⇒ **不再**报「缺少內容尋址讀數」',
+  false, String(e2e.message).includes('缺少內容尋址讀數'))
+check('G6b', '…且流程真走到 ④（假云函数通道收到 replaceFaceImage op）',
+  true, e2eTransportSlice.some((item) => item.data && item.data.op === 'replaceFaceImage'))
+check('G6c', '④ 由假通道结构化拒绝 ⇒ 上拋原话（reason 逐字、零改写）',
+  'STORAGE_UNAVAILABLE', e2e.reason)
+check('G6d', '文案落在 ④ 段「雲端替換失敗」（＝ 已越过 ③a ③b）',
+  true, String(e2e.message).includes('雲端替換失敗'))
+
+/* ---------------- G7：变异负对照（源拷临时目录；仓内零写入） ---------------- */
+const rewriteRelative = (source, baseDir, override) =>
+  source.replace(
+    /(from\s+|import\s+)(['"])(\.{1,2}\/[^'"]+)\2/g,
+    (match, lead, quote, spec) =>
+      `${lead}${quote}${Object.prototype.hasOwnProperty.call(override, spec)
+        ? override[spec]
+        : path.resolve(baseDir, spec)}${quote}`
+  )
+const authSourcePath = path.join(ROOT, 'src/services/imageAuthority.js')
+const sealsSourcePath = path.join(ROOT, 'src/services/seals.js')
+const mutatedAuthSource = rewriteRelative(readFileSync(authSourcePath, 'utf8').replace(
+  'storageKey: replyStorageKey,',
+  "storageKey: '', /* 变异：透传改回空串 */"
+), path.dirname(authSourcePath), {})
+if (!mutatedAuthSource.includes("storageKey: '', /* 变异：透传改回空串 */")) {
+  throw new Error('mutation-auth：锚点未打中（imageAuthority.js 成功分支写法已改 ⇒ 拒绝静默放行）')
+}
+const tempDir = mkdtempSync(path.join(os.tmpdir(), 'xiai-image-key-mutation-'))
+const mutatedAuthPath = path.join(tempDir, 'imageAuthority.mjs')
+writeFileSync(mutatedAuthPath, mutatedAuthSource)
+const mutatedSealsPath = path.join(tempDir, 'seals.mjs')
+writeFileSync(
+  mutatedSealsPath,
+  rewriteRelative(readFileSync(sealsSourcePath, 'utf8'), path.dirname(sealsSourcePath), {
+    './imageAuthority.js': mutatedAuthPath
+  })
+)
+const mutatedAuthority = await import(pathToFileURL(mutatedAuthPath).href)
+const mutatedSeals = await import(pathToFileURL(mutatedSealsPath).href)
+
+const g7a = await (async () => {
+  authorityReply.storageKey = G_KEY
+  authorityReply.mime = null
+  beginRound()
+  const out = await mutatedAuthority.storeArtifactBytes(webpBytes())
+  endRound()
+  return out
+})()
+check('G7a', '变异负对照①：透传改回空串 ⇒ A 路 storageKey 恒空（变异已生效）', '', g7a.storageKey)
+check('G7a2', '变异负对照①′：⇒ G1 的期望（＝内容寻址键）必不成立（G1 必红）',
+  false, g7a.storageKey === G_KEY)
+
+authorityReply.storageKey = G_KEY
+authorityReply.mime = null
+const e2eMark2 = e2eTransport.length
+beginRound()
+const e2eMut = await mutatedSeals.replaceFaceImage(E2E_FACE_ID, { bytes: webpBytes() })
+endRound()
+const e2eSlice2 = e2eTransport.slice(e2eMark2)
+check('G7b', '变异负对照②：透传改回空串 ⇒ **端到端③a 必红**（文案含「缺少內容尋址讀數」）',
+  true, String(e2eMut.message).includes('缺少內容尋址讀數'))
+check('G7c', '变异负对照③：变异下卡在 ③a ⇒ ④ 零调用（假通道未收到 replaceFaceImage）',
+  false, e2eSlice2.some((item) => item.data && item.data.op === 'replaceFaceImage'))
+
+/* 收口：清掉本段注入面（会话 / 形态 / 假通道 / 环境），不给后续段留状态。 */
+session.setUser(null)
+writeFace.setWriteFaceModeOverride(null)
+cloudbaseFn.setCloudFunctionTransport(null)
+rmSync(tempDir, { recursive: true, force: true })
+globalThis.__XIAI_TEST_ENV__ = { PROD: true } /* 恢复 E / F 段原环境（与改动前逐字一致）。 */
 
 /* --------------------------------------------------------------------------- */
 /* 收尾：还原真 transport，打印读数                                             */

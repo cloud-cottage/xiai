@@ -553,14 +553,22 @@ async function storeViaAuthorityApi(body, localDigest) {
       }
     )
   }
+  /* ⑤ **回包 `mime`（本單）**：服務端有給就取（trim 後原樣），缺省仍是存儲容器 `STORAGE_MIME`
+     —— 只改「取哪來的值」，不改 ③b 容器自检的判定面。 */
+  const replyMime = String((payload && payload.mime) || '').trim()
+  /* ⑥ **A 路回包 `storage_key` 透傳（本單｜修生產缺陷）**：雲端形態下 `/api/image/store`
+     回包**帶**內容尋址鍵（cos ＝ `xiai/images/<摘要前兩位>/<摘要>.tiff`）⇒ **原樣透傳**
+     （`payload.storage_key || payload.storageKey`，trim 後照抄，不改寫、不補構造）；
+     本機 / 同源 local 後端回**空串或缺鍵** ⇒ 仍是空串 —— 本機鏈路口徑一字不變，
+     **絕不在此補 `artifactObjectKeyOf(...)`**（鍵是服務端讀數，不是客戶端能自稱的值）。 */
+  const replyStorageKey = String((payload && (payload.storage_key || payload.storageKey)) || '').trim()
   return {
     ok: true,
     sha256: digest,
     bytesLength,
-    mime: STORAGE_MIME,
+    mime: replyMime || STORAGE_MIME,
     relPath: String((payload && payload.relPath) || ''),
-    /* A 路：二進制**不在客户端雲桶**（在本機權威庫）⇒ 行上 `storage_key` 仍為空串（既有口徑）。 */
-    storageKey: '',
+    storageKey: replyStorageKey,
     idempotent: String(reply.headers.get('X-Xiai-Idempotent') || '').toLowerCase() === 'true',
     message: ''
   }
