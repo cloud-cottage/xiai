@@ -11,6 +11,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import FaceFixedAttributesDialog from '../components/FaceFixedAttributesDialog.vue'
 import PersonPicker from '../components/PersonPicker.vue'
 import PersonProposalDialog from '../components/PersonProposalDialog.vue'
+import PhotoLightbox from '../components/PhotoLightbox.vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import SealFolderPicker from '../components/SealFolderPicker.vue'
 import TextTransformButtons from '../components/TextTransformButtons.vue'
@@ -480,6 +481,30 @@ async function loadPhotoImages() {
 watch(() => [route.params.id, dataVersion.value, gallery.value.map((row) => row.id).join(',')], loadPhotoImages, {
   immediate: true
 })
+
+/* ---------------------- 实物照片：点击放大（**全用户可用**，本单只做查看） ---------------------- */
+/* 遮罩由 `PhotoLightbox.vue` 单点渲染（`v-if` ⇒ 至多一份）；触发块**零权限判定** ——
+   普通用户与游客一律可点 / 可键盘触发（隐藏 · 删除属下一单，本单不做）。 */
+const photoLightboxOpen = ref(false)
+const photoLightboxIndex = ref(0)
+/* 触发的那张照片元素（关窗后把焦点还回去；取事件的 `currentTarget`）。 */
+const photoLightboxTrigger = ref(null)
+
+function openPhotoLightbox(photo, event) {
+  const at = gallery.value.findIndex((row) => row.id === photo.id)
+  photoLightboxIndex.value = at < 0 ? 0 : at
+  photoLightboxTrigger.value = (event && event.currentTarget) || null
+  photoLightboxOpen.value = true
+}
+
+function closePhotoLightbox() {
+  photoLightboxOpen.value = false
+}
+
+/** 触发元素的无障碍名用的序号（1 起，与遮罩里的 `N / 总` 同口径）。 */
+function photoOrdinalOf(photo) {
+  return gallery.value.findIndex((row) => row.id === photo.id) + 1
+}
 
 const logged = isLoggedIn
 const canSubmit = computed(() => seals.canSubmitCorrection())
@@ -3945,7 +3970,21 @@ async function onImageBookChange(imageId, event) {
       </div>
       <div class="panel__body">
         <div v-if="gallery.length" class="detail__gallery">
-          <figure v-for="photo in gallery" :key="photo.id" class="detail__photo">
+          <!-- 點擊放大（**全用戶**：普通用戶與遊客皆可，零權限判定）：可點面＝整張卡片 ——
+               手型指標 ＋ `role="button"` ＋ `tabindex="0"` ＋ 回車 / 空格同觸發；
+               鉤子 `data-photo-open` 與 `v-for="photo in gallery"` 同源 ⇒ 張數恆等於 gallery 行數。 -->
+          <figure
+            v-for="photo in gallery"
+            :key="photo.id"
+            class="detail__photo detail__photo--zoom"
+            role="button"
+            tabindex="0"
+            :data-photo-open="photo.id"
+            :aria-label="`放大檢視第 ${photoOrdinalOf(photo)} 張實物照片`"
+            @click="openPhotoLightbox(photo, $event)"
+            @keydown.enter.prevent="openPhotoLightbox(photo, $event)"
+            @keydown.space.prevent="openPhotoLightbox(photo, $event)"
+          >
             <!-- R-87 / R-88：实拍图按元数据切分（实拍族 8 块）→ 前端拼接展示（按原色）。 -->
             <SliceImage
               v-if="photoUrls[photo.id]"
@@ -3983,6 +4022,19 @@ async function onImageBookChange(imageId, event) {
         </div>
       </div>
     </section>
+
+    <!-- 實物照片**點擊放大**遮罩（全用戶可用；本單只做查看 —— 隱藏 / 刪除屬下一單）：
+         `v-if` ⇒ 遮罩至多一份；`role="dialog"` / `aria-modal` / ESC（`useEscToClose`）/
+         焦點回焦 / 背景鎖滾動都在 `PhotoLightbox.vue` 內單點處理。 -->
+    <PhotoLightbox
+      v-if="photoLightboxOpen"
+      :photos="gallery"
+      :index="photoLightboxIndex"
+      :srcs="photoUrls"
+      :trigger="photoLightboxTrigger"
+      @close="closePhotoLightbox"
+      @update:index="photoLightboxIndex = $event"
+    />
 
     <FaceFixedAttributesDialog
       v-if="editingFace"
@@ -5421,6 +5473,15 @@ async function onImageBookChange(imageId, event) {
   padding: var(--s-1) var(--s-2);
   color: var(--c-text-muted);
   font-size: var(--t-xs);
+}
+
+/* 實物照片卡片的**可點放大**提示（全用戶）：手型指標 ＋ 懸停描邊；顏色只取令牌。 */
+.detail__photo--zoom {
+  cursor: pointer;
+}
+
+.detail__photo--zoom:hover {
+  border-color: var(--c-gold);
 }
 
 /* 整枚印章圖卡片上的管理員動作列（【刪除】；非管理員 ⇒ 按鈕不渲染，本列隨之為空）。 */
