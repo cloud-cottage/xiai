@@ -23,7 +23,7 @@
  *   D 段 两路行为一致（⑥）＋ 静态纪律：单实现点唯一、`doc.book_id` 赋值恰 2 处且带 `null`
  *      护栏、剥注释后零 `book_id: null` / 空串落值、幂等注释在场、**钱路零变化**
  *      （`REASONS` 恰 13、reason ⊆ 冻结 13、submit 恰 5 键 / status READY 恰 6 键 /
- *      list 行恰 6 键 / 同步成功 9 键、失败 4 键 / `ADMIN_OPS` 恰 53 项）。
+ *      list 行恰 6 键 / 同步成功 9 键、失败 4 键 / `ADMIN_OPS` 恰 56 项）。
  *
  * 纪律：断言失败 ⇒ 退出码 1；不打印任何明文密钥（上游 key 只登记长度）。
  */
@@ -765,7 +765,7 @@ section('D', '两路一致 ＋ 静态纪律：同一函数 / 落键护栏 / 幂�
 /* D5：钱路零变化（reason 恰 13 且零新增；三 op 回包键面冻结；注册面 52 项）。 */
 {
   const reasons = [...seenReasons].sort()
-  check('D5', '钱路零变化：`REASONS` **恰 13 值**、本套全程 `reason` ⊆ 冻结 13（零新增）；键面常量冻结 —— submit 成功恰 5 键 / 失败恰 4 键、status READY 恰 6 键、list 行恰 6 键、同步成功恰 9 键 / 失败恰 4 键；`ADMIN_OPS` 恰 53 项', {
+  check('D5', '钱路零变化：`REASONS` **恰 13 值**、本套全程 `reason` ⊆ 冻结 13（零新增）；键面常量冻结 —— submit 成功恰 5 键 / 失败恰 4 键、status READY 恰 6 键、list 行恰 6 键、同步成功恰 9 键 / 失败恰 4 键；`ADMIN_OPS` 恰 56 项', {
     reasonsSize: 13,
     reasonsSubset: true,
     submitSuccess: ['charge', 'ok', 'source_image_id', 'status', 'task_id'],
@@ -774,7 +774,7 @@ section('D', '两路一致 ＋ 静态纪律：同一函数 / 落键护栏 / 幂�
     listRow: ['created_at', 'error_message', 'image_id', 'source_image_id', 'status', 'task_id'],
     syncSuccess: 9,
     syncFailure: 4,
-    adminOps: 53
+    adminOps: 56
   }, {
     reasonsSize: Object.keys(REASONS).length,
     reasonsSubset: reasons.every((reason) => FROZEN_REASONS.indexOf(reason) !== -1),

@@ -3345,13 +3345,32 @@ async function listSealImages(payload) {
 }
 
 /**
+ * **實物照片公開只讀面（本單新增｜`listSealPhotos`）** —— **薄委派**：业务逻辑单点
+ * （载荷封闭键面 ＋ `hidden !== true` 可见性闸门 ＋ `created_at` 升序自排 ＋ 200 上限与
+ * `truncated` 如实报 ＋ 12 键公开投影「**零 `created_by**」）全在
+ * `lib/ops.js::listSealPhotoRows(payload, false)`（本处零第二套过滤 / 零第二套排序；
+ * `opsOf()` **延迟 require** 以打破加载环，与本文件其余 op 同法）。
+ * 硬口径：**匿名可调**（`index.js::handlePublic` 只传载荷、不传身份）；**恒零写**；
+ * 载荷封闭恰一键 `seal_id`；「集合不存在」按可选读面降级为零行 ⇒ `rows: []`。
+ * **公开永远只回可见行** —— 管理员看含 `hidden` 的全量行走独立的
+ * `ADMIN_OPS.listSealPhotosAdmin`（公开路径无身份，**不修它**）。
+ * @param {object} payload 载荷（封闭恰一键 `seal_id`）
+ * @returns {Promise<{ok:true, rows:Array<object>, count:number, truncated:boolean}|
+ *                   {ok:false, reason:string, message:string}>}
+ */
+function listSealPhotos(payload) {
+  return opsOf().listSealPhotoRows(payload, false)
+}
+
+/**
  * **匿名可调的公开 op 表**（`index.js` 在令牌校验**之前**按这张表分流；
  * 表外的一切 op 仍必须验 token）。**只读**：这里的 op 一律零写。
- * **恰 7 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
+ * **恰 8 成员**：`listSealCards` ＋ `suggestAuthors`（§3.81.5 追加注 v1.100）
  * ＋ `listPersonCards` / `getPersonCard`（人物读面改吃 CARD 主库；`2 → 4`）
  * ＋ `catalogStats`（首页页头三计数；`4 → 5`）
  * ＋ `listSealCovers`（卡片矩陣：印章封面 `thumb_key` 批量派生；`5 → 6`，恒零写）
- * ＋ `listSealImages`（搜索结果页影像瀑布流；`6 → 7`，恒零写）。
+ * ＋ `listSealImages`（搜索结果页影像瀑布流；`6 → 7`，恒零写）
+ * ＋ `listSealPhotos`（實物照片只读列表；`7 → 8`，恒零写、**只回可见行**）。
  */
 const PUBLIC_OPS = Object.freeze({
   listSealCards,
@@ -3360,14 +3379,15 @@ const PUBLIC_OPS = Object.freeze({
   getPersonCard,
   catalogStats,
   listSealCovers,
-  listSealImages
+  listSealImages,
+  listSealPhotos
 })
 
 /**
  * **匿名可调的公开写 op 表**（`index.js` 在令牌 / 会话 / 配置判定**之前**按 `action:'public-write'`
  * 分流；与上面 `PUBLIC_OPS` **两张表分开可判负**）。**恰 1 成员**：`bumpSealView`
  * （印章浏览量 +1；裁定 §6）。表外 op ⇒ `FORBIDDEN` ＋ 零读零写。
- * `PUBLIC_OPS` **现恰 7 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
+ * `PUBLIC_OPS` **现恰 8 成员且恒零写** —— 而本表**恰 1 个写面**；新增的写 op 只能进本表。
  */
 const PUBLIC_WRITE_OPS = Object.freeze({
   bumpSealView
@@ -3389,6 +3409,9 @@ module.exports = {
   /* 影像瀑布流（本单 `PUBLIC_OPS` 6 → 7）：op 本体 ＋ 冻结键面（回包 5 键 / 影像行 13 键）
      ＋ `limit` 上下界 ＋ 不透明游标编解码（离线自检直接断言）。 */
   listSealImages,
+  /* 實物照片只读列表（本单 `PUBLIC_OPS` 7 → 8）：op 本体（薄委派 `lib/ops.js::listSealPhotoRows`；
+     键面 / 过滤 / 排序 / 上限的真源在 `lib/ops.js`，此处零第二套）。 */
+  listSealPhotos,
   LIST_SEAL_IMAGES_SUCCESS_KEYS,
   LIST_SEAL_IMAGES_ROW_KEYS,
   LIST_SEAL_IMAGES_DEFAULT_LIMIT,

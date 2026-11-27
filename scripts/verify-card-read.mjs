@@ -9,7 +9,7 @@
  * `lib/sealCards.js` / `lib/cardApi.js` 的**真实函数体**。
  *
  * 断言面（十三组；每条可机械判负）：
- *   R0. 冻结键面逐字：`PUBLIC_OPS` 恰 7 成员；两个新 op 的载荷 / 回包键面（1 / 4 / 1 / 2）；
+ *   R0. 冻结键面逐字：`PUBLIC_OPS` 恰 8 成员；两个新 op 的载荷 / 回包键面（1 / 4 / 1 / 2）；
  *       索引行基面 10 键 ＋ 別號追加 2 键；`source` 字面值 `local-fallback`。
  *   R1. `listPersonCards` **CARD 路**：573 行 × 10 键、回包恰 4 键（**无 `source`**）、
  *       `count === rows.length`、`generated_at` 即上游值（**零写**）。
@@ -312,13 +312,13 @@ const getPersonCalls = () => fakeCard.state.calls.filter((call) => call.op === '
 /* ===========================================================================
    R0：冻结键面逐字（唯一真源；直接引用被测件导出）
    =========================================================================== */
-section('R0', '冻结键面：PUBLIC_OPS 恰 7 ／ 两 op 载荷与回包 ／ 索引行 10＋2 键')
+section('R0', '冻结键面：PUBLIC_OPS 恰 8 ／ 两 op 载荷与回包 ／ 索引行 10＋2 键')
 {
   const publicKeys = Object.keys(sealCards.PUBLIC_OPS)
-  check('R0', '`PUBLIC_OPS` **恰 7 成员**（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers / listSealImages〔v1.130 新增：搜索结果页影像瀑布流，恒零写〕，皆函数）', {
-    count: 7,
-    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'suggestAuthors'],
-    types: ['function', 'function', 'function', 'function', 'function', 'function', 'function']
+  check('R0', '`PUBLIC_OPS` **恰 8 成员**（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers / listSealImages〔v1.130 新增：搜索结果页影像瀑布流，恒零写〕/ listSealPhotos〔2026-11-27 實物照片只读列表，恒零写、只回可见行〕，皆函数）', {
+    count: 8,
+    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'listSealPhotos', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function', 'function', 'function', 'function', 'function']
   }, {
     count: publicKeys.length,
     keys: sorted(publicKeys),

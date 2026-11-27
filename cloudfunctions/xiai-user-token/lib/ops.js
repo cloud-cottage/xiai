@@ -249,7 +249,15 @@ const COLLECTIONS = Object.freeze({
      `CLOUD_COLLECTION_KEYS` / `CLOUD_KEY_OF_LOCAL`）、**本文件零寫入口**（寫入由部署人一次性
      在控制台完成）。**不寫環境變量**：`xiai-user-token` 的環境變量整表替換語義會抹掉
      `XIAI_ADMIN_PHONE` / `XIAI_USER_TOKEN_SECRET` 等既有項 ⇒ 密鑰改走集合（人類口徑）。 */
-  serverSecrets: 'xiai_server_secrets'
+  serverSecrets: 'xiai_server_secrets',
+  /* **實物照片云端化（本單）**：`xiai_seal_photos` —— 每枚实物照片（TIFF 原图）一行，
+     `_id = 'ph-' + hash16(JSON.stringify([seal_id, sha256]))`（**确定性派生 ⇒ 同章同图幂等**）。
+     行面封闭 **13 键**（见 `SEAL_PHOTO_ROW_KEYS`）；ACL ＝ **PRIVATE**（新建集合默认值，
+     客户端永远不直读）⇒ **不进** `CLOUD_COLLECTIONS` / `CLOUD_COLLECTION_KEYS` /
+     `CLOUD_KEY_OF_LOCAL`（客户端零读面、不参与水合）；**不进**既有 `photos`（`xiai_photos`，
+     删印只读计数、行全保留）—— 两集合并存、口径互不替代。写面只经本文件五 op
+     （`createSealPhoto` ＋ 三个管理员 op ＋ 公开只读 `listSealPhotos`），**零直写入口**。 */
+  sealPhotos: 'xiai_seal_photos'
 })
 
 /* ---------------------------------------------------------------------------
@@ -456,7 +464,16 @@ const OPTIONAL_READ_COLLECTIONS = Object.freeze([
    `profile: null`）⇒ 进可选读面白名单；**非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧
    上抛**（判定单点 `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）；
    **判权 / 写面不在此降级**（`updateNickname` 的写走 `persist`，不走 `readRows` 的降级路）。 */
-  COLLECTIONS.userProfiles
+  COLLECTIONS.userProfiles,
+  /* **實物照片（本單）**：`xiai_seal_photos` 是**新建集合**（可能尚未被任何写入创建）⇒ 首次
+   `listSealPhotos` / `listSealPhotosAdmin` 的读、`createSealPhoto` 的幂等预查、
+   `setSealPhotoHidden` / `deleteSealPhoto` 的存在性读都不能因「集合不存在」整笔失败
+   （`persist` 的 `set` 分支另有建集自愈）。「集合不存在 ≡ 零行」在本集合上是**真语义**
+   （还没有任何照片行 ⇒ 公开列表回 `rows: []`、幂等预查＝未命中）⇒ 进可选读面白名单；
+   **非「集合不存在」类错误（ETIMEDOUT / 权限 / 5xx）照旧上抛**（判定单点
+   `lib/config.js::isCollectionNotExistError`，与其余白名单成员完全同尺）；
+   **写面不在此降级**（`createSealPhoto` 的 `plan` 与 `deleteRow` 走 `persist` / 写点，不走本降级路）。 */
+  COLLECTIONS.sealPhotos
 ])
 
 /**
@@ -3895,6 +3912,247 @@ function nicknameValueDenial(raw) {
   return { ok: true, nickname }
 }
 
+/* ---------------------------------------------------------------------------
+   **實物照片云端化（本單｜派單方設計決定照抄，不再议）**：集合 `xiai_seal_photos` 的载荷封闭
+   键面 ＋ 行面 / 回包投影键面 ＋ 值域门 ＋ 行读取单点（**排序与上限只在服务端做一次**）。
+   · 五个 op 分派：`createSealPhoto` → `OPS`（登录令牌门，任何已登录用户）；
+     `listSealPhotos` → `lib/sealCards.js::PUBLIC_OPS`（匿名可调，`index.js::handlePublic`
+     只传载荷不传身份）；`listSealPhotosAdmin` / `setSealPhotoHidden` / `deleteSealPhoto`
+     → `ADMIN_OPS`（管理员白名单门 `adminWhitelistDenial`）。
+   · **公开列表永远只回可见行**（`hidden !== true`）且投影**不含 `created_by`**（公开路径无身份、
+     不下发上传者）；**管理员看含 `hidden` 的全量行**走独立的 `listSealPhotosAdmin`
+     （公开路径无身份，**不修它**）。
+   · 排序：`created_at` **升序**（`readRows` 只支持 `limit` / `orderByDesc` ⇒ 升序在本文件自排，
+     同刻再按 `_id` 升序定序）；单次上限 `SEAL_PHOTO_LIST_MAX_ROWS`（200），超限**如实报**
+     `truncated: true`（**不静默截断**：多读一枚作判据）。
+   · 写面**零新 `reason`**（只用既有冻结值；行不存在一律既有 `INVALID_VALUE`，因 `REASONS`
+     冻结 13 值、**无 `NOT_FOUND`**）、**零新集合登记点**（见 `COLLECTIONS.sealPhotos`）、
+     落盘只经本文件既有两个写点（`persist` / `deleteRow`）。
+   --------------------------------------------------------------------------- */
+
+/** 公开读面 `listSealPhotos`（＋管理读面 `listSealPhotosAdmin`）载荷封闭**恰一键**。 */
+const SEAL_PHOTO_LIST_ALLOWED_KEYS = Object.freeze(['seal_id'])
+/** 写面 `createSealPhoto` 载荷封闭**恰 8 键**（身份类键一律不在面内 ⇒ `INVALID_FIELD`）。 */
+const SEAL_PHOTO_CREATE_ALLOWED_KEYS = Object.freeze([
+  'seal_id',
+  'stamp_id',
+  'sha256',
+  'bytes',
+  'mime',
+  'width',
+  'height',
+  'note'
+])
+/** 隐藏开关 `setSealPhotoHidden` 载荷封闭**恰 2 键**（`photo_id` ＋ `hidden` 布尔）。 */
+const SEAL_PHOTO_HIDDEN_ALLOWED_KEYS = Object.freeze(['photo_id', 'hidden'])
+/** 删行 `deleteSealPhoto` 载荷封闭**恰一键** `photo_id`。 */
+const SEAL_PHOTO_DELETE_ALLOWED_KEYS = Object.freeze(['photo_id'])
+
+/** `xiai_seal_photos` **行面封闭 13 键**（离线自检逐键断言）。 */
+const SEAL_PHOTO_ROW_KEYS = Object.freeze([
+  '_id',
+  'seal_id',
+  'stamp_id',
+  'sha256',
+  'bytes',
+  'mime',
+  'width',
+  'height',
+  'note',
+  'hidden',
+  'created_by',
+  'created_at',
+  'updated_at'
+])
+
+/** **公开投影 12 键 ＝ 行面 13 键 − `created_by`**（公开路径零身份字段）。 */
+const SEAL_PHOTO_PUBLIC_ROW_KEYS = Object.freeze(SEAL_PHOTO_ROW_KEYS.filter((key) => key !== 'created_by'))
+
+/** 单次列表上限（超限**如实报** `truncated`，不静默截断）。 */
+const SEAL_PHOTO_LIST_MAX_ROWS = 200
+/** `note` 上限（字；trim 后判定，空 ⇒ 空串）。 */
+const SEAL_PHOTO_NOTE_MAX_LENGTH = 200
+/** `mime` **逐字**值域（只认 TIFF 原图，不接受变体写法）。 */
+const SEAL_PHOTO_MIME = 'image/tiff'
+/** `sha256` 形态：**64 位小写十六进制**（大写 / 长短不符一律拒）。 */
+const SEAL_PHOTO_SHA256_PATTERN = /^[0-9a-f]{64}$/
+/** 文档键前缀（与 `ph-` 逐字一致；唯一来源）。 */
+const SEAL_PHOTO_ID_PREFIX = 'ph-'
+
+/**
+ * **确定性文档键**（幂等单点）：`_id = 'ph-' + hash16(JSON.stringify([seal_id, sha256]))`
+ * ⇒ 同章同图重传落同一行（**零新增行、回同一 `_id`**）。
+ * @param {string} sealId 已过值域门的印章编号
+ * @param {string} sha256 已过值域门的 64 位小写摘要
+ * @returns {string} 文档 `_id`
+ */
+function sealPhotoDocId(sealId, sha256) {
+  return `${SEAL_PHOTO_ID_PREFIX}${hash16(JSON.stringify([sealId, sha256]))}`
+}
+
+/**
+ * **行 → 管理面回包投影**（纯函数；恒**恰 13 键** `SEAL_PHOTO_ROW_KEYS`、键序与表一致）。
+ * 行缺失字段时按零值回（不新增键、不回 `undefined` 假装在场）。
+ * @param {object|null} row 云端行
+ * @returns {object} 恰 13 键
+ */
+function sealPhotoRowOf(row) {
+  const source = row && typeof row === 'object' ? row : {}
+  return {
+    _id: text(source._id),
+    seal_id: text(source.seal_id),
+    stamp_id: text(source.stamp_id),
+    sha256: text(source.sha256),
+    bytes: source.bytes,
+    mime: text(source.mime),
+    width: source.width,
+    height: source.height,
+    note: text(source.note),
+    hidden: source.hidden === true,
+    created_by: text(source.created_by),
+    created_at: text(source.created_at),
+    updated_at: text(source.updated_at)
+  }
+}
+
+/**
+ * **行 → 公开回包投影**（纯函数；恒**恰 12 键** `SEAL_PHOTO_PUBLIC_ROW_KEYS`）＝ 管理面投影
+ * **剔除 `created_by`**（公开路径无身份、不下发上传者；键面封闭、不按行抄键）。
+ * @param {object|null} row 云端行
+ * @returns {object} 恰 12 键
+ */
+function sealPhotoPublicRowOf(row) {
+  const out = sealPhotoRowOf(row)
+  delete out.created_by
+  return out
+}
+
+/**
+ * **`created_at` 升序**（服务端自排；同刻按 `_id` 升序定序 ⇒ 结果确定、可重放）。
+ * `readRows` 只支持 `limit` / `orderByDesc`（倒序）⇒ 升序必须在本文件做。
+ * @param {Array<object>} rows 读回的行
+ * @returns {Array<object>} 新数组（不改写入参）
+ */
+function sortSealPhotoRows(rows) {
+  return rows.slice().sort((left, right) => {
+    const la = text(left.created_at)
+    const ra = text(right.created_at)
+    if (la !== ra) return la < ra ? -1 : 1
+    const li = text(left._id)
+    const ri = text(right._id)
+    if (li !== ri) return li < ri ? -1 : 1
+    return 0
+  })
+}
+
+/**
+ * **列表读取单点**（公开面与管理面**共用**；零第二套过滤 / 零第二套排序）。
+ * 读 `seal_id` 等值行（多读一枚作超限判据）→ 升序 → 按 `includeHidden` 过滤 → 截 200 → 投影。
+ * @param {object} payload 载荷（封闭恰一键 `seal_id`）
+ * @param {boolean} includeHidden `false` ＝ 公开面（**只回可见行**、投影无 `created_by`）；
+ *   `true` ＝ 管理面（**全量行含 `hidden`**、投影含 `created_by`）
+ * @returns {Promise<{ok:true, rows:Array<object>, count:number, truncated:boolean}|
+ *                   {ok:false, reason:string, message:string}>}
+ */
+async function listSealPhotoRows(payload, includeHidden) {
+  /* 载荷形态 ＋ 封闭恰一键（未知键 / 身份类键 ⇒ `INVALID_FIELD`；判定早于任何读）。 */
+  const keyDenial = pointsPayloadDenial(payload, SEAL_PHOTO_LIST_ALLOWED_KEYS)
+  if (keyDenial) return keyDenial
+  if (payload.seal_id === undefined || payload.seal_id === null) {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的印章編號（seal_id）；本次零讀取。')
+  }
+  if (typeof payload.seal_id !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '印章編號（seal_id）必須是字符串；本次零讀取。')
+  }
+  const sealId = text(payload.seal_id)
+  if (sealId === '') {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要的印章編號（seal_id）；本次零讀取。')
+  }
+  /* 「集合不存在」按可选读面白名单降级为零行；真存储故障 ⇒ 抛错 ⇒ `index.js` 转
+     `STORAGE_UNAVAILABLE`（绝不伪装 `FORBIDDEN`）。多读一枚（上限 + 1）只为**如实报超限**。 */
+  const matched = await readRows(COLLECTIONS.sealPhotos, { seal_id: sealId }, { limit: SEAL_PHOTO_LIST_MAX_ROWS + 1 })
+  const ordered = sortSealPhotoRows(matched)
+  /* **公开面可见性闸门**：只回 `hidden !== true` 的行（管理面 `includeHidden` 不走这一支）。 */
+  const visible = includeHidden ? ordered : ordered.filter((row) => row.hidden !== true)
+  const truncated = visible.length > SEAL_PHOTO_LIST_MAX_ROWS
+  const page = visible.slice(0, SEAL_PHOTO_LIST_MAX_ROWS)
+  const rows = page.map((row) => (includeHidden ? sealPhotoRowOf(row) : sealPhotoPublicRowOf(row)))
+  return { ok: true, rows, count: rows.length, truncated }
+}
+
+/**
+ * **写面值域门**（纯函数；**全部判定在任何读 / 写之前**）。逐条（不放宽）：
+ *   ① `seal_id` / `stamp_id`：缺 / 空 ⇒ `MISSING_REQUIRED`、非字符串 ⇒ `INVALID_VALUE`；
+ *   ② `sha256`：缺 ⇒ `MISSING_REQUIRED`、非字符串 / **非 64 位小写十六进制** ⇒ `INVALID_VALUE`；
+ *   ③ `bytes` / `width` / `height`：缺 ⇒ `MISSING_REQUIRED`、**非正整数**（含字符串数字、
+ *      小数、`0`、负数）⇒ `INVALID_VALUE`；
+ *   ④ `mime`：缺 ⇒ `MISSING_REQUIRED`、**非逐字 `image/tiff`** ⇒ `INVALID_VALUE`；
+ *   ⑤ `note`（可选）：缺 / `null` ⇒ 空串；非字符串 ⇒ `INVALID_VALUE`；trim 后 **> 200 字**
+ *      ⇒ `INVALID_VALUE`（**不夹取**）。
+ * **零新增 `reason`**（只用既有冻结值）。
+ * @param {object} payload 载荷（键面已由 `SEAL_PHOTO_CREATE_ALLOWED_KEYS` 封闭）
+ * @returns {null|{ok:false, reason:string, message:string}} 放行 ⇒ `null`
+ */
+function sealPhotoCreateValueDenial(payload) {
+  const required = ['seal_id', 'stamp_id', 'sha256', 'bytes', 'mime', 'width', 'height']
+  for (const key of required) {
+    if (payload[key] === undefined || payload[key] === null) {
+      return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${key}）；本次零寫入。`)
+    }
+  }
+  for (const key of ['seal_id', 'stamp_id', 'sha256', 'mime']) {
+    if (typeof payload[key] !== 'string') {
+      return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是字符串；本次零寫入。`)
+    }
+  }
+  if (text(payload.seal_id) === '') {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（seal_id）；本次零寫入。')
+  }
+  if (text(payload.stamp_id) === '') {
+    return deny(REASONS.MISSING_REQUIRED, '缺少必要欄位（stamp_id）；本次零寫入。')
+  }
+  if (!SEAL_PHOTO_SHA256_PATTERN.test(payload.sha256)) {
+    return deny(REASONS.INVALID_VALUE, '影像摘要（sha256）必須是 64 位小寫十六進制；本次零寫入。')
+  }
+  if (payload.mime !== SEAL_PHOTO_MIME) {
+    return deny(REASONS.INVALID_VALUE, `影像容器（mime）只認逐字「${SEAL_PHOTO_MIME}」；本次零寫入。`)
+  }
+  for (const key of ['bytes', 'width', 'height']) {
+    const value = payload[key]
+    if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+      return deny(REASONS.INVALID_VALUE, `欄位（${key}）必須是正整數；本次零寫入。`)
+    }
+  }
+  if (payload.note !== undefined && payload.note !== null && typeof payload.note !== 'string') {
+    return deny(REASONS.INVALID_VALUE, '備註（note）必須是文字；本次零寫入。')
+  }
+  const note = payload.note === undefined || payload.note === null ? '' : payload.note.trim()
+  if (note.length > SEAL_PHOTO_NOTE_MAX_LENGTH) {
+    return deny(REASONS.INVALID_VALUE, `備註超出上限（${SEAL_PHOTO_NOTE_MAX_LENGTH} 字）；本次零寫入。`)
+  }
+  return null
+}
+
+/**
+ * **`photo_id` 形态门**（纯函数；缺 / `null` / 全空白 ⇒ `MISSING_REQUIRED`、非字符串 ⇒
+ * `INVALID_VALUE`；与写面其余必填串同一套文案、**零新增 `reason`**）。
+ * @param {*} raw 载荷里的 `photo_id` 原值
+ * @param {string} label 上屏字段名（`photo_id`）
+ * @returns {null|{ok:false, reason:string, message:string}} 放行 ⇒ `null`
+ */
+function sealPhotoIdDenial(raw, label) {
+  if (raw === undefined || raw === null) {
+    return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${label}）；本次零寫入。`)
+  }
+  if (typeof raw !== 'string') {
+    return deny(REASONS.INVALID_VALUE, `欄位（${label}）必須是字符串；本次零寫入。`)
+  }
+  if (text(raw) === '') {
+    return deny(REASONS.MISSING_REQUIRED, `缺少必要欄位（${label}）；本次零寫入。`)
+  }
+  return null
+}
+
 const OPS = Object.freeze({
   /**
    * **普通用戶【勘誤】影像（本單新增 op｜`submitImageCorrection`｜`OPS` 登录面｜§3.77）**：
@@ -5343,6 +5601,69 @@ const OPS = Object.freeze({
       ok: true,
       profile: profileViewOf(Object.assign({ _id: uid }, row)),
       plan: { writes: [{ kind: 'set', collection: COLLECTIONS.userProfiles, id: uid, doc: row }] }
+    }
+  },
+
+  /**
+   * **實物照片入册（本單新增 op｜`createSealPhoto`｜`OPS` 登录令牌门）**：任何已登录用户
+   * 为其所持的 `.tiff` 原图登记一行 `xiai_seal_photos`（**对象本体由客户端直传云存储**，
+   * 本 op 只落元数据行）。回 `{ok:true, row}`（`row` ＝ 恰 13 键 `SEAL_PHOTO_ROW_KEYS`）。
+   * 顺序（**全部判定早于任何写**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 唯一写点执行）：
+   *   ① 登录门 `identityUsable`（身份**只取令牌 / 会话**；无身份 ⇒ 既有 `FORBIDDEN` ＋ 零读写）；
+   *   ② 载荷形态 ＋ 封闭恰 8 键（`SEAL_PHOTO_CREATE_ALLOWED_KEYS`；未知键 / 身份类键 ⇒
+   *      `INVALID_FIELD`，与其余 op 同一条文案）；
+   *   ③ 值域门 `sealPhotoCreateValueDenial`（`sha256` 恰 64 位小写 hex、`bytes` / `width` /
+   *      `height` 正整数、`mime` 逐字 `image/tiff`、`note` trim 后 ≤ 200 字 ⇒ 空串；
+   *      越界 ⇒ 既有 `INVALID_VALUE`、缺键 ⇒ `MISSING_REQUIRED`，**零新增 reason**）；
+   *   ④ **幂等预查**：按确定性 `_id = 'ph-' + hash16(JSON.stringify([seal_id, sha256]))` 读一行
+   *      （「集合不存在」按可选读面降级为零行）⇒ **已存在 ⇒ 零写入**，回同一 `_id` 的既有行
+   *      （**不产 `plan`** ⇒ `index.js` 落盘分支不触发）；
+   *   ⑤ 否则产 `plan`（`kind:'set'`、`id` ＝ 该 `_id` ⇒ 确定性 upsert）：`hidden:false`、
+   *      `created_by` ＝ **令牌派生 uid**（载荷自称一律无效）、`created_at` / `updated_at` ＝
+   *      服务端时钟（`new Date().toISOString()`）。失败恒**恰 3 键**。
+   * @param {object} payload 载荷（封闭 8 键，见 `SEAL_PHOTO_CREATE_ALLOWED_KEYS`）
+   * @param {{uid:string, phone:string, role?:string}} identity **服务端派生**的身份（唯一来源）
+   * @returns {Promise<{ok:true, row:object, plan:object}|{ok:true, row:object}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async createSealPhoto(payload, identity) {
+    /* ① 登录门（与 `submitImageCorrection` 同一条既有文案、零新增 reason）。 */
+    if (!identityUsable(identity)) {
+      return deny(REASONS.FORBIDDEN, '缺少可驗證的提交人身份；本次零寫入。')
+    }
+    /* ② 载荷形态 ＋ 封闭恰 8 键。 */
+    const keyDenial = pointsPayloadDenial(payload, SEAL_PHOTO_CREATE_ALLOWED_KEYS)
+    if (keyDenial) return keyDenial
+    /* ③ 值域门（全部判定早于任何读 / 写）。 */
+    const valueDenial = sealPhotoCreateValueDenial(payload)
+    if (valueDenial) return valueDenial
+    const sealId = text(payload.seal_id)
+    const sha256 = text(payload.sha256)
+    const docId = sealPhotoDocId(sealId, sha256)
+    /* ④ 幂等预查（同 `_id` 已有行 ⇒ 零写入、回同一 `_id`）。 */
+    const existing = await readRows(COLLECTIONS.sealPhotos, { _id: docId }, { limit: 1 })
+    if (existing.length > 0) return { ok: true, row: sealPhotoRowOf(existing[0]) }
+    /* ⑤ 落盘计划（`_id` 随 doc 交出；`persist` 的 `set` 分支按平台约束剔 `_id` 后写）。 */
+    const at = new Date().toISOString()
+    const row = {
+      _id: docId,
+      seal_id: sealId,
+      stamp_id: text(payload.stamp_id),
+      sha256,
+      bytes: payload.bytes,
+      mime: text(payload.mime),
+      width: payload.width,
+      height: payload.height,
+      note: payload.note === undefined || payload.note === null ? '' : payload.note.trim(),
+      hidden: false,
+      created_by: text(identity.uid),
+      created_at: at,
+      updated_at: at
+    }
+    return {
+      ok: true,
+      row,
+      plan: { writes: [{ kind: 'set', collection: COLLECTIONS.sealPhotos, id: docId, doc: row }] }
     }
   }
 })
@@ -12140,7 +12461,114 @@ const ADMIN_OPS = Object.freeze({
    * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
    * @param {{adminPhone?:string, nowSeconds?:number}} [context]
    */
-  putPublisher
+  putPublisher,
+
+  /**
+   * **管理員「實物照片全量列表」（本單新增 op｜`listSealPhotosAdmin`｜`ADMIN_OPS`｜零写入）**：
+   * 回 `{ok:true, rows, count, truncated}` —— `rows` ＝ **全量行含 `hidden`**、每行**恰 13 键**
+   * `SEAL_PHOTO_ROW_KEYS`（**含 `created_by`**）；与公开面 `listSealPhotos` **同一排序与同一上限**
+   * （`created_at` 升序、上限 200、超限如实报 `truncated: true`）。
+   * 顺序：① **管理员门在第一行**（既有 `adminWhitelistDenial`；缺 env / 非白名单 ⇒ 结构化拒 ＋
+   * **零读取**）→ ② 载荷封闭恰一键 `seal_id`（`SEAL_PHOTO_LIST_ALLOWED_KEYS`；未知键 / 身份类键 ⇒
+   * `INVALID_FIELD`）→ ③ 读行（「集合不存在」按可选读面降级为零行 ⇒ `rows: []`；真存储故障 ⇒
+   * 抛错 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`）。**不产 `plan`** ⇒ 零写入。
+   * @param {object} payload 载荷（封闭恰一键 `seal_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, rows:Array<object>, count:number, truncated:boolean}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async listSealPhotosAdmin(payload, identity, context) {
+    const gate = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (gate) return gate
+    return listSealPhotoRows(payload, true)
+  },
+
+  /**
+   * **管理員「實物照片隱藏開關」（本單新增 op｜`setSealPhotoHidden`｜`ADMIN_OPS`）**：
+   * 载荷封闭**恰 2 键** `photo_id` ＋ `hidden`（**必须是布尔**；其余键 / 身份类键 ⇒ `INVALID_FIELD`）。
+   * 顺序（**全部判定早于任何写**；本 op 只产 `plan` ⇒ 落盘由 `index.js` 唯一写点执行）：
+   *   ① 管理员门在第一行（`adminWhitelistDenial`；零读零写地拒）；
+   *   ② 载荷键面门 → `photo_id` 形态门 → `hidden` 布尔门（非布尔 ⇒ `INVALID_VALUE`）；
+   *   ③ **存在性读**：行不存在 ⇒ 既有 **`INVALID_VALUE`**（`REASONS` 冻结 13 值、**无 `NOT_FOUND`**
+   *      ⇒ 取捨：一律回落既有 `INVALID_VALUE`，文案如实写明「未找到該實物照片」）；
+   *   ④ 产 `plan`（`kind:'update'`、`match {_id}`、`expectAtLeast: 1`；`persist` 的 update 分支
+   *      自带**读回比对** ⇒ 没写生效绝不报成功），`updated_at` ＝ 服务端时钟；
+   *   ⑤ 回**更新后的公开投影行**（恰 12 键 `SEAL_PHOTO_PUBLIC_ROW_KEYS`、**无 `created_by`**）。
+   * 失败恒**恰 3 键**、`reason` **零新增**。
+   * @param {object} payload 载荷（封闭 2 键 `photo_id` / `hidden`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, row:object, plan:object}|{ok:false, reason:string, message:string}>}
+   */
+  async setSealPhotoHidden(payload, identity, context) {
+    /* ① 管理员门（零读零写地拒）。 */
+    const gate = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (gate) return gate
+    /* ② 载荷形态 ＋ 封闭恰 2 键。 */
+    const keyDenial = pointsPayloadDenial(payload, SEAL_PHOTO_HIDDEN_ALLOWED_KEYS)
+    if (keyDenial) return keyDenial
+    const idDenial = sealPhotoIdDenial(payload.photo_id, 'photo_id')
+    if (idDenial) return idDenial
+    if (typeof payload.hidden !== 'boolean') {
+      return deny(REASONS.INVALID_VALUE, '隱藏標記（hidden）必須是布爾值；本次零寫入。')
+    }
+    const photoId = text(payload.photo_id)
+    /* ③ 存在性读（行不存在 ⇒ `INVALID_VALUE`；零写入）。 */
+    const existing = await readRows(COLLECTIONS.sealPhotos, { _id: photoId }, { limit: 1 })
+    if (existing.length === 0) {
+      return deny(REASONS.INVALID_VALUE, `未找到該實物照片（photo_id：${photoId}）；本次零寫入。`)
+    }
+    /* ④ 落盘计划（update ＋ `expectAtLeast:1` ＋ 回读比对）。 */
+    const at = new Date().toISOString()
+    const hidden = payload.hidden
+    const row = sealPhotoPublicRowOf(Object.assign({}, existing[0], { hidden, updated_at: at }))
+    return {
+      ok: true,
+      row,
+      plan: {
+        writes: [
+          { kind: 'update', collection: COLLECTIONS.sealPhotos, match: { _id: photoId }, doc: { hidden, updated_at: at }, expectAtLeast: 1 }
+        ]
+      }
+    }
+  },
+
+  /**
+   * **管理員「刪實物照片行」（本單新增 op｜`deleteSealPhoto`｜`ADMIN_OPS`）**：
+   * 载荷封闭**恰一键** `photo_id`；**只删元数据行、不删云存储对象**（TIFF 原图与审计字节保留）
+   * ⇒ 成功回包**恰 3 键** `{ok:true, deleted:true, object_retained:true}`（**如实告知对象未删**）。
+   * 顺序：① 管理员门在第一行（零读零写地拒）→ ② 载荷键面门 → ③ `photo_id` 形态门 →
+   *   ④ **存在性读**：行不存在 ⇒ 既有 **`INVALID_VALUE`**（同 `setSealPhotoHidden` 的取捨，
+   *   `REASONS` 无 `NOT_FOUND`）→ ⑤ 走本文件既有**唯一删行点** `deleteRow`（自带读回比对：
+   *   行仍在 ⇒ 抛错 ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`，绝不谎报已删）。
+   * **不产 `plan`**（写步在 op 内执行）；失败恒**恰 3 键**、`reason` **零新增**。
+   * @param {object} payload 载荷（封闭恰一键 `photo_id`）
+   * @param {{uid:string, phone:string, role?:string}} identity 服务端派生身份
+   * @param {{adminPhone?:string, nowSeconds?:number}} [context]
+   * @returns {Promise<{ok:true, deleted:true, object_retained:true}|
+   *                   {ok:false, reason:string, message:string}>}
+   */
+  async deleteSealPhoto(payload, identity, context) {
+    /* ① 管理员门（零读零写地拒）。 */
+    const gate = adminWhitelistDenial(identity, context && context.adminPhone)
+    if (gate) return gate
+    /* ② 载荷形态 ＋ 封闭恰一键。 */
+    const keyDenial = pointsPayloadDenial(payload, SEAL_PHOTO_DELETE_ALLOWED_KEYS)
+    if (keyDenial) return keyDenial
+    /* ③ 形态门。 */
+    const idDenial = sealPhotoIdDenial(payload.photo_id, 'photo_id')
+    if (idDenial) return idDenial
+    const photoId = text(payload.photo_id)
+    /* ④ 存在性读（行不存在 ⇒ `INVALID_VALUE`；零删行、零删对象）。 */
+    const existing = await readRows(COLLECTIONS.sealPhotos, { _id: photoId }, { limit: 1 })
+    if (existing.length === 0) {
+      return deny(REASONS.INVALID_VALUE, `未找到該實物照片（photo_id：${photoId}）；本次零刪行。`)
+    }
+    /* ⑤ 删行（唯一删行点 `deleteRow`；**对象不删** ⇒ 如实回 `object_retained: true`）。 */
+    await deleteRow(COLLECTIONS.sealPhotos, photoId)
+    return { ok: true, deleted: true, object_retained: true }
+  }
 })
 
 /**
@@ -12834,5 +13262,28 @@ module.exports = {
   PROFILE_ROW_KEYS,
   PROFILE_VIEW_KEYS,
   nicknameValueDenial,
-  profileViewOf
+  profileViewOf,
+  /* **實物照片云端化（本單 `xiai_seal_photos`｜五 op）**：新集合登记 ＋ 四张载荷封闭键面 ＋
+     行面 / 公开投影键面 ＋ 值域与上限常量 ＋ 确定性文档键 ＋ 两个投影纯函数 ＋ 升序排序单点 ＋
+     列表读取单点（公开面 `lib/sealCards.js::listSealPhotos` 薄委派它，**零第二套过滤 / 排序**）
+     ＋ 写面值域门 ＋ `photo_id` 形态门 —— 供离线自检
+     `scripts/verify-seal-photos-server.mjs` 直接断言（实现单点均在本文件上文）。 */
+  SEAL_PHOTO_LIST_ALLOWED_KEYS,
+  SEAL_PHOTO_CREATE_ALLOWED_KEYS,
+  SEAL_PHOTO_HIDDEN_ALLOWED_KEYS,
+  SEAL_PHOTO_DELETE_ALLOWED_KEYS,
+  SEAL_PHOTO_ROW_KEYS,
+  SEAL_PHOTO_PUBLIC_ROW_KEYS,
+  SEAL_PHOTO_LIST_MAX_ROWS,
+  SEAL_PHOTO_NOTE_MAX_LENGTH,
+  SEAL_PHOTO_MIME,
+  SEAL_PHOTO_SHA256_PATTERN,
+  SEAL_PHOTO_ID_PREFIX,
+  sealPhotoDocId,
+  sealPhotoRowOf,
+  sealPhotoPublicRowOf,
+  sortSealPhotoRows,
+  listSealPhotoRows,
+  sealPhotoCreateValueDenial,
+  sealPhotoIdDenial
 }

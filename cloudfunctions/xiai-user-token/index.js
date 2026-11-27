@@ -1234,6 +1234,31 @@ if (op === 'getProfile' || op === 'updateNickname') {
     if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
   }
 }
+/* **實物照片管理員讀數面（additive 透传｜**按 op 收窄**｜本單 `listSealPhotosAdmin` /
+   `deleteSealPhoto`）**：键名真源 ＝ `lib/ops.js` 的 `SEAL_PHOTO_*` 键面（逐 op 封闭、
+   存在性驱动）：
+   · `listSealPhotosAdmin` → `rows` / `count` / `truncated`（`rows` ＝ 全量行含 `hidden`、
+     每行恰 13 键；`truncated` ＝ 超 200 上限的如实标记，**不静默截断**）；
+   · `deleteSealPhoto`     → `deleted` / `object_retained`（**恰 3 键回包**；
+     `object_retained: true` ＝ COS 对象未删、如实告知）。
+   **其餘任何 op 一律不透傳這 5 個鍵**（即使 `opResult` 意外帶同名鍵 —— 例如
+   `pullImportRows` / `listBookCovers` 的 `rows`、各类 `count` —— 亦一個都不外泄）
+   ⇒ 既有回包**逐字不変**（序列化後亦不新增鍵）。失败回包（`ok:false`）走上面的早退分支、
+   恒 3 鍵、零讀數鍵；`createSealPhoto` / `setSealPhotoHidden` 的 `row` 是**既有基座键**
+   （上文 `row: opResult.row` 一律透传）⇒ 本处零补编；**`plan` 是内部落盘计划（内部面）
+   ⇒ 绝不外传**；既有字段一律不刪、不改。 */
+if (op === 'listSealPhotosAdmin') {
+  const SEAL_PHOTO_ADMIN_LIST_READOUT_KEYS = ['rows', 'count', 'truncated']
+  for (const key of SEAL_PHOTO_ADMIN_LIST_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
+if (op === 'deleteSealPhoto') {
+  const SEAL_PHOTO_DELETE_READOUT_KEYS = ['deleted', 'object_retained']
+  for (const key of SEAL_PHOTO_DELETE_READOUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(opResult, key)) response[key] = opResult[key]
+  }
+}
 return response
 }
 

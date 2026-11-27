@@ -21,7 +21,7 @@
  *       `command.inc(1)`（原子哨兵）；未知键 ⇒ `INVALID_FIELD`；非字符串 / `trim` 后空 / 65 字
  *       ⇒ `INVALID_VALUE`；印章不存在 ⇒ `INVALID_VALUE` ＋ 回包**恰 3 键**；
  *       `PUBLIC_WRITE_OPS` **恰 1 成员**；表外 op 走 `public-write` ⇒ `FORBIDDEN` ＋ 零读写。
- *   V5. **双表分离**（`AC-734`）：`PUBLIC_OPS` **恰 7 成员**且**其 op 零写入**（**按 `Object.keys`
+ *   V5. **双表分离**（`AC-734`）：`PUBLIC_OPS` **恰 8 成员**且**其 op 零写入**（**按 `Object.keys`
  *       全量各打一发**，不写死数字，`stats.writes` 一字不增）；两表交集为空、`bumpSealView` 不在 `PUBLIC_OPS` 内。
  *   V6. **回填 `repairSealViewCount`**（`AC-736`）：`dry_run` 不写；真写后 `view_count` 回读为 `0`
  *       且 `written` ＝ `eligible`；**同参重放 `written === 0`（幂等）**；回包**恒恰 5 键**；
@@ -601,9 +601,9 @@ section('V4', 'bumpSealView：合法 ⇒ view_count ＋1（回读；写面是 co
 }
 
 /* ===========================================================================
-   V5：双表分离 —— PUBLIC_OPS 恰 7 成员且恒零写（读面按 Object.keys 全量打）
+   V5：双表分离 —— PUBLIC_OPS 恰 8 成员且恒零写（读面按 Object.keys 全量打）
    =========================================================================== */
-section('V5', '双表分离：PUBLIC_OPS 恰 7 成员、**全部**公开读 op 各打一发零写入；与 PUBLIC_WRITE_OPS 交集为空')
+section('V5', '双表分离：PUBLIC_OPS 恰 8 成员、**全部**公开读 op 各打一发零写入；与 PUBLIC_WRITE_OPS 交集为空')
 {
   const seeds = [
     { stamp_id: 'SV000000020', view_count: 2, created_at: '2026-01-01T00:00:00.000Z' },
@@ -616,9 +616,9 @@ section('V5', '双表分离：PUBLIC_OPS 恰 7 成员、**全部**公开读 op �
   ])
   await withStore(v5Store, async () => {
     const readKeys = Object.keys(sealCards.PUBLIC_OPS)
-    check('V5a', '`PUBLIC_OPS` **恰 7 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`〔v1.130 新增：搜索结果页影像瀑布流，恒零写〕）', {
-      count: 7,
-      keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'suggestAuthors']
+    check('V5a', '`PUBLIC_OPS` **恰 8 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`〔v1.130 新增：搜索结果页影像瀑布流，恒零写〕/ `listSealPhotos`〔2026-11-27 實物照片只读列表，恒零写、只回可见行〕）', {
+      count: 8,
+      keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'listSealPhotos', 'suggestAuthors']
     }, {
       count: readKeys.length,
       keys: sorted(readKeys)
@@ -643,7 +643,9 @@ section('V5', '双表分离：PUBLIC_OPS 恰 7 成员、**全部**公开读 op �
       getPersonCard: { person_id: '000000789' },
       catalogStats: {},
       listSealCovers: { stamp_ids: ['SV000000020'] },
-      listSealImages: { limit: 5 }
+      listSealImages: { limit: 5 },
+      /* 實物照片只读列表（本单 `PUBLIC_OPS` 7 → 8）：载荷封闭恰一键；集合无行 ⇒ `rows: []`。 */
+      listSealPhotos: { seal_id: 'SV000000020' }
     }
     const calls = []
     for (const key of sorted(readKeys)) {
@@ -654,6 +656,7 @@ section('V5', '双表分离：PUBLIC_OPS 恰 7 成员、**全部**公开读 op �
       calls.push(await publicCall(key, READ_PAYLOADS[key]))
     }
     check('V5c', '`PUBLIC_OPS` **全部公开读 op**（**按 `Object.keys` 全量打**，不写死数字）**各打一发、回包形态合规**（`ok:true` 且无 `reason`；载荷表缺键 ⇒ `NO_PAYLOAD` 占位必判红；逐 op 键面由既有套件断言）', [
+      { ok: true, reason: '' },
       { ok: true, reason: '' },
       { ok: true, reason: '' },
       { ok: true, reason: '' },

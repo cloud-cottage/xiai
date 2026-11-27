@@ -14,9 +14,9 @@
  *       `SUGGEST_AUTHORS_ALLOWED_KEYS`(3：face_id,name,limit) /
  *       `SUGGEST_AUTHORS_SUCCESS_KEYS`(4：ok,query,normalized,candidates) /
  *       `AUTHOR_CANDIDATE_KEYS`(7) / `MATCHED_FIELDS`(5：name,alias,courtesy,art,contains)。
- *   P1. `PUBLIC_OPS` **恰 7 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
+ *   P1. `PUBLIC_OPS` **恰 8 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` /
  *       `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`（v1.130 新增：
- *       搜索结果页影像瀑布流，恒零写），皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
+ *       搜索结果页影像瀑布流，恒零写）/ `listSealPhotos`（2026-11-27 實物照片只读列表，恒零写、只回可见行），皆函数）；表外 op（含一切管理员 op）走 `action:'public'` ⇒ `FORBIDDEN` ＋ 零读。
  *   P2. **两 op 载荷封闭**：未知键 / **身份类键**（`user_id` / `phone`）⇒ `INVALID_FIELD`
  *       ＋ 恰 3 键拒绝 ＋ 零读（判定早于任何读）。
  *   P3. `listSealCards` 回包**恰 5 键**、`rows` 每元素**恰 16 键**。
@@ -369,17 +369,17 @@ check('P0', '七张冻结常量逐字 ＝ 契约值（7 / 5 / 16 / 3 / 4 / 7 / 5
 }
 
 /* ===========================================================================
-   P1：`PUBLIC_OPS` 恰 7 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
+   P1：`PUBLIC_OPS` 恰 8 成员 ＋ 表外 op 走 public ⇒ FORBIDDEN ＋ 零写
    =========================================================================== */
-section('P1', 'PUBLIC_OPS 恰 7（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers / listSealImages〔v1.130〕）；表外 op ⇒ FORBIDDEN')
+section('P1', 'PUBLIC_OPS 恰 8（listSealCards / suggestAuthors / listPersonCards / getPersonCard / catalogStats / listSealCovers / listSealImages〔v1.130〕/ listSealPhotos〔2026-11-27〕）；表外 op ⇒ FORBIDDEN')
 {
   const keys = Object.keys(sealCards.PUBLIC_OPS)
   const readsBefore = store.stats.reads
   const denied = await publicCall('repairPrimaryFace', {})
-  check('P1', '`PUBLIC_OPS` **恰 7 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`（v1.130 新增：搜索结果页影像瀑布流，恒零写），皆函数）', {
-    count: 7,
-    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'suggestAuthors'],
-    types: ['function', 'function', 'function', 'function', 'function', 'function', 'function']
+  check('P1', '`PUBLIC_OPS` **恰 8 成员**（`listSealCards` / `suggestAuthors` / `listPersonCards` / `getPersonCard` / `catalogStats` / `listSealCovers` / `listSealImages`（v1.130 新增：搜索结果页影像瀑布流，恒零写）/ `listSealPhotos`（2026-11-27 實物照片只读列表，恒零写、只回可见行），皆函数）', {
+    count: 8,
+    keys: ['catalogStats', 'getPersonCard', 'listPersonCards', 'listSealCards', 'listSealCovers', 'listSealImages', 'listSealPhotos', 'suggestAuthors'],
+    types: ['function', 'function', 'function', 'function', 'function', 'function', 'function', 'function']
   }, {
     count: keys.length,
     keys: sorted(keys),
