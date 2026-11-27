@@ -1223,6 +1223,14 @@ const syncFeedback = ref('')
 const syncBusyKey = ref('')
 /** 深链定位目标（`{from, entity, key}`；无深链 ⇒ `null`）。 */
 const syncTarget = ref(null)
+/** 「僅顯示待審」开关（**默认开** ⇒ 表只列 `PENDING`；关 ⇒ 列出全部行）。 */
+const syncPendingOnly = ref(true)
+/** 行分流（服务层纯函数 `sync.partitionSyncRows`；只读派生，**不改 `syncRows`**）。 */
+const syncPartition = computed(() => sync.partitionSyncRows(syncRows.value))
+/** 上屏行（开 ⇒ 只列待审；关 ⇒ 全部，保序同原数组）。 */
+const syncVisibleRows = computed(() => (syncPendingOnly.value ? syncPartition.value.pending : syncRows.value))
+/** 「另有 N 條已處理」的 N（开关关时不上屏 —— 关时全部已在表内，「另有」不成立）。 */
+const syncSettledCount = computed(() => syncPartition.value.settled.length)
 
 /** 操作列文案（`create` / `update`；未知值原样上屏，**不猜**）。 */
 const SYNC_OP_LABELS = Object.freeze({ create: '新建', update: '更新' })
@@ -1317,11 +1325,15 @@ async function approveSyncRow(row) {
   syncBusyKey.value = id
   syncFeedback.value = ''
   try {
-    const result = await sync.approveAndApply(id)
+    /* `currentStatus` 带上本行读数 ⇒ 服务端回 `CONFLICT` 且该项其实已写入时判**幂等成功**。 */
+    const result = await sync.approveAndApply(id, { currentStatus: row.status })
     if (result.ok === true) {
-      /* 本地状态先按纯函数推进，再整表刷新（服务端回读才是最终真源）。 */
+      /* 本地状态先按纯函数推进（幂等回包 `item.status='APPLIED'` ⇒ 该行落到 `APPLIED`），
+         再整表刷新（服务端回读才是最终真源）。 */
       syncRows.value = syncRows.value.map((item) => (item.queue_id === id ? sync.nextSyncRow(item, result) : item))
-      syncFeedback.value = `已通過並寫入：${result.msg}`
+      /* 幂等回包**不是失败**：单独上屏幂等文案（不带 `未寫入` / `reason`）。 */
+      syncFeedback.value =
+        result.item && result.item.idempotent === true ? '該項已寫入（無需重複操作）' : `已通過並寫入：${result.msg}`
       await refreshSyncRows()
       return
     }
@@ -2011,6 +2023,12 @@ watch(canSyncReview, (open, wasOpen) => {
       <div class="panel__head">
         <h2>來自斐萃的待審變更</h2>
         <span class="muted-hint">本期實體 books / persons / publishers · 共 {{ syncRows.length }} 條</span>
+        <!-- 「僅顯示待審」（**默认开**）：开 ⇒ 表只列 `PENDING`（`partitionSyncRows` 分流），
+             关 ⇒ 列出全部；已处理条数另起一行如实给（不置灰、不占位）。 -->
+        <label class="review__only-mine">
+          <input v-model="syncPendingOnly" type="checkbox" data-sync-pending-only />
+          僅顯示待審
+        </label>
         <button
           class="btn btn--ghost"
           type="button"
@@ -2031,7 +2049,7 @@ watch(canSyncReview, (open, wasOpen) => {
         <p v-if="syncFeedback" class="notice review__notice" data-sync-feedback>{{ syncFeedback }}</p>
         <p v-else-if="syncNotice" class="notice review__notice" data-sync-notice>{{ syncNotice }}</p>
 
-        <table v-if="syncRows.length" class="list-table" data-sync-table>
+        <table v-if="syncVisibleRows.length" class="list-table" data-sync-table>
           <thead>
             <tr>
               <th>實體</th>
@@ -2045,7 +2063,7 @@ watch(canSyncReview, (open, wasOpen) => {
           </thead>
           <tbody>
             <tr
-              v-for="row in syncRows"
+              v-for="row in syncVisibleRows"
               :key="row.queue_id || `${row.entity}|${row.key}`"
               :class="{ 'is-sync-target': isSyncTarget(row) }"
               :data-sync-entity="row.entity"
@@ -2058,7 +2076,10 @@ watch(canSyncReview, (open, wasOpen) => {
               <td>{{ row.queued_at ? formatDateTime(row.queued_at) : '—' }}</td>
               <td>{{ syncStatusLabel(row.status) }}</td>
               <td class="review__ops">
+                <!-- **状态门（本单）**：两颗按钮只在 `PENDING` 行出现；已落定行改渲染状态字样
+                     （复用 `syncStatusLabel`，带 `data-sync-settled`）—— **不置灰按钮、不占位**。 -->
                 <button
+                  v-if="row.status === 'PENDING'"
                   class="btn btn--primary"
                   type="button"
                   data-action="sync-approve"
@@ -2069,6 +2090,7 @@ watch(canSyncReview, (open, wasOpen) => {
                   通過並寫入
                 </button>
                 <button
+                  v-if="row.status === 'PENDING'"
                   class="btn btn--ghost"
                   type="button"
                   data-action="sync-reject"
@@ -2078,12 +2100,19 @@ watch(canSyncReview, (open, wasOpen) => {
                 >
                   駁回
                 </button>
+                <span v-if="row.status !== 'PENDING'" class="muted-hint" data-sync-settled>
+                  {{ syncStatusLabel(row.status) }}
+                </span>
               </td>
             </tr>
           </tbody>
         </table>
         <p v-else-if="syncLoading" class="muted-hint" data-sync-loading>正在取回斐萃待審變更…</p>
         <p v-else class="muted-hint" data-sync-empty>當前沒有來自斐萃的待審變更。</p>
+        <!-- 「僅顯示待審」开着 ⇒ 表下如实给一行已处理条数（关时全部已在表内 ⇒「另有」不成立，不给）。 -->
+        <p v-if="syncPendingOnly && syncSettledCount > 0" class="muted-hint" data-sync-settled-count>
+          另有 {{ syncSettledCount }} 條已處理
+        </p>
       </div>
     </section>
 

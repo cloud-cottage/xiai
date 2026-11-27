@@ -13,8 +13,13 @@
  *   · `approve(queueId)`   —— `approveQueue`（**载荷只带 `queue_id`**，逐项）；
  *   · `applyUp(queueId)`   —— `applyUp`（`to-xiai` 上行写入 xiai，单 `queue_id`）；
  *   · `reject(queueId)`    —— `rejectQueue`（单 `queue_id`）；
- *   · `approveAndApply(id)`—— 【通过并写入】两步编排：**任一步失败即停**，结构化 reason 原样上抛；
+ *   · `approveAndApply(id, options)`—— 【通过并写入】两步编排：**任一步失败即停**，结构化
+ *     reason 原样上抛；`options.currentStatus` ＝ 调用方读到的行状态（幂等判据输入，
+ *     `CONFLICT` ＋ 该项已写入 ⇒ **幂等成功**、零 `applyUp`）；
  *   · `nextSyncRow(row, result)` —— **纯函数**的本地状态推进（失败 ⇒ 本地状态**逐字不变**）；
+ *   · `canApproveSyncRow(row)` / `partitionSyncRows(rows)` —— **纯函数**状态门：
+ *     只有 `PENDING` 行可动作（按钮按状态收窄的判据单点）；按状态分流 `{pending, settled}`
+ *     （保序、不改原数组；「僅顯示待審」开关用）；
  *   · `canReviewSync()`    —— 审阅段的渲染门（**判权单点 ＝ `session.js::isAdmin`**）；
  *   · `parseSyncDeepLink(query)` —— 深链 `?from=feicui&entity=<books|persons|publishers>&key=<业务键>` 解析。
  *
@@ -108,6 +113,13 @@ export const SYNC_QUEUE_STATUS = Object.freeze([
   'FAILED',
   'CONFLICT'
 ])
+
+/**
+ * **唯一可动作状态**：六态里只有 `PENDING` 允许【通過並寫入】/【駁回】。
+ * 已落定行（APPROVED · REJECTED · APPLIED · FAILED · CONFLICT）一律不可动作 ——
+ * 对它们发写请求只会被服务端 CAS 门按「状态 ≠ PENDING」拒（`CONFLICT`，零写入）。
+ */
+export const SYNC_ACTIONABLE_STATUS = 'PENDING'
 
 /** 深链标记值（feicui 侧生成 `?from=feicui&entity=…&key=…`）。 */
 export const SYNC_DEEP_LINK_FROM = 'feicui'
@@ -428,19 +440,55 @@ export async function reject(queueId) {
 }
 
 /**
+ * **幂等判据（纯函数）**：`approve` 回 `CONFLICT` 且该项**其实已经写入** ⇒ 视作成功。
+ * 真因（2026-11-28 生产现场）：用户点到一条早已 `APPLIED` 的行 ⇒ 服务端 CAS 门
+ * （状态 ≠ `PENDING` 即拒、零写入）回 `CONFLICT`，而这不是失败 —— 项已经写过了。
+ *  · 调用方给了 `options.currentStatus` ⇒ **以它为准**：`'APPLIED'` ⇒ 幂等；
+ *    其它状态（如 `PENDING`）⇒ 真冲突，**不因 `msg` 字样放宽**；
+ *  · 未给状态（无 `options` / `currentStatus` 非串或空）⇒ 退服务端读数：
+ *    `msg` 含 `APPLIED` ⇒ 幂等；否则照旧失败。
+ * **只认 `reason === 'CONFLICT'`**（其它 reason 即便状态是 APPLIED 也原样失败）。
+ * @param {object|undefined} options `approveAndApply` 的可选参
+ * @param {{reason:string, msg:string}} approved `approve` 步的结果
+ * @returns {boolean}
+ */
+function isAlreadyApplied(options, approved) {
+  if (!approved || approved.reason !== 'CONFLICT') return false
+  const opts = options && typeof options === 'object' ? options : null
+  const stated = opts && typeof opts.currentStatus === 'string' ? opts.currentStatus.trim() : ''
+  if (stated !== '') return stated === 'APPLIED'
+  return text(approved.msg).includes('APPLIED')
+}
+
+/**
  * **【通过并写入】两步编排**（`approveQueue` → `applyUp`）。
  * **任一步失败即停**并结构化上抛（`reason` ＝ 该步服务端 reason，`msg` 写明卡在哪一步），
  * **绝不**在 `applyUp` 失败后回 `ok:true`、也绝不把失败折成成功文案。
+ *
+ * **幂等例外（本单新增）**：`approve` 回 `CONFLICT` 且该项已写入（见 `isAlreadyApplied`）
+ * ⇒ **幂等成功** `ok:true` ＋ `item.idempotent === true` ＋ `item.status === 'APPLIED'`，
+ * **零 `applyUp`（只发一次 `approveQueue`）**、不重复写；其余 `CONFLICT` / 其它 `reason`
+ * 仍原样失败（文案与 reason **一字不改**）。
  * @param {string} queueId
- * @returns {Promise<{ok:boolean, reason:string, msg:string, item:{stage:string, queue_id:string, status:string}|null}>}
+ * @param {{currentStatus?:string}} [options] 本行读到的队列状态（幂等判据的调用方读数）
+ * @returns {Promise<{ok:boolean, reason:string, msg:string, item:{stage:string, queue_id:string, status:string, idempotent?:boolean}|null}>}
  */
-export async function approveAndApply(queueId) {
+export async function approveAndApply(queueId, options) {
   const id = singleQueueId(queueId)
   if (id === null) {
     return fail('INVALID_VALUE', 'queue_id 必須是單一字串（逐項通過，不收數組、不夾帶業務資料）；本次零寫入。')
   }
   const approved = await approve(id)
   if (approved.ok !== true) {
+    /* **已写入 ⇒ 幂等成功**（停在 approve 步、零 `applyUp`、零重复写）。 */
+    if (isAlreadyApplied(options, approved)) {
+      return done('該項已寫入（無需重複操作）；本次未重複寫入。', {
+        stage: 'done',
+        queue_id: id,
+        status: 'APPLIED',
+        idempotent: true
+      })
+    }
     return fail(approved.reason, `通過失敗：${approved.msg}`, { stage: 'approve', queue_id: id, status: 'PENDING' })
   }
   const applied = await applyUp(id)
@@ -463,6 +511,40 @@ export function nextSyncRow(row, result) {
   const status = result.item && typeof result.item.status === 'string' ? result.item.status : ''
   if (status === '' || status === row.status) return row
   return Object.assign({}, row, { status })
+}
+
+/* --------------------------------------------------------------------------- 状态门（纯函数） */
+
+/**
+ * **该行是否可动作（纯函数｜状态门单点）**：只有 `PENDING` 行能【通過並寫入】/【駁回】。
+ * 非物件 / 空状态 / 已落定（`APPROVED` · `REJECTED` · `APPLIED` · `FAILED` · `CONFLICT`）
+ * ⇒ `false` —— 面板据此**按状态收窄**两颗按钮，不再对已落定行发注定 `CONFLICT` 的写请求
+ * （生产真因：面板把 PENDING 与 APPLIED 行一并列出 ⇒ 用户点到已写入行 ⇒ 服务端 CAS 门拒）。
+ * @param {unknown} row 审阅行
+ * @returns {boolean}
+ */
+export function canApproveSyncRow(row) {
+  if (!row || typeof row !== 'object') return false
+  return row.status === SYNC_ACTIONABLE_STATUS
+}
+
+/**
+ * **按状态分流（纯函数｜「僅顯示待審」用）** ⇒ `{pending, settled}`：
+ *  · **保序**（两桶各自维持入参顺序）、**不改入参数组**、**不改行**（只搬引用）；
+ *  · 非 `PENDING`（含非物件元素）一律进 `settled`，两桶长度之和 ＝ 入参长度；
+ *  · **非数组 ⇒ 两空数组**（不猜、不把物件当行）。
+ * @param {unknown} rows 审阅行数组
+ * @returns {{pending:Array, settled:Array}}
+ */
+export function partitionSyncRows(rows) {
+  const pending = []
+  const settled = []
+  if (!Array.isArray(rows)) return { pending, settled }
+  rows.forEach((row) => {
+    if (canApproveSyncRow(row)) pending.push(row)
+    else settled.push(row)
+  })
+  return { pending, settled }
 }
 
 /* --------------------------------------------------------------------------- 深链 */
@@ -515,6 +597,7 @@ export default {
   syncEntityCloudOf,
   SYNC_OP,
   SYNC_QUEUE_STATUS,
+  SYNC_ACTIONABLE_STATUS,
   SYNC_DEEP_LINK_FROM,
   SYNC_LIMIT_DEFAULT,
   SYNC_LIMIT_MAX,
@@ -531,5 +614,7 @@ export default {
   reject,
   approveAndApply,
   nextSyncRow,
+  canApproveSyncRow,
+  partitionSyncRows,
   parseSyncDeepLink
 }
