@@ -189,7 +189,42 @@ const faces = computed(() => (seal.value ? seal.value.faces : []))
 const wholeSealImages = computed(() => (seal.value && Array.isArray(seal.value.wholeSealImages) ? seal.value.wholeSealImages : []))
 /** 本章是否已有印面（＝已有 base face）⇒ 上传弹窗的 `base face` 选项禁用（裁定件 §五）。 */
 const sealHasBaseFace = computed(() => faces.value.some((face) => seals.faceRoleOf(face, faces.value) === seals.FACE_ROLE_BASE))
-const gallery = computed(() => (seal.value ? photoService.listPhotosByStamp(seal.value.stamp_id) : []))
+/**
+ * **實物照片畫廊（本單起由服務層「合併單點」供數）** —— `listSealPhotosMerged(stampId, sealId, {admin})`：
+ * 雲端行在前（`storage:'cloud'`）、本機 IndexedDB 遺留行在後（`local:true`）、同 `sha256` 只留雲端份、
+ * `hidden` 行非管理員不可見。**不再**用 `listPhotosByStamp`（那只看本機鏡像，雲端行會整類缺席）。
+ * 雲端行**不讀 IndexedDB**：字節由 `SliceImage` 按行內 `sha256` 走
+ * `displayFetch('/image/slices?sha256=…')` 塊面就地取（見 `SliceImage.vue` 的 digest 分流）。
+ */
+const gallery = ref([])
+/** 合併讀數（上屏 / 取證）：雲端條數、本機遺留條數（=「未上雲」說明行的 N）、可讀提示。 */
+const galleryCloudCount = ref(0)
+const galleryLocalOnly = ref(0)
+const galleryNotice = ref('')
+/* 載入序號：換章 / 重載後回包遲到時丟棄過期結果（不讓上一枚的行串進這一枚）。 */
+let galleryRequestId = 0
+
+/** 重新取畫廊（每次掛載 / 換章 / 寫面成功後由 watch 觸發；不輪詢）。 */
+async function loadGallery() {
+  const sealRow = seal.value
+  const token = (galleryRequestId += 1)
+  if (!sealRow) {
+    gallery.value = []
+    galleryCloudCount.value = 0
+    galleryLocalOnly.value = 0
+    galleryNotice.value = ''
+    return
+  }
+  const stampId = String(sealRow.stamp_id || '')
+  const out = await photoService.listSealPhotosMerged(stampId, stampId, {
+    admin: photoService.canManageSealPhotos()
+  })
+  if (token !== galleryRequestId) return // 過期回包：丟棄
+  gallery.value = Array.isArray(out.rows) ? out.rows : []
+  galleryCloudCount.value = Number(out.cloudCount) || 0
+  galleryLocalOnly.value = Number(out.localOnly) || 0
+  galleryNotice.value = out.ok ? '' : String(out.message || '')
+}
 
 /* ---------------------- 影像：二进制只在 IndexedDB ---------------------- */
 /* 页面**只能**经服务层取回二进制（`seals.loadImageDataUrl`），不得自行读写浏览器存储。 */
@@ -471,6 +506,10 @@ async function loadPhotoImages() {
      再按 id 取回二进制（迁移幂等，无可迁时零写入）。 */
   await photoService.ensurePhotoStorageMigrated()
   for (const row of gallery.value) {
+    /* **雲端行不讀 IndexedDB（本單）**：它的字節在雲端，本機影像庫沒有這一行 ——
+       載入門由 `photoReadyOf()` 放行，字節由 `SliceImage` 按行內 `sha256`
+       走 `displayFetch('/image/slices?sha256=…')` 塊面就地取（不經本機、不偽造 dataURL）。 */
+    if (row.storage === 'cloud') continue
     if (photoUrls[row.id] || photoErrors[row.id]) continue
     const out = await photoService.loadPhotoDataUrl(row.id)
     if (out.ok) photoUrls[row.id] = out.dataUrl
@@ -478,13 +517,31 @@ async function loadPhotoImages() {
   }
 }
 
+/** 縮略圖 / 大圖的**渲染門**：本機行＝已取回 dataURL；雲端行＝立即放行（字節走塊面，不落本機）。 */
+function photoReadyOf(row) {
+  if (!row) return false
+  if (row.storage === 'cloud') return true
+  return Boolean(photoUrls[row.id])
+}
+
 watch(() => [route.params.id, dataVersion.value, gallery.value.map((row) => row.id).join(',')], loadPhotoImages, {
   immediate: true
 })
 
-/* ---------------------- 实物照片：点击放大（**全用户可用**，本单只做查看） ---------------------- */
+/* 畫廊（合併行）的取數面：掛載 / 換章 / 寫面成功 / 數據源狀態變化 ⇒ 重取一次；
+   **不輪詢**（與服務層自限③一致）。gallery 行一變，上面那條 watch 會跟着重跑取字節。 */
+watch(
+  () => [route.params.id, dataVersion.value, seals.dataSourceState().state],
+  () => {
+    void loadGallery()
+  },
+  { immediate: true }
+)
+
+/* ---------------------- 实物照片：点击放大（**全用户可用**） ---------------------- */
 /* 遮罩由 `PhotoLightbox.vue` 单点渲染（`v-if` ⇒ 至多一份）；触发块**零权限判定** ——
-   普通用户与游客一律可点 / 可键盘触发（隐藏 · 删除属下一单，本单不做）。 */
+   普通用户与游客一律可点 / 可键盘触发（隐藏 · 删除的**管理员三钮**另挂在逐卡片上，
+   见上面 `canManagePhotos` 段；触发面本身仍零权限语义）。 */
 const photoLightboxOpen = ref(false)
 const photoLightboxIndex = ref(0)
 /* 触发的那张照片元素（关窗后把焦点还回去；取事件的 `currentTarget`）。 */
@@ -504,6 +561,67 @@ function closePhotoLightbox() {
 /** 触发元素的无障碍名用的序号（1 起，与遮罩里的 `N / 总` 同口径）。 */
 function photoOrdinalOf(photo) {
   return gallery.value.findIndex((row) => row.id === photo.id) + 1
+}
+
+/* ============================================================================
+   **實物照片 · 管理員三鈕（隱藏 / 取消隱藏 / 刪除｜本單）
+   ----------------------------------------------------------------------------
+   · 渲染条件＝服务层判定 `photos.canManageSealPhotos()`（与 `seals.canDeleteSeal`
+     同一把尺子）；普通用户 / 游客 ⇒ **整块不渲染**、DOM 零命中，**不得** CSS 隐藏 /
+     `disabled` 冒充。
+   · **按行收窄（2026-11-27 派单方裁定）**：整块门之内再套一层
+     `v-if="photo.storage === 'cloud'"` ⇒ **本机遗留行（`local:true`）三钮零渲染**
+     （服务端 `setSealPhotoHidden` / `deleteSealPhoto` 只认云端行，给本机行一个必然
+     失败的按钮不如不给）；本机行的**可见性照旧**（合并单点负责，本处零判定）。
+   · 钩子只用 `data-photo-hide` / `data-photo-unhide` / `data-photo-delete` ——
+     **不新增 `data-admin-action` 取值**（该族取值集合仍恰 12 值）。
+   · 样式＝`.btn--admin`（虚线轮廓）＋ `<AdminBadge>`（右上角锁标）＋ 标签内含
+     「僅${ADMIN_LABEL}可見」（verify-admin-buttons 硬约束，title 与 aria-label 各一处）。
+   · 删除走 `ConfirmDialog` 二次确认，文案必须含
+     「影像檔案仍保留於雲端儲存（可日後清理）」；成功 / 失败都本页上屏，不静默。
+   · 按钮只挂**能力种类**，弹窗内的确认 / 取消钮只用 `data-action`（ConfirmDialog 自带）。
+   ============================================================================ */
+const canManagePhotos = computed(() => photoService.canManageSealPhotos())
+const photoActionBusy = ref(false)
+const photoActionFeedback = ref('')
+const photoDeleteOpen = ref(false)
+const photoDeleteTarget = ref(null)
+
+/** 删除二次确认主文案（列明：照片编号 / 不可恢复 / 云对象保留）。 */
+const photoDeleteMessage = computed(() => {
+  const target = photoDeleteTarget.value
+  const id = target && target.id ? String(target.id) : ''
+  return `將刪除實物照片行「${id}」；畫廊不再顯示該行，刪後不可恢復。影像檔案仍保留於雲端儲存（可日後清理）。`
+})
+
+/** 打开删除二次确认（每次重置旧反馈）。 */
+function openPhotoDelete(photo) {
+  photoDeleteTarget.value = photo
+  photoActionFeedback.value = ''
+  photoDeleteOpen.value = true
+}
+
+/** 隱藏 / 取消隱藏（服务层 `setSealPhotoHidden`；服务端裁决，本页零判定）。 */
+async function onPhotoToggleHidden(photo, hidden) {
+  if (!canManagePhotos.value || photoActionBusy.value) return
+  photoActionBusy.value = true
+  const out = await photoService.setSealPhotoHidden(photo.id, hidden)
+  photoActionBusy.value = false
+  photoActionFeedback.value = out.message
+  if (out.ok) dataVersion.value += 1 // 重取合并列表 ⇒ 隐藏态与徽标即时回读
+}
+
+/** 确认删除（过 `ConfirmDialog`；服务层 `deleteSealPhoto` 只删行、云对象保留）。 */
+async function confirmPhotoDelete() {
+  const target = photoDeleteTarget.value
+  photoDeleteOpen.value = false
+  if (!target) return
+  photoDeleteTarget.value = null
+  photoActionBusy.value = true
+  const out = await photoService.deleteSealPhoto(target.id)
+  photoActionBusy.value = false
+  photoActionFeedback.value = out.message
+  if (out.ok) dataVersion.value += 1
 }
 
 const logged = isLoggedIn
@@ -2164,13 +2282,17 @@ async function applyPhotoFile(file) {
     uploading.value = false
     return
   }
-  const result = await photoService.uploadPhoto({
+  /* **雲端兩步走（本單）**：① `displayFetch('/image/store')` 字節入云 ②
+     `createSealPhoto` 登记行 —— 从头到尾**不碰本机存储**（不写 IndexedDB、
+     不写 `xiai:v1:photos`）；② 失败 ⇒ 服务层文案含「登記失敗」与
+     「影像已存雲端…重試不會重複上傳」，且**零 IDB 写入**。 */
+  const result = await photoService.uploadSealPhotoCloud({
     stampId: seal.value.stamp_id,
+    sealId: seal.value.stamp_id,
     bytes: exported.bytes,
     mime: exported.mime,
     width: exported.width,
-    height: exported.height,
-    fileName: file.name
+    height: exported.height
   })
   uploadFeedback.value = result.ok
     ? `${result.message}（${describeBytes(loaded.originalBytes)} → ${describeBytes(exported.bytes.length)}，${exported.width} × ${exported.height}，${exported.mime}），已歸入本印章實物照片。${exported.notice ? ` ${exported.notice}` : ''}`
@@ -3985,9 +4107,12 @@ async function onImageBookChange(imageId, event) {
             @keydown.enter.prevent="openPhotoLightbox(photo, $event)"
             @keydown.space.prevent="openPhotoLightbox(photo, $event)"
           >
-            <!-- R-87 / R-88：实拍图按元数据切分（实拍族 8 块）→ 前端拼接展示（按原色）。 -->
+            <!-- R-87 / R-88：实拍图按元数据切分（实拍族 8 块）→ 前端拼接展示（按原色）。
+                 渲染门＝`photoReadyOf(photo)`：**本机行**要先取回 dataURL；**云端行**立即放行
+                 （字节由 `SliceImage` 按行内 `sha256` 走 `displayFetch('/image/slices')`，
+                  **不读 IndexedDB**、本页也不伪造 dataURL）。 -->
             <SliceImage
-              v-if="photoUrls[photo.id]"
+              v-if="photoReadyOf(photo)"
               :src="photoUrls[photo.id]"
               :row="photo"
               cut-hint="photo"
@@ -3999,9 +4124,77 @@ async function onImageBookChange(imageId, event) {
             <figcaption>
               {{ formatBytes(photo.bytes) }}<template v-if="photo.mime"> · {{ photo.mime }}</template>
             </figcaption>
+            <!-- hidden 行：非管理员在**合并列表**那一步就已被过滤 ⇒ 这里只可能是管理员看到；
+                 徽标字面取服务层单点 `PHOTO_HIDDEN_BADGE`（上屏繁体「已隱藏」）。 -->
+            <p v-if="photo.hidden" class="detail__badge" data-photo-hidden-badge>
+              {{ photo.hidden_badge || '已隱藏' }}
+            </p>
+            <!-- 管理員三鈕（非管理員 / 遊客 ⇒ **整块不渲染**，DOM 零命中；不得 CSS 隐藏 /
+                 `disabled` 冒充）：钩子 `data-photo-hide` / `data-photo-unhide` /
+                 `data-photo-delete` —— **不进** `[data-admin-action]` 族（该族取值集合仍恰 12 值）。
+                 **按行收窄（2026-11-27 派单方裁定）**：内层 `<template v-if="photo.storage === 'cloud'">`
+                 再把三钮限到**云端行** —— 本机遗留行（`local:true` / `storage:'indexeddb'`）三钮
+                 **零渲染**（服务端会拒，与其给一个必然失败的按钮不如不给）；本机行的**可见性照旧**
+                 （仍由合并单点 `mergeSealPhotoRows` 裁，本处不掺和）。 -->
+            <div v-if="canManagePhotos" class="detail__photo-actions" data-photo-admin-actions>
+              <template v-if="photo.storage === 'cloud'">
+                <button
+                  v-if="photo.hidden"
+                  class="btn btn--ghost btn--admin"
+                  type="button"
+                  data-photo-unhide
+                  :data-photo-id="photo.id"
+                  :disabled="photoActionBusy"
+                  :title="`取消隱藏（僅${ADMIN_LABEL}可見）`"
+                  :aria-label="`取消隱藏（僅${ADMIN_LABEL}可見）`"
+                  @click="onPhotoToggleHidden(photo, false)"
+                >
+                  <AdminBadge />
+                  取消隱藏
+                </button>
+                <button
+                  v-else
+                  class="btn btn--ghost btn--admin"
+                  type="button"
+                  data-photo-hide
+                  :data-photo-id="photo.id"
+                  :disabled="photoActionBusy"
+                  :title="`隱藏（僅${ADMIN_LABEL}可見）`"
+                  :aria-label="`隱藏（僅${ADMIN_LABEL}可見）`"
+                  @click="onPhotoToggleHidden(photo, true)"
+                >
+                  <AdminBadge />
+                  隱藏
+                </button>
+                <button
+                  class="btn btn--ghost btn--admin"
+                  type="button"
+                  data-photo-delete
+                  :data-photo-id="photo.id"
+                  :disabled="photoActionBusy"
+                  :title="`刪除（僅${ADMIN_LABEL}可見）`"
+                  :aria-label="`刪除（僅${ADMIN_LABEL}可見）`"
+                  @click="openPhotoDelete(photo)"
+                >
+                  <AdminBadge />
+                  刪除
+                </button>
+              </template>
+            </div>
           </figure>
         </div>
         <p v-else class="detail__hint">暫無實物照片。</p>
+
+        <!-- 本机遗留说明行（**N = 0 ⇒ 整行不渲染**）：N ＝ 合并后仍在本机、云端尚无同摘要行的张数。 -->
+        <p v-if="galleryLocalOnly > 0" class="detail__hint" data-photo-local-leftover>
+          {{ galleryLocalOnly }} 張本機舊照片未上雲，重新上傳即可獲得雲端副本。
+        </p>
+        <!-- 云端列表的可读降级（列表失败时服务层仍交回本机行并带 message；不静默）。 -->
+        <p v-if="galleryNotice" class="detail__hint" data-photo-gallery-notice>{{ galleryNotice }}</p>
+        <!-- 管理员三钮的执行反馈（成功 / 失败都上屏）。 -->
+        <p v-if="photoActionFeedback" class="detail__hint" data-photo-action-feedback>
+          {{ photoActionFeedback }}
+        </p>
 
         <div class="detail__upload" tabindex="0" data-paste-zone="photo-upload" @paste="onPastePhoto">
           <label v-if="canUpload" class="btn btn--ghost detail__upload-btn">
@@ -4023,9 +4216,10 @@ async function onImageBookChange(imageId, event) {
       </div>
     </section>
 
-    <!-- 實物照片**點擊放大**遮罩（全用戶可用；本單只做查看 —— 隱藏 / 刪除屬下一單）：
-         `v-if` ⇒ 遮罩至多一份；`role="dialog"` / `aria-modal` / ESC（`useEscToClose`）/
-         焦點回焦 / 背景鎖滾動都在 `PhotoLightbox.vue` 內單點處理。 -->
+    <!-- 實物照片**點擊放大**遮罩（全用戶可用）：`v-if` ⇒ 遮罩至多一份；`role="dialog"` /
+         `aria-modal` / ESC（`useEscToClose`）/ 焦點回焦 / 背景鎖滾動都在 `PhotoLightbox.vue`
+         內單點處理。大圖的渲染門：**本机行**要 `srcs[id]` 已取回；**云端行**立即放行
+         （字节由 `SliceImage` 按行内 `sha256` 走块面，不读 IndexedDB）。 -->
     <PhotoLightbox
       v-if="photoLightboxOpen"
       :photos="gallery"
@@ -4034,6 +4228,23 @@ async function onImageBookChange(imageId, event) {
       :trigger="photoLightboxTrigger"
       @close="closePhotoLightbox"
       @update:index="photoLightboxIndex = $event"
+    />
+
+    <!-- **刪除實物照片的二次確認（本單）**：复用 `ConfirmDialog`（显式、可取消、默认不通过）。
+         文案**必须含**「影像檔案仍保留於雲端儲存（可日後清理）」；确认 / 取消钮只挂
+         `data-action`（`photo-delete-confirm` / `photo-delete-cancel`，**不新增
+         `data-admin-action`**）。ConfirmDialog 自带 `role="dialog"` 与其自己的
+         `useEscToClose` ⇒ 本页「5 扇自建弹窗 / 5 层 hook」读数不变。 -->
+    <ConfirmDialog
+      v-if="photoDeleteOpen"
+      title="刪除實物照片"
+      :message="photoDeleteMessage"
+      hint="只刪元數據行：影像檔案仍保留於雲端儲存（可日後清理）。"
+      confirm-text="確認刪除"
+      confirm-action="photo-delete-confirm"
+      cancel-action="photo-delete-cancel"
+      @confirm="confirmPhotoDelete"
+      @cancel="photoDeleteOpen = false"
     />
 
     <FaceFixedAttributesDialog

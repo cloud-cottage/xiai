@@ -37,6 +37,11 @@ import {
 } from '../utils/image.js'
 import { SLICE_META_FIELD } from '../data/seed.js'
 import { currentUser } from '../data/session.js'
+/* 云端化三通道（本单新增；**只引用、不另立**）：公开读面 `callCloudFunction`、
+   字节入云 `displayFetch('/image/store')`、写面（含管理三 op）`userWriteGate`。 */
+import { callCloudFunction } from '../data/cloudbaseFn.js'
+import { displayFetch } from './displayImage.js'
+import { userWriteGate } from './userWrite.js'
 
 export const PHOTO_AUDIT_STATUS = {
   PENDING: 'PENDING',
@@ -507,3 +512,374 @@ export async function photoBitmapOf(photoId) {
 
 /** 把逐块画布按原坐标拼回整图（拼接自证 / 导出；与 `seals.js` 同一实现，不另写一份几何）。 */
 export { composeSliceTiles }
+
+/* ============================================================================
+   **實物照片雲端化（2026-11-27｜派單方偵察結論照抄，不再议）**
+   ----------------------------------------------------------------------------
+   【通道（重要，照偵察修正版）】
+     · 管理三 op（`listSealPhotosAdmin` / `setSealPhotoHidden` / `deleteSealPhoto`）
+       全在云函数 `xiai-user-token`（admin-token 的 SealPhoto 命中 0）⇒
+       **不得**走 `services/admin.js::adminWriteGate`，正确通道 ＝
+       `services/userWrite.js::userWriteGate` → `token.js::userGate`
+       （与 `pullImportRows` / `listPendingCorrectionsForAdmin` 同路）。
+     · 公开 `listSealPhotos` 照 `services/sealCards.js` 的模式：
+       `callCloudFunction('xiai-user-token', {action:'public', op:'listSealPhotos', payload:{seal_id}})`。
+     · 字节入云走 `displayFetch('/image/store')`（候选回退单点，每档 4s 超时）；
+       ≤8MiB 大文件有超时风险 ⇒ 失败一律如实报，**绝不静默**。
+   【本文件自限，逐条可机械判】
+     ① 上传**只写云端两步**，从头到尾**不碰本机存储**（不调 `putPhotoBinary` / `savePhotoRows`）；
+     ② 列表合并：云端行在前（`storage:'cloud'`），本机 IDB 遗留行在后（`local:true`）；
+        同 `sha256` 只留云端份；`hidden` 行非管理员不可见、管理员可见且带「已隱藏」徽标；
+     ③ 管理员数据源 ＝ `listSealPhotosAdmin`，**仅在管理员打开管理开关 / 进入页面时调**，不轮询；
+     ④ 所有文案一律繁体（AC-72）。
+   ============================================================================ */
+
+/** 承载五个照片 op 的云函数名（本文件唯一出现处）。 */
+const SEAL_PHOTO_FUNCTION_NAME = 'xiai-user-token'
+/** 公开只读通道的 `action` 字面值（云函数 `index.js::handlePublic` 的分流判据）。 */
+const SEAL_PHOTO_PUBLIC_ACTION = 'public'
+/** 五个 op 名（与云函数注册面逐字一致；本文件唯一出现处）。 */
+const SEAL_PHOTO_LIST_OP = 'listSealPhotos'
+const SEAL_PHOTO_ADMIN_LIST_OP = 'listSealPhotosAdmin'
+const SEAL_PHOTO_CREATE_OP = 'createSealPhoto'
+const SEAL_PHOTO_HIDDEN_OP = 'setSealPhotoHidden'
+const SEAL_PHOTO_DELETE_OP = 'deleteSealPhoto'
+/** 按 op 收窄的回包读数键面（与云函数 `index.js` 的收窄面逐字同集；`token.js::gate` 只按声明透传）。 */
+const SEAL_PHOTO_ADMIN_LIST_READOUT_KEYS = Object.freeze(['rows', 'count', 'truncated'])
+const SEAL_PHOTO_DELETE_READOUT_KEYS = Object.freeze(['deleted', 'object_retained'])
+/** 云端行的存储标记（本单合并单点；本机遗留行不带它）。 */
+const PHOTO_STORAGE_CLOUD = 'cloud'
+/** 云存储收件容器（服务端 `mime` 逐字值域只认它）。 */
+const PHOTO_CLOUD_MIME = 'image/tiff'
+/** 隐藏行给管理员的徽标字面（上屏繁体）。 */
+export const PHOTO_HIDDEN_BADGE = '已隱藏'
+/**
+ * 「字节已在云端、但登记行失败」的固定前缀 —— **语义冻结**：
+ * 影像已存雲端 / 登記失敗 / 重試不會重複上傳（内容寻址 ⇒ 同图不重复上传字节）。
+ */
+const PHOTO_REGISTER_FAIL_PREFIX = '影像已存雲端，但登記失敗；重試不會重複上傳。'
+
+/** 64 位小写十六进制（与服务端 `normalize_digest` 同口径；不符 ⇒ 空串，不猜不补）。 */
+function photoDigestOf(raw) {
+  const text = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase()
+  if (text.length !== 64) return ''
+  for (const ch of text) if (!'0123456789abcdef'.includes(ch)) return ''
+  return text
+}
+
+/** 当前（或指定）账号是否可操作照片管理三钮 —— 与 `seals.canDeleteSeal` **同一把尺子**。 */
+export function canManageSealPhotos(actor) {
+  const user = actor || currentUser()
+  return user !== null && user !== undefined && user.role === 'admin'
+}
+
+/** 云端行 → 合并视图行（补 `id` / `storage` / 徽标；不改服务端键面本身）。 */
+function cloudPhotoRowOf(row) {
+  const source = row && typeof row === 'object' ? row : {}
+  const merged = Object.assign({}, source, {
+    id: String(source.id || source._id || ''),
+    storage: PHOTO_STORAGE_CLOUD,
+    local: false
+  })
+  if (merged.hidden === true) merged.hidden_badge = PHOTO_HIDDEN_BADGE
+  return merged
+}
+
+/** 本机 IDB 遗留行 → 合并视图行（`local:true` 标记；其余键原样）。 */
+function localPhotoRowOf(row) {
+  return Object.assign({}, row, { id: String((row && row.id) || ''), local: true })
+}
+
+/**
+ * **合并单点**：云端行在前、本机遗留行在后；同 `sha256` 只留云端份；
+ * `hidden` 行非管理员不可见（本端兜底，不只依赖服务端过滤）。
+ */
+function mergeSealPhotoRows(cloudRows, localRows, admin) {
+  const cloud = []
+  const seenIds = new Set()
+  const cloudDigests = new Set()
+  for (const raw of Array.isArray(cloudRows) ? cloudRows : []) {
+    const row = cloudPhotoRowOf(raw)
+    if (!row.id) continue
+    if (!admin && row.hidden === true) continue
+    if (seenIds.has(row.id)) continue
+    seenIds.add(row.id)
+    if (row.sha256) cloudDigests.add(row.sha256)
+    cloud.push(row)
+  }
+  const local = []
+  for (const raw of Array.isArray(localRows) ? localRows : []) {
+    const row = localPhotoRowOf(raw)
+    if (!row.id) continue
+    if (row.sha256 && cloudDigests.has(row.sha256)) continue
+    local.push(row)
+  }
+  return { rows: cloud.concat(local), cloudCount: cloud.length, localOnly: local.length }
+}
+
+/** 云端列表的结构化失败（`ok:false` ＋ 冻结 reason ＋ 可读文案；不编造行）。 */
+function cloudListFailure(reply, fallbackMessage) {
+  const reason = (reply && reply.reason) || 'STORAGE_UNAVAILABLE'
+  const message = (reply && reply.message) || fallbackMessage
+  return { ok: false, rows: [], cloudCount: 0, localOnly: 0, truncated: false, reason, message }
+}
+
+/**
+ * 读云端照片行（公开面 / 管理面共用一个函数；**排序与上限只在服务端做一次**）。
+ * @param {string} sealKey 印章编号（`seal_id` 与 `stamp_id` 在本仓同值）
+ * @param {boolean} admin `true` ＝ 走 `listSealPhotosAdmin`（全量含 hidden）
+ * @returns {Promise<{ok:boolean, rows:Array, truncated:boolean, reason?:string, message:string}>}
+ */
+async function fetchCloudSealPhotos(sealKey, admin) {
+  if (admin) {
+    const reply = await userWriteGate(SEAL_PHOTO_ADMIN_LIST_OP, { seal_id: sealKey }, {
+      readoutKeys: SEAL_PHOTO_ADMIN_LIST_READOUT_KEYS
+    })
+    if (reply && reply.dev === true) {
+      return {
+        ok: false, rows: [], truncated: false, reason: 'STORAGE_UNAVAILABLE',
+        message: '離線形態：未經雲端，雲端實物照片列表不可用；以下為本機舊照片。'
+      }
+    }
+    if (!reply || reply.ok !== true) return cloudListFailure(reply, '雲端實物照片列表暫時不可用，請稍後再試。')
+    const rows = Array.isArray(reply.rows) ? reply.rows : []
+    return { ok: true, rows, truncated: reply.truncated === true, message: '' }
+  }
+  const reply = await callCloudFunction(SEAL_PHOTO_FUNCTION_NAME, {
+    action: SEAL_PHOTO_PUBLIC_ACTION,
+    op: SEAL_PHOTO_LIST_OP,
+    payload: { seal_id: sealKey }
+  })
+  const result = (reply && reply.result) || null
+  if (!reply || reply.ok !== true || !result || result.ok !== true) {
+    return cloudListFailure(result || reply, '雲端實物照片列表暫時不可用，請稍後再試。')
+  }
+  return {
+    ok: true,
+    rows: Array.isArray(result.rows) ? result.rows : [],
+    truncated: result.truncated === true,
+    message: ''
+  }
+}
+
+/**
+ * **列表合并**：云端行在前、本机 IDB 遗留行在后；同 `sha256` 只留云端份；
+ * `hidden` 行非管理员不可见、管理员可见且带「已隱藏」徽标。
+ *
+ * 云端列表失败时**仍交回本机行**并带可读 `message`（不静默、不假装全空）。
+ * @param {string} stampId 印章编号（兼容入参）
+ * @param {string} sealId 印章编号（服务端 `seal_id`；与 `stamp_id` 同值）
+ * @param {{admin?:boolean}} [options] `admin` ＝ 走管理面全量列表（**只在管理员打开管理开关 /
+ *   进入页面时调，不自动轮询**）
+ * @returns {Promise<{ok:boolean, rows:Array, cloudCount:number, localOnly:number,
+ *   truncated:boolean, reason?:string, message:string}>}
+ */
+export async function listSealPhotosMerged(stampId, sealId, options = {}) {
+  const admin = options.admin === true
+  const sealKey = String(sealId || stampId || '').trim()
+  const localStamp = String(stampId || sealId || '').trim()
+  const localRows = localStamp ? listPhotosByStamp(localStamp) : []
+  if (!sealKey) {
+    const fallback = { rows: localRows.map(localPhotoRowOf), cloudCount: 0, localOnly: 0, truncated: false }
+    return Object.assign({ ok: false, reason: 'MISSING_STAMP', message: '未指定印章。' }, fallback)
+  }
+  const cloud = await fetchCloudSealPhotos(sealKey, admin)
+  const merged = mergeSealPhotoRows(cloud.rows, localRows, admin)
+  const message = cloud.truncated
+    ? '雲端照片超過單次列表上限 200 張，已如實截斷顯示（其餘未列出）。'
+    : cloud.message
+  return {
+    ok: cloud.ok,
+    rows: merged.rows,
+    cloudCount: merged.cloudCount,
+    localOnly: merged.localOnly,
+    truncated: cloud.truncated,
+    reason: cloud.reason,
+    message
+  }
+}
+
+/**
+ * **上传两步走 · 第 ① 步：字节入云**（`POST /image/store`，候选回退单点、每档 4s）。
+ * 回包摘要必须与本地按字节算出的值逐字一致，否则明确失败（不采信自报值）。
+ */
+async function storePhotoBytesToCloud(payload) {
+  const localDigest = sha256Hex(payload)
+  const attempt = await displayFetch(
+    '/image/store',
+    { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: payload },
+    {
+      networkFailure: {
+        reason: 'STORAGE_UNAVAILABLE',
+        message: '影像暫時無法上傳雲端（本機權威存儲服務未就緒），請稍後再試；本次未登記任何照片行。'
+      },
+      failureOfReply: async (reply) => {
+        let reason = ''
+        let message = ''
+        try {
+          const face = await reply.json()
+          reason = String((face && face.reason) || '')
+          message = String((face && face.message) || '')
+        } catch {
+          reason = ''
+        }
+        return {
+          reason: reason || 'STORAGE_UNAVAILABLE',
+          message: message || '影像暫時無法上傳雲端，請稍後再試；本次未登記任何照片行。'
+        }
+      }
+    }
+  )
+  if (!attempt.ok) return { ok: false, reason: attempt.reason, message: attempt.message }
+  let body = null
+  try {
+    body = await attempt.reply.json()
+  } catch {
+    body = null
+  }
+  const digest = photoDigestOf(body && body.sha256)
+  if (!digest) {
+    return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: '影像入庫失敗：雲端未回可辨識的摘要；本次未登記任何照片行。' }
+  }
+  if (digest !== localDigest) {
+    return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: '影像入庫失敗：雲端回讀摘要與本地按字節算出的摘要不一致；本次未登記任何照片行。' }
+  }
+  const bytesLength = Number(body && body.bytesLength)
+  if (Number.isFinite(bytesLength) && bytesLength !== payload.length) {
+    return { ok: false, reason: 'UNRECOGNIZED_IMAGE', message: '影像入庫失敗：雲端回讀體量與本地不一致；本次未登記任何照片行。' }
+  }
+  return { ok: true, sha256: digest, message: '' }
+}
+
+/**
+ * **上传两步走（停写 IDB）**：① `displayFetch('/image/store')` 拿 `sha256`；
+ * ② `userWriteGate('createSealPhoto', 8 键)`。
+ *
+ * ② 失败 ⇒ **不写 IDB**（本函数从头到尾不碰本机存储）、文案含「登記失敗」且
+ * 「影像已存雲端…重試不會重複上傳」（内容寻址 ⇒ 重试不会重复上传字节）。
+ * @param {{stampId:string, sealId:string, bytes:Uint8Array|ArrayBuffer|ArrayBufferView,
+ *          mime?:string, width?:number, height?:number, note?:string}} payload
+ * @returns {Promise<{ok:boolean, stored?:boolean, row?:object, reason?:string, message:string}>}
+ */
+export async function uploadSealPhotoCloud({ stampId, sealId, bytes, mime, width, height, note } = {}) {
+  const user = currentUser()
+  if (!user) return { ok: false, reason: 'UNAUTHENTICATED', message: '請先登錄後再上傳實物照片' }
+  const sealKey = String(sealId || stampId || '').trim()
+  if (!sealKey) return { ok: false, reason: 'MISSING_STAMP', message: '未指定印章' }
+  const stampKey = String(stampId || sealKey)
+
+  const payload = toUint8Array(bytes)
+  if (!payload || payload.length === 0) {
+    return { ok: false, reason: 'EMPTY_CONTENT', message: '照片內容爲空，請重新選擇文件' }
+  }
+  if (payload.length > PHOTO_ARTIFACT_MAX_BYTES) {
+    return {
+      ok: false,
+      reason: 'ARTIFACT_TOO_LARGE',
+      message:
+        `本機影像生成失敗：處理後影像 ${describeBytes(payload.length)} 超過入庫上限 ${describeBytes(PHOTO_ARTIFACT_MAX_BYTES)}。` +
+        '這與「所選文件 ≤ 1 MB」的輸入上限是兩回事；請重試，或改用支持 WebP 編碼的瀏覽器後再上傳。'
+    }
+  }
+  /* mime 以**字节魔数**为准（不采信调用方的声称值）。 */
+  const actualMime = sniffBytesMime(payload)
+  if (!isImageMime(actualMime)) {
+    const claimed = String(mime || '').trim().toLowerCase()
+    return {
+      ok: false,
+      reason: 'NOT_IMAGE',
+      message: '這不是可用的圖片內容（無法識別圖片格式），請重新選擇圖片文件'
+        + (claimed ? `（聲稱類型 ${claimed}）` : '')
+    }
+  }
+  /* 服务端 `mime` 逐字值域只认 `image/tiff`（存储容器与印面面同口径）⇒ 非 TIFF 如实拒。 */
+  if (actualMime !== PHOTO_CLOUD_MIME) {
+    return {
+      ok: false,
+      reason: 'NOT_IMAGE',
+      message: `雲端實物照片只收 ${PHOTO_CLOUD_MIME} 存儲件（本機當前產物為 ${actualMime}）；本次零上傳。`
+    }
+  }
+  const finalWidth = Number.isFinite(Number(width)) && Number(width) > 0 ? Math.round(Number(width)) : 0
+  const finalHeight = Number.isFinite(Number(height)) && Number(height) > 0 ? Math.round(Number(height)) : 0
+  if (!finalWidth || !finalHeight) {
+    return { ok: false, reason: 'INVALID_VALUE', message: '缺少影像尺寸（寬 / 高須為正整數）；本次零上傳。' }
+  }
+  const trimmedNote = String(note || '').trim()
+  if (trimmedNote.length > 200) {
+    return { ok: false, reason: 'INVALID_VALUE', message: '備註超過 200 字；本次零上傳。' }
+  }
+
+  /* ① 字节入云（候选回退单点；失败如实交回，不静默）。 */
+  const stored = await storePhotoBytesToCloud(payload)
+  if (!stored.ok) return { ok: false, stored: false, reason: stored.reason, message: stored.message }
+
+  /* ② 登记行（载荷封闭恰 8 键；身份类键由服务端拒）。**失败零 IDB 写入。** */
+  const gate = await userWriteGate(SEAL_PHOTO_CREATE_OP, {
+    seal_id: sealKey,
+    stamp_id: stampKey,
+    sha256: stored.sha256,
+    bytes: payload.length,
+    mime: actualMime,
+    width: finalWidth,
+    height: finalHeight,
+    note: trimmedNote
+  })
+  if (!gate || gate.ok !== true) {
+    const detail = gate && gate.message ? String(gate.message) : ''
+    return {
+      ok: false,
+      stored: true,
+      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      message: PHOTO_REGISTER_FAIL_PREFIX + (detail ? `服務端回覆：${detail}` : '')
+    }
+  }
+  return { ok: true, stored: true, row: cloudPhotoRowOf(gate.row), message: '實物照片已上傳' }
+}
+
+/** 管理员「隱藏 / 取消隱藏」（`userWriteGate` 通道；服务端裁决，本层零判定）。 */
+export async function setSealPhotoHidden(photoId, hidden) {
+  const id = String(photoId || '').trim()
+  if (!id) return { ok: false, reason: 'MISSING_REQUIRED', message: '未指定照片編號；本次零寫入。' }
+  if (typeof hidden !== 'boolean') {
+    return { ok: false, reason: 'INVALID_VALUE', message: '隱藏標記必須是布爾值；本次零寫入。' }
+  }
+  const gate = await userWriteGate(SEAL_PHOTO_HIDDEN_OP, { photo_id: id, hidden })
+  if (!gate || gate.ok !== true) {
+    return {
+      ok: false,
+      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      message: (gate && gate.message) || '隱藏狀態更新失敗；本次零寫入。'
+    }
+  }
+  return {
+    ok: true,
+    row: cloudPhotoRowOf(gate.row),
+    message: hidden ? '已隱藏該實物照片。' : '已取消隱藏該實物照片。'
+  }
+}
+
+/** 管理员「刪照片行」（只删元数据行、**云对象保留**；成功回包 `{ok, deleted, object_retained}`）。 */
+export async function deleteSealPhoto(photoId) {
+  const id = String(photoId || '').trim()
+  if (!id) return { ok: false, reason: 'MISSING_REQUIRED', message: '未指定照片編號；本次零刪除。' }
+  const gate = await userWriteGate(SEAL_PHOTO_DELETE_OP, { photo_id: id }, {
+    readoutKeys: SEAL_PHOTO_DELETE_READOUT_KEYS
+  })
+  if (!gate || gate.ok !== true) {
+    return {
+      ok: false,
+      reason: (gate && gate.reason) || 'STORAGE_UNAVAILABLE',
+      message: (gate && gate.message) || '刪除失敗；本次零刪除。'
+    }
+  }
+  const retained = gate.object_retained === true
+  return {
+    ok: true,
+    deleted: gate.deleted === true,
+    object_retained: retained,
+    message: retained
+      ? '已刪除該實物照片行；影像檔案仍保留於雲端儲存（可日後清理）。'
+      : '已刪除該實物照片行。'
+  }
+}

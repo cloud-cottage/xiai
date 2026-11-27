@@ -141,9 +141,12 @@ onBeforeUnmount(() => {
 
       <div class="photo-lightbox__figure" data-photo-lightbox-figure>
         <!-- 大尺寸**重渲染同一张**：与缩略图同一 `srcs[id]` ＋ 同一 `row` ＋ 同一 `cut-hint`
-             ⇒ 同一套切分口径，只换容器宽度（切块铺贴，不整图直出）。 -->
+             ⇒ 同一套切分口径，只换容器宽度（切块铺贴，不整图直出）。
+             渲染门：**本机行**要 `srcs[id]` 已取回；**云端行**立即放行 —— 它的字节由
+             `SliceImage` 按行内 `sha256` 走 `displayFetch('/image/slices')` 块面就地取，
+             **不读 IndexedDB**（本组件零服务调用，照旧）。 -->
         <SliceImage
-          v-if="current && srcs[current.id]"
+          v-if="current && (current.storage === 'cloud' || srcs[current.id])"
           :src="srcs[current.id]"
           :row="current"
           cut-hint="photo"

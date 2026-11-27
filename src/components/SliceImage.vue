@@ -234,7 +234,9 @@ async function render() {
       /* **K-P5b｜讀取面雙路分流（硬判據）**：行內有 digest（二進制在服務端權威庫）⇒ 塊面走
          **按 digest 引用的形態**（`POST /api/image/slices?sha256=<hex>`）—— **不需要本機字節**；
          無 digest 的存量行 ⇒ 下面既有本機路徑**一行未改**（非 TIFF 原生解碼、**零 api**）。 */
-      const digest = seals.imageDigestOf(rowId)
+      /* **本單（實物照片雲端化）**：**雲端行**取塊改走行內 `sha256`（服務端權威庫按 digest 出塊，
+         本機 IndexedDB 沒有它的字節）；**本機行照舊**按影像編號取 digest（存量路徑一字未改）。 */
+      const digest = row.storage === 'cloud' ? row.sha256 : seals.imageDigestOf(rowId)
       if (digest) {
         const reply = await imageFaces.fetchSlices({ sha256: digest, assetId: rowId, kind: clientKind })
         if (reply.ok) {

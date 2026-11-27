@@ -6,8 +6,10 @@
  * 本页承担实物照片的**上传闭环**（选图 → 预览 + 可拖拽/缩放的方形框 → 上传）
  * 与**画廊渲染**（二进制从数据层取回，页面不碰任何浏览器存储）。
  *
- * 处理全部在浏览器端完成（解码 → 降采样 → 方形化 → WebP 编码），
- * **不调用任何后端 / 斐萃端点**；二进制进 IndexedDB，`localStorage` 只存元数据。
+ * 处理全部在浏览器端完成（解码 → 降采样 → 方形化 → **單頁 8bit Deflate TIFF**），
+ * **不调用任何后端 / 斐萃端点**；上传走**雲端兩步走**（`preparePhotoSource` ＋
+ * `uploadSealPhotoCloud`），**全程不写本机 IndexedDB / localStorage**。
+ * 画廊列表**仍只列本机遗留行**（云端「按创建者查列表」服务端尚无 —— 欠账，不实现）。
  */
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
@@ -21,7 +23,6 @@ import {
   centerSquareCrop,
   canEncodeWebp,
   describeBytes,
-  exportSquareImage,
   loadImageFile,
   normalizeCrop
 } from '../utils/image.js'
@@ -350,7 +351,11 @@ async function onUpload() {
   }
   busy.value = true
   stepText.value = '正在裁切並編碼…'
-  const exported = await exportSquareImage(source.value.bitmap, {
+  /* **雲端兩步走（本單）**：源件一律**單頁 8bit Deflate TIFF**（服务层唯一具名入口
+     `preparePhotoSource`），随后 `uploadSealPhotoCloud` 两步 —— ① 字节入云 ②
+     `createSealPhoto` 登记行；**全程不碰本机 IndexedDB / localStorage**，
+     ② 失败时文案由服务层带上「登記失敗」且零 IDB 写入。 */
+  const exported = await photoService.preparePhotoSource(source.value.bitmap, {
     crop: { ...crop.value },
     maxSide: IMAGE_LIMITS.maxSide,
     quality: IMAGE_LIMITS.quality
@@ -361,15 +366,15 @@ async function onUpload() {
     setStatus(`處理失敗：${exported.message}`, 'error')
     return
   }
-  stepText.value = '正在寫入本地影像庫…'
-  const result = await photoService.uploadPhoto({
+  stepText.value = '正在上傳雲端…'
+  const result = await photoService.uploadSealPhotoCloud({
     stampId: stampId.value,
+    sealId: stampId.value,
     bytes: exported.bytes,
     mime: exported.mime,
     width: exported.width,
     height: exported.height,
-    note: note.value,
-    fileName: source.value.fileName
+    note: note.value
   })
   busy.value = false
   stepText.value = ''
@@ -382,8 +387,11 @@ async function onUpload() {
   clearSelection()
   note.value = ''
   version.value += 1
+  /* **不谎报「已在下方画廊中」**：本页画廊仍是**本机遗留行**（云端「按创建者查列表」
+     服务端尚无，欠账不实现）⇒ 如实说明副本落在哪。 */
   setStatus(
-    `${result.message}：${before} → ${after}（${exported.width} × ${exported.height}，${exported.mime}），已在下方畫廊中。`,
+    `${result.message}：${before} → ${after}（${exported.width} × ${exported.height}，${exported.mime}），` +
+      '已存入雲端；本頁畫廊只列本機舊照片，雲端副本在對應印章詳情頁可見。',
     'ok'
   )
 }
@@ -399,7 +407,7 @@ async function onUpload() {
     <section class="panel">
       <div class="panel__head">
         <h2>上傳實物照片</h2>
-        <span class="photos__hint">單張上限 {{ limitText }}，處理全部在瀏覽器端完成（裁方形 → WebP）</span>
+        <span class="photos__hint">單張上限 {{ limitText }}，處理全部在瀏覽器端完成（裁方形 → TIFF，單頁 8bit Deflate）</span>
       </div>
       <div class="panel__body">
         <div class="field">
@@ -463,7 +471,7 @@ async function onUpload() {
               />
               <b>{{ crop ? crop.side : 0 }} px</b>
             </label>
-            <p class="photos__meta">產出：{{ outSizeText }} · 目標格式 image/webp（編不出時如實記錄實際格式）</p>
+            <p class="photos__meta">產出：{{ outSizeText }} · 目標格式 image/tiff（單頁 8bit Deflate，入庫容器）</p>
             <p v-if="!webpOk" class="photos__warn">
               當前瀏覽器未確認支持 WebP 編碼：將按實際產出格式如實入庫（不冒充 webp）。
             </p>
