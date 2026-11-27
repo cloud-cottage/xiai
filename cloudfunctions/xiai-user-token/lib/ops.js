@@ -2871,6 +2871,55 @@ async function issueCodeNumberAvoiding(kind, isTaken) {
   return deny(REASONS.STORAGE_UNAVAILABLE, '識別編號發號撞號重試超限；本次零寫入。')
 }
 
+/**
+ * **发号避让：候选号的「产出码」是否已被占**（本单「避让谓词改看码」**单点**；纯函数、绝不自抛）。
+ *
+ * 真因（2026-11-27 生产事故）：旧谓词**只比 `seal_no`** ⇒ 遗留 / 幽灵行（占着码 `AAADS`、
+ * `seal_no` 缺失或 ≠ 81）判不出「已占」⇒ 发出的码撞上它的**文档标识** ⇒ 创建写步 `set`
+ * 静默**整行覆盖**。故判据为**两条（或）**：
+ *   ① 既有行 `seal_no === no`（原判据，一字未改）；
+ *   ② 产出码命中任一身份键 `stamp_id` / `sid` / `_id`。
+ *
+ * 码恒由**单点** `codeId.encodeSealCode(no)` 算（**不另写第二套编码**）；
+ * 编码失败 ⇒ **保守判「已占」**（算不出码就无从避让 ⇒ 继续取下一个号，绝不落不确定的号）。
+ * @param {number} no 候选印章号
+ * @param {Array<object>} seals 已扫描的印章行集（调用方的扫描面）
+ * @returns {boolean} true ＝ 该号/该码已被占（须换号）
+ */
+function sealCodeOccupiedBy(no, seals) {
+  const rows = Array.isArray(seals) ? seals : []
+  const candidate = Number(no)
+  if (rows.some((item) => Number(item && item.seal_no) === candidate)) return true
+  const encoded = codeId.encodeSealCode(candidate)
+  if (!encoded || encoded.ok !== true) return true
+  const code = text(encoded.code)
+  if (code === '') return true
+  return rows.some(
+    (item) => text(item && item.stamp_id) === code || text(item && item.sid) === code || text(item && item._id) === code
+  )
+}
+
+/**
+ * **写前存在性硬校验**（本单第 2 层；纯函数、绝不自抛）：计划写入的 `_id` 是否已在
+ * **已扫描行集**的**文档标识**里存在 —— 只比 `_id`（业务键 `stamp_id` / `sid` 的占位由上面的
+ * 避让谓词负责；两层判据**不同**，才能各自独立报红）。
+ * @param {string} id 计划写入的文档 `_id`
+ * @param {Array<object>} rows 已扫描行集
+ * @returns {boolean} true ＝ 该 `_id` 已有文档（**不得写、不得覆盖**）
+ */
+function plannedDocIdTaken(id, rows) {
+  const target = text(id)
+  if (target === '') return false
+  return (Array.isArray(rows) ? rows : []).some((item) => text(item && item._id) === target)
+}
+
+/**
+ * **印章号换号重试上界**（本单第 2 层）：候选码的**文档标识**已在扫描行集里 ⇒ 该号作废、
+ * 换下一个号；**有界 8 次** ⇒ 仍撞则结构化拒绝（零 plan、零写入）。8 是**防御性上界**：
+ * 正常库态下第 1 层谓词已把这类号全部避让，走到这里只说明扫描面/谓词被改坏。
+ */
+const SEAL_CODE_ISSUE_ATTEMPTS = 8
+
 /* --------------------------------------------------------------------------- 出版社（publisher）写面
    **本單新增两件（只在本文件落地；集合名 / 号别单点均已由上文登记）**：
    · `issuePublisherCodes(count)` —— **内部发号函数，不注册为 op**。为什么不能单开 op：云函数
@@ -5951,15 +6000,30 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
   }
   /* **识别编码（口径件 §3｜R-2 / R-5）**：采纳时由**服务端计数器**原子发号 ⇒ `seal_no`，
      `sid` ＝ `encodeSealCode(seal_no)`；`stamp_id` 的值 **＝ `sid`**（旧 `XA…` / 纯数字形态不再产生）。
-     载荷里的 `sid` / `seal_no` **一律不采信**（本函数自产）；与既有行撞号 ⇒ 继续取号（不改写既有行）。 */
-  const issuedSeal = await issueCodeNumberAvoiding('seal', (no) =>
-    (Array.isArray(seals) ? seals : []).some((item) => Number(item && item.seal_no) === no)
-  )
-  if (!issuedSeal.ok) return { ok: false, reason: issuedSeal.reason }
-  const sealNo = issuedSeal.no
-  const sealCode = codeId.encodeSealCode(sealNo)
-  if (!sealCode.ok) return { ok: false, reason: REASONS.INVALID_VALUE }
-  const stampId = sealCode.code
+     载荷里的 `sid` / `seal_no` **一律不采信**（本函数自产）；与既有行撞号 ⇒ 继续取号（不改写既有行）。
+     **本单第 1 层（避让看码）**：谓词不再只比 `seal_no` —— 改走单点 `sealCodeOccupiedBy`
+     （`seal_no` 命中 **或** 产出码被 `stamp_id` / `sid` / `_id` 占住）。
+     **本单第 2 层（写前存在性硬校验）**：候选码的**文档标识**已在扫描行集里 ⇒ 该号作废、
+     **换号重试**（**有界 `SEAL_CODE_ISSUE_ATTEMPTS` ＝ 8 次**）；8 次仍撞 ⇒ 结构化拒绝
+     （零 plan、零写入；reason 沿既有 `STORAGE_UNAVAILABLE`，**零新增字面值**）。 */
+  let sealNo = 0
+  let stampId = ''
+  const rejectedSealNos = new Set()
+  for (let attempt = 0; attempt < SEAL_CODE_ISSUE_ATTEMPTS && stampId === ''; attempt += 1) {
+    const issuedSeal = await issueCodeNumberAvoiding('seal', (no) =>
+      rejectedSealNos.has(no) || sealCodeOccupiedBy(no, seals)
+    )
+    if (!issuedSeal.ok) return { ok: false, reason: issuedSeal.reason }
+    const sealCode = codeId.encodeSealCode(issuedSeal.no)
+    if (!sealCode || sealCode.ok !== true) return { ok: false, reason: REASONS.INVALID_VALUE }
+    if (plannedDocIdTaken(sealCode.code, seals)) {
+      rejectedSealNos.add(issuedSeal.no)
+      continue
+    }
+    sealNo = issuedSeal.no
+    stampId = sealCode.code
+  }
+  if (stampId === '') return { ok: false, reason: REASONS.STORAGE_UNAVAILABLE }
   const serial = sealStampSerialOf(stampId)
   /* **影像 `seq` 分配（单点）**：本批**新建**的影像登记行（＝ `imageOverlay` 覆蓋層；由无审核直写
      通道在本构造器之前自建、`stamp_id` 此刻才由发号得出）逐个分配 `seq` 并**落进行对象**：
@@ -6022,7 +6086,14 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
     created_at: at,
     updated_at: at
   }
-  const taken = new Set((Array.isArray(faces) ? faces : []).map((item) => text(item && item.id)))
+  /* **面行 id 占位集（本单第 2 层）**：既有行的 `id` **与 `_id` 都入集** —— 只看 `id` 时，
+     `_id` 与 `id` 不一致的遗留行判不出「已占」⇒ 计划面行会撞上它的**文档标识**。
+     `nextFaceIdOf` 在 `taken` 里递增 ⇒ **撞号即换号**（天然有界，与既有实现同一把尺）。 */
+  const taken = new Set()
+  for (const item of Array.isArray(faces) ? faces : []) {
+    taken.add(text(item && item.id))
+    taken.add(text(item && item._id))
+  }
   const faceDocs = []
   /* **主印面标记（本单新增）**：新建印章的 FACE 行里，`face_no` 最小的那一枚置
      `is_primary:true`（`face_no` 在下面按同类循环递增 ⇒ 「首个 FACE」即最小号），其余 FACE 置
@@ -6076,9 +6147,22 @@ async function buildSealAcceptanceFromImport(row, seals, faces, identity, at, im
      `FACE` / `EDGE` 两值 ⇒ 「非 `EDGE`」≡ `kind='FACE'`）。
      **必须写进这一个 `sealDoc` 对象**（构造器零新增返回字段、调用方零新增写步）：
      `reviewSealImport` 新章支 / `repairImportAcceptance`（`verify-adopt-atomicity` E8「落盘计划
-     恰 3 条正式行 `set`」逐字不变）/ `createSealWithFaceDirect` / `createSealUpload` 四条路
+     恰 3 条写步」**读数不变** —— 本单只把其中印章行的 `kind` 由 `set` 换成 `create`，
+     **步数、顺序、写体逐字不变**）/ `createSealWithFaceDirect` / `createSealUpload` 四条路
      **写步数一个都不变**。 */
   sealDoc.face_count = faceDocs.reduce((total, doc) => (text(doc && doc.kind) === 'EDGE' ? total : total + 1), 0)
+  /* **写前存在性硬校验（本单第 2 层｜产 plan 之前最后一道）**：计划写入的**每一个 `_id`**
+     （印章行 ＝ `stampId`、印面行 ＝ 逐 `doc.id`）在**已扫描行集**的文档标识里查存在；
+     命中 ⇒ **不写、不覆盖** —— 返回 `ok:false` ⇒ 调用方**零写步、不产 plan**。
+     影像行（`row.id`，内容寻址）**不在此列**：同 sha 恒同 `_id`，且引用解析时**已按既有幂等语义
+     复用既有行**（`findSealImportImageRow` 命中即不入本批）⇒ 命中即「同 sha 复用」，无覆盖面。
+     （印章行的同判已在发号处独立做过一次；此处是**独立复核** —— 任一层被改坏，另一层仍在。） */
+  const plannedIds = [stampId].concat(
+    faceDocs.map((doc) => text(doc && doc.id))
+  )
+  if (plannedIds.some((id) => plannedDocIdTaken(id, seals) || plannedDocIdTaken(id, faces))) {
+    return { ok: false, reason: REASONS.STORAGE_UNAVAILABLE }
+  }
   return { ok: true, stampId, sealDoc, faceDocs }
 }
 
@@ -9437,12 +9521,28 @@ const ADMIN_OPS = Object.freeze({
     const imageStampHandled = new Set()
     let sealsCache = null
     let facesCache = null
+    /* **扫描面缺口修（与 2026-11-27 撞码事故同型）**：`sealsOf()` / `facesOf()` 原走**裸
+       `collection.get()`** —— 平台单次默认只回 **100 行** ⇒ 生产正式行 6000+ 时，本 op 的
+       **撞码避让**与**印面 `_id` 存在性校验**只看得见前 100 行（后 5900 行等于不存在）。
+       改 `readAllGuarded` 翻页取全（默认 1000/批、硬上限 20000）；**取不全 ⇒ 结构化拒绝**
+       （`truncatedScanError` ⇒ `index.js` 转 `STORAGE_UNAVAILABLE`，文案同
+       `TRUNCATED_SCAN_MESSAGE`）—— 与 `createSealUpload` 的 `readAllGuarded` 同法，绝不拿
+       「只读了前 100 行」的行集给避让 / 存在性结论。**惰性**（首次用到才读）⇒ 驳回路 / 早拒路
+       零额外读，既有读数一字不变。 */
     const sealsOf = async () => {
-      if (sealsCache === null) sealsCache = rowsOfReply(await resolveDb().collection(COLLECTIONS.seals).get())
+      if (sealsCache === null) {
+        const scan = await readAllGuarded(COLLECTIONS.seals)
+        if (scan.truncated) throw truncatedScanError()
+        sealsCache = scan.rows
+      }
       return sealsCache
     }
     const facesOf = async () => {
-      if (facesCache === null) facesCache = rowsOfReply(await resolveDb().collection(COLLECTIONS.faces).get())
+      if (facesCache === null) {
+        const scan = await readAllGuarded(COLLECTIONS.faces)
+        if (scan.truncated) throw truncatedScanError()
+        facesCache = scan.rows
+      }
       return facesCache
     }
     for (const row of targets) {
@@ -9469,10 +9569,12 @@ const ADMIN_OPS = Object.freeze({
       const seals = await sealsOf()
       /* **I-1 顺序（本单硬口径）**：**先落正式行**（印章 ＋ 印面；按 `(source_seal_id, source)`
          幂等键去重 ⇒ 重跑不产生重复行），**后翻导入行状态**（`expectAtLeast:1`）。 */
-      /* **幂等键命中（本单 B.1）**：内存全量未命中 ⇒ **按幂等键定向读一次**。真因 —— `sealsOf()`
-         走裸 `collection.get()`，平台单次默认只回 **100 行** ⇒ 正式行 >100 时内存查找**必然漏命中**
-         ⇒ 会把「章已存在」误判成「新章」⇒ 重放时**再发一个印章号、建第二枚章**（比原缺陷更重）。
-         定向读按同一对键等值查询（`limit:1`）⇒ 与内存判据同尺、且不受 100 行上限影响。 */
+      /* **幂等键命中（本单 B.1）**：内存全量未命中 ⇒ **按幂等键定向读一次**。真因（**已由本单
+         扫描面缺口修闭环**）—— `sealsOf()` 原走裸 `collection.get()`，平台单次默认只回 **100 行**
+         ⇒ 正式行 >100 时内存查找**必然漏命中** ⇒ 会把「章已存在」误判成「新章」⇒ 重放时**再发一个
+         印章号、建第二枚章**（比原缺陷更重）。现 `sealsOf()` 已改 `readAllGuarded` 翻页取全
+         （取不全 ⇒ 结构化拒绝），本定向读**保留为第二道防线**：按同一对键等值查询（`limit:1`）
+         ⇒ 与内存判据同尺、且不受单次 100 行上限影响。 */
       const existing =
         seals.find(
           (item) => text(item && item.source_seal_id) === sourceSealId && text(item && item.source) === text(row && row.source)
@@ -9497,10 +9599,13 @@ const ADMIN_OPS = Object.freeze({
           continue
         }
         seals.push(built.sealDoc)
-        writes.push({ kind: 'set', collection: COLLECTIONS.seals, id: built.stampId, doc: built.sealDoc })
+        /* **本单第 3 层（新建写步不得 upsert）**：新章行 / 新面行改用 `kind:'create'`
+           （写前按 `_id` 判存在 ⇒ 撞既有行**结构化拒绝、绝不覆盖**）；`existing` 支的
+           补面 / `face_count` 写步（补齐既有章）**仍为 `set` / `update`，一字未改**。 */
+        writes.push({ kind: 'create', collection: COLLECTIONS.seals, id: built.stampId, doc: built.sealDoc })
         const allFaces = await facesOf()
         for (const faceDoc of built.faceDocs) {
-          writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
+          writes.push({ kind: 'create', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
           allFaces.push(faceDoc)
         }
         /* **回填寫步插在面行寫步之後**（opt-in；零命中原樣零步；導入行狀態翻轉仍在其後）。 */
@@ -9816,10 +9921,12 @@ const ADMIN_OPS = Object.freeze({
         const built = await buildSealAcceptanceFromImport(row, formal, faces, identity, at)
         if (!built.ok) continue
         formal.push(built.sealDoc)
-        writes.push({ kind: 'set', collection: target.formal, id: built.stampId, doc: built.sealDoc })
+        /* **本单第 3 层**：孤儿补齐的**新建**章行 / 面行改 `kind:'create'`（撞既有 `_id` ⇒
+           结构化拒绝、绝不覆盖）；`person` / `item` 两通道写步**一字未改**。 */
+        writes.push({ kind: 'create', collection: target.formal, id: built.stampId, doc: built.sealDoc })
         for (const faceDoc of built.faceDocs) {
           faces.push(faceDoc)
-          writes.push({ kind: 'set', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
+          writes.push({ kind: 'create', collection: COLLECTIONS.faces, id: faceDoc.id, doc: faceDoc })
         }
         changed[target.key] += 1
       }
@@ -10458,10 +10565,13 @@ const ADMIN_OPS = Object.freeze({
       },
       plan: {
         op: 'createSealWithFaceDirect',
+        /* **本单第 3 层**：印章行 / 印面行改 `kind:'create'`（写前判存在 ⇒ 撞既有 `_id` 抛
+           `DUPLICATE_ID`、绝不覆盖）；**影像登记行仍为 `set`**（内容寻址 `_id` ⇒ 同 sha 恒同
+           行，既有幂等语义一字未改）。写步数、顺序、写体逐字不变。 */
         writes: [
           ...imageRows.map((row) => ({ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row })),
-          { kind: 'set', collection: COLLECTIONS.seals, id: built.stampId, doc: built.sealDoc },
-          ...built.faceDocs.map((doc) => ({ kind: 'set', collection: COLLECTIONS.faces, id: doc.id, doc }))
+          { kind: 'create', collection: COLLECTIONS.seals, id: built.stampId, doc: built.sealDoc },
+          ...built.faceDocs.map((doc) => ({ kind: 'create', collection: COLLECTIONS.faces, id: doc.id, doc }))
         ]
       }
     }
@@ -11867,17 +11977,21 @@ const ADMIN_OPS = Object.freeze({
          无九位号引用 ⇒ 恒空数组 ⇒ 写步与改前逐一相同。 */
       plan: {
         op: 'createSealUpload',
+        /* **本单第 3 层**：印章行 / 印面行由 `kind:'add'`（靠 `E11000` 事后拦）改为
+           `kind:'create'`（**写前**按 `_id` 判存在 ⇒ 撞既有行抛 `DUPLICATE_ID`、绝不覆盖，
+           且**先于任何写**即拒 ⇒ 零部分写入）；`pointerWrites`（印人指针）与影像登记行
+           **一字未改**。写步数、顺序不变。 */
         writes: [
           ...pointerWrites,
           ...imageRows.map((row) => ({ kind: 'set', collection: COLLECTIONS.images, id: row.id, doc: row })),
           {
-            kind: 'add',
+            kind: 'create',
             collection: COLLECTIONS.seals,
             id: built.stampId,
             doc: Object.assign({ _id: built.stampId }, built.sealDoc)
           },
           ...built.faceDocs.map((doc) => ({
-            kind: 'add',
+            kind: 'create',
             collection: COLLECTIONS.faces,
             id: doc.id,
             doc: Object.assign({ _id: doc.id }, doc)
@@ -12753,8 +12867,10 @@ function writeStepFingerprintOf(error) {
  *
  * 两种计划形态（互斥）：
  *   · `{collection, doc}`        ⇒ 单文档 `add()`（既有 `submitCorrection` 逐字沿用）；
- *   · `{writes:[{kind:'set', collection, id, doc} | {kind:'add', collection, doc}]}`
- *     ⇒ 按序执行（本单 `endorseCorrection` 的两处落盘；`set` ＝ 确定性文档键 upsert ⇒ 幂等）。
+ *   · `{writes:[{kind:'set'|'create'|'update'|'add', …}]}` ⇒ 按序执行（`set` ＝ 确定性文档键
+ *     upsert ⇒ 幂等；**`create` ＝ 显式新建**：写前按 `_id` 判存在，已存在 ⇒ 抛
+ *     `DUPLICATE_ID` 结构化拒绝、**绝不覆盖**，仅四条新建路径的印章行 / 印面行使用，
+ *     `update` / `set` 语义**一字未改**）。
  *
  * **原子性说明（如实登记）**：CloudBase 无跨文档事务面（本工程既有 op 亦为单写）。
  * 本单把「采信行 → 公开计数行」排成**确定序**，且两键皆**确定性 `_id` ＋ 幂等 upsert**
@@ -12776,7 +12892,25 @@ async function persist(plan) {
     for (let index = 0; index < plan.writes.length; index += 1) {
       const step = plan.writes[index]
       try {
-        if (step && step.kind === 'set') {
+        if (step && step.kind === 'create') {
+          /* **显式新建写步（本单第 3 层｜四条创建路径的印章行 / 印面行专用）**：
+             先按**文档 `_id`** 判存在 —— 已存在 ⇒ **结构化拒绝、绝不覆盖**：抛
+             `DUPLICATE_ID:<集合>/<id>`，由本函数既有 catch 包成 `WRITE_STEP_FAILED:i/n`
+             ⇒ `index.js` 转 **`STORAGE_UNAVAILABLE`**（**reason 零新增**；语义上选它是因为
+             persist 的写步失败**一律**归口 `STORAGE_UNAVAILABLE`，不把「撞上既有行」伪装成
+             入参错误 `INVALID_VALUE`、更不伪装 `FORBIDDEN`）；**零后续步**（既有即断语义）。
+             **不存在** ⇒ 走与 `set` **完全相同**的落盘路（含建集自愈 `add`、剔 `_id`）。
+             集合 / 文档「不存在」类错误 ⇒ 视作「尚无该行」继续（与 `set` 分支同判）。
+             **`update` / 既有 `set` 分支与本分支的正常路逐字未改。 */
+          let existed = false
+          try {
+            existed = rowsOf(await db.collection(step.collection).doc(step.id).get()).length > 0
+          } catch (error) {
+            if (!isCollectionNotExistError(error) && !isDocNotExistError(error)) throw error
+          }
+          if (existed) throw new Error(`DUPLICATE_ID:${text(step.collection)}/${text(step.id)}`)
+        }
+        if (step && (step.kind === 'set' || step.kind === 'create')) {
           /* **建集自愈（上一轮真因修）**：CloudBase 的 `doc(id).set()` 对**从未被创建的集合**回
              `DATABASE_COLLECTION_NOT_EXIST`（`set` 不自动建集，只有 `add` 会）⇒ 生产
              `xiai_correction_summaries` 从未被写过 ⇒ 上述各步**恒失败**。故**仅**对「集合不存在」

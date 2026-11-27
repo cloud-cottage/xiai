@@ -218,8 +218,13 @@ const IMPORT_STATUS = { PENDING: 'PENDING', ACCEPTED: 'ACCEPTED', REJECTED: 'REJ
 const CHANNELS = [
   { key: 'person', importCollection: 'xiai_person_imports', formalCollection: 'xiai_persons', idKey: 'source_person_id', op: 'reviewPersonImport' },
   { key: 'item', importCollection: 'xiai_item_imports', formalCollection: 'xiai_items', idKey: 'source_item_id', op: 'reviewItemImport' },
-  { key: 'seal', importCollection: 'xiai_seal_imports', formalCollection: 'xiai_seals', idKey: 'source_seal_id', op: 'reviewSealImport' }
+  /* **本单授权改（撞码覆盖修复第 3 层）**：印章**新建**写步已由 `kind:'set'` 改 `kind:'create'`
+     （写前按 `_id` 判存在 ⇒ 撞既有行结构化拒绝、绝不覆盖）⇒ G1-seal / G3-seal 的正式行
+     `kind` 判据随之改 `create`；`person` / `item` 两通道**一字未改**（仍 `set`）。 */
+  { key: 'seal', importCollection: 'xiai_seal_imports', formalCollection: 'xiai_seals', idKey: 'source_seal_id', op: 'reviewSealImport', formalKind: 'create' }
 ]
+/** 该通道**正式行（新建）写步**的 `kind`：印章通道 `create`，其余沿用 `set`。 */
+const formalKindOf = (channel) => channel.formalKind || 'set'
 
 /** 造一条该通道的导入行（真实字段面；`status` / `source*` 可覆盖）。 */
 function importRowOf(channel, { id, sourceKey, status = IMPORT_STATUS.PENDING, extra = {} } = {}) {
@@ -392,9 +397,10 @@ console.log(JSON.stringify({ section: 'G', title: 'I-1 写入顺序（先正式�
     ops.setOpsDbProvider(store.provider)
     const res = noteReason(await ops.ADMIN_OPS[channel.op]({ batch_id: 'B-ADOPT', decision: 'ACCEPTED' }, ADMIN_IDENTITY, CONTEXT))
     const writes = (res.plan && res.plan.writes) || []
-    const formalIndex = writes.findIndex((w) => w.collection === channel.formalCollection && w.kind === 'set')
+    const formalKind = formalKindOf(channel)
+    const formalIndex = writes.findIndex((w) => w.collection === channel.formalCollection && w.kind === formalKind)
     const statusIndex = writes.findIndex((w) => w.collection === channel.importCollection && w.kind === 'update')
-    check(`G1-${channel.key}`, `${channel.op}：正式行 set **先于**导入行状态 update`, true, formalIndex !== -1 && statusIndex !== -1 && formalIndex < statusIndex)
+    check(`G1-${channel.key}`, `${channel.op}：正式行 ${formalKind} **先于**导入行状态 update`, true, formalIndex !== -1 && statusIndex !== -1 && formalIndex < statusIndex)
     check(`G2-${channel.key}`, `${channel.op}：状态翻转带 expectAtLeast`, 1, writes[statusIndex].expectAtLeast)
     /* 幂等认回：正式行已存在（同幂等键）⇒ 不产第二枚 set。 */
     const existing = Object.assign({ _id: 'existing-formal' }, writes[formalIndex].doc)
@@ -402,7 +408,7 @@ console.log(JSON.stringify({ section: 'G', title: 'I-1 写入顺序（先正式�
     ops.setOpsDbProvider(store2.provider)
     const replay = noteReason(await ops.ADMIN_OPS[channel.op]({ batch_id: 'B-ADOPT', decision: 'ACCEPTED' }, ADMIN_IDENTITY, CONTEXT))
     const replayWrites = (replay.plan && replay.plan.writes) || []
-    check(`G3-${channel.key}`, `${channel.op}：同幂等键重放 ⇒ **不产第二枚正式行 set**（幂等认回）`, 0, replayWrites.filter((w) => w.collection === channel.formalCollection && w.kind === 'set').length)
+    check(`G3-${channel.key}`, `${channel.op}：同幂等键重放 ⇒ **不产第二枚正式行 ${formalKind}**（幂等认回）`, 0, replayWrites.filter((w) => w.collection === channel.formalCollection && w.kind === formalKind).length)
   }
 }
 
