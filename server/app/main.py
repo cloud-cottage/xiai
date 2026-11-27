@@ -125,6 +125,7 @@ CORS_EXPOSE_HEADERS = (
     "X-Xiai-Source-Height", "X-Xiai-Source-Mime", "X-Xiai-Source-Ref",
     "X-Xiai-Source-Sha256", "X-Xiai-Source-Size", "X-Xiai-Source-Width",
     "X-Xiai-Stored-Bytes", "X-Xiai-Stored-Sha256",
+    "X-Xiai-Storage-Key",
     "X-Xiai-Thumb-Long-Edge",
     "X-Xiai-Tiff-Bits-Per-Sample", "X-Xiai-Tiff-Compression", "X-Xiai-Tiff-Pages",
     "X-Xiai-Tiff-Photometric", "X-Xiai-Tiff-Pinned-Ok", "X-Xiai-Tiff-Rows-Per-Strip",
@@ -613,6 +614,9 @@ async def image_store(request: Request) -> Response:
     _validate_query(dict(request.query_params), STORE_QUERY)
     data = await _read_payload(request)
     record = store.store_bytes(data)
+    # ★ 寫鍵（**追加，不改既有字段**）：cos ＝ `xiai/images/<xx>/<digest>.tiff`（與雲函數鍵門同形）；
+    #   local ＝ 空串（二進制不在雲桶，既有語義一字不改）。
+    storage_key = str(record.get("storageKey") or "")
     headers = {
         "X-Xiai-Authority-Sha256": record["sha256"],
         "X-Xiai-Authority-Rel-Path": record["relPath"],
@@ -623,6 +627,7 @@ async def image_store(request: Request) -> Response:
         # `cos` 後端無本地 mtime（回 `None`）⇒ 表頭留空，不偽造數值；`local` 恆為整數（原樣）
         "X-Xiai-Mtime-Ns-After": "" if record["mtimeNsAfter"] is None else str(record["mtimeNsAfter"]),
         "X-Xiai-Stored-Bytes": str(record["storedBytes"]),
+        "X-Xiai-Storage-Key": storage_key,
         "X-Xiai-Out-Mime": codec.TIFF_MIME,
         "Cache-Control": "no-store",
     }
@@ -633,6 +638,7 @@ async def image_store(request: Request) -> Response:
             "sha256": record["sha256"],
             "bytesLength": record["bytesLength"],
             "relPath": record["relPath"],
+            "storage_key": storage_key,
         },
         headers=headers,
     )

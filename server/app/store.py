@@ -26,8 +26,11 @@
 **後端可插拔（2026-11-26 派單）** —— 接口三件套 `store_bytes` / `read_bytes` / `exists` 不變，
 實現兩個後端（選擇器 ＝ 環境變量 `XIAI_STORE_BACKEND`，缺省 `local`）：
   · **`local`** —— 本檔既有行為**逐字不變**（本機 dev 與 ctrl 面板照舊；`run.sh` 語義不動）；
-  · **`cos`** —— 讀寫雲存儲桶（傳輸面 ＝ `app/cosstore.py`），**對象鍵與 local 同構**
-    （`<sha256[:2]>/<sha256>.tiff`、無前綴）；憑據只從 `COS_*` 讀；桶內無對象 ＝ `NOT_FOUND`（404 同形）。
+  · **`cos`** —— 讀寫雲存儲桶（傳輸面 ＝ `app/cosstore.py`）；**寫鍵** ＝ `object_key_for()`
+    ＝ `xiai/images/<sha256[:2]>/<sha256>.tiff`（與雲函數影像鍵門同形；`local` 寫鍵仍 ＝ 裸形、一字不改）；
+    **讀鍵** ＝ `candidate_rel_paths()` 的**確定探測序**（存量 `xiai/images/**` 在前、裸形兜底、
+    其餘 `LEGACY_READONLY_CONTAINERS` 擴展殿後；命中即回、零回寫、零搬遷）；
+    桶內全部未命中 ＝ `NOT_FOUND`（404 同形）。
   · **`cos` 缺必需 env ⇒ 導入即失敗**（`StoreConfigError`，錯誤裡只列**缺失變量名**、
     **永不回顯值**）—— **不允許靜默回落 `local`**（否則線上一寫就丟）。
 """
@@ -126,6 +129,58 @@ def path_for(digest: str) -> Path:
     return authority_root() / digest[:SHARD_CHARS] / f"{digest}{EXTENSION}"
 
 
+# ── 存量鍵面（**只讀回落**；零回寫、零搬遷、零對象遷移）──────────────────────────
+# 桶內存量對象由舊入冊路寫入，鍵形 ＝ `xiai/images/<摘要前兩位>/<摘要>.<ext>`
+# （行上 `storage_key` 記的就是它；雲函數 `createSealUpload` 的影像對象鍵門逐字要求同形）。
+LEGACY_KEY_PREFIX = "xiai/images"
+LEGACY_FIXED_EXTS = (EXTENSION, ".png")        # 確定序 ②③：先 `.tiff`、後 `.png`
+# `codec` 的 mime 字面 ⇒ 擴展名（只列讀面會用到的容器；其餘 mime 不猜、不探）
+MIME_EXTENSION = {
+    codec.TIFF_MIME: EXTENSION,
+    codec.PNG_MIME: ".png",
+    codec.WEBP_MIME: ".webp",
+    codec.JPEG_MIME: ".jpg",
+    codec.AVIF_MIME: ".avif",
+}
+
+
+def object_key_for(digest: str) -> str:
+    """**`cos` 後端的寫鍵**：`xiai/images/<xx>/<digest>.tiff`（與雲函數影像鍵門同形）。
+
+    `rel_path_for()` 保持裸形 `<xx>/<digest>.tiff` 不動（回包 `relPath` / 本地寫鍵仍用它）；
+    `local` 後端的寫鍵一字不改（＝ `path_for()`）。
+    """
+    return f"{LEGACY_KEY_PREFIX}/{digest[:SHARD_CHARS]}/{digest}{EXTENSION}"
+
+
+def legacy_rel_paths(digest: str) -> tuple[str, ...]:
+    """存量鍵族（**全在 `xiai/images/**` 之下**）：`.tiff` → `.png` → 其餘
+    `codec.LEGACY_READONLY_CONTAINERS` 的擴展（同一模板；沒有就不再多一序位）。"""
+    shard = digest[:SHARD_CHARS]
+    exts: list[str] = list(LEGACY_FIXED_EXTS)
+    for mime in codec.LEGACY_READONLY_CONTAINERS:
+        ext = MIME_EXTENSION.get(mime)
+        if ext and ext not in exts:
+            exts.append(ext)
+    return tuple(f"{LEGACY_KEY_PREFIX}/{shard}/{digest}{ext}" for ext in exts)
+
+
+def candidate_rel_paths(digest: str) -> tuple[str, ...]:
+    """讀面**確定探測序**（兩後端同一份；命中即返回、後續不再探）：
+
+      ① `xiai/images/<xx>/<digest>.tiff`（存量入冊鍵）
+      ② `xiai/images/<xx>/<digest>.png`（存量展示件）
+      ③ 裸形 `<xx>/<digest>.tiff`（＝ `rel_path_for`；**兜住已寫在裸形下的那件**）
+      ④ 其餘 `codec.LEGACY_READONLY_CONTAINERS` 擴展（同 `xiai/images/**` 模板）
+
+    全未命中 ⇒ 調用方維持既有 `NOT_FOUND`（404 同形，**不新增 reason**）。
+    """
+    normalized = normalize_digest(digest)
+    legacy = legacy_rel_paths(normalized)
+    bare = rel_path_for(normalized)
+    return legacy[:2] + (bare,) + legacy[2:]
+
+
 # ── 輸入面判定（魔數 / 上限；全部取凍結 reason 表）───────────────────────────────
 def is_tiff_container(data: bytes) -> bool:
     """容器判據：魔數命中 `II*\\0` 或 `MM\\0*`（8 字節頭齊備才算）。"""
@@ -192,6 +247,7 @@ def _local_store_bytes(data: bytes) -> dict:
         "sha256": digest,
         "bytesLength": len(data),
         "relPath": rel_path_for(digest),
+        "storageKey": "",                      # ★ local 寫鍵不在雲桶 ⇒ 空串（既有語義一字不改）
         "idempotent": idempotent,
         "existedBefore": existed,
         "storedBytes": stat.st_size,
@@ -202,25 +258,30 @@ def _local_store_bytes(data: bytes) -> dict:
 
 # ── 讀取（byte-verbatim；讀路徑零回寫）─────────────────────────────────────────
 def _local_read_bytes(digest: str) -> bytes:
-    """按 digest 取回權威庫原字節（**`local` 後端原實現，逐字未改**；零轉碼、零回寫）；取不到 ⇒ `NOT_FOUND`（404）。"""
+    """按 digest 取回權威庫原字節（**零轉碼、零回寫**）；按 `candidate_rel_paths()` 的確定序探測
+    （存量 `xiai/images/**` 在前、裸形兜底、其餘 legacy 容器殿後），全部未命中 ⇒ `NOT_FOUND`（404）。"""
     normalized = normalize_digest(digest)
-    target = path_for(normalized)
-    if not target.is_file():
-        raise XiaiError(NOT_FOUND)
-    return target.read_bytes()
+    root = authority_root()
+    for rel in candidate_rel_paths(normalized):
+        if (root / rel).is_file():
+            return (root / rel).read_bytes()
+    raise XiaiError(NOT_FOUND)
 
 
 # ── 後端分發（接口三件套 ＝ `store_bytes` / `read_bytes` / `exists`）──────────────
 def _cos_store_bytes(data: bytes) -> dict:
-    """`cos` 後端寫入：鍵形同構；冪等口徑**照抄 local**（size 相同才去核對 digest）。
+    """`cos` 後端寫入：**寫鍵 ＝ `object_key_for()`**（`xiai/images/<xx>/<digest>.tiff`，
+    與雲函數影像鍵門同形）；冪等口徑**照抄 local**（size 相同才去核對 digest）。
 
+    回包 `relPath` 仍回**裸形** `rel_path_for(digest)`（與 B 路回包同形，一字不改）；
+    寫鍵另由 `storageKey` 如實回報（`main.py` 落成回包 `storage_key` ＋ `X-Xiai-Storage-Key`）。
     桶內已有同 size 異內容（理論上不該發生的髒件）⇒ 以真內容覆寫（＝ local 的「自愈」口徑）。
     `mtimeNs*` 對象存儲沒有本地 mtime ⇒ 回 `None`（`main.py` 侧表頭留空，不偽造數值）。
     """
     from . import cosstore
 
     digest = validate_payload(data)              # 三步門：兩後端同門、同順序
-    key = rel_path_for(digest)                   # 鍵形與 local 逐字同構
+    key = object_key_for(digest)                 # ★ 寫鍵（存量鍵門形態）；讀面另見 candidate_rel_paths()
     size = cosstore.stat(key)                    # None ＝ 桶內無此件
     existed = size is not None
     idempotent = existed and size == len(data) and hashlib.sha256(cosstore.get(key)).hexdigest() == digest
@@ -230,7 +291,8 @@ def _cos_store_bytes(data: bytes) -> dict:
         "ok": True,
         "sha256": digest,
         "bytesLength": len(data),
-        "relPath": key,
+        "relPath": rel_path_for(digest),         # 裸形（與既有回包 / B 路同形，一字不改）
+        "storageKey": key,                       # ★ cos 寫鍵（＝ 行上 `storage_key` 的來源）
         "idempotent": idempotent,
         "existedBefore": existed,
         "storedBytes": len(data),
@@ -242,8 +304,8 @@ def _cos_store_bytes(data: bytes) -> dict:
 def store_bytes(data: bytes) -> dict:
     """權威寫入（內容尋址）——**兩後端同一套三步門**（空 → 超限 → 非 TIFF → digest）。
 
-    · `local` ＝ 上面 `_local_store_bytes`（原子 rename ＋ 冪等，**逐字未改**）；
-    · `cos` ＝ 對象 PUT（鍵形同構、冪等口徑同上）。
+    · `local` ＝ 上面 `_local_store_bytes`（原子 rename ＋ 冪等；寫鍵一字不改，`storageKey` ＝ 空串）；
+    · `cos` ＝ 對象 PUT（**寫鍵 ＝ `xiai/images/<xx>/<digest>.tiff`**、冪等口徑同上）。
     """
     if BACKEND == BACKEND_COS:
         return _cos_store_bytes(data)
@@ -251,25 +313,43 @@ def store_bytes(data: bytes) -> dict:
 
 
 def read_bytes(digest: str) -> bytes:
-    """按 digest 取回原字節（**零轉碼、零回寫**）；取不到 ⇒ `NOT_FOUND`（404 同形）。
+    """按 digest 取回原字節（**零轉碼、零回寫、零搬遷**）；取不到 ⇒ `NOT_FOUND`（404 同形）。
 
-    兩後端同語義：`local` ＝ 本地文件；`cos` ＝ 桶內對象（無對象亦 `NOT_FOUND`，**不新增 reason**）。
+    兩後端同一份**確定探測序** ＝ `candidate_rel_paths(digest)`（① `xiai/images/**.tiff`
+    → ② `xiai/images/**.png` → ③ 裸形 `<xx>/<digest>.tiff` → ④ 其餘 legacy 容器）：
+    命中即返回、後續不再探；全缺仍 `NOT_FOUND`（**不新增 reason**）。
     """
+    normalized = normalize_digest(digest)
+    candidates = candidate_rel_paths(normalized)
     if BACKEND == BACKEND_COS:
         from . import cosstore
 
-        return cosstore.get(rel_path_for(normalize_digest(digest)))
-    return _local_read_bytes(digest)
+        for key in candidates:
+            try:
+                return cosstore.get(key)
+            except XiaiError as exc:
+                if exc.reason != NOT_FOUND:
+                    raise                      # 非 404（如 STORAGE_UNAVAILABLE）照舊上拋
+        raise XiaiError(NOT_FOUND)
+    root = authority_root()
+    for rel in candidates:
+        target = root / rel
+        if target.is_file():
+            return target.read_bytes()
+    raise XiaiError(NOT_FOUND)
 
 
 def exists(digest: str) -> bool:
-    """按 digest 探活（`True` ＝ 這件在權威庫裡；兩後端同語義）。"""
+    """按 digest 探活（`True` ＝ 這件在權威庫裡）——**與 `read_bytes()` 同一份探測序**
+    （`candidate_rel_paths`；命中即停，不再探後續）。"""
     normalized = normalize_digest(digest)
+    candidates = candidate_rel_paths(normalized)
     if BACKEND == BACKEND_COS:
         from . import cosstore
 
-        return cosstore.exists(rel_path_for(normalized))
-    return path_for(normalized).is_file()
+        return any(cosstore.exists(key) for key in candidates)
+    root = authority_root()
+    return any((root / rel).is_file() for rel in candidates)
 
 
 def health_facts() -> dict:
@@ -291,9 +371,34 @@ def health_facts() -> dict:
         "idempotent": True,
         "env_override": ENV_ROOT_VAR,
         "endpoints": {"store": "/api/image/store", "original": "/api/image/original/{sha256}"},
-        "read_forms": {"slices": "?sha256=<hex>", "thumb": "?sha256=<hex>", "download": "?sha256=<hex>"},
+        "read_forms": {
+            "slices": "?sha256=<hex>",
+            "thumb": "?sha256=<hex>",
+            "download": "?sha256=<hex>",
+            # ★ 只讀事實（追加；既有三鍵一字不改）：存量鍵回落已開啟
+            "legacy_key_fallback": "已開啟（只讀、零回寫、零搬遷；確定序命中即返回字節，全缺仍 NOT_FOUND）",
+        },
         "legacy_direct_upload_forms": "保留（既有直傳字節形態一字未破）",
         "existing_data_policy": "存量面不掃、不遷移、不刪任何件；同名同 digest 異內容 ⇒ 以真內容自愈（`os.replace` 覆寫該同名件）—— 非「不覆蓋存量」",
+        # ★ 只讀事實（追加；**不刪既有字段、不改名**）：讀面回落序 ＋ 兩組鍵形 ＋ 寫鍵形態
+        "legacy_key_fallback": {
+            "enabled": True,
+            "mode": "只讀探測序（命中即返回字節；零回寫、零搬遷、不遷移任何對象、不新增 reason）",
+            "read_probe_order": [
+                rel.replace("0" * 64, "<digest>").replace("00", "<xx>")
+                for rel in candidate_rel_paths("0" * 64)
+            ],
+            "key_forms": {
+                "new_layout": PATH_SHAPE,                      # `<xx>/<digest>.tiff`（裸形）
+                "legacy": "xiai/images/<xx>/<digest>.{tiff,png,…}",
+            },
+            "bare_form_in_fallback": True,                     # 讀面兜底含裸形（已寫在裸形下的件照舊讀得到）
+            "write_key_shape": (
+                "xiai/images/<xx>/<digest>.tiff（cos 寫鍵 ＝ 雲函數影像鍵門同形）"
+                if BACKEND == BACKEND_COS
+                else "<xx>/<digest>.tiff（local 寫鍵一字未改）"
+            ),
+        },
     }
     facts["backend"] = BACKEND                     # `local` / `cos`（選擇器 ＝ `XIAI_STORE_BACKEND`）
     if BACKEND == BACKEND_COS:
