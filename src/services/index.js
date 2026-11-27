@@ -57,8 +57,14 @@ import * as publishers from './publishers.js'
    （`profile.js`；op 名 / 读数键面 / 回落链真源全仓唯一处）。页面与组件仍**只**经本门面访问数据
    （不得直接 import `../data/*`）。 */
 import * as profile from './profile.js'
+/* **斐萃同步审阅门面（本单新增｜Kevin 2026-11-26 裁定）**：`listToXiai` / `approve` /
+   `applyUp` / `reject`（逐项、**零批量直通**）＋ 深链解析 ＋ admin 渲染门。
+   审阅口复用 `/my/corrections`（**不新建 `/admin/sync` 路由**）；本期实体只
+   `books` / `persons` / `publishers`。页面与组件仍**只**经本门面访问数据
+   （不得直接 import `../data/*`、不直调云函数）。 */
+import * as sync from './sync.js'
 
-export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards, publishers, profile }
+export const services = { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards, publishers, profile, sync }
 
-export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards, publishers, profile }
+export { auth, seals, corrections, endorsements, persons, photos, points, admin, drive, imageFaces, sealExport, items, feicui, aiAccess, aiEnhance, sealCards, authorMatch, personCards, publishers, profile, sync }
 export default services

@@ -15,7 +15,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import PlaceholderPanel from '../components/PlaceholderPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { corrections, persons, points, seals, items } from '../services/index.js'
+import { corrections, persons, points, seals, items, sync } from '../services/index.js'
 import { currentUser } from '../data/session.js'
 /* **形態①（K-乙-4｜2026-10-12｜更正 R-2）**：本机面判据的**唯一真源** —— 外部批量导入＝
    本机专属面，判据是**本机构建开关** `VITE_XIAI_LOCAL_IMPORT_FACE`（字面取键；值 ∈ {'1','true'}），
@@ -1191,6 +1191,191 @@ async function confirmRevoke() {
     revokeBusy.value = false
   }
 }
+
+/* ============================================================================
+   **來自斐萃的待審變更（本單新增｜任務 C）**
+   ----------------------------------------------------------------------------
+   - 审阅口**复用本页**（Kevin 裁定：不新建 `/admin/sync` 路由）；服务层单点
+     `services/sync.js`（op 名 / 载荷键面 / 深链解析 / admin 渲染门全在那边）。
+   - **仅管理员渲染**：`canSyncReview` 取 `sync.canReviewSync()`（判权单点 ＝
+     `data/session.js::isAdmin`）⇒ 非管理员 `v-if` 恒 false ⇒ **DOM 零命中**、
+     **零取行请求**（不以 CSS 隐藏冒充）。
+   - **逐项**：每行自己的【通過並寫入】/【駁回】；**不提供全选一键通过**
+     （Kevin 红线：可批量列出、不许批量直通）。
+   - **两步失败即停**：`approveAndApply` ＝ `approveQueue` → `applyUp`，任一步失败
+     ⇒ 结构化 `reason` 上屏 ＋ **本地状态逐字不变**（`sync.nextSyncRow` 失败返回原行）。
+   - **深链**：`?from=feicui&entity=<books|persons|publishers>&key=<业务键>` 进页即定位
+     （目标行排到首位 ＋ 高亮；其它行仍在 ⇒ 过滤 / 高亮两种读法都成立）。
+   ============================================================================ */
+
+/** 审阅段渲染门（服务层单点；非管理员 ⇒ 恒 false）。 */
+const canSyncReview = computed(() => sync.canReviewSync())
+
+/** 待审行（来自 `sync.listToXiai`；**仅内存**，刷新即重取）。 */
+const syncRows = ref([])
+/** 取行中（上屏「正在取回…」）。 */
+const syncLoading = ref(false)
+/** 取行 / 深链定位提示。 */
+const syncNotice = ref('')
+/** 动作反馈（通过并写入 / 驳回的成功与失败都走这里，**失败带 reason**）。 */
+const syncFeedback = ref('')
+/** 在飞行的 `queue_id`（防重入；空串 ⇒ 无在飞）。 */
+const syncBusyKey = ref('')
+/** 深链定位目标（`{from, entity, key}`；无深链 ⇒ `null`）。 */
+const syncTarget = ref(null)
+
+/** 操作列文案（`create` / `update`；未知值原样上屏，**不猜**）。 */
+const SYNC_OP_LABELS = Object.freeze({ create: '新建', update: '更新' })
+/** 状态列文案（云队列六态 ＋ 未入队空态）。 */
+const SYNC_STATUS_LABELS = Object.freeze({
+  PENDING: '待審',
+  APPROVED: '已通過（待寫入）',
+  REJECTED: '已駁回',
+  APPLIED: '已寫入',
+  FAILED: '失敗',
+  CONFLICT: '衝突'
+})
+
+function syncOpLabel(op) {
+  const key = String(op === undefined || op === null ? '' : op).trim()
+  return key === '' ? '—' : SYNC_OP_LABELS[key] || key
+}
+
+function syncStatusLabel(status) {
+  const key = String(status === undefined || status === null ? '' : status).trim()
+  if (key === '') return '未入隊'
+  return SYNC_STATUS_LABELS[key] || key
+}
+
+/** 该行是否命中深链目标（实体 ＋ 业务键；业务键同时比差异项 `key` 与队列 `subject_id`）。 */
+function isSyncTarget(row) {
+  const target = syncTarget.value
+  if (!target || !row) return false
+  if (row.entity !== target.entity) return false
+  return row.key === target.key || row.subject_id === target.key
+}
+
+/** 清除深链定位（显示全部；**不改任何数据**）。 */
+function clearSyncTarget() {
+  syncTarget.value = null
+  void refreshSyncRows()
+}
+
+/**
+ * 解析深链（服务层单点 `sync.parseSyncDeepLink`）。
+ * 不是斐萃深链 ⇒ 静默清目标（普通进页零提示）；是深链但参数不合 ⇒ 结构化原因上屏。
+ */
+function applySyncDeepLink(query) {
+  const parsed = sync.parseSyncDeepLink(query)
+  if (parsed.ok === true) {
+    syncTarget.value = parsed.item
+    return parsed
+  }
+  syncTarget.value = null
+  if (parsed.reason !== 'NO_DEEP_LINK') {
+    syncFeedback.value = `斐萃深鏈解析失敗（${parsed.reason}）：${parsed.msg}`
+  }
+  return parsed
+}
+
+/**
+ * 取回「來自斐萃的待審變更」（只读；**非管理员零请求**）。
+ * 成功 ⇒ 行落位 ＋ 深链目标行排首位；失败 ⇒ **不以空集冒充**，结构化 `reason` 上屏。
+ */
+async function refreshSyncRows() {
+  if (!canSyncReview.value) {
+    syncRows.value = []
+    syncNotice.value = ''
+    return
+  }
+  syncLoading.value = true
+  try {
+    const target = syncTarget.value
+    const result = await sync.listToXiai(target ? { entity: target.entity } : {})
+    if (result.ok !== true) {
+      syncRows.value = []
+      syncNotice.value = `取回失敗（${result.reason}）：${result.msg}`
+      return
+    }
+    const items = result.item && Array.isArray(result.item.items) ? result.item.items : []
+    /* 深链定位：目标行排到首位（**不丢其它行** ⇒ 过滤与高亮两种读法都成立）。 */
+    const located = target ? items.filter((row) => isSyncTarget(row)) : []
+    const rest = target ? items.filter((row) => !isSyncTarget(row)) : items
+    syncRows.value = located.concat(rest)
+    syncNotice.value = target
+      ? `已定位斐萃深鏈：${target.entity} ／ ${target.key}（共 ${items.length} 條）`
+      : result.msg
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+/** 【通過並寫入】：逐项两步（`approveQueue` → `applyUp`）；任一步失败即停并上屏 reason。 */
+async function approveSyncRow(row) {
+  const id = String((row && row.queue_id) || '')
+  if (id === '' || syncBusyKey.value !== '') return
+  syncBusyKey.value = id
+  syncFeedback.value = ''
+  try {
+    const result = await sync.approveAndApply(id)
+    if (result.ok === true) {
+      /* 本地状态先按纯函数推进，再整表刷新（服务端回读才是最终真源）。 */
+      syncRows.value = syncRows.value.map((item) => (item.queue_id === id ? sync.nextSyncRow(item, result) : item))
+      syncFeedback.value = `已通過並寫入：${result.msg}`
+      await refreshSyncRows()
+      return
+    }
+    /* 失败即停：**本地状态逐字不变**（`nextSyncRow` 对失败返回原行）＋ 结构化 reason 上屏。 */
+    syncRows.value = syncRows.value.map((item) => (item.queue_id === id ? sync.nextSyncRow(item, result) : item))
+    syncFeedback.value = `未寫入（${result.reason}）：${result.msg}`
+  } catch (error) {
+    syncFeedback.value = `未寫入（STORAGE_UNAVAILABLE）：${(error && error.message) || '未知錯誤'}`
+  } finally {
+    syncBusyKey.value = ''
+  }
+}
+
+/** 【駁回】：逐项单步（`rejectQueue`）；成功刷新、失败上屏 reason（本地状态不动）。 */
+async function rejectSyncRow(row) {
+  const id = String((row && row.queue_id) || '')
+  if (id === '' || syncBusyKey.value !== '') return
+  syncBusyKey.value = id
+  syncFeedback.value = ''
+  try {
+    const result = await sync.reject(id)
+    if (result.ok === true) {
+      syncRows.value = syncRows.value.map((item) => (item.queue_id === id ? sync.nextSyncRow(item, result) : item))
+      syncFeedback.value = `已駁回：${result.msg}`
+      await refreshSyncRows()
+      return
+    }
+    syncFeedback.value = `駁回失敗（${result.reason}）：${result.msg}`
+  } catch (error) {
+    syncFeedback.value = `駁回失敗（STORAGE_UNAVAILABLE）：${(error && error.message) || '未知錯誤'}`
+  } finally {
+    syncBusyKey.value = ''
+  }
+}
+
+/* 深链 ＋ 首次取行（`immediate` ⇒ 进页即定位；query 变化重跑。非管理员 ⇒ 零请求）。 */
+watch(
+  () => [route.query.from, route.query.entity, route.query.key],
+  () => {
+    applySyncDeepLink(route.query)
+    void refreshSyncRows()
+  },
+  { immediate: true }
+)
+
+/* **角色是异步到位的**（`services/roles.js::fetchMyRole` 走云端 op，登录/刷新后才合并进登录态）⇒
+   挂载瞬间 `canSyncReview` 常为 false（`state.user.role` 还是本机行的 'user'）⇒ 上面那次取行
+   被门挡下、`syncRows` 留在 `[]`；而角色随后变成 admin 时**没有任何东西再取一次** ⇒
+   审阅区渲染出来了却是空的、且**零提示**（实测 2026-11-27 真机：队列里明明有一条 PENDING，
+   页面上「什么都没有」，既没错误也没行）。
+   ⇒ 门一开就补取一次（只在 false→true 跳变时触发，不重复打）。 */
+watch(canSyncReview, (open, wasOpen) => {
+  if (open === true && wasOpen !== true) void refreshSyncRows()
+})
 </script>
 
 <template>
@@ -1814,6 +1999,91 @@ async function confirmRevoke() {
         >
           當前沒有待審覈的印人 / 印章 / 印谱外部導入批次。
         </p>
+      </div>
+    </section>
+
+    <!-- **來自斐萃的待審變更（本單新增｜任務 C）**：审阅口复用本页（**不新建 `/admin/sync` 路由**）。
+         仅管理员渲染（`v-if="canSyncReview"` ⇒ 非管理员 **DOM 零命中**，不以 CSS 隐藏冒充）；
+         本期实体封闭 `books` / `persons` / `publishers`；**逐项**【通過並寫入】/【駁回】——
+         **不提供全选一键通过**（Kevin 红线：可批量列出、不许批量直通）；
+         深链 `?from=feicui&entity=…&key=…` 进页即定位（目标行排首位 ＋ 高亮）。 -->
+    <section v-if="canSyncReview" class="panel" data-sync-review>
+      <div class="panel__head">
+        <h2>來自斐萃的待審變更</h2>
+        <span class="muted-hint">本期實體 books / persons / publishers · 共 {{ syncRows.length }} 條</span>
+        <button
+          class="btn btn--ghost"
+          type="button"
+          data-action="sync-refresh"
+          :disabled="syncLoading"
+          @click="refreshSyncRows"
+        >
+          {{ syncLoading ? '正在取回…' : '重新整理' }}
+        </button>
+      </div>
+      <div class="panel__body">
+        <p v-if="syncTarget" class="notice review__notice" data-sync-target-notice>
+          已定位斐萃深鏈：{{ syncTarget.entity }} ／ {{ syncTarget.key }}
+          <button class="btn btn--ghost" type="button" data-action="sync-clear-target" @click="clearSyncTarget">
+            顯示全部
+          </button>
+        </p>
+        <p v-if="syncFeedback" class="notice review__notice" data-sync-feedback>{{ syncFeedback }}</p>
+        <p v-else-if="syncNotice" class="notice review__notice" data-sync-notice>{{ syncNotice }}</p>
+
+        <table v-if="syncRows.length" class="list-table" data-sync-table>
+          <thead>
+            <tr>
+              <th>實體</th>
+              <th>業務鍵</th>
+              <th>操作</th>
+              <th>差異欄位數</th>
+              <th>入隊時間</th>
+              <th>狀態</th>
+              <th>審核</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in syncRows"
+              :key="row.queue_id || `${row.entity}|${row.key}`"
+              :class="{ 'is-sync-target': isSyncTarget(row) }"
+              :data-sync-entity="row.entity"
+              :data-sync-key="row.key"
+            >
+              <td>{{ row.entity }}</td>
+              <td>{{ row.key }}</td>
+              <td>{{ syncOpLabel(row.op) }}</td>
+              <td>{{ row.diff_count }}</td>
+              <td>{{ row.queued_at ? formatDateTime(row.queued_at) : '—' }}</td>
+              <td>{{ syncStatusLabel(row.status) }}</td>
+              <td class="review__ops">
+                <button
+                  class="btn btn--primary"
+                  type="button"
+                  data-action="sync-approve"
+                  :data-sync-queue-id="row.queue_id"
+                  :disabled="!row.queue_id || syncBusyKey === row.queue_id"
+                  @click="approveSyncRow(row)"
+                >
+                  通過並寫入
+                </button>
+                <button
+                  class="btn btn--ghost"
+                  type="button"
+                  data-action="sync-reject"
+                  :data-sync-queue-id="row.queue_id"
+                  :disabled="!row.queue_id || syncBusyKey === row.queue_id"
+                  @click="rejectSyncRow(row)"
+                >
+                  駁回
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else-if="syncLoading" class="muted-hint" data-sync-loading>正在取回斐萃待審變更…</p>
+        <p v-else class="muted-hint" data-sync-empty>當前沒有來自斐萃的待審變更。</p>
       </div>
     </section>
 
