@@ -517,7 +517,7 @@ async function save() {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--s-4);
 }
 
 .publishers__gate {

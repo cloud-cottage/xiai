@@ -670,6 +670,29 @@ check('E6', '负对照 ⑩：只把 `font-size: var(--t-xs)` 改回 `12px` ⇒ E
   pubPxOnly: e6.pubPxOnly
 })
 
+/* —— E7：两页**页头**规则跨页对拍 —— `.books__head`（基准）与 `.publishers__head` 按
+ *     `属性: 值;` 归一后的声明列表**逐条相同**（仅类名前缀不同，属性集 / 值 / 顺序全对齐），
+ *     且两条规则体内零硬编码 `px` 字面值 —— 页头间距只走令牌 `var(--s-4)`。
+ *     起因：`/publishers` 页头曾是 `gap: 12px`，与 `/books` 的 `var(--s-4)`（=16px）不等价，
+ *     2026-11-28 经 Kevin 批准改为令牌（真删 4px 视觉差，非等价替换）。 */
+const e7Books = gateRule(booksSrc, '.books__head')
+const e7Pub = gateRule(pubSrc, '.publishers__head')
+const e7BooksDecls = declList(e7Books.body)
+const e7PubDecls = declList(e7Pub.body)
+check('E7', '两页页头 `.books__head` / `.publishers__head` 各恰 1 条，按 `属性: 值;` 归一后的声明序列**逐条相同**（仅类名前缀不同），且两条规则体内零硬编码 `px` 字面值（间距只走令牌 `var(--s-4)`）', {
+  booksRuleCount: 1,
+  pubRuleCount: 1,
+  sameDecls: true,
+  booksPx: [],
+  pubPx: []
+}, {
+  booksRuleCount: e7Books.count,
+  pubRuleCount: e7Pub.count,
+  sameDecls: canon(e7BooksDecls) === canon(e7PubDecls),
+  booksPx: pxLiterals(e7Books.body),
+  pubPx: pxLiterals(e7Pub.body)
+})
+
 /* ---------------------------------------------------------------- 收尾 */
 const total = results.length
 const failedIds = results.filter((r) => !r.pass).map((r) => r.id)
