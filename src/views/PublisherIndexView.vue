@@ -521,12 +521,12 @@ async function save() {
 }
 
 .publishers__gate {
-  flex: none;
-  padding: 4px 10px;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 12px;
-  opacity: 0.8;
+  flex: 0 0 auto;
+  padding: var(--s-1) var(--s-2);
+  border: 1px dashed var(--c-line);
+  border-radius: var(--r-sm);
+  color: var(--c-text-muted);
+  font-size: var(--t-xs);
 }
 
 .publishers__notice {

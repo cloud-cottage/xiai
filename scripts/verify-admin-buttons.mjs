@@ -29,6 +29,12 @@
  *     全件零 `v-model="form.author"` 文本框；`authorPersons` 取 `persons.referablePersons()`；
  *     传 `persons.personName`；提交链未改（`field: item.key` / `value: form[item.key]`）。
  *   D 变异负对照（D1〜D7）：判据必须会响。
+ *   E 跨页 gate 徽标（E1〜E6）：`/books`（基准）与 `/publishers` 两页 `*__gate` 规则**按
+ *     `属性: 值;` 归一后逐字相同**（仅类名前缀不同，属性集与值、顺序均一致）；publishers 侧
+ *     零 `999px` / `currentColor` / `opacity` / 硬编码 `px`（除与基准同在的 `1px` 描边宽度）；
+ *     模板钩子 `data-publishers-gate` / `data-books-gate` 与类名面不被顺手改掉；
+ *     变异负对照：把 publishers 那条改回 `border: 1px solid currentColor`（或 `padding: 4px 10px`）
+ *     ⇒ 必红。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -39,6 +45,8 @@ const BASE_CSS_REL = 'src/styles/base.css'
 const BADGE_REL = 'src/components/AdminBadge.vue'
 const VIEW_REL = 'src/views/SealDetailView.vue'
 const SQUARE_REL = 'src/views/SquareView.vue'
+const BOOKS_REL = 'src/views/BookIndexView.vue'
+const PUB_REL = 'src/views/PublisherIndexView.vue'
 
 /* ---------------------------------------------------------------- 断言骨架 */
 const results = []
@@ -361,6 +369,9 @@ const baseCss = read(BASE_CSS_REL)
 const badgeSrc = read(BADGE_REL)
 const viewSrc = read(VIEW_REL)
 const squareSrc = read(SQUARE_REL)
+/* 跨页 gate 徽标面（E 段）：`/books` 基准 ＋ `/publishers` 待对齐件。 */
+const booksSrc = read(BOOKS_REL)
+const pubSrc = read(PUB_REL)
 
 const baseJudge = judgeBaseCss(baseCss)
 const badgeJudge = judgeBadge(badgeSrc)
@@ -512,6 +523,152 @@ const d7 = cleanPages({
 check('D7', '负对照 ⑦：给 `canUpload` 普通权限门的按钮擅自加 `btn--admin` ⇒ B4 必红（判据不恒空、也不是一刀切：管理员门要带、普通门不许带）', {
   leaked: ['canUpload']
 }, { leaked: b4Leaks(d7) })
+
+/* --------------------------------- E 跨页 gate 徽标 ---------------------- */
+section('E', '跨页 gate 徽标：/books 与 /publishers 的 `*__gate` 规则按 `属性: 值;` 归一后逐字相同（仅类名前缀不同），publishers 侧零 999px / currentColor / opacity / 硬编码 px，模板钩子面不动')
+
+/** SFC → `<style>` 段纯 CSS（剥注释；去掉 `<style …>` 开标签本身，
+ *  否则首条规则的选择器会粘上 `<style scoped>` ⇒ 精确匹配取不到规则）。 */
+function sfcStyleText(sfcText) {
+  const clean = stripComments(sfcText)
+  const start = clean.indexOf('<style')
+  if (start < 0) return ''
+  const openEnd = clean.indexOf('>', start)
+  const end = clean.indexOf('</style>')
+  if (openEnd < 0 || end < 0 || end < openEnd) return ''
+  return clean.slice(openEnd + 1, end)
+}
+
+/** 规则体 → 按 `属性: 值;` 归一的声明列表（保序；只归一空白，不改值）。 */
+const declList = (body) =>
+  (body || '')
+    .split(';')
+    .map((chunk) => chunk.trim().replace(/\s+/g, ' '))
+    .filter(Boolean)
+    .map((chunk) => `${chunk};`)
+
+const pxLiterals = (text) => [...String(text).matchAll(/\d+(?:\.\d+)?px/g)].map((m) => m[0])
+
+function gateRule(sfcText, selector) {
+  const rules = cssRules(sfcStyleText(sfcText)).filter((r) => r.selector === selector)
+  return { count: rules.length, body: rules[0] ? rules[0].body : null }
+}
+
+/** E 段判据（纯函数；D/E 段的变异负对照复用同一把尺子）。 */
+function judgeGates(booksText, pubText) {
+  const books = gateRule(booksText, '.books__gate')
+  const pub = gateRule(pubText, '.publishers__gate')
+  const booksDecls = declList(books.body)
+  const pubDecls = declList(pub.body)
+  const pubBody = pub.body || ''
+  const forbidden = []
+  if (/999px/.test(pubBody)) forbidden.push('999px')
+  if (/currentColor/i.test(pubBody)) forbidden.push('currentColor')
+  if (/opacity\s*:/i.test(pubBody)) forbidden.push('opacity')
+  const booksPx = pxLiterals(books.body)
+  const pubPx = pxLiterals(pubBody)
+  return {
+    booksRuleCount: books.count,
+    pubRuleCount: pub.count,
+    booksDecls,
+    pubDecls,
+    /* 逐字对拍：归一后两条规则的 `属性: 值;` 序列完全相同（属性集、值、顺序）。 */
+    sameDecls: canon(booksDecls) === canon(pubDecls),
+    forbidden,
+    /* publishers 侧独有的硬编码 px（基准同在的 `1px` 描边不算）。 */
+    pubPxOnly: pubPx.filter((v) => !booksPx.includes(v)),
+    pubClassCount: countOf(pubText, 'class="publishers__gate"'),
+    pubHookCount: countOf(pubText, 'data-publishers-gate'),
+    booksClassCount: countOf(booksText, 'class="books__gate"'),
+    booksHookCount: countOf(booksText, 'data-books-gate')
+  }
+}
+
+/** 只在 `.publishers__gate { … }` 块内做替换（内存副本，不写被测件）。 */
+function mutatePubGate(text, from, to) {
+  let applied = false
+  const out = text.replace(/\.publishers__gate\s*\{[^}]*\}/, (block) => {
+    if (!block.includes(from)) return block
+    applied = true
+    return block.replace(from, to)
+  })
+  return { text: out, applied }
+}
+
+/* 基准（`/books`，裁定口径）：两条规则归一后必须逐字等于这份清单。 */
+const GATE_CANON = [
+  'flex: 0 0 auto;',
+  'padding: var(--s-1) var(--s-2);',
+  'border: 1px dashed var(--c-line);',
+  'border-radius: var(--r-sm);',
+  'color: var(--c-text-muted);',
+  'font-size: var(--t-xs);'
+]
+
+const gateJudge = judgeGates(booksSrc, pubSrc)
+check('E1', '两页 `*__gate` 规则各恰 1 条，且 `.publishers__gate` 按 `属性: 值;` 归一后的声明序列与 `.books__gate` **逐字相同**（属性集 / 值 / 顺序三者全对齐，仅类名前缀不同）', {
+  booksRuleCount: 1,
+  pubRuleCount: 1,
+  sameDecls: true,
+  decls: GATE_CANON
+}, {
+  booksRuleCount: gateJudge.booksRuleCount,
+  pubRuleCount: gateJudge.pubRuleCount,
+  sameDecls: gateJudge.sameDecls,
+  decls: gateJudge.pubDecls
+})
+check('E2', '`.publishers__gate` 零 `999px` / `currentColor` / `opacity`，且无基准之外的硬编码 `px`（`1px` 描边两页同在，不算）', {
+  forbidden: [],
+  pubPxOnly: []
+}, { forbidden: gateJudge.forbidden, pubPxOnly: gateJudge.pubPxOnly })
+check('E3', '模板与钩子面未被顺手改动：两页 `class="*__gate"` 与 `data-*-gate="admin"` 各恰 1 处', {
+  pubClassCount: 1,
+  pubHookCount: 1,
+  booksClassCount: 1,
+  booksHookCount: 1
+}, {
+  pubClassCount: gateJudge.pubClassCount,
+  pubHookCount: gateJudge.pubHookCount,
+  booksClassCount: gateJudge.booksClassCount,
+  booksHookCount: gateJudge.booksHookCount
+})
+
+/* —— 变异负对照：判据必须会响（只在内存副本上改，不写被测件） —— */
+const e4mut = mutatePubGate(pubSrc, 'border: 1px dashed var(--c-line);', 'border: 1px solid currentColor;')
+const e4 = judgeGates(booksSrc, e4mut.text)
+check('E4', '负对照 ⑧：把 publishers 那条改回 `border: 1px solid currentColor` ⇒ E1 与 E2 必红（线型 + 颜色两处同时失守）', {
+  applied: true,
+  sameDecls: false,
+  forbidden: ['currentColor']
+}, {
+  applied: e4mut.applied,
+  sameDecls: e4.sameDecls,
+  forbidden: e4.forbidden
+})
+
+const e5mut = mutatePubGate(pubSrc, 'padding: var(--s-1) var(--s-2);', 'padding: 4px 10px;')
+const e5 = judgeGates(booksSrc, e5mut.text)
+check('E5', '负对照 ⑨：把 publishers 的令牌间距改回硬编码 `padding: 4px 10px` ⇒ E1 与 E2 必红（硬编码 px 检测非恒空）', {
+  applied: true,
+  sameDecls: false,
+  pubPxOnly: ['4px', '10px']
+}, {
+  applied: e5mut.applied,
+  sameDecls: e5.sameDecls,
+  pubPxOnly: e5.pubPxOnly
+})
+
+const e6mut = mutatePubGate(pubSrc, 'font-size: var(--t-xs);', 'font-size: 12px;')
+const e6 = judgeGates(booksSrc, e6mut.text)
+check('E6', '负对照 ⑩：只把 `font-size: var(--t-xs)` 改回 `12px` ⇒ E1 与 E2 必红（值级差异也会被抓，不是只看属性名）', {
+  applied: true,
+  sameDecls: false,
+  pubPxOnly: ['12px']
+}, {
+  applied: e6mut.applied,
+  sameDecls: e6.sameDecls,
+  pubPxOnly: e6.pubPxOnly
+})
 
 /* ---------------------------------------------------------------- 收尾 */
 const total = results.length
