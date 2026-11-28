@@ -120,7 +120,7 @@ check('A5', 'isAdmin 单点同步为真（同一份状态）', true, isAdmin.val
 /* A9〜A12：静态渲染门（审阅段必须由 `v-if` 条件渲染，不得 `v-show` 冒充）。 */
 {
   const src = stripComments(read('src/views/MyCorrectionsView.vue'))
-  const openTag = '<section v-if="canSyncReview" class="panel" data-sync-review>'
+  const openTag = '<section v-if="canSyncReview" class="panel panel--admin" data-sync-review>'
   check('A9', '审阅段开标签逐字（v-if 条件渲染）', true, src.includes(openTag))
   check('A10', '审阅段零 v-show（不以 CSS 隐藏冒充）', 0, (src.match(/<section[^>]*data-sync-review[^>]*>/g) || []).filter((tag) => tag.includes('v-show')).length)
   check('A11', '渲染门来自服务层单点 sync.canReviewSync()', true, src.includes('const canSyncReview = computed(() => sync.canReviewSync())'))

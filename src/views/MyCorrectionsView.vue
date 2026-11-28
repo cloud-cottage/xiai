@@ -1433,7 +1433,7 @@ watch(canSyncReview, (open, wasOpen) => {
          切页签**先清空旧列表再按 `status` 重新取数**（上限 200），不串数据。
          钩子只用新增的 `data-correction-status` / `data-correction-only-mine`，
          **不新增管理员动作钩子的任何取值**（动作按钮集合仍是既有 12 值）。 -->
-    <section v-if="canReview" class="panel">
+    <section v-if="canReview" class="panel panel--admin">
       <div class="panel__head">
         <h2>勘誤審覈（全部用戶）</h2>
         <!-- 计数行**如实三态**：加载中 / 认证读数不可用 / 正常读数（**不以「共 0 條」冒充读数不可用**）。 -->
@@ -1642,7 +1642,7 @@ watch(canSyncReview, (open, wasOpen) => {
     <!-- **印人提案审核区块（本单新增）**：管理员专属（非管理员 ⇒ 不渲染，DOM 零命中）；
          采纳 / 驳回复用既有按钮形态；**不新开路由 / 专区**（落点＝本页，沿 §3.9 追加注（v1.53））。
          钩子族新增**恰 1 个**取值 `person-proposal-review`（采纳 / 驳回共用，不复用既有字面值）。 -->
-    <section v-if="canReviewProposals" class="panel">
+    <section v-if="canReviewProposals" class="panel panel--admin">
       <div class="panel__head">
         <h2>待審印人提案（全部用戶）</h2>
         <span class="muted-hint">共 {{ proposals.length }} 條</span>
@@ -1709,7 +1709,7 @@ watch(canSyncReview, (open, wasOpen) => {
          **三类导入行同屏**（印人导入 ＋ 印章导入 ＋ 印谱导入），**共用同一钩子值** `person-import-review`
          （采纳 / 驳回共用，不复用既有字面值，也不新增取值 ⇒ 取值集合不增）。
          粒度（W-77）：按批次（整批）＋ 按单行（逐条）两个入口都实现（三类同型）。 -->
-    <section v-if="isLocalImportFace() && (canReviewImports || canReviewSealImports || canReviewItemImports)" class="panel">
+    <section v-if="isLocalImportFace() && (canReviewImports || canReviewSealImports || canReviewItemImports)" class="panel panel--admin">
       <div class="panel__head">
         <h2>待審導入批次（外部批量導入）</h2>
         <span class="muted-hint">印人導入 共 {{ importRows.length }} 條 · {{ importBatches.length }} 批</span>
@@ -2019,7 +2019,7 @@ watch(canSyncReview, (open, wasOpen) => {
          本期实体封闭 `books` / `persons` / `publishers`；**逐项**【通過並寫入】/【駁回】——
          **不提供全选一键通过**（Kevin 红线：可批量列出、不许批量直通）；
          深链 `?from=feicui&entity=…&key=…` 进页即定位（目标行排首位 ＋ 高亮）。 -->
-    <section v-if="canSyncReview" class="panel" data-sync-review>
+    <section v-if="canSyncReview" class="panel panel--admin" data-sync-review>
       <div class="panel__head">
         <h2>來自斐萃的待審變更</h2>
         <span class="muted-hint">本期實體 books / persons / publishers · 共 {{ syncRows.length }} 條</span>
